@@ -1,0 +1,849 @@
+import os
+import uuid
+import asyncio
+from pathlib import Path
+from typing import Optional, Dict, Any
+from datetime import datetime, timezone
+from enum import Enum
+import json
+import csv
+
+from app.config import settings
+from app.models.dataset import DatasetStatus
+from app.services.duckdb_service import get_duckdb_service
+from app.utils.sanitization import sanitize_filename, sql_quote_literal
+
+
+# Backward-compat alias — existing code references ProcessingStatus
+ProcessingStatus = DatasetStatus
+
+
+class DatasetRecord:
+    """
+    In-memory representation of a dataset for API compatibility.
+
+    Backed by the ``dataset_records`` SQL table (BQ-111) but presented
+    to callers with the same attribute interface as before so that
+    routers and other services need no changes.
+    """
+
+    def __init__(
+        self,
+        dataset_id: str,
+        original_filename: str,
+        file_type: str,
+    ):
+        self.id = dataset_id
+        self.original_filename = original_filename
+        self.file_type = file_type
+        self.status = DatasetStatus.UPLOADED
+        self.error: Optional[str] = None
+        self.created_at = datetime.now(timezone.utc)
+        self.updated_at = datetime.now(timezone.utc)
+        self.upload_path: Optional[Path] = None
+        self.processed_path: Optional[Path] = None
+        self.metadata: Dict[str, Any] = {}
+        self.document_content: Optional[Dict[str, Any]] = None  # For document types
+        # BQ-108+109: Batch + preview fields
+        self.batch_id: Optional[str] = None
+        self.relative_path: Optional[str] = None
+        self.preview_text: Optional[str] = None
+        self.preview_metadata: Optional[Dict[str, Any]] = None
+        self.confirmed_at: Optional[datetime] = None
+        self.confirmed_by: Optional[str] = None
+        self.file_size_bytes: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        result = {
+            "id": self.id,
+            "original_filename": self.original_filename,
+            "file_type": self.file_type,
+            "status": self.status.value if isinstance(self.status, ProcessingStatus) else self.status,
+            "error": self.error,
+            "created_at": self.created_at.isoformat() if isinstance(self.created_at, datetime) else self.created_at,
+            "updated_at": self.updated_at.isoformat() if isinstance(self.updated_at, datetime) else self.updated_at,
+            "upload_path": str(self.upload_path) if self.upload_path else None,
+            "processed_path": str(self.processed_path) if self.processed_path else None,
+            "metadata": self.metadata,
+        }
+        if self.document_content:
+            result["document_info"] = {
+                "text_blocks": self.document_content.get("metadata", {}).get("text_blocks", 0),
+                "table_count": self.document_content.get("metadata", {}).get("table_count", 0),
+                "processor": self.document_content.get("metadata", {}).get("processor", "unknown"),
+            }
+        return result
+
+
+# File type categories
+TABULAR_TYPES = {'csv', 'tsv', 'json', 'parquet'}
+DOCUMENT_TYPES = {
+    # Existing (Unstructured)
+    'pdf', 'docx', 'doc', 'pptx', 'ppt',
+    # Tika-powered (BQ-TIKA)
+    'rtf', 'odt', 'ods', 'odp', 'epub',
+    'eml', 'msg', 'mbox',
+    'xml', 'rss',
+    'pages', 'numbers', 'key',
+    'wps', 'wpd',
+    'ics', 'vcf',
+}
+SPREADSHEET_TYPES = {'xlsx', 'xls'}
+TEXT_TYPES = {'txt', 'md', 'html', 'htm'}
+
+
+def _db_to_record(db_row) -> DatasetRecord:
+    """Convert a DatasetRecord DB model to the in-memory DatasetRecord."""
+    rec = DatasetRecord(
+        dataset_id=db_row.id,
+        original_filename=db_row.original_filename,
+        file_type=db_row.file_type,
+    )
+    # Map legacy status values to new DatasetStatus enum
+    status_map = {
+        "uploading": DatasetStatus.UPLOADED,
+        "processing": DatasetStatus.READY,
+        "failed": DatasetStatus.ERROR,
+    }
+    raw_status = db_row.status
+    if raw_status in status_map:
+        rec.status = status_map[raw_status]
+    else:
+        try:
+            rec.status = DatasetStatus(raw_status)
+        except ValueError:
+            rec.status = DatasetStatus.ERROR
+
+    rec.created_at = db_row.created_at
+    rec.updated_at = db_row.updated_at
+    rec.processed_path = Path(db_row.processed_path) if db_row.processed_path else None
+    rec.file_size_bytes = db_row.file_size_bytes or 0
+
+    # Deserialize metadata_json
+    try:
+        meta = json.loads(db_row.metadata_json) if db_row.metadata_json else {}
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+
+    # Extract document_content from metadata if present
+    rec.document_content = meta.pop("document_content", None)
+    rec.metadata = meta
+
+    # Reconstruct upload_path from storage_filename
+    upload_dir = Path(settings.upload_directory)
+    if db_row.storage_filename and db_row.storage_filename != "__migration_marker__":
+        rec.upload_path = upload_dir / db_row.storage_filename
+
+    # Extract error from metadata if stored there
+    rec.error = meta.pop("error", None)
+
+    # BQ-108+109 fields
+    rec.batch_id = getattr(db_row, "batch_id", None)
+    rec.relative_path = getattr(db_row, "relative_path", None)
+    rec.preview_text = getattr(db_row, "preview_text", None)
+    rec.confirmed_at = getattr(db_row, "confirmed_at", None)
+    rec.confirmed_by = getattr(db_row, "confirmed_by", None)
+
+    # Deserialize preview_metadata JSON
+    raw_pm = getattr(db_row, "preview_metadata", None)
+    if raw_pm:
+        try:
+            rec.preview_metadata = json.loads(raw_pm)
+        except (json.JSONDecodeError, TypeError):
+            rec.preview_metadata = None
+    else:
+        rec.preview_metadata = None
+
+    return rec
+
+
+def _record_to_db(rec: DatasetRecord, storage_filename: str):
+    """Create a DB model dict from the in-memory DatasetRecord."""
+    from app.models.dataset import DatasetRecord as DBDatasetRecord
+
+    metadata = dict(rec.metadata)
+    if rec.document_content:
+        metadata["document_content"] = rec.document_content
+    if rec.error:
+        metadata["error"] = rec.error
+
+    file_size = rec.file_size_bytes or 0
+    if not file_size and rec.upload_path:
+        try:
+            file_size = os.path.getsize(rec.upload_path)
+        except OSError:
+            pass
+
+    return DBDatasetRecord(
+        id=rec.id,
+        original_filename=rec.original_filename,
+        storage_filename=storage_filename,
+        file_type=rec.file_type,
+        file_size_bytes=file_size,
+        status=rec.status.value if isinstance(rec.status, DatasetStatus) else rec.status,
+        processed_path=str(rec.processed_path) if rec.processed_path else None,
+        metadata_json=json.dumps(metadata, default=str),
+        created_at=rec.created_at,
+        updated_at=rec.updated_at,
+        batch_id=rec.batch_id,
+        relative_path=rec.relative_path,
+        preview_text=rec.preview_text,
+        preview_metadata=json.dumps(rec.preview_metadata, default=str) if rec.preview_metadata else None,
+        confirmed_at=rec.confirmed_at,
+        confirmed_by=rec.confirmed_by,
+    )
+
+
+class ProcessingService:
+    """Handles file processing and conversion to Parquet.
+
+    BQ-111: Dataset records are now persisted in the ``dataset_records``
+    SQL table instead of an in-memory dict + datasets.json file.
+    """
+
+    def __init__(self):
+        self.upload_dir = Path(settings.upload_directory)
+        self.processed_dir = Path(settings.processed_directory)
+
+        # Create directories
+        self.upload_dir.mkdir(parents=True, exist_ok=True)
+        self.processed_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # DB helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_session():
+        from app.core.database import get_session_context
+        return get_session_context()
+
+    def _save_record(self, rec: DatasetRecord, storage_filename: str) -> None:
+        """Upsert a DatasetRecord into the database."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from app.core.database import _sqlite_retry, _is_sqlite
+
+        def _do():
+            with self._get_session() as session:
+                existing = session.get(DBDatasetRecord, rec.id)
+                if existing is not None:
+                    existing.original_filename = rec.original_filename
+                    existing.storage_filename = storage_filename
+                    existing.file_type = rec.file_type
+                    existing.status = rec.status.value if isinstance(rec.status, DatasetStatus) else rec.status
+                    existing.processed_path = str(rec.processed_path) if rec.processed_path else None
+
+                    metadata = dict(rec.metadata)
+                    if rec.document_content:
+                        metadata["document_content"] = rec.document_content
+                    if rec.error:
+                        metadata["error"] = rec.error
+                    existing.metadata_json = json.dumps(metadata, default=str)
+                    existing.updated_at = datetime.now(timezone.utc)
+
+                    if rec.upload_path:
+                        try:
+                            existing.file_size_bytes = os.path.getsize(rec.upload_path)
+                        except OSError:
+                            pass
+
+                    # BQ-108+109 fields
+                    existing.batch_id = rec.batch_id
+                    existing.relative_path = rec.relative_path
+                    existing.preview_text = rec.preview_text
+                    existing.preview_metadata = json.dumps(rec.preview_metadata, default=str) if rec.preview_metadata else None
+                    existing.confirmed_at = rec.confirmed_at
+                    existing.confirmed_by = rec.confirmed_by
+
+                    session.add(existing)
+                else:
+                    db_rec = _record_to_db(rec, storage_filename)
+                    session.add(db_rec)
+                session.commit()
+
+        if _is_sqlite:
+            _sqlite_retry(_do)
+        else:
+            _do()
+
+    # ------------------------------------------------------------------
+    # CRUD
+    # ------------------------------------------------------------------
+
+    def create_dataset(self, original_filename: str, file_type: str) -> DatasetRecord:
+        """Create a new dataset record for an incoming upload."""
+        dataset_id = str(uuid.uuid4())[:8]  # Short ID
+        record = DatasetRecord(
+            dataset_id=dataset_id,
+            original_filename=original_filename,
+            file_type=file_type,
+        )
+
+        # Sanitize the user-supplied filename before constructing the storage path
+        safe_name = sanitize_filename(original_filename)
+        safe_filename = f"{dataset_id}_{safe_name}"
+        upload_path = (self.upload_dir / safe_filename).resolve()
+
+        # Verify the resolved path stays within the upload directory (no traversal)
+        if not str(upload_path).startswith(str(self.upload_dir.resolve())):
+            raise ValueError("Invalid filename: path traversal detected")
+
+        record.upload_path = upload_path
+        # Store original filename in metadata for display purposes
+        record.metadata["original_filename"] = original_filename
+
+        self._save_record(record, safe_filename)
+        return record
+
+    def get_dataset(self, dataset_id: str) -> Optional[DatasetRecord]:
+        """Get a dataset record by ID."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+
+        with self._get_session() as session:
+            db_row = session.get(DBDatasetRecord, dataset_id)
+            if db_row is None or db_row.id == "__migrated__":
+                return None
+            return _db_to_record(db_row)
+
+    def list_datasets(self) -> list[DatasetRecord]:
+        """List all dataset records."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from sqlmodel import select
+
+        with self._get_session() as session:
+            stmt = (
+                select(DBDatasetRecord)
+                .where(DBDatasetRecord.id != "__migrated__")
+                .where(DBDatasetRecord.status != "deleted")
+                .order_by(DBDatasetRecord.created_at.desc())
+            )
+            rows = session.exec(stmt).all()
+            return [_db_to_record(r) for r in rows]
+
+
+    def find_by_filename(self, filename: str) -> Optional["DatasetRecord"]:
+        """Find an existing non-deleted dataset with the same original filename."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from sqlmodel import select
+
+        with self._get_session() as session:
+            stmt = (
+                select(DBDatasetRecord)
+                .where(DBDatasetRecord.original_filename == filename)
+                .where(DBDatasetRecord.id != "__migrated__")
+                .where(DBDatasetRecord.status != "deleted")
+                .order_by(DBDatasetRecord.created_at.desc())
+                .limit(1)
+            )
+            row = session.exec(stmt).first()
+            if row is None:
+                return None
+            return _db_to_record(row)
+
+    def delete_dataset(self, dataset_id: str) -> bool:
+        """Delete a dataset and its files."""
+        record = self.get_dataset(dataset_id)
+        if not record:
+            return False
+
+        # Delete files
+        if record.upload_path and record.upload_path.exists():
+            record.upload_path.unlink()
+        if record.processed_path and record.processed_path.exists():
+            record.processed_path.unlink()
+
+        # Remove from DB
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+
+        with self._get_session() as session:
+            db_row = session.get(DBDatasetRecord, dataset_id)
+            if db_row:
+                session.delete(db_row)
+                session.commit()
+        return True
+
+    def _is_cancelled(self, dataset_id: str) -> bool:
+        """Check if a dataset has been cancelled (call between phases)."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        with self._get_session() as session:
+            db_row = session.get(DBDatasetRecord, dataset_id)
+            if db_row and db_row.status == DatasetStatus.CANCELLED.value:
+                return True
+        return False
+
+    def _set_status(self, dataset_id: str, status: DatasetStatus) -> None:
+        """Atomically set dataset status in DB."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from app.core.database import _sqlite_retry, _is_sqlite
+
+        def _do():
+            with self._get_session() as session:
+                db_row = session.get(DBDatasetRecord, dataset_id)
+                if db_row:
+                    db_row.status = status.value
+                    db_row.updated_at = datetime.now(timezone.utc)
+                    session.add(db_row)
+                    session.commit()
+
+        if _is_sqlite:
+            _sqlite_retry(_do)
+        else:
+            _do()
+
+    def _cache_preview(self, record: DatasetRecord) -> None:
+        """Populate preview_text and preview_metadata after extraction."""
+        preview_text = None
+        preview_meta: Dict[str, Any] = {
+            "file_type": record.file_type,
+            "size_bytes": record.file_size_bytes,
+        }
+
+        # Extract preview text
+        if record.document_content:
+            # For documents: first 500 chars from text blocks
+            text_blocks = record.document_content.get("text_content", [])
+            if isinstance(text_blocks, list):
+                full_text = " ".join(
+                    b.get("text", "") if isinstance(b, dict) else str(b)
+                    for b in text_blocks
+                )
+            else:
+                full_text = str(text_blocks)
+            preview_text = full_text[:500]
+            preview_meta["kind"] = "document"
+        elif record.processed_path and record.processed_path.exists():
+            # For tabular: get sample rows + schema via DuckDB
+            try:
+                duckdb = get_duckdb_service()
+                meta = duckdb.get_file_metadata(record.processed_path)
+                preview_meta["row_count_estimate"] = meta.get("row_count", 0)
+                preview_meta["column_count"] = meta.get("column_count", 0)
+                preview_meta["kind"] = "tabular"
+
+                # Schema preview
+                profiles = duckdb.get_column_profile(record.processed_path)
+                preview_meta["schema"] = [
+                    {"name": p["name"], "type": p.get("type", "UNKNOWN")}
+                    for p in profiles[:50]
+                ]
+
+                # Sample rows for preview
+                sample = duckdb.get_sample_rows(record.processed_path, limit=5)
+                preview_meta["sample_rows"] = sample
+
+                # First 500 chars of text representation
+                if sample:
+                    text_repr = json.dumps(sample[:3], default=str)
+                    preview_text = text_repr[:500]
+            except Exception:
+                pass
+
+        # Enforce 2KB limit on preview_text
+        if preview_text and len(preview_text.encode("utf-8")) > 2048:
+            preview_text = preview_text[:500]
+
+        record.preview_text = preview_text
+        record.preview_metadata = preview_meta
+
+    async def process_file(self, dataset_id: str, skip_indexing: bool = False) -> DatasetRecord:
+        """Process an uploaded file based on its type.
+
+        Args:
+            dataset_id: The dataset to process.
+            skip_indexing: If True, stop after extraction (preview mode).
+        """
+        record = self.get_dataset(dataset_id)
+        if not record:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        if not record.upload_path or not record.upload_path.exists():
+            record.status = DatasetStatus.ERROR
+            record.error = "Upload file not found"
+            self._save_record(record, record.upload_path.name if record.upload_path else f"{dataset_id}")
+            return record
+
+        # Check cancellation before starting
+        if self._is_cancelled(dataset_id):
+            record.status = DatasetStatus.CANCELLED
+            return record
+
+        # Phase 1: Extract
+        record.status = DatasetStatus.EXTRACTING
+        record.updated_at = datetime.now(timezone.utc)
+        self._save_record(record, record.upload_path.name if record.upload_path else f"{dataset_id}")
+
+        try:
+            file_type = record.file_type.lower()
+
+            if file_type in TABULAR_TYPES:
+                await self._extract_tabular(record)
+            elif file_type in DOCUMENT_TYPES:
+                await self._process_document(record)
+            elif file_type in SPREADSHEET_TYPES:
+                await self._process_spreadsheet(record)
+            elif file_type in TEXT_TYPES:
+                await self._process_text(record)
+            else:
+                raise ValueError(f"Unsupported file type: {file_type}")
+
+            # Cache preview data after extraction
+            self._cache_preview(record)
+
+        except Exception as e:
+            record.status = DatasetStatus.ERROR
+            record.error = str(e)
+            record.updated_at = datetime.now(timezone.utc)
+            storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+            self._save_record(record, storage_fn)
+            return record
+
+        # Check cancellation between phases
+        if self._is_cancelled(dataset_id):
+            record.status = DatasetStatus.CANCELLED
+            storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+            self._save_record(record, storage_fn)
+            return record
+
+        if skip_indexing:
+            record.status = DatasetStatus.PREVIEW_READY
+            record.updated_at = datetime.now(timezone.utc)
+            storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+            self._save_record(record, storage_fn)
+            return record
+
+        # Phase 2: Index
+        record.status = DatasetStatus.INDEXING
+        record.updated_at = datetime.now(timezone.utc)
+        storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+        self._save_record(record, storage_fn)
+
+        try:
+            self._run_indexing(record)
+            record.status = DatasetStatus.READY
+            record.updated_at = datetime.now(timezone.utc)
+        except Exception as e:
+            record.status = DatasetStatus.ERROR
+            record.error = f"Indexing failed: {e}"
+            record.updated_at = datetime.now(timezone.utc)
+
+        storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+        self._save_record(record, storage_fn)
+        return record
+
+    def _run_indexing(self, record: DatasetRecord) -> None:
+        """Phase 2: chunk → embed → Qdrant. Extracted from _process_tabular etc."""
+        if not record.processed_path or not record.processed_path.exists():
+            return
+        try:
+            from app.services.indexing_service import get_indexing_service
+            indexing_service = get_indexing_service()
+            index_result = indexing_service.index_dataset(
+                dataset_id=record.id,
+                filepath=record.processed_path,
+            )
+            record.metadata["index_status"] = index_result
+        except Exception as e:
+            record.metadata["index_status"] = {"status": "error", "error": str(e)}
+
+        # PII scan
+        try:
+            from app.services.pii_service import get_pii_service
+            pii_service = get_pii_service()
+            pii_result = pii_service.scan_dataset(record.processed_path)
+            record.metadata["pii_scan"] = pii_result
+        except Exception as e:
+            record.metadata["pii_scan"] = {"status": "scan_failed", "error": str(e)}
+
+    async def run_index_phase(self, dataset_id: str) -> DatasetRecord:
+        """Run only the index phase (called after confirm)."""
+        record = self.get_dataset(dataset_id)
+        if not record:
+            raise ValueError(f"Dataset {dataset_id} not found")
+
+        if self._is_cancelled(dataset_id):
+            record.status = DatasetStatus.CANCELLED
+            return record
+
+        record.status = DatasetStatus.INDEXING
+        record.updated_at = datetime.now(timezone.utc)
+        storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
+        self._save_record(record, storage_fn)
+
+        try:
+            self._run_indexing(record)
+            if self._is_cancelled(dataset_id):
+                record.status = DatasetStatus.CANCELLED
+            else:
+                record.status = DatasetStatus.READY
+            record.updated_at = datetime.now(timezone.utc)
+        except Exception as e:
+            record.status = DatasetStatus.ERROR
+            record.error = f"Indexing failed: {e}"
+            record.updated_at = datetime.now(timezone.utc)
+
+        self._save_record(record, storage_fn)
+        return record
+
+    # Maximum time (seconds) allowed for converting a file to Parquet.
+    # Large CSVs/TSVs (400MB+) may need several minutes.
+    EXTRACT_TIMEOUT_S = 300  # 5 minutes
+
+    async def _extract_tabular(self, record: DatasetRecord):
+        """Extract phase for tabular files (CSV, JSON, Parquet) - convert to Parquet."""
+        import logging
+        _log = logging.getLogger(__name__)
+
+        file_size = record.file_size_bytes or 0
+        file_mb = file_size / (1024 * 1024)
+
+        duckdb = get_duckdb_service()
+
+        # Determine output parquet path
+        parquet_filename = f"{record.id}.parquet"
+        record.processed_path = self.processed_dir / parquet_filename
+
+        # Get the read function for this file type
+        read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
+
+        # Convert to Parquet using streaming COPY
+        safe_out = sql_quote_literal(str(record.processed_path))
+        copy_query = f"""
+            COPY (SELECT * FROM {read_func})
+            TO '{safe_out}'
+            (FORMAT PARQUET, COMPRESSION ZSTD)
+        """
+
+        def _run_conversion(conn, query):
+            conn.execute(query)
+
+        try:
+            await asyncio.wait_for(
+                asyncio.get_event_loop().run_in_executor(
+                    None, _run_conversion, duckdb.connection, copy_query,
+                ),
+                timeout=self.EXTRACT_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            _log.error(
+                "Parquet conversion timed out for %s (%s, %.0fMB) after %ds",
+                record.id, record.file_type, file_mb, self.EXTRACT_TIMEOUT_S,
+            )
+            raise ValueError(
+                f"File processing timed out ({record.file_type}, {file_mb:.0f}MB). "
+                f"Files over ~400MB may require more processing time."
+            )
+        except Exception as e:
+            err_msg = str(e)
+            _log.error(
+                "Parquet conversion failed for %s (%s, %d bytes): %s",
+                record.id, record.file_type, file_size, err_msg,
+            )
+            # Retry with a fresh connection and higher memory limit for large files
+            if file_size > 100 * 1024 * 1024:  # >100MB
+                _log.info("Retrying large file %s with dedicated connection", record.id)
+                large_conn = duckdb.create_ephemeral_connection(
+                    memory_limit="16GB", threads=4,
+                )
+                try:
+                    large_read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
+                    large_query = (
+                        f"COPY (SELECT * FROM {large_read_func}) "
+                        f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                    )
+                    await asyncio.wait_for(
+                        asyncio.get_event_loop().run_in_executor(
+                            None, _run_conversion, large_conn, large_query,
+                        ),
+                        timeout=self.EXTRACT_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    raise ValueError(
+                        f"Large file processing timed out ({record.file_type}, {file_mb:.0f}MB). "
+                        f"Maximum processing time is {self.EXTRACT_TIMEOUT_S}s."
+                    )
+                except Exception as retry_err:
+                    raise ValueError(
+                        f"Large file conversion failed ({record.file_type}, "
+                        f"{file_mb:.0f}MB): {retry_err}"
+                    ) from retry_err
+                finally:
+                    large_conn.close()
+            else:
+                raise ValueError(
+                    f"Parquet conversion failed ({record.file_type}, "
+                    f"{file_mb:.0f}MB): {err_msg}"
+                ) from e
+
+        # Extract comprehensive metadata from the processed Parquet file
+        try:
+            record.metadata = duckdb.get_file_metadata(record.processed_path)
+            record.metadata['column_profiles'] = duckdb.get_column_profile(record.processed_path)
+            record.metadata['sample_rows'] = duckdb.get_sample_rows(record.processed_path, limit=5)
+        except Exception as e:
+            _log.exception("Metadata extraction failed for %s", record.id)
+            record.metadata = {"extraction_error": {"code": "METADATA_EXTRACTION_FAILED", "type": type(e).__name__}}
+
+    async def _process_document(self, record: DatasetRecord):
+        """Process document files (PDF, Word, PowerPoint) using Unstructured."""
+        from app.services.document_service import get_document_service
+
+        doc_service = get_document_service()
+
+        # Process document to extract content
+        content = doc_service.process_document(record.upload_path)
+        record.document_content = content
+
+        # Convert extracted text to a searchable Parquet file
+        parquet_filename = f"{record.id}.parquet"
+        record.processed_path = self.processed_dir / parquet_filename
+
+        # Create CSV from extracted content, then convert to Parquet
+        temp_csv = self.processed_dir / f"{record.id}_temp.csv"
+
+        try:
+            with open(temp_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['block_index', 'block_type', 'page_number', 'content'])
+
+                for i, block in enumerate(content["text_content"]):
+                    page_num = block.get("metadata", {}).get("page_number", 0)
+                    writer.writerow([
+                        i,
+                        block.get("type", "Text"),
+                        page_num,
+                        block.get("text", "")
+                    ])
+
+                # Add tables as separate rows
+                for i, table in enumerate(content["tables"]):
+                    page_num = table.get("metadata", {}).get("page_number", 0)
+                    writer.writerow([
+                        len(content["text_content"]) + i,
+                        "Table",
+                        page_num,
+                        table.get("content", "")
+                    ])
+
+            # Convert to Parquet
+            duckdb = get_duckdb_service()
+            safe_csv = sql_quote_literal(str(temp_csv))
+            safe_out = sql_quote_literal(str(record.processed_path))
+            copy_query = f"""
+                COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
+                TO '{safe_out}'
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+            duckdb.connection.execute(copy_query)
+
+            # Extract metadata
+            metadata = duckdb.get_file_metadata(record.processed_path)
+            metadata["source_type"] = "document"
+            metadata["original_format"] = record.file_type
+            metadata["text_blocks"] = len(content["text_content"])
+            metadata["tables_extracted"] = len(content["tables"])
+            record.metadata = metadata
+
+        finally:
+            # Clean up temp file
+            if temp_csv.exists():
+                temp_csv.unlink()
+
+    async def _process_text(self, record: DatasetRecord):
+        """Process text files (.txt, .md, .html, .htm) using TextProcessor."""
+        from app.services.text_processor import TextProcessor
+
+        processor = TextProcessor()
+        content = processor.process(record.upload_path)
+
+        # For large text files (>1MB), truncate stored text but keep full metadata
+        MAX_TEXT_BYTES = 1 * 1024 * 1024  # 1MB
+        full_text = content["text_content"]
+        if len(full_text.encode("utf-8", errors="replace")) > MAX_TEXT_BYTES:
+            truncated_text = full_text[:MAX_TEXT_BYTES]
+            content["metadata"]["truncated"] = True
+            content["metadata"]["original_char_count"] = content["metadata"]["char_count"]
+        else:
+            truncated_text = full_text
+
+        record.document_content = content
+
+        # Convert to a searchable Parquet file
+        parquet_filename = f"{record.id}.parquet"
+        record.processed_path = self.processed_dir / parquet_filename
+
+        temp_csv = self.processed_dir / f"{record.id}_temp.csv"
+
+        try:
+            with open(temp_csv, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+                writer.writerow(['block_index', 'block_type', 'content'])
+                writer.writerow([0, 'text', truncated_text])
+
+            duckdb = get_duckdb_service()
+            safe_csv = sql_quote_literal(str(temp_csv))
+            safe_out = sql_quote_literal(str(record.processed_path))
+            copy_query = f"""
+                COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
+                TO '{safe_out}'
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
+            duckdb.connection.execute(copy_query)
+
+            metadata = duckdb.get_file_metadata(record.processed_path)
+            metadata["source_type"] = "text"
+            metadata["original_format"] = record.file_type
+            metadata.update(content["metadata"])
+            record.metadata = metadata
+
+        finally:
+            if temp_csv.exists():
+                temp_csv.unlink()
+
+    async def _process_spreadsheet(self, record: DatasetRecord):
+        """Process Excel spreadsheets (.xlsx, .xls) via pandas."""
+        import pandas as pd
+
+        duckdb = get_duckdb_service()
+
+        parquet_filename = f"{record.id}.parquet"
+        record.processed_path = self.processed_dir / parquet_filename
+
+        ext = record.upload_path.suffix.lower()
+
+        # Select the right engine: openpyxl for .xlsx, xlrd for .xls
+        engine = "xlrd" if ext == ".xls" else "openpyxl"
+
+        try:
+            xlsx = pd.ExcelFile(record.upload_path, engine=engine)
+            sheet_names = xlsx.sheet_names
+
+            # Read first sheet
+            df = pd.read_excel(xlsx, sheet_name=0)
+
+            # Save to Parquet
+            df.to_parquet(record.processed_path, compression='zstd', index=False)
+
+            metadata = duckdb.get_file_metadata(record.processed_path)
+            metadata["source_type"] = "spreadsheet"
+            metadata["original_format"] = record.file_type
+            metadata["sheet_names"] = sheet_names
+            metadata["sheets_count"] = len(sheet_names)
+            record.metadata = metadata
+
+        except Exception as e:
+            raise ValueError(
+                f"Excel processing failed for {record.original_filename} "
+                f"(engine={engine}): {e}"
+            )
+
+
+# Singleton instance
+_processing_service: Optional[ProcessingService] = None
+
+
+def get_processing_service() -> ProcessingService:
+    """Get the singleton processing service instance."""
+    global _processing_service
+    if _processing_service is None:
+        _processing_service = ProcessingService()
+    return _processing_service

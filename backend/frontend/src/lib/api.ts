@@ -1,0 +1,462 @@
+// API Configuration and Client
+
+// Get API URL from localStorage or environment variable or default.
+// Default is empty string (same-origin relative URLs) so the frontend
+// works when served from the backend on any host (Railway, Docker, etc.).
+export function getApiUrl(): string {
+  if (typeof window !== 'undefined') {
+    const stored = localStorage.getItem('vectoraiz_api_url');
+    if (stored) return stored;
+  }
+  // VITE_API_URL is injected at build time by Railway.
+  // Fallback: if not set AND we're on dev.vectoraiz.com, use the known backend.
+  const envUrl = import.meta.env.VITE_API_URL;
+  if (envUrl) return envUrl;
+  
+  // Smart fallback for split-service deploys (frontend ≠ backend origin)
+  if (typeof window !== 'undefined' && window.location.hostname === 'dev.vectoraiz.com') {
+    return 'https://vectoraiz-backend-production.up.railway.app';
+  }
+  return ''; // same-origin (works when frontend is served from backend)
+}
+
+// Read stored API key for auth header injection
+function getStoredApiKey(): string | null {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('vectoraiz_api_key');
+  }
+  return null;
+}
+
+// Generic fetch wrapper with error handling
+async function apiFetch<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const url = `${getApiUrl()}${endpoint}`;
+  const apiKey = getStoredApiKey();
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string>),
+  };
+
+  if (apiKey) {
+    headers['X-API-Key'] = apiKey;
+  }
+
+  const response = await fetch(url, {
+    ...options,
+    headers,
+  });
+
+  if (response.status === 401) {
+    // Clear invalid key — will trigger re-auth via AuthContext
+    localStorage.removeItem('vectoraiz_api_key');
+  }
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: 'Unknown error' }));
+    throw new Error(error.detail || `API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
+// Dataset types from API
+export interface ApiDataset {
+  id: string;
+  original_filename: string;
+  file_type: string;
+  status: 'uploading' | 'processing' | 'ready' | 'error';
+  error?: string;
+  created_at: string;
+  updated_at: string;
+  metadata: {
+    row_count?: number;
+    column_count?: number;
+    columns?: Array<{ name: string; type: string }>;
+    size_bytes?: number;
+    index_status?: { status: string; rows_indexed?: number };
+    pii_scan?: { overall_risk: string; columns_with_pii: number };
+  };
+}
+
+export interface DatasetListResponse {
+  datasets: ApiDataset[];
+  count: number;
+}
+
+export interface SearchResult {
+  dataset_id: string;
+  dataset_name: string;
+  score: number;
+  row_index: number;
+  text_content: string;
+  row_data: Record<string, unknown>;
+}
+
+export interface SearchResponse {
+  query: string;
+  results: SearchResult[];
+  total: number;
+  datasets_searched: number;
+  duration_ms: number;
+}
+
+export interface SQLResponse {
+  query: string;
+  columns: string[];
+  data: Record<string, unknown>[];
+  row_count: number;
+  duration_ms: number;
+  truncated: boolean;
+}
+
+export interface SQLTable {
+  table_name: string;
+  dataset_id: string;
+  row_count: number;
+  column_count: number;
+}
+
+export interface SQLTablesResponse {
+  tables: SQLTable[];
+  count: number;
+}
+
+export interface TableSchemaColumn {
+  name: string;
+  type: string;
+  nullable: boolean;
+}
+
+export interface TableSchemaResponse {
+  dataset_id: string;
+  table_name: string;
+  columns: TableSchemaColumn[];
+}
+
+export interface DatasetSampleResponse {
+  dataset_id: string;
+  sample: Record<string, unknown>[];
+  count: number;
+}
+
+export interface DatasetStatisticsResponse {
+  dataset_id: string;
+  statistics: {
+    column: string;
+    type: string;
+    count: number;
+    null_count: number;
+    unique_count?: number;
+    min?: number;
+    max?: number;
+    mean?: number;
+    median?: number;
+    std?: number;
+    top_values?: { value: string; count: number }[];
+  }[];
+}
+
+export interface DatasetProfileResponse {
+  dataset_id: string;
+  column_profiles: {
+    column: string;
+    type: string;
+    stats: Record<string, unknown>;
+  }[];
+}
+
+export interface UploadResponse {
+  dataset_id: string;
+  status: string;
+}
+
+export interface DatasetStatusResponse {
+  dataset_id: string;
+  status: string;
+  error?: string;
+}
+
+export interface HealthResponse {
+  status: string;
+  timestamp: string;
+}
+
+export interface ReadyResponse {
+  status: string;
+  checks: Record<string, { status: string; message?: string }>;
+}
+
+export interface PIIScanResponse {
+  dataset_id: string;
+  scan_status: string;
+  overall_risk: string;
+  columns_scanned: number;
+  columns_with_pii: number;
+  column_results: {
+    column: string;
+    pii_types: string[];
+    risk_level: string;
+    sample_matches?: string[];
+  }[];
+}
+
+export interface PIIEntitiesResponse {
+  entities: {
+    type: string;
+    description: string;
+    risk_level: string;
+  }[];
+  count: number;
+}
+
+export interface VectorHealthResponse {
+  status: string;
+  collections: number;
+  total_vectors: number;
+}
+
+export interface VectorCollectionsResponse {
+  collections: {
+    name: string;
+    vectors_count: number;
+    status: string;
+  }[];
+  count: number;
+}
+
+export interface SearchStatsResponse {
+  total_datasets: number;
+  total_vectors: number;
+  datasets: {
+    dataset_id: string;
+    dataset_name: string;
+    vectors_count: number;
+    status: string;
+  }[];
+}
+
+export interface SearchSuggestResponse {
+  query: string;
+  suggestions: {
+    text: string;
+    score: number;
+  }[];
+}
+
+// Dataset API
+export class DuplicateFileError extends Error {
+  existingDataset: { id: string; filename: string; status: string; created_at: string };
+  constructor(detail: string, existing: { id: string; filename: string; status: string; created_at: string }) {
+    super(detail);
+    this.name = 'DuplicateFileError';
+    this.existingDataset = existing;
+  }
+}
+
+export const datasetsApi = {
+  list: () => apiFetch<DatasetListResponse>('/api/datasets'),
+  
+  get: (id: string) => apiFetch<ApiDataset>(`/api/datasets/${id}`),
+  
+  upload: async (file: File, options?: { allowDuplicate?: boolean }): Promise<UploadResponse> => {
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const headers: Record<string, string> = {};
+    const apiKey = getStoredApiKey();
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+
+    const params = options?.allowDuplicate ? '?allow_duplicate=true' : '';
+    const response = await fetch(`${getApiUrl()}/api/datasets/upload${params}`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    if (response.status === 401) {
+      localStorage.removeItem('vectoraiz_api_key');
+    }
+
+    if (response.status === 409) {
+      const body = await response.json().catch(() => ({}));
+      if (body.error === 'duplicate_filename') {
+        throw new DuplicateFileError(body.detail, body.existing_dataset);
+      }
+    }
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Upload failed' }));
+      throw new Error(error.detail);
+    }
+
+    return response.json();
+  },
+  
+  delete: (id: string) => apiFetch<{ message: string }>(`/api/datasets/${id}`, { method: 'DELETE' }),
+  
+  getSample: (id: string, limit = 10) => 
+    apiFetch<DatasetSampleResponse>(
+      `/api/datasets/${id}/sample?limit=${limit}`
+    ),
+  
+  getStatistics: (id: string) =>
+    apiFetch<DatasetStatisticsResponse>(`/api/datasets/${id}/statistics`),
+  
+  getProfile: (id: string) =>
+    apiFetch<DatasetProfileResponse>(`/api/datasets/${id}/profile`),
+  
+  getFull: (id: string) =>
+    apiFetch<ApiDataset>(`/api/datasets/${id}/full`),
+  
+  getStatus: (id: string) =>
+    apiFetch<DatasetStatusResponse>(`/api/datasets/${id}/status`),
+};
+
+// Search API
+export const searchApi = {
+  search: (query: string, options?: { dataset_id?: string; limit?: number; min_score?: number }) => {
+    const params = new URLSearchParams({ q: query });
+    if (options?.dataset_id) params.append('dataset_id', options.dataset_id);
+    if (options?.limit) params.append('limit', options.limit.toString());
+    if (options?.min_score) params.append('min_score', options.min_score.toString());
+    
+    return apiFetch<SearchResponse>(`/api/search?${params}`);
+  },
+  
+  searchDataset: (datasetId: string, query: string, limit = 10) =>
+    apiFetch<SearchResponse>(`/api/search/dataset/${datasetId}?q=${encodeURIComponent(query)}&limit=${limit}`),
+  
+  suggest: (query: string) =>
+    apiFetch<SearchSuggestResponse>(`/api/search/suggest?q=${encodeURIComponent(query)}`),
+  
+  stats: () =>
+    apiFetch<SearchStatsResponse>('/api/search/stats'),
+};
+
+// SQL API
+export const sqlApi = {
+  query: (sql: string, options?: { dataset_id?: string; limit?: number; offset?: number }) =>
+    apiFetch<SQLResponse>('/api/sql/query', {
+      method: 'POST',
+      body: JSON.stringify({
+        query: sql,
+        dataset_id: options?.dataset_id,
+        limit: options?.limit || 1000,
+        offset: options?.offset || 0,
+      }),
+    }),
+  
+  tables: () =>
+    apiFetch<SQLTablesResponse>('/api/sql/tables'),
+  
+  tableSchema: (datasetId: string) =>
+    apiFetch<TableSchemaResponse>(`/api/sql/tables/${datasetId}`),
+  
+  validate: (sql: string) =>
+    apiFetch<{ query: string; valid: boolean; error?: string }>('/api/sql/validate', {
+      method: 'POST',
+      body: JSON.stringify({ query: sql }),
+    }),
+};
+
+// PII API
+export const piiApi = {
+  scan: (datasetId: string) =>
+    apiFetch<PIIScanResponse>(`/api/pii/scan/${datasetId}`, { method: 'POST' }),
+  
+  getScan: (datasetId: string) =>
+    apiFetch<PIIScanResponse>(`/api/pii/scan/${datasetId}`),
+  
+  entities: () =>
+    apiFetch<PIIEntitiesResponse>('/api/pii/entities'),
+};
+
+// Health API
+export const healthApi = {
+  check: () => apiFetch<HealthResponse>('/api/health'),
+  ready: () => apiFetch<ReadyResponse>('/api/health/ready'),
+};
+
+// Vectors API
+export const vectorsApi = {
+  health: () => apiFetch<VectorHealthResponse>('/api/vectors/health'),
+  collections: () => apiFetch<VectorCollectionsResponse>('/api/vectors/collections'),
+};
+
+// Auth types
+export interface AuthUser {
+  id: string;
+  username: string;
+  role: string;
+}
+
+export interface AuthSetupResponse {
+  message: string;
+  user: AuthUser;
+  api_key: string;
+}
+
+export interface AuthLoginResponse {
+  user_id: number;
+  username: string;
+  api_key: string;
+}
+
+export interface AuthMeResponse {
+  user_id: number;
+  username: string;
+  role: string;
+  is_active: boolean;
+}
+
+export interface AuthKeyInfo {
+  key_id: string;
+  label: string;
+  scopes: string[];
+  created_at: string;
+  last_used_at: string | null;
+  revoked: boolean;
+}
+
+export interface AuthKeyCreatedResponse {
+  key_id: string;
+  full_key: string;
+  label: string;
+  scopes: string[];
+}
+
+// Auth API
+export const authApi = {
+  setup: (username: string, password: string) =>
+    apiFetch<AuthSetupResponse>('/api/auth/setup', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+
+  login: (username: string, password: string) =>
+    apiFetch<AuthLoginResponse>('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ username, password }),
+    }),
+
+  me: () => apiFetch<AuthMeResponse>('/api/auth/me'),
+
+  listKeys: () => apiFetch<AuthKeyInfo[]>('/api/auth/keys'),
+
+  createKey: (label: string, scopes: string[] = ['all']) =>
+    apiFetch<AuthKeyCreatedResponse>('/api/auth/keys', {
+      method: 'POST',
+      body: JSON.stringify({ label, scopes }),
+    }),
+
+  revokeKey: (keyId: string) =>
+    apiFetch<{ message: string }>(`/api/auth/keys/${keyId}`, {
+      method: 'DELETE',
+    }),
+};

@@ -1,0 +1,19 @@
+Explain why the following search results matched the user's query.
+
+### USER QUERY
+{{ query }}
+
+### SEARCH RESULTS
+{% for chunk in context_chunks %}
+[source_{{ loop.index }}]:
+{{ chunk }}
+
+---
+{% endfor %}
+
+### INSTRUCTIONS
+1. Explain the relevance of each result to the query.
+2. Highlight which results are most relevant and why.
+3. Cite specific sources [source_N] in your explanation.
+
+### EXPLANATION

@@ -1,0 +1,88 @@
+# =============================================================================
+# vectorAIz — Production Docker Compose
+# =============================================================================
+# BQ-089: Hardened for self-hosting
+#
+# Usage:
+#   cp .env.example .env   # Edit with your settings
+#   docker compose -f docker-compose.prod.yml up -d
+#   docker compose -f docker-compose.prod.yml logs -f vectoraiz-api
+#
+# Requirements:
+#   - Docker Engine 24+ with Compose v2
+#   - At least 4GB RAM available for containers
+# =============================================================================
+
+services:
+  vectoraiz-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vectoraiz-api
+    restart: unless-stopped
+    ports:
+      - "${VECTORAIZ_PORT:-8000}:8000"
+    volumes:
+      - vectoraiz-data:/data
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - WORKERS=${VECTORAIZ_WORKERS:-2}
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.2
+    container_name: vectoraiz-qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant-storage:/qdrant/storage
+    # No ports exposed — only accessible to vectoraiz-api via internal network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  vectoraiz-data:
+    driver: local
+  qdrant-storage:
+    driver: local

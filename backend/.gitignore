@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+.venv/
+
+# Data
+data/
+*.parquet
+*.csv
+*.json
+!.devcontainer/*.json
+!frontend/*.json
+!frontend/src/**/*.json
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+.docker/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+-e 
+# CC build artifacts
+.env.bak
+.env.local-qa
+.env.test-qa
+P0-FIX-REPORT*.md
+QA-REPORT*.md
+docker-compose.local-qa.yml
+logs/
+.env.dev-backup
+*.webloc

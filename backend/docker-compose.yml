@@ -1,0 +1,29 @@
+services:
+  vectoraiz-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app # Hot reload for development
+      - ./tests:/app/tests # Test files
+      - ./data:/data # Persistent data storage
+    environment:
+      - DEBUG=true
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - VECTORAIZ_AUTH_ENABLED=true
+      - VECTORAIZ_AI_MARKET_URL=https://ai-market-backend-production.up.railway.app
+      - VECTORAIZ_AUTH_CACHE_TTL=300
+    depends_on:
+      - qdrant
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333" # Exposed for development; remove in production
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  qdrant_storage:

@@ -1,0 +1,108 @@
+# =============================================================================
+# vectorAIz — Customer Deployment Dockerfile
+# =============================================================================
+# BQ-127: Air-Gap Architecture — Self-contained appliance
+#
+# Three-stage build:
+#   1. Frontend: Node → npm build → static files
+#   2. Backend:  Python → pip install → packages
+#   3. Runtime:  Python + nginx + tini → serves UI + API on port 80
+#
+# Usage with docker-compose.customer.yml:
+#   docker compose -f docker-compose.customer.yml up -d
+# =============================================================================
+
+# ---- Stage 1: Build Frontend ----
+FROM node:22-slim AS frontend-builder
+
+WORKDIR /ui
+COPY frontend/package*.json frontend/bun.lockb* ./
+RUN npm ci --production=false 2>/dev/null || npm install
+COPY frontend/ .
+RUN npm run build
+
+
+# ---- Stage 2: Build Backend ----
+FROM python:3.11.11-slim-bookworm AS backend-builder
+
+WORKDIR /build
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+# Pre-download NLTK data
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    python -c "import nltk; nltk.download('punkt', download_dir='/install/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/install/nltk_data')"
+
+# Pre-download sentence-transformers model for air-gap operation
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    HF_HOME=/install/hf_cache \
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+
+# ---- Stage 3: Runtime ----
+FROM python:3.11.11-slim-bookworm AS runtime
+
+LABEL maintainer="ai.market <ops@ai.market>"
+LABEL description="vectorAIz — Self-hosted data processing & semantic search"
+LABEL version="1.2.0"
+
+WORKDIR /app
+
+# Install tini (PID 1, signal forwarding, zombie reaping — Council condition C7)
+# Install nginx (serves frontend SPA, reverse-proxies API)
+# Install runtime deps (same as existing Dockerfile)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tini \
+    nginx \
+    libpq5 \
+    poppler-utils \
+    tesseract-ocr \
+    libreoffice \
+    pandoc \
+    libmagic1 \
+    libgl1 \
+    libglib2.0-0 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Python packages from builder
+COPY --from=backend-builder /install /usr/local
+COPY --from=backend-builder /install/nltk_data /usr/share/nltk_data
+COPY --from=backend-builder /install/hf_cache /root/.cache/huggingface
+
+# Copy backend application code
+COPY app/ ./app/
+COPY alembic.ini ./alembic.ini
+COPY alembic/ ./alembic/
+
+# Copy built frontend → nginx html root
+COPY --from=frontend-builder /ui/dist /usr/share/nginx/html
+
+# Copy deployment configs
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+# Remove default nginx site
+RUN rm -f /etc/nginx/sites-enabled/default
+
+# Create data directories
+RUN mkdir -p /data/uploads /data/processed /data/temp /data/keystore && \
+    chmod 755 /data
+
+VOLUME ["/data"]
+EXPOSE 80
+
+# Health check — nginx on :80 proxies to API
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+    CMD curl -f http://localhost/api/health || exit 1
+
+# tini as PID 1 (Council condition C7)
+ENTRYPOINT ["tini", "--"]
+CMD ["/entrypoint.sh"]

@@ -1,0 +1,17 @@
+You are an expert data analyst. Please summarize the following dataset content.
+
+### DATASET CONTEXT
+{% for chunk in context_chunks %}
+[source_{{ loop.index }}]:
+{{ chunk }}
+
+---
+{% endfor %}
+
+### INSTRUCTIONS
+1. Provide a concise summary of what this data represents.
+2. Identify key fields or columns mentioned.
+3. Note any potential compliance sensitivities (PII, etc) if visible.
+4. Cite specific chunks using [source_N] where appropriate.
+
+### SUMMARY

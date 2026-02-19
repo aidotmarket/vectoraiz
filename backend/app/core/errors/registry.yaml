@@ -1,0 +1,445 @@
+schema_version: 1
+
+errors:
+  # ─── API Domain (HTTP layer, validation, auth) ──────────────────────
+  - code: VAI-API-001
+    domain: API
+    title: Invalid request payload
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 400
+    safe_message: "The request payload is invalid. Check the request body format."
+    remediation:
+      - "Verify JSON payload matches the expected schema"
+      - "Check Content-Type header is application/json"
+
+  - code: VAI-API-002
+    domain: API
+    title: Authentication required
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 401
+    safe_message: "Authentication is required. Provide a valid API key."
+    remediation:
+      - "Include X-API-Key header in your request"
+      - "Verify your API key is active at ai.market"
+
+  - code: VAI-API-003
+    domain: API
+    title: Resource not found
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 404
+    safe_message: "The requested resource was not found."
+    remediation:
+      - "Verify the resource ID is correct"
+      - "Check the resource has not been deleted"
+
+  # ─── CFG Domain (Configuration & env) ──────────────────────────────
+  - code: VAI-CFG-001
+    domain: CFG
+    title: Missing configuration
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 500
+    safe_message: "A required configuration value is missing."
+    remediation:
+      - "Check .env file for required environment variables"
+      - "Review documentation for configuration requirements"
+
+  - code: VAI-CFG-002
+    domain: CFG
+    title: Invalid configuration value
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 500
+    safe_message: "A configuration value is invalid."
+    remediation:
+      - "Check .env file for typos or invalid values"
+      - "Verify URLs and port numbers are correct"
+
+  - code: VAI-CFG-003
+    domain: CFG
+    title: Missing LLM API key
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 500
+    safe_message: "LLM provider API key is not configured."
+    remediation:
+      - "Set the appropriate API key in .env (VECTORAIZ_GEMINI_API_KEY, etc.)"
+      - "Verify the key is valid with the provider"
+
+  # ─── DB Domain (DuckDB / SQLite) ───────────────────────────────────
+  - code: VAI-DB-001
+    domain: DB
+    title: Database unavailable
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 503
+    safe_message: "Local database is temporarily unavailable."
+    remediation:
+      - "Check disk space and file permissions"
+      - "Restart the application"
+
+  - code: VAI-DB-002
+    domain: DB
+    title: Query execution failed
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 400
+    safe_message: "The SQL query could not be executed."
+    remediation:
+      - "Check SQL syntax"
+      - "Verify table and column names"
+
+  - code: VAI-DB-003
+    domain: DB
+    title: Database write locked
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 503
+    safe_message: "Database is temporarily locked. Try again shortly."
+    remediation:
+      - "Wait and retry the operation"
+      - "Check for long-running transactions"
+
+  # ─── QDR Domain (Qdrant) ───────────────────────────────────────────
+  - code: VAI-QDR-001
+    domain: QDR
+    title: Qdrant unreachable
+    severity: ERROR
+    retryable: true
+    user_action_required: true
+    http_status: 503
+    safe_message: "Vector database is not reachable. Check Qdrant container."
+    remediation:
+      - "Verify Qdrant container is running"
+      - "Check QDRANT_URL in settings"
+
+  - code: VAI-QDR-002
+    domain: QDR
+    title: Collection not found
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 404
+    safe_message: "The requested vector collection does not exist."
+    remediation:
+      - "Verify collection name is correct"
+      - "Re-index the dataset to create the collection"
+
+  - code: VAI-QDR-003
+    domain: QDR
+    title: Dimension mismatch
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 422
+    safe_message: "Vector dimensions do not match the collection configuration."
+    remediation:
+      - "Ensure embedding model matches the collection"
+      - "Re-create collection with correct dimensions"
+
+  # ─── LLM Domain (LLM provider adapter) ─────────────────────────────
+  - code: VAI-LLM-001
+    domain: LLM
+    title: LLM provider unreachable
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 503
+    safe_message: "AI model provider is temporarily unavailable."
+    remediation:
+      - "Check internet connectivity"
+      - "Verify API key is valid"
+      - "Check provider status page"
+
+  - code: VAI-LLM-002
+    domain: LLM
+    title: Model not found
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 500
+    safe_message: "The configured AI model could not be loaded."
+    remediation:
+      - "Verify model name in configuration"
+      - "Check provider supports the model"
+
+  - code: VAI-LLM-003
+    domain: LLM
+    title: LLM rate limited
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 429
+    safe_message: "AI model rate limit reached. Please wait and retry."
+    remediation:
+      - "Wait a moment before retrying"
+      - "Consider upgrading your API plan with the provider"
+
+  # ─── ING Domain (Ingestion/parsing) ────────────────────────────────
+  - code: VAI-ING-001
+    domain: ING
+    title: Unsupported file type
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 422
+    safe_message: "This file type is not supported. Supported: CSV, JSON, PDF, DOCX, TXT, XLSX."
+    remediation:
+      - "Convert file to a supported format"
+
+  - code: VAI-ING-002
+    domain: ING
+    title: File too large
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 413
+    safe_message: "The uploaded file exceeds the maximum size limit."
+    remediation:
+      - "Split the file into smaller parts"
+      - "Check the upload size limit in documentation"
+
+  - code: VAI-ING-003
+    domain: ING
+    title: File parsing failed
+    severity: ERROR
+    retryable: false
+    user_action_required: true
+    http_status: 422
+    safe_message: "The file could not be parsed. It may be corrupted or in an unexpected format."
+    remediation:
+      - "Verify the file is not corrupted"
+      - "Check file encoding (UTF-8 recommended)"
+
+  # ─── EMB Domain (Embeddings pipeline) ──────────────────────────────
+  - code: VAI-EMB-001
+    domain: EMB
+    title: Embedding generation failed
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 500
+    safe_message: "Failed to generate embeddings for the content."
+    remediation:
+      - "Retry the indexing operation"
+      - "Check available memory"
+
+  - code: VAI-EMB-002
+    domain: EMB
+    title: Embedding model unavailable
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 503
+    safe_message: "The embedding model is not available."
+    remediation:
+      - "Check model download completed"
+      - "Restart the application"
+
+  - code: VAI-EMB-003
+    domain: EMB
+    title: Batch embedding failed
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 500
+    safe_message: "Batch embedding partially failed. Some items were not indexed."
+    remediation:
+      - "Retry the indexing operation"
+      - "Check for oversized text chunks"
+
+  # ─── RAG Domain (Retrieval + prompting) ────────────────────────────
+  - code: VAI-RAG-001
+    domain: RAG
+    title: No relevant context found
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 404
+    safe_message: "No relevant data found for your query. Try a different question or index more data."
+    remediation:
+      - "Rephrase the query"
+      - "Ensure relevant datasets are indexed"
+
+  - code: VAI-RAG-002
+    domain: RAG
+    title: Token budget exceeded
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 422
+    safe_message: "The query and context exceed the model's token limit."
+    remediation:
+      - "Shorten the query"
+      - "Reduce the number of context documents"
+
+  - code: VAI-RAG-003
+    domain: RAG
+    title: Generation failed
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 500
+    safe_message: "AI answer generation failed. Please retry."
+    remediation:
+      - "Retry the query"
+      - "Check LLM provider status"
+
+  # ─── COP Domain (Co-Pilot) ─────────────────────────────────────────
+  - code: VAI-COP-001
+    domain: COP
+    title: Co-Pilot session conflict
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 409
+    safe_message: "A Co-Pilot session is already active. Disconnect the other session first."
+    remediation:
+      - "Close the existing Co-Pilot session"
+      - "Wait for the session to timeout"
+
+  - code: VAI-COP-002
+    domain: COP
+    title: Insufficient balance
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 402
+    safe_message: "Insufficient credits for this Co-Pilot operation."
+    remediation:
+      - "Add credits at ai.market"
+      - "Check your balance"
+
+  - code: VAI-COP-003
+    domain: COP
+    title: Co-Pilot timeout
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 504
+    safe_message: "Co-Pilot operation timed out."
+    remediation:
+      - "Retry the operation"
+      - "Check network connectivity"
+
+  # ─── SEC Domain (Trust Channel, crypto) ─────────────────────────────
+  - code: VAI-SEC-001
+    domain: SEC
+    title: Invalid cryptographic key
+    severity: CRITICAL
+    retryable: false
+    user_action_required: true
+    http_status: 500
+    safe_message: "Device cryptographic key is invalid or corrupted."
+    remediation:
+      - "Re-initialize the keystore"
+      - "Check VECTORAIZ_KEYSTORE_PASSPHRASE is correct"
+
+  - code: VAI-SEC-002
+    domain: SEC
+    title: Signature verification failed
+    severity: ERROR
+    retryable: false
+    user_action_required: false
+    http_status: 403
+    safe_message: "Request signature verification failed."
+    remediation:
+      - "Verify the signing key is correct"
+      - "Re-register the device with ai.market"
+
+  - code: VAI-SEC-003
+    domain: SEC
+    title: Trust channel handshake failed
+    severity: ERROR
+    retryable: true
+    user_action_required: true
+    http_status: 503
+    safe_message: "Secure connection to ai.market could not be established."
+    remediation:
+      - "Check internet connectivity"
+      - "Verify device registration status"
+
+  # ─── SYS Domain (OS/resources/runtime) ─────────────────────────────
+  - code: VAI-SYS-001
+    domain: SYS
+    title: Disk space critical
+    severity: CRITICAL
+    retryable: false
+    user_action_required: true
+    http_status: 507
+    safe_message: "Disk space is critically low. Free up space to continue."
+    remediation:
+      - "Delete unused datasets or log files"
+      - "Expand disk storage"
+
+  - code: VAI-SYS-002
+    domain: SYS
+    title: Memory pressure
+    severity: WARN
+    retryable: true
+    user_action_required: true
+    http_status: 503
+    safe_message: "System memory is low. Performance may be degraded."
+    remediation:
+      - "Close other applications"
+      - "Increase container memory limit"
+
+  - code: VAI-SYS-003
+    domain: SYS
+    title: Log rotation failed
+    severity: WARN
+    retryable: true
+    user_action_required: false
+    http_status: 500
+    safe_message: "Log file rotation failed. Logging continues to stderr."
+    remediation:
+      - "Check disk space and permissions in logs/ directory"
+
+  # ─── UX Domain (Frontend-facing action-required) ───────────────────
+  - code: VAI-UX-001
+    domain: UX
+    title: Dataset not found
+    severity: WARN
+    retryable: false
+    user_action_required: true
+    http_status: 404
+    safe_message: "The requested dataset was not found."
+    remediation:
+      - "Verify the dataset ID"
+      - "Check the dataset has not been deleted"
+
+  - code: VAI-UX-002
+    domain: UX
+    title: Dataset processing in progress
+    severity: INFO
+    retryable: true
+    user_action_required: false
+    http_status: 409
+    safe_message: "Dataset is currently being processed. Please wait."
+    remediation:
+      - "Wait for processing to complete"
+      - "Check the processing status endpoint"
+
+  - code: VAI-UX-003
+    domain: UX
+    title: Search unavailable
+    severity: ERROR
+    retryable: true
+    user_action_required: false
+    http_status: 503
+    safe_message: "Search is temporarily unavailable."
+    remediation:
+      - "Verify Qdrant is running"
+      - "Retry in a few moments"

@@ -1,0 +1,1091 @@
+from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File, Form, BackgroundTasks, Query
+from fastapi.responses import JSONResponse
+from typing import List, Optional
+from pathlib import Path
+import aiofiles
+import asyncio
+import os
+import json
+import logging
+import uuid
+from datetime import datetime, timezone
+
+from app.core.async_utils import run_sync
+from app.core.errors import VectorAIzError
+from app.services.batch_service import _check_magic_bytes, _MAGIC_SIGNATURES
+
+from app.config import settings
+from app.models.dataset import DatasetStatus
+from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.processing_service import (
+    get_processing_service,
+    ProcessingService,
+    ProcessingStatus,
+)
+from app.services.indexing_service import get_indexing_service, IndexingService
+from app.services.attestation_service import AttestationService, get_attestation_service
+from app.models.attestation_schemas import QualityAttestation
+from app.services.compliance_service import ComplianceService, get_compliance_service
+from app.models.compliance_schemas import ComplianceReport
+from app.services.listing_metadata_service import ListingMetadataService, get_listing_metadata_service
+from app.models.listing_metadata_schemas import ListingMetadata
+from app.services.pipeline_service import PipelineService, get_pipeline_service
+from app.services.marketplace_push_service import MarketplacePushService, get_marketplace_push_service, MarketplacePushError
+from app.services.batch_service import get_batch_service, BatchService
+from app.services.preview_service import get_preview_service, PreviewService
+from app.schemas.batch import ConfirmRequest, BatchConfirmResponse
+from app.auth.api_key_auth import get_current_user, AuthenticatedUser
+from app.services.llm_providers.base import LLMProviderError
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+# Maximum file size for single-file uploads — use the global config value (default 500MB)
+MAX_UPLOAD_FILE_BYTES = settings.max_upload_size_bytes
+
+SUPPORTED_EXTENSIONS = {
+    # Data formats (pandas/DuckDB pipeline)
+    '.csv', '.tsv', '.json', '.parquet', '.xlsx', '.xls',
+    # Documents (Unstructured)
+    '.pdf', '.docx', '.doc', '.pptx', '.ppt',
+    # Plain text
+    '.txt', '.md', '.html', '.htm',
+    # Tika-powered document formats (BQ-TIKA)
+    '.rtf', '.odt', '.ods', '.odp', '.epub',
+    '.eml', '.msg', '.mbox',
+    '.xml', '.rss',
+    '.pages', '.numbers', '.key',
+    '.wps', '.wpd',
+    '.ics', '.vcf',
+}
+
+
+def get_file_extension(filename: str) -> str:
+    """Extract file extension from filename."""
+    return Path(filename).suffix.lower().strip()
+
+
+@router.get("/")
+async def list_datasets(
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """List all datasets with their processing status."""
+    records = processing.list_datasets()
+    return {
+        "datasets": [r.to_dict() for r in records],
+        "count": len(records)
+    }
+
+
+@router.post("/upload")
+async def upload_dataset(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    processing: ProcessingService = Depends(get_processing_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+    allow_duplicate: bool = Query(False, description="Skip duplicate filename check"),
+):
+    """
+    Upload a new dataset file.
+
+    Accepts CSV, JSON, Parquet, Excel files.
+    Files are streamed to disk, then processed in the background.
+    Requires X-API-Key header.
+    """
+    max_size_mb = MAX_UPLOAD_FILE_BYTES // (1024 * 1024)
+
+    # Validate file extension
+    extension = get_file_extension(file.filename)
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise VectorAIzError("VAI-ING-001", detail=f"Unsupported file type: {extension}")
+
+    # Early file size check — use Content-Length header for instant reject
+    # before any streaming, preventing timeout on very large uploads (BUG-4/6)
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > MAX_UPLOAD_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
+        )
+    if file.size and file.size > MAX_UPLOAD_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
+        )
+
+    file_type = extension[1:]  # Remove the dot
+
+    # Check for duplicate filename (unless explicitly allowed)
+    # Only reject true duplicates: same filename AND same file size
+    if not allow_duplicate:
+        existing = processing.find_by_filename(file.filename)
+        if existing:
+            # If both sizes are known, only block true duplicates (same name + same size)
+            # If either size is unknown, fall back to name-only dedup (safer default)
+            sizes_known = existing.file_size_bytes is not None and file.size is not None
+            if not sizes_known or existing.file_size_bytes == file.size:
+                from datetime import datetime as dt
+                return JSONResponse(
+                    status_code=409,
+                    content={
+                        "error": "duplicate_filename",
+                        "detail": f"A dataset with filename '{file.filename}' already exists",
+                        "existing_dataset": {
+                            "id": existing.id,
+                            "filename": existing.original_filename,
+                            "status": existing.status.value if hasattr(existing.status, 'value') else str(existing.status),
+                            "created_at": existing.created_at.isoformat() if isinstance(existing.created_at, dt) else str(existing.created_at),
+                        },
+                    },
+                )
+
+    # Create dataset record
+    record = processing.create_dataset(
+        original_filename=file.filename,
+        file_type=file_type
+    )
+    
+    try:
+        # Stream file to disk in chunks, enforcing byte-count limit
+        bytes_written = 0
+        magic_header = b""
+        async with aiofiles.open(record.upload_path, 'wb') as out_file:
+            while chunk := await file.read(settings.chunk_size):
+                bytes_written += len(chunk)
+                if bytes_written > MAX_UPLOAD_FILE_BYTES:
+                    # Abort: delete partial file and return 413
+                    await out_file.close()
+                    try:
+                        os.unlink(record.upload_path)
+                    except OSError:
+                        pass
+                    processing.delete_dataset(record.id)
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
+                    )
+                # Capture first 8 bytes for magic-byte validation
+                if len(magic_header) < 8:
+                    magic_header += chunk[:8 - len(magic_header)]
+                await out_file.write(chunk)
+
+        # Magic-byte content-type validation (match bulk upload behavior)
+        if not _check_magic_bytes(magic_header, extension):
+            try:
+                os.unlink(record.upload_path)
+            except OSError:
+                pass
+            processing.delete_dataset(record.id)
+            raise HTTPException(
+                status_code=422,
+                detail=f"File content does not match extension {extension}",
+            )
+
+        # Queue background processing
+        background_tasks.add_task(process_dataset_task, record.id)
+
+        return JSONResponse(
+            status_code=202,  # Accepted
+            content={
+                "message": "File uploaded successfully. Processing started.",
+                "dataset_id": record.id,
+                "status": record.status.value,
+                "filename": record.original_filename,
+            }
+        )
+
+    except HTTPException:
+        raise  # Re-raise 413 and 422 without wrapping
+    except (ConnectionError, asyncio.CancelledError) as e:
+        # BUG-6: Client disconnected during large upload — clean up gracefully
+        logger.warning("Upload connection aborted for %s: %s", record.id, type(e).__name__)
+        try:
+            os.unlink(record.upload_path)
+        except OSError:
+            pass
+        processing.delete_dataset(record.id)
+        raise HTTPException(status_code=499, detail="Upload aborted by client")
+    except Exception as e:
+        # Clean up on failure
+        processing.delete_dataset(record.id)
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+
+async def process_dataset_task(dataset_id: str, skip_indexing: bool = False):
+    """Background task to process an uploaded dataset."""
+    processing = get_processing_service()
+    await processing.process_file(dataset_id, skip_indexing=skip_indexing)
+
+
+async def index_dataset_task(dataset_id: str):
+    """Background task to run index phase after confirm."""
+    processing = get_processing_service()
+    await processing.run_index_phase(dataset_id)
+
+
+# ---------------------------------------------------------------------------
+# BQ-108+109: Batch upload, preview, confirm endpoints
+# ---------------------------------------------------------------------------
+
+@router.post("/batch")
+async def batch_upload(
+    background_tasks: BackgroundTasks,
+    files: List[UploadFile] = File(...),
+    paths: Optional[str] = Form(default=None),
+    mode: str = Form(default="preview"),
+    batch_id: Optional[str] = Form(default=None),
+    processing: ProcessingService = Depends(get_processing_service),
+    batch_service: BatchService = Depends(get_batch_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    BQ-108: Bulk upload multiple files.
+    mode=preview (default) stops at extraction; mode=process auto-indexes.
+    """
+    if not files:
+        raise HTTPException(status_code=422, detail="No files provided")
+
+    # Parse paths JSON array if provided
+    path_list: Optional[List[str]] = None
+    if paths:
+        try:
+            path_list = json.loads(paths)
+            if not isinstance(path_list, list):
+                raise ValueError
+        except (json.JSONDecodeError, ValueError):
+            raise HTTPException(status_code=422, detail="paths must be a JSON array of strings")
+        if len(path_list) != len(files):
+            raise HTTPException(
+                status_code=422,
+                detail=f"paths length ({len(path_list)}) must match files length ({len(files)})",
+            )
+
+    # Read first 8 bytes of each file for magic-byte validation, plus sizes
+    filenames = []
+    sizes = []
+    headers = []
+    for f in files:
+        filenames.append(f.filename or "unnamed")
+        header = await f.read(8)
+        headers.append(header)
+        # Seek back so the file can be fully read later
+        await f.seek(0)
+        # Estimate size from content-length or header
+        sizes.append(f.size or 0)
+
+    # Validate batch
+    try:
+        accepted_indices, rejected_items = batch_service.validate_batch(
+            filenames, sizes, headers, path_list,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    bid = batch_id or f"bch_{uuid.uuid4().hex[:12]}"
+    skip_indexing = mode != "process"
+
+    items: List[dict] = list(rejected_items)  # start with rejected
+
+    # Save accepted files and create records
+    for idx in accepted_indices:
+        f = files[idx]
+        fname = filenames[idx]
+        ext = Path(fname).suffix.lower()
+        file_type = ext[1:] if ext else "unknown"
+        rel_path = path_list[idx] if path_list else fname
+
+        record = batch_service.create_dataset_record(
+            filename=fname,
+            file_type=file_type,
+            file_size=sizes[idx],
+            batch_id=bid,
+            relative_path=rel_path,
+        )
+
+        # Stream file to disk, enforcing byte-count limit per file
+        size_exceeded = False
+        try:
+            bytes_written = 0
+            async with aiofiles.open(record.upload_path, "wb") as out_file:
+                await f.seek(0)
+                while chunk := await f.read(settings.chunk_size):
+                    bytes_written += len(chunk)
+                    if bytes_written > settings.max_upload_size_bytes:
+                        size_exceeded = True
+                        break
+                    await out_file.write(chunk)
+
+            if size_exceeded:
+                try:
+                    os.unlink(record.upload_path)
+                except OSError:
+                    pass
+                processing.delete_dataset(record.id)
+                items.append({
+                    "client_file_index": idx,
+                    "original_filename": fname,
+                    "status": "rejected",
+                    "error_code": "file_too_large",
+                    "error": f"File exceeds {settings.max_upload_size_bytes // (1024*1024)}MB limit (actual bytes)",
+                })
+                continue
+
+            # Update actual file size
+            record.file_size_bytes = bytes_written
+            storage_fn = record.upload_path.name
+            processing._save_record(record, storage_fn)
+
+        except Exception as e:
+            processing.delete_dataset(record.id)
+            items.append({
+                "client_file_index": idx,
+                "original_filename": fname,
+                "status": "rejected",
+                "error_code": "save_failed",
+                "error": str(e),
+            })
+            continue
+
+        # Queue background extraction
+        background_tasks.add_task(process_dataset_task, record.id, skip_indexing)
+
+        items.append({
+            "client_file_index": idx,
+            "original_filename": fname,
+            "relative_path": rel_path,
+            "size_bytes": record.file_size_bytes,
+            "status": "accepted",
+            "dataset_id": record.id,
+            "preview_url": f"/api/datasets/{record.id}/preview",
+            "status_url": f"/api/datasets/{record.id}/status",
+        })
+
+    # Sort items by client_file_index for consistent ordering
+    items.sort(key=lambda x: x.get("client_file_index", 0))
+
+    accepted_count = sum(1 for i in items if i.get("status") == "accepted")
+    rejected_count = sum(1 for i in items if i.get("status") == "rejected")
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "batch_id": bid,
+            "accepted": accepted_count,
+            "rejected": rejected_count,
+            "items": items,
+        },
+    )
+
+
+@router.get("/batch/{batch_id}")
+async def get_batch_status(
+    batch_id: str,
+    batch_service: BatchService = Depends(get_batch_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """BQ-108: Get aggregated status of all datasets in a batch."""
+    result = batch_service.get_batch_status(batch_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return result
+
+
+@router.post("/batch/{batch_id}/confirm-all")
+async def confirm_batch(
+    batch_id: str,
+    background_tasks: BackgroundTasks,
+    batch_service: BatchService = Depends(get_batch_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """BQ-109: Confirm all preview_ready datasets in a batch."""
+    if not batch_service.batch_belongs_to_user(batch_id, user.user_id):
+        raise HTTPException(status_code=404, detail="Batch not found")
+
+    result = batch_service.confirm_batch(batch_id, user.user_id)
+
+    # Queue indexing for each confirmed dataset
+    for ds_id in result.pop("confirmed_ids", []):
+        background_tasks.add_task(index_dataset_task, ds_id)
+
+    return JSONResponse(status_code=202, content=result)
+
+
+@router.get("/{dataset_id}")
+async def get_dataset(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service)
+):
+    """Get metadata for a specific dataset."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise VectorAIzError("VAI-UX-001", detail=f"Dataset '{dataset_id}' not found")
+
+    response = record.to_dict()
+    
+    # If ready, include full metadata from DuckDB
+    if record.status == ProcessingStatus.READY and record.processed_path:
+        try:
+            metadata = await run_sync(duckdb.get_file_metadata, record.processed_path)
+            response["metadata"] = metadata
+        except Exception as e:
+            response["metadata_error"] = str(e)
+    
+    return response
+
+
+@router.get("/{dataset_id}/status")
+async def get_dataset_status(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """Get processing status for a dataset (for polling)."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise VectorAIzError("VAI-UX-001", detail=f"Dataset '{dataset_id}' not found")
+
+    status_val = record.status.value if isinstance(record.status, DatasetStatus) else record.status
+    return {
+        "dataset_id": dataset_id,
+        "status": status_val,
+        "original_filename": record.original_filename,
+        "batch_id": record.batch_id,
+        "error_message": record.error if status_val == DatasetStatus.ERROR.value else None,
+    }
+
+
+@router.get("/{dataset_id}/preview")
+async def get_dataset_preview(
+    dataset_id: str,
+    preview_service: PreviewService = Depends(get_preview_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """BQ-109: Get data preview for a dataset. Returns status-appropriate response for all states."""
+    result = preview_service.get_preview(dataset_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    return result
+
+
+@router.post("/{dataset_id}/confirm")
+async def confirm_dataset(
+    dataset_id: str,
+    body: ConfirmRequest,
+    background_tasks: BackgroundTasks,
+    processing: ProcessingService = Depends(get_processing_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    BQ-109: Confirm a dataset for indexing. Idempotent.
+    preview_ready → 202, indexing → 202 (no-op), ready → 200 (no-op),
+    extracting → 409, error → 409, cancelled → 404.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    status_val = record.status.value if isinstance(record.status, DatasetStatus) else record.status
+
+    if status_val == DatasetStatus.CANCELLED.value:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    if status_val == DatasetStatus.EXTRACTING.value:
+        return JSONResponse(
+            status_code=409,
+            content={"status": status_val, "error": "Dataset still extracting, try again later"},
+        )
+
+    if status_val == DatasetStatus.ERROR.value:
+        return JSONResponse(
+            status_code=409,
+            content={"status": status_val, "error": "Dataset in error state, cannot confirm"},
+        )
+
+    if status_val == DatasetStatus.READY.value:
+        return JSONResponse(status_code=200, content={"status": "ready"})
+
+    if status_val == DatasetStatus.INDEXING.value:
+        return JSONResponse(status_code=202, content={"status": "indexing"})
+
+    if status_val == DatasetStatus.PREVIEW_READY.value:
+        # Transition to indexing
+        processing._set_status(dataset_id, DatasetStatus.INDEXING)
+        # Record confirmation
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from app.core.database import get_session_context
+        with get_session_context() as session:
+            db_row = session.get(DBDatasetRecord, dataset_id)
+            if db_row:
+                db_row.confirmed_at = datetime.now(timezone.utc)
+                db_row.confirmed_by = user.user_id
+                session.add(db_row)
+                session.commit()
+
+        background_tasks.add_task(index_dataset_task, dataset_id)
+        return JSONResponse(status_code=202, content={"status": "indexing"})
+
+    # Fallback for uploaded state
+    return JSONResponse(
+        status_code=409,
+        content={"status": status_val, "error": "Dataset not ready for confirmation"},
+    )
+
+
+@router.post("/{dataset_id}/pipeline")
+async def run_processing_pipeline(
+    dataset_id: str,
+    background_tasks: BackgroundTasks,
+    pipeline_service: PipelineService = Depends(get_pipeline_service),
+    processing: ProcessingService = Depends(get_processing_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """
+    Run the full processing pipeline on a dataset.
+    This includes DuckDB analysis, PII scan, compliance, attestation, and listing metadata.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready for pipeline. Current status: {record.status.value}"
+        )
+    
+    background_tasks.add_task(pipeline_service.run_pipeline, dataset_id)
+    
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "Processing pipeline started in the background.",
+            "dataset_id": dataset_id,
+        }
+    )
+
+
+
+@router.post("/{dataset_id}/process-full")
+async def process_full_pipeline(
+    dataset_id: str,
+    background_tasks: BackgroundTasks,
+    pipeline_service: PipelineService = Depends(get_pipeline_service),
+    processing: ProcessingService = Depends(get_processing_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """
+    BQ-088: Trigger the full processing pipeline on a dataset.
+    Runs DuckDB analysis, PII scan, and compliance check in background.
+    Returns a job ID for tracking progress via GET /pipeline-status.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready for pipeline processing. Current status: {record.status.value}"
+        )
+
+    background_tasks.add_task(pipeline_service.run_full_pipeline, dataset_id)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "message": "Full processing pipeline started.",
+            "dataset_id": dataset_id,
+            "status_url": f"/api/datasets/{dataset_id}/pipeline-status",
+        }
+    )
+
+
+@router.get("/{dataset_id}/pipeline-status")
+async def get_pipeline_status(
+    dataset_id: str,
+    pipeline_service: PipelineService = Depends(get_pipeline_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """
+    BQ-088: Get pipeline progress with per-step status.
+    Returns overall status, message, and individual step statuses
+    (pending/running/success/failed/skipped) with timestamps.
+    """
+    status_data = pipeline_service.get_pipeline_status(dataset_id)
+
+    if status_data.get("status") == "failed" and status_data.get("message") == "No pipeline run found for this dataset.":
+        raise HTTPException(
+            status_code=404,
+            detail=f"No pipeline has been run for dataset '{dataset_id}'.",
+        )
+
+    return status_data
+
+
+@router.get("/{dataset_id}/sample")
+async def get_dataset_sample(
+    dataset_id: str,
+    limit: int = 10,
+    redact_pii: bool = True,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service),
+    preview_service: PreviewService = Depends(get_preview_service),
+):
+    """Get sample rows from a dataset. PII columns are masked by default."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+
+    try:
+        sample = await run_sync(duckdb.get_sample_rows, record.processed_path, limit)
+
+        if redact_pii and sample:
+            pii_columns = preview_service.detect_pii_columns(dataset_id, sample)
+            if pii_columns:
+                sample = _redact_pii_rows(sample, pii_columns)
+
+        return {
+            "dataset_id": dataset_id,
+            "sample": sample,
+            "count": len(sample),
+            "pii_redacted": redact_pii,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _redact_pii_rows(rows: list, pii_columns: set) -> list:
+    """Mask values in PII-flagged columns with '***'."""
+    return [
+        {k: "***" if k in pii_columns else v for k, v in row.items()}
+        for row in rows
+    ]
+
+
+@router.get("/{dataset_id}/statistics")
+async def get_dataset_statistics(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service)
+):
+    """Get column statistics for a dataset."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+    
+    try:
+        stats = await run_sync(duckdb.get_column_statistics, record.processed_path)
+        return {
+            "dataset_id": dataset_id,
+            "statistics": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/profile")
+async def get_dataset_profile(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service)
+):
+    """
+    Get detailed column profiles including null analysis, uniqueness, and semantic types.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+    
+    try:
+        profiles = await run_sync(duckdb.get_column_profile, record.processed_path)
+        return {
+            "dataset_id": dataset_id,
+            "column_profiles": profiles,
+            "column_count": len(profiles)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{dataset_id}/attestation", response_model=QualityAttestation)
+async def generate_dataset_attestation(
+    dataset_id: str,
+    attestation_service: AttestationService = Depends(get_attestation_service),
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """Get quality attestation report for a dataset."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    try:
+        attestation = await attestation_service.generate_attestation(dataset_id)
+        return attestation
+    except LLMProviderError:
+        raise HTTPException(status_code=503, detail="LLM provider not configured")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Attestation generation failed for dataset %s", dataset_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/{dataset_id}/compliance", response_model=ComplianceReport)
+async def get_dataset_compliance(
+    dataset_id: str,
+    compliance_service: ComplianceService = Depends(get_compliance_service),
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """Get compliance report for a dataset, based on PII scan results."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    try:
+        report = await compliance_service.generate_compliance_report(dataset_id)
+        return report
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{dataset_id}/listing-metadata", response_model=ListingMetadata)
+async def generate_listing_metadata(
+    dataset_id: str,
+    listing_service: ListingMetadataService = Depends(get_listing_metadata_service),
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """Generate marketplace-ready listing metadata for a dataset."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    try:
+        metadata = await listing_service.generate_listing_metadata(dataset_id)
+        return metadata
+    except LLMProviderError:
+        raise HTTPException(status_code=503, detail="LLM provider not configured")
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.exception("Listing metadata generation failed for dataset %s", dataset_id)
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/{dataset_id}/searchability")
+async def get_dataset_searchability(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service)
+):
+    """
+    Get searchability score indicating how well the dataset can be semantically searched.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+    
+    try:
+        searchability = await run_sync(duckdb.calculate_searchability_score, record.processed_path)
+        return {
+            "dataset_id": dataset_id,
+            **searchability
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/full")
+async def get_dataset_full_metadata(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    duckdb: DuckDBService = Depends(get_duckdb_service)
+):
+    """
+    Get comprehensive metadata including basic info, column profiles, and searchability.
+    This is the complete dataset analysis endpoint.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+    
+    try:
+        full_metadata = await run_sync(duckdb.get_enhanced_metadata, record.processed_path)
+        return {
+            "dataset_id": dataset_id,
+            "original_filename": record.original_filename,
+            **full_metadata
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{dataset_id}/content")
+async def get_dataset_content(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service)
+):
+    """
+    Get extracted content for document types (PDF, Word, PowerPoint).
+    Returns text blocks and tables extracted from the document.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+    
+    if not record.document_content:
+        raise HTTPException(
+            status_code=400,
+            detail="This dataset is not a document type. Use /sample for tabular data."
+        )
+    
+    return {
+        "dataset_id": dataset_id,
+        "original_filename": record.original_filename,
+        "text_blocks": record.document_content.get("text_content", []),
+        "tables": record.document_content.get("tables", []),
+        "metadata": record.document_content.get("metadata", {})
+    }
+
+
+@router.post("/{dataset_id}/index")
+async def index_dataset(
+    dataset_id: str,
+    row_limit: int = 10000,
+    recreate: bool = False,
+    processing: ProcessingService = Depends(get_processing_service),
+    indexing: IndexingService = Depends(get_indexing_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """
+    Trigger indexing for a dataset (runs in background).
+
+    Returns HTTP 202 with a job_id immediately. Indexing proceeds
+    as a background asyncio task. Check status via GET /{dataset_id}/index.
+    Requires X-API-Key header.
+    """
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready. Current status: {record.status.value}"
+        )
+
+    if not record.processed_path or not record.processed_path.exists():
+        raise HTTPException(status_code=500, detail="Processed file not found")
+
+    job_id = str(uuid.uuid4())
+    filepath = record.processed_path
+
+    async def _index_background():
+        try:
+            await run_sync(
+                indexing.index_dataset,
+                dataset_id, filepath, row_limit, None, recreate,
+            )
+            logger.info("Background indexing complete for dataset %s (job %s)", dataset_id, job_id)
+        except Exception:
+            logger.exception("Background indexing failed for dataset %s (job %s)", dataset_id, job_id)
+
+    asyncio.create_task(_index_background())
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id": job_id,
+            "status": "indexing",
+            "dataset_id": dataset_id,
+        }
+    )
+
+
+@router.get("/{dataset_id}/index")
+async def get_index_status(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    indexing: IndexingService = Depends(get_indexing_service),
+):
+    """Get the indexing status for a dataset."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    return await run_sync(indexing.get_index_status, dataset_id)
+
+
+@router.delete("/{dataset_id}/index")
+async def delete_index(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    indexing: IndexingService = Depends(get_indexing_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """Delete the search index for a dataset. Requires X-API-Key header."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+    
+    success = await run_sync(indexing.delete_dataset_index, dataset_id)
+    if success:
+        return {"message": f"Index for dataset '{dataset_id}' deleted successfully"}
+    else:
+        raise HTTPException(status_code=404, detail="Index not found")
+
+
+@router.delete("/{dataset_id}")
+async def delete_dataset(
+    dataset_id: str,
+    processing: ProcessingService = Depends(get_processing_service),
+    user: AuthenticatedUser = Depends(get_current_user)
+):
+    """Delete a dataset and its files. Handles cancellation for pre-ready states."""
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    status_val = record.status.value if isinstance(record.status, DatasetStatus) else record.status
+
+    # For pre-ready states: set cancelled immediately so background tasks abort
+    if status_val in (
+        DatasetStatus.UPLOADED.value,
+        DatasetStatus.EXTRACTING.value,
+        DatasetStatus.PREVIEW_READY.value,
+        DatasetStatus.INDEXING.value,
+    ):
+        processing._set_status(dataset_id, DatasetStatus.CANCELLED)
+
+    success = processing.delete_dataset(dataset_id)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to delete dataset")
+
+    return {"message": f"Dataset '{dataset_id}' deleted successfully"}
+
+
+@router.post("/{dataset_id}/publish")
+async def publish_to_marketplace(
+    dataset_id: str,
+    price: float = 25.0,
+    category: str = "tabular",
+    model_provider: str = "local",
+    processing: ProcessingService = Depends(get_processing_service),
+    push_service: MarketplacePushService = Depends(get_marketplace_push_service),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """
+    Publish a processed dataset to ai.market.
+
+    BQ-090: Sends listing metadata, compliance report, and attestation
+    to the marketplace API. The dataset must be in READY status.
+
+    - **price**: Listing price in USD (minimum $25)
+    - **category**: Primary category slug (e.g. "tabular", "financial")
+    - **model_provider**: AI model used for analysis ("local", "anthropic", etc.)
+    """
+    # Verify dataset exists and is ready
+    record = processing.get_dataset(dataset_id)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
+
+    if record.status != ProcessingStatus.READY:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Dataset not ready for publish. Current status: {record.status.value}. "
+                   "Run the processing pipeline first."
+        )
+
+    try:
+        result = await push_service.push_to_marketplace(
+            dataset_id=dataset_id,
+            price=price,
+            category=category,
+            model_provider=model_provider,
+        )
+        return result
+    except MarketplacePushError as e:
+        status_code = e.status_code or 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "error": str(e),
+                "marketplace_status": e.status_code,
+                "detail": e.detail,
+            }
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error during publish: {str(e)}"
+        )
