@@ -47,9 +47,9 @@ To stop: `./stop.sh`
 
 | Platform | Download | Notes |
 |----------|----------|-------|
-| **macOS** | [vectorAIz-Installer.dmg](https://github.com/maxrobbins/vectoraiz/releases/latest) | Checks for Docker/OrbStack, installs if needed |
+| **macOS** | [install-mac.sh](https://github.com/maxrobbins/vectoraiz/releases/latest) | `chmod +x install-mac.sh && ./install-mac.sh` |
 | **Windows** | [install-vectoraiz.ps1](https://github.com/maxrobbins/vectoraiz/releases/latest) | Requires Docker Desktop + WSL2 |
-| **Linux** | `curl -fsSL https://get.vectoraiz.com/install.sh \| bash` | Auto-installs Docker if missing |
+| **Linux** | [install-linux.sh](https://github.com/maxrobbins/vectoraiz/releases/latest) | `chmod +x install-linux.sh && ./install-linux.sh` |
 
 ### Allie AI Assistant (optional)
 
