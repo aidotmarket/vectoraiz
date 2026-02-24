@@ -13,6 +13,19 @@ function Write-Ok    { param($msg) Write-Host "  ✓ $msg" -ForegroundColor Gree
 function Write-Warn  { param($msg) Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Err   { param($msg) Write-Host "`n  ERROR: $msg`n" -ForegroundColor Red; exit 1 }
 
+# Safe Docker check — never throws, returns $true/$false
+function Test-DockerReady {
+    try {
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "SilentlyContinue"
+        $null = docker info 2>&1
+        $ErrorActionPreference = $prev
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
+}
+
 # Spinner — runs a script block with animated spinner
 function Invoke-WithSpinner {
     param(
@@ -30,18 +43,44 @@ function Invoke-WithSpinner {
         $i++
     }
 
-    $result = Receive-Job $job
+    $result = Receive-Job $job -ErrorAction SilentlyContinue
     Remove-Job $job -Force
     Write-Host "`r                                                                        `r" -NoNewline
     return $result
 }
 
-# Waiting spinner — spins while checking a condition
-function Wait-WithSpinner {
+# Waiting spinner — spins while polling Docker readiness
+function Wait-ForDockerWithSpinner {
     param(
-        [string]$Message,
-        [int]$MaxSeconds = 120,
-        [scriptblock]$Check
+        [string]$Message = "Waiting for Docker...",
+        [int]$MaxSeconds = 120
+    )
+    $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    $waited = 0
+    $i = 0
+
+    while ($waited -lt $MaxSeconds) {
+        if (Test-DockerReady) {
+            Write-Host "`r                                                                        `r" -NoNewline
+            return $true
+        }
+
+        $frame = $frames[$i % $frames.Count]
+        Write-Host "`r  $frame $Message ($($waited)s)" -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Seconds 1
+        $waited++
+        $i++
+    }
+
+    Write-Host "`r                                                                        `r" -NoNewline
+    return $false
+}
+
+# Waiting spinner for health check
+function Wait-ForHealthWithSpinner {
+    param(
+        [string]$Url,
+        [int]$MaxSeconds = 180
     )
     $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
     $waited = 0
@@ -49,18 +88,21 @@ function Wait-WithSpinner {
 
     while ($waited -lt $MaxSeconds) {
         try {
-            $ok = & $Check 2>$null
-            if ($ok -ne $false -and $LASTEXITCODE -eq 0) {
+            $prev = $ErrorActionPreference
+            $ErrorActionPreference = "SilentlyContinue"
+            $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3
+            $ErrorActionPreference = $prev
+            if ($resp.StatusCode -eq 200) {
                 Write-Host "`r                                                                        `r" -NoNewline
                 return $true
             }
         } catch { }
 
         $frame = $frames[$i % $frames.Count]
-        Write-Host "`r  $frame $Message ($($waited)s)" -NoNewline -ForegroundColor Cyan
-        Start-Sleep -Milliseconds 500
+        Write-Host "`r  $frame Waiting for vectorAIz to be ready... ($($waited)s)" -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Seconds 2
+        $waited += 2
         $i++
-        if ($i % 2 -eq 0) { $waited++ }
     }
 
     Write-Host "`r                                                                        `r" -NoNewline
@@ -83,13 +125,18 @@ function Install-DockerDesktop {
         Write-Host "  (This may take a few minutes)" -ForegroundColor DarkGray
         Write-Host ""
 
+        $prev = $ErrorActionPreference
+        $ErrorActionPreference = "SilentlyContinue"
         winget install --id Docker.DockerDesktop --accept-source-agreements --accept-package-agreements 2>&1 | ForEach-Object {
-            if ($_ -match "Successfully|Found|Installing|Downloaded") {
-                Write-Host "  | $_" -ForegroundColor DarkGray
+            $line = "$_"
+            if ($line -match "Successfully|Found|Installing|Downloaded|verified") {
+                Write-Host "  | $line" -ForegroundColor DarkGray
             }
         }
+        $wingetExit = $LASTEXITCODE
+        $ErrorActionPreference = $prev
 
-        if ($LASTEXITCODE -eq 0) {
+        if ($wingetExit -eq 0) {
             Write-Ok "Docker Desktop installed"
             return $true
         } else {
@@ -98,7 +145,6 @@ function Install-DockerDesktop {
     }
 
     # Fallback: direct download with spinner
-    $installerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
     $installerPath = Join-Path $env:TEMP "DockerDesktopInstaller.exe"
 
     Invoke-WithSpinner -Message "Downloading Docker Desktop..." -Action {
@@ -121,8 +167,19 @@ function Install-DockerDesktop {
     return $true
 }
 
+function Start-DockerDesktop {
+    $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
+    if (Test-Path $dockerDesktop) {
+        Write-Info "Starting Docker Desktop..."
+        Start-Process $dockerDesktop
+    }
+}
+
+# --- Main Docker check ---
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
+
 if (-not $dockerCmd) {
+    # Docker not installed at all
     Write-Host ""
     Write-Info "Docker is not installed. vectorAIz needs Docker to run."
     Write-Host ""
@@ -143,16 +200,13 @@ if (-not $dockerCmd) {
     $installed = Install-DockerDesktop
 
     if ($installed) {
+        # Refresh PATH so docker command is found
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-        $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-        if (Test-Path $dockerDesktop) {
-            Start-Process $dockerDesktop
-        }
-
+        Start-DockerDesktop
         Write-Host "  (First launch takes 30-60 seconds)" -ForegroundColor DarkGray
 
-        $ready = Wait-WithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 120 -Check { docker info }
+        $ready = Wait-ForDockerWithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 120
 
         if (-not $ready) {
             Write-Host ""
@@ -164,18 +218,15 @@ if (-not $dockerCmd) {
             exit 0
         }
     }
-} else {
-    $info = docker info 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-        if (Test-Path $dockerDesktop) {
-            Start-Process $dockerDesktop
-        }
+} elseif (-not (Test-DockerReady)) {
+    # Docker installed but daemon not running
+    Start-DockerDesktop
+    Write-Host "  (Waiting for daemon...)" -ForegroundColor DarkGray
 
-        $ready = Wait-WithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 90 -Check { docker info }
-        if (-not $ready) {
-            Write-Err "Docker didn't start. Please start Docker Desktop manually and re-run."
-        }
+    $ready = Wait-ForDockerWithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 90
+
+    if (-not $ready) {
+        Write-Err "Docker didn't start. Please start Docker Desktop manually and re-run."
     }
 }
 
@@ -248,12 +299,14 @@ if (-not (Test-Path ".env")) {
     $pgPass = -join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
     $port = 80
 
-    $listener = Get-NetTCPConnection -LocalPort 80 -ErrorAction SilentlyContinue
-    if ($listener) {
-        $port = 8080
-        $listener2 = Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue
-        if ($listener2) { $port = 3000 }
-    }
+    try {
+        $listener = Get-NetTCPConnection -LocalPort 80 -ErrorAction SilentlyContinue
+        if ($listener) {
+            $port = 8080
+            $listener2 = Get-NetTCPConnection -LocalPort 8080 -ErrorAction SilentlyContinue
+            if ($listener2) { $port = 3000 }
+        }
+    } catch { }
 
     @"
 # vectorAIz Configuration
@@ -271,17 +324,25 @@ $port = (Select-String -Path ".env" -Pattern "^VECTORAIZ_PORT=(\d+)" | ForEach-O
 if (-not $port) { $port = "80" }
 
 Write-Info "Building and starting containers (first run may take a few minutes)..."
-docker compose -f docker-compose.customer.yml up -d --build
 
-if ($LASTEXITCODE -ne 0) {
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+docker compose -f docker-compose.customer.yml up -d --build 2>&1 | ForEach-Object {
+    $line = "$_"
+    if ($line -match "Creating|Starting|Built|Pulling|Building") {
+        Write-Host "  | $line" -ForegroundColor DarkGray
+    }
+}
+$composeExit = $LASTEXITCODE
+$ErrorActionPreference = $prev
+
+if ($composeExit -ne 0) {
     Write-Err "Failed to start containers. Check Docker Desktop is running."
 }
 
 $url = if ($port -eq "80") { "http://localhost" } else { "http://localhost:$port" }
 
-$ready = Wait-WithSpinner -Message "Waiting for vectorAIz to be ready..." -MaxSeconds 180 -Check {
-    try { (Invoke-WebRequest -Uri "http://localhost:$using:port/api/health" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200 } catch { $false }
-}
+$ready = Wait-ForHealthWithSpinner -Url "$url/api/health" -MaxSeconds 180
 
 if (-not $ready) {
     Write-Warn "Timed out. Try opening $url in a minute."
