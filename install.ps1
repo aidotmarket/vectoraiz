@@ -13,6 +13,60 @@ function Write-Ok    { param($msg) Write-Host "  ✓ $msg" -ForegroundColor Gree
 function Write-Warn  { param($msg) Write-Host "  ! $msg" -ForegroundColor Yellow }
 function Write-Err   { param($msg) Write-Host "`n  ERROR: $msg`n" -ForegroundColor Red; exit 1 }
 
+# Spinner — runs a script block with animated spinner
+function Invoke-WithSpinner {
+    param(
+        [string]$Message,
+        [scriptblock]$Action
+    )
+    $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    $job = Start-Job -ScriptBlock $Action
+    $i = 0
+
+    while ($job.State -eq 'Running') {
+        $frame = $frames[$i % $frames.Count]
+        Write-Host "`r  $frame $Message" -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Milliseconds 100
+        $i++
+    }
+
+    $result = Receive-Job $job
+    Remove-Job $job -Force
+    Write-Host "`r                                                                        `r" -NoNewline
+    return $result
+}
+
+# Waiting spinner — spins while checking a condition
+function Wait-WithSpinner {
+    param(
+        [string]$Message,
+        [int]$MaxSeconds = 120,
+        [scriptblock]$Check
+    )
+    $frames = @('⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏')
+    $waited = 0
+    $i = 0
+
+    while ($waited -lt $MaxSeconds) {
+        try {
+            $ok = & $Check 2>$null
+            if ($ok -ne $false -and $LASTEXITCODE -eq 0) {
+                Write-Host "`r                                                                        `r" -NoNewline
+                return $true
+            }
+        } catch { }
+
+        $frame = $frames[$i % $frames.Count]
+        Write-Host "`r  $frame $Message ($($waited)s)" -NoNewline -ForegroundColor Cyan
+        Start-Sleep -Milliseconds 500
+        $i++
+        if ($i % 2 -eq 0) { $waited++ }
+    }
+
+    Write-Host "`r                                                                        `r" -NoNewline
+    return $false
+}
+
 $repo   = "maxrobbins/vectoraiz"
 $branch = "main"
 $installDir = "$HOME\vectoraiz"
@@ -23,7 +77,6 @@ Write-Host ""
 
 # ─── Install Docker if missing ───────────────────────────────────
 function Install-DockerDesktop {
-    # Try winget first (ships with Windows 10 1809+ and Windows 11)
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
         Write-Info "Installing Docker Desktop via winget..."
@@ -40,25 +93,25 @@ function Install-DockerDesktop {
             Write-Ok "Docker Desktop installed"
             return $true
         } else {
-            Write-Warn "winget install returned an error. Trying direct download..."
+            Write-Warn "winget had an issue. Trying direct download..."
         }
     }
 
-    # Fallback: direct download
-    Write-Info "Downloading Docker Desktop installer..."
+    # Fallback: direct download with spinner
     $installerUrl = "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe"
     $installerPath = Join-Path $env:TEMP "DockerDesktopInstaller.exe"
 
-    try {
+    Invoke-WithSpinner -Message "Downloading Docker Desktop..." -Action {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
-    } catch {
+        Invoke-WebRequest -Uri "https://desktop.docker.com/win/main/amd64/Docker%20Desktop%20Installer.exe" -OutFile (Join-Path $env:TEMP "DockerDesktopInstaller.exe") -UseBasicParsing
+    }
+
+    if (-not (Test-Path $installerPath)) {
         Write-Err "Failed to download Docker Desktop. Install manually: https://docker.com/get-started"
     }
 
-    Write-Ok "Downloaded"
-    Write-Info "Running Docker Desktop installer..."
-    Write-Host "  (Follow the installer prompts)" -ForegroundColor DarkGray
+    Write-Ok "Downloaded Docker Desktop"
+    Write-Info "Running installer (follow any prompts)..."
     Write-Host ""
 
     Start-Process -FilePath $installerPath -ArgumentList "install", "--quiet", "--accept-license" -Wait
@@ -66,29 +119,6 @@ function Install-DockerDesktop {
     Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
     Write-Ok "Docker Desktop installed"
     return $true
-}
-
-function Wait-ForDocker {
-    param([int]$MaxWait = 120)
-
-    Write-Info "Waiting for Docker to start..."
-    Write-Host "  (This takes 30-60 seconds on first launch)" -ForegroundColor DarkGray
-
-    $waited = 0
-    while ($waited -lt $MaxWait) {
-        $info = docker info 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Host ""
-            Write-Ok "Docker is ready"
-            return $true
-        }
-        Start-Sleep -Seconds 3
-        $waited += 3
-        Write-Host "`r  ⏳ Waiting for Docker... ($($waited)s)" -NoNewline
-    }
-
-    Write-Host ""
-    return $false
 }
 
 $dockerCmd = Get-Command docker -ErrorAction SilentlyContinue
@@ -113,22 +143,21 @@ if (-not $dockerCmd) {
     $installed = Install-DockerDesktop
 
     if ($installed) {
-        # Refresh PATH so docker command is found
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-        # Try to start Docker Desktop
         $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
         if (Test-Path $dockerDesktop) {
-            Write-Info "Starting Docker Desktop..."
             Start-Process $dockerDesktop
         }
 
-        $ready = Wait-ForDocker -MaxWait 120
+        Write-Host "  (First launch takes 30-60 seconds)" -ForegroundColor DarkGray
+
+        $ready = Wait-WithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 120 -Check { docker info }
 
         if (-not $ready) {
             Write-Host ""
             Write-Warn "Docker is still starting up."
-            Write-Warn "Please wait for Docker Desktop to finish loading, then re-run:"
+            Write-Warn "Wait for it to finish, then re-run:"
             Write-Host ""
             Write-Host "    irm https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.ps1 | iex" -ForegroundColor White
             Write-Host ""
@@ -136,17 +165,14 @@ if (-not $dockerCmd) {
         }
     }
 } else {
-    # Docker command exists — check if running
     $info = docker info 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Info "Docker is installed but not running. Starting it..."
-
         $dockerDesktop = "C:\Program Files\Docker\Docker\Docker Desktop.exe"
         if (Test-Path $dockerDesktop) {
             Start-Process $dockerDesktop
         }
 
-        $ready = Wait-ForDocker -MaxWait 90
+        $ready = Wait-WithSpinner -Message "Starting Docker Desktop..." -MaxSeconds 90 -Check { docker info }
         if (-not $ready) {
             Write-Err "Docker didn't start. Please start Docker Desktop manually and re-run."
         }
@@ -169,16 +195,18 @@ if (Test-Path "$installDir\backend") {
     $existing = $false
 }
 
-Write-Info "Downloading vectorAIz..."
-
-try {
+Invoke-WithSpinner -Message "Downloading vectorAIz..." -Action {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing
-} catch {
+    $tmpDir = Join-Path $env:TEMP (Get-ChildItem $env:TEMP -Directory -Filter "vectoraiz-install-*" | Select-Object -Last 1).Name
+    $zipFile = Join-Path $tmpDir "vectoraiz.zip"
+    Invoke-WebRequest -Uri "https://github.com/maxrobbins/vectoraiz/archive/refs/heads/main.zip" -OutFile $zipFile -UseBasicParsing
+}
+
+if (-not (Test-Path $zipFile)) {
     Write-Err "Failed to download. Check your internet connection."
 }
 
-Write-Ok "Downloaded"
+Write-Ok "Downloaded vectorAIz"
 
 # ─── Extract ─────────────────────────────────────────────────────
 Write-Info "Extracting..."
@@ -190,7 +218,6 @@ if (-not $extractedDir) {
     Write-Err "Failed to extract archive."
 }
 
-# Preserve .env if updating
 $envBackup = $null
 if ($existing -and (Test-Path "$installDir\backend\.env")) {
     $envBackup = Get-Content "$installDir\backend\.env" -Raw
@@ -217,7 +244,6 @@ Write-Host ""
 
 Set-Location "$installDir\backend"
 
-# Generate .env if first run
 if (-not (Test-Path ".env")) {
     $pgPass = -join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
     $port = 80
@@ -251,26 +277,13 @@ if ($LASTEXITCODE -ne 0) {
     Write-Err "Failed to start containers. Check Docker Desktop is running."
 }
 
-# Wait for healthy
-Write-Info "Waiting for vectorAIz to be ready..."
-$maxWait = 180
-$waited = 0
-
-while ($waited -lt $maxWait) {
-    try {
-        $health = Invoke-WebRequest -Uri "http://localhost:$port/api/health" -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
-        if ($health.StatusCode -eq 200) { break }
-    } catch { }
-    Start-Sleep -Seconds 3
-    $waited += 3
-    Write-Host "`r  ⏳ Waiting for services... ($($waited)s)" -NoNewline
-}
-
-Write-Host ""
-
 $url = if ($port -eq "80") { "http://localhost" } else { "http://localhost:$port" }
 
-if ($waited -ge $maxWait) {
+$ready = Wait-WithSpinner -Message "Waiting for vectorAIz to be ready..." -MaxSeconds 180 -Check {
+    try { (Invoke-WebRequest -Uri "http://localhost:$using:port/api/health" -UseBasicParsing -TimeoutSec 3).StatusCode -eq 200 } catch { $false }
+}
+
+if (-not $ready) {
     Write-Warn "Timed out. Try opening $url in a minute."
 } else {
     Write-Ok "All services healthy"

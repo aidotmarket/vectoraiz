@@ -25,6 +25,60 @@ success() { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
 warn()    { printf "  ${YELLOW}⚠${NC} %s\n" "$1"; }
 fail()    { printf "\n  ${RED}${BOLD}ERROR:${NC} %s\n\n" "$1"; exit 1; }
 
+# Spinner — runs a command in the background with an animated spinner
+# Usage: spin "Downloading Docker Desktop..." curl -fSL ...
+spin() {
+    local msg="$1"
+    shift
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local len=${#frames}
+
+    "$@" &
+    local pid=$!
+    local i=0
+
+    while kill -0 "$pid" 2>/dev/null; do
+        i=$(( (i + 1) % len ))
+        frame=$(printf '%s' "$frames" | cut -c$((i + 1))-$((i + 1)))
+        printf "\r  ${CYAN}%s${NC} %s" "$frame" "$msg"
+        sleep 0.1
+    done
+
+    wait "$pid"
+    local exit_code=$?
+    printf "\r                                                                    \r"
+    return $exit_code
+}
+
+# Waiting spinner — spins while checking a condition
+# Usage: spin_wait "Waiting for Docker..." 120 "docker info"
+spin_wait() {
+    local msg="$1"
+    local max_wait="$2"
+    local check_cmd="$3"
+    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local len=${#frames}
+    local waited=0
+    local i=0
+
+    while [ "$waited" -lt "$max_wait" ]; do
+        if eval "$check_cmd" >/dev/null 2>&1; then
+            printf "\r                                                                    \r"
+            return 0
+        fi
+        i=$(( (i + 1) % len ))
+        frame=$(printf '%s' "$frames" | cut -c$((i + 1))-$((i + 1)))
+        printf "\r  ${CYAN}%s${NC} %s (%ds)" "$frame" "$msg" "$waited"
+        sleep 0.5
+        # Increment by 1 every 2 loops (since we sleep 0.5)
+        if [ $((i % 2)) -eq 0 ]; then
+            waited=$((waited + 1))
+        fi
+    done
+    printf "\r                                                                    \r"
+    return 1
+}
+
 REPO="maxrobbins/vectoraiz"
 BRANCH="main"
 INSTALL_DIR="$HOME/vectoraiz"
@@ -56,9 +110,9 @@ install_docker_macos() {
         info "Detected Intel Mac"
     fi
 
-    info "Downloading Docker Desktop..."
     DMG_PATH="/tmp/Docker.dmg"
-    curl -fSL "$DMG_URL" -o "$DMG_PATH" || fail "Failed to download Docker Desktop."
+    spin "Downloading Docker Desktop..." curl -fSL "$DMG_URL" -o "$DMG_PATH" \
+        || fail "Failed to download Docker Desktop."
     success "Downloaded Docker Desktop"
 
     info "Installing Docker Desktop (you may be prompted for your password)..."
@@ -68,36 +122,22 @@ install_docker_macos() {
     rm -f "$DMG_PATH"
     success "Docker Desktop installed"
 
-    info "Starting Docker Desktop..."
     open /Applications/Docker.app
 
     printf "\n"
-    printf "  ${CYAN}${BOLD}Docker is starting up...${NC}\n"
-    printf "  ${DIM}This takes 30-60 seconds on first launch.${NC}\n"
-    printf "\n"
+    printf "  ${DIM}First launch takes 30-60 seconds...${NC}\n"
 
-    # Wait for Docker to be ready (up to 120s)
-    WAITED=0
-    MAX_WAIT=120
-    while [ $WAITED -lt $MAX_WAIT ]; do
-        if docker info >/dev/null 2>&1; then
-            success "Docker is ready"
-            return 0
-        fi
-        sleep 3
-        WAITED=$((WAITED + 3))
-        printf "\r  ${CYAN}⏳${NC} Waiting for Docker to start... (%ds)" "$WAITED"
-    done
-    printf "\n"
-
-    # If we get here, Docker didn't start in time
-    printf "\n"
-    warn "Docker is still starting. Please wait for the Docker icon in your menu bar,"
-    warn "then re-run this installer:"
-    printf "\n"
-    printf "    curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | sh\n"
-    printf "\n"
-    exit 0
+    if spin_wait "Starting Docker Desktop..." 120 "docker info"; then
+        success "Docker is ready"
+    else
+        printf "\n"
+        warn "Docker is still starting. Please wait for the Docker icon in your menu bar,"
+        warn "then re-run this installer:"
+        printf "\n"
+        printf "    curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | sh\n"
+        printf "\n"
+        exit 0
+    fi
 }
 
 install_docker_linux() {
@@ -107,12 +147,10 @@ install_docker_linux() {
 
     curl -fsSL https://get.docker.com | sudo sh || fail "Docker installation failed."
 
-    # Add current user to docker group
     if command -v usermod >/dev/null 2>&1; then
         sudo usermod -aG docker "$USER" 2>/dev/null || true
     fi
 
-    # Start Docker
     if command -v systemctl >/dev/null 2>&1; then
         sudo systemctl start docker 2>/dev/null || true
         sudo systemctl enable docker 2>/dev/null || true
@@ -120,7 +158,6 @@ install_docker_linux() {
 
     success "Docker installed"
 
-    # Check if it works without sudo
     if ! docker info >/dev/null 2>&1; then
         printf "\n"
         warn "Docker was installed, but you need to log out and back in"
@@ -137,7 +174,6 @@ if ! command -v docker >/dev/null 2>&1; then
     info "Docker is not installed. vectorAIz needs Docker to run."
     printf "\n"
 
-    # Prompt user
     printf "  Install Docker now? [Y/n] "
     read -r REPLY < /dev/tty 2>/dev/null || REPLY="y"
     REPLY="${REPLY:-y}"
@@ -167,24 +203,13 @@ if ! command -v docker >/dev/null 2>&1; then
         fail "Unsupported OS. Please install Docker manually: https://docs.docker.com/get-started/"
     fi
 elif ! docker info >/dev/null 2>&1; then
-    # Docker installed but not running
     if [ "$OS" = "macos" ]; then
         info "Docker is installed but not running. Starting it..."
         open /Applications/Docker.app 2>/dev/null || open -a OrbStack 2>/dev/null || true
 
-        WAITED=0
-        while [ $WAITED -lt 90 ]; do
-            if docker info >/dev/null 2>&1; then
-                success "Docker is running"
-                break
-            fi
-            sleep 3
-            WAITED=$((WAITED + 3))
-            printf "\r  ${CYAN}⏳${NC} Waiting for Docker... (%ds)" "$WAITED"
-        done
-        printf "\n"
-
-        if ! docker info >/dev/null 2>&1; then
+        if spin_wait "Waiting for Docker..." 90 "docker info"; then
+            success "Docker is running"
+        else
             fail "Docker didn't start. Please start Docker Desktop manually and re-run."
         fi
     else
@@ -217,14 +242,12 @@ else
     EXISTING=false
 fi
 
-info "Downloading vectorAIz..."
 TMPDIR_DL=$(mktemp -d)
 ZIPFILE="$TMPDIR_DL/vectoraiz.zip"
 
-curl -fsSL "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip" -o "$ZIPFILE" \
+spin "Downloading vectorAIz..." curl -fsSL "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip" -o "$ZIPFILE" \
     || fail "Failed to download. Check your internet connection."
-
-success "Downloaded"
+success "Downloaded vectorAIz"
 
 # ─── Extract ─────────────────────────────────────────────────────
 info "Extracting..."
@@ -239,7 +262,6 @@ if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
     fail "Failed to extract archive."
 fi
 
-# Preserve .env if updating
 if [ "$EXISTING" = true ] && [ -f "$INSTALL_DIR/backend/.env" ]; then
     cp "$INSTALL_DIR/backend/.env" "$TMPDIR_DL/.env.backup"
 fi
