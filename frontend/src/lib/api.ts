@@ -583,6 +583,23 @@ export const piiApi = {
     apiFetch<PIIEntitiesResponse>('/api/pii/entities'),
 };
 
+// System info types
+export interface SystemInfo {
+  mode: string;
+  version: string;
+  features: Record<string, boolean>;
+  system: {
+    cpu_cores: number;
+    memory_gb: number;
+    recommended_concurrent_uploads: number;
+  };
+}
+
+// System API
+export const systemApi = {
+  info: () => apiFetch<SystemInfo>('/api/system/info'),
+};
+
 // Health API
 export const healthApi = {
   check: () => apiFetch<HealthResponse>('/api/health'),

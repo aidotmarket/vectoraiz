@@ -67,7 +67,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
-import { getApiUrl } from "@/lib/api";
+import { getApiUrl, systemApi } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { useMode } from "@/contexts/ModeContext";
 import ConnectivitySettings from "@/components/ConnectivitySettings";
@@ -92,7 +92,12 @@ const SettingsPage = () => {
   
   // Processing state
   const [memoryLimit, setMemoryLimit] = useState([12]);
-  const [concurrentUploads, setConcurrentUploads] = useState("3");
+  const [concurrentUploads, setConcurrentUploads] = useState(() =>
+    localStorage.getItem('vectoraiz_concurrent_uploads') ?? 'auto'
+  );
+  const [recommendedConcurrent, setRecommendedConcurrent] = useState<number | null>(null);
+  const [systemCores, setSystemCores] = useState<number | null>(null);
+  const [systemMemGb, setSystemMemGb] = useState<number | null>(null);
   
   // Storage state
   const [dataDirectory, setDataDirectory] = useState("~/vectoraiz/data");
@@ -275,6 +280,19 @@ const SettingsPage = () => {
   useEffect(() => {
     fetchVersionInfo();
   }, [fetchVersionInfo]);
+
+  // Fetch system info for recommended concurrent uploads
+  useEffect(() => {
+    systemApi.info().then((info) => {
+      const rec = info.system.recommended_concurrent_uploads;
+      setRecommendedConcurrent(rec);
+      setSystemCores(info.system.cpu_cores);
+      setSystemMemGb(info.system.memory_gb);
+      localStorage.setItem('vectoraiz_recommended_concurrent', String(rec));
+    }).catch(() => {
+      // Fallback: leave recommendation as null
+    });
+  }, []);
 
   // Validate URL format
   const isValidUrl = (url: string): boolean => {
@@ -730,20 +748,32 @@ const SettingsPage = () => {
 
           <div className="space-y-2 pt-2 border-t border-border">
             <Label className="text-foreground">Concurrent Uploads</Label>
-            <Select value={concurrentUploads} onValueChange={setConcurrentUploads}>
-              <SelectTrigger className="bg-background border-border w-32">
+            <Select value={concurrentUploads} onValueChange={(v) => {
+              setConcurrentUploads(v);
+              if (v === 'auto') {
+                localStorage.removeItem('vectoraiz_concurrent_uploads');
+              } else {
+                localStorage.setItem('vectoraiz_concurrent_uploads', v);
+              }
+            }}>
+              <SelectTrigger className="bg-background border-border w-40">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="auto">Auto{recommendedConcurrent ? ` (${recommendedConcurrent})` : ''}</SelectItem>
                 <SelectItem value="1">1</SelectItem>
                 <SelectItem value="2">2</SelectItem>
                 <SelectItem value="3">3</SelectItem>
                 <SelectItem value="4">4</SelectItem>
                 <SelectItem value="5">5</SelectItem>
+                <SelectItem value="6">6</SelectItem>
               </SelectContent>
             </Select>
             <p className="text-sm text-muted-foreground">
-              Number of files that can be processed simultaneously.
+              Number of files uploaded simultaneously.
+              {systemCores !== null && systemMemGb !== null && (
+                <> Detected: {systemCores} cores, {systemMemGb} GB RAM.</>
+              )}
             </p>
           </div>
         </CardContent>

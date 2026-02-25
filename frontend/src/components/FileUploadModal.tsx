@@ -315,7 +315,16 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     }
   };
 
-  const CONCURRENT_UPLOADS = 3;
+  const concurrentUploads = (() => {
+    const stored = localStorage.getItem('vectoraiz_concurrent_uploads');
+    if (stored && stored !== 'auto') {
+      const n = parseInt(stored, 10);
+      if (n >= 1 && n <= 6) return n;
+    }
+    const rec = localStorage.getItem('vectoraiz_recommended_concurrent');
+    const n = parseInt(rec || '', 10);
+    return n >= 1 && n <= 6 ? n : 3;
+  })();
 
   async function runWithConcurrency<T>(
     items: T[],
@@ -345,7 +354,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     setShowLargeWarning(false);
     setIsUploading(true);
 
-    await runWithConcurrency(pending, (item) => uploadOne(item, false), CONCURRENT_UPLOADS);
+    await runWithConcurrency(pending, (item) => uploadOne(item, false), concurrentUploads);
 
     setIsUploading(false);
   };
@@ -354,7 +363,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const handleUploadDuplicates = async () => {
     setIsUploading(true);
     const dupes = queue.filter((f) => f.state === "duplicate");
-    await runWithConcurrency(dupes, (item) => uploadOne(item, true), CONCURRENT_UPLOADS);
+    await runWithConcurrency(dupes, (item) => uploadOne(item, true), concurrentUploads);
     setIsUploading(false);
   };
 

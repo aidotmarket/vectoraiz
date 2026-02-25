@@ -7,6 +7,7 @@ BQ-123A: Health check endpoints with deep component checks.
 """
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -226,7 +227,14 @@ async def _check_memory() -> dict:
 # ── System info (public, no auth) ────────────────────────────────────
 @router.get("/system/info")
 async def system_info():
-    """Public endpoint (no auth) returning system mode and feature flags."""
+    """Public endpoint (no auth) returning system mode, feature flags, and system capabilities."""
+    mem = psutil.virtual_memory()
+    cores = os.cpu_count() or 4
+    mem_gb = round(mem.total / (1024**3), 1)
+    # Recommended concurrent uploads: floor(cores/4), clamped 2-6
+    # 6 is the browser's per-origin connection limit
+    recommended_concurrent = min(max(cores // 4, 2), 6)
+
     return {
         "mode": settings.mode,
         "version": APP_VERSION,
@@ -235,6 +243,11 @@ async def system_info():
             "marketplace": settings.marketplace_enabled,
             "earnings": settings.marketplace_enabled,
             "local_auth": True,
+        },
+        "system": {
+            "cpu_cores": cores,
+            "memory_gb": mem_gb,
+            "recommended_concurrent_uploads": recommended_concurrent,
         },
     }
 
