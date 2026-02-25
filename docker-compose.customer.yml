@@ -20,6 +20,8 @@ services:
       - "${VECTORAIZ_PORT:-8080}:80"
     volumes:
       - vectoraiz-data:/data
+      # Local import: mount a host directory read-only for fast file import (no upload)
+      - ${VECTORAIZ_IMPORT_DIR:-${HOME}/vectoraiz-imports}:/imports:ro
       # Optional: enables one-click auto-update from the UI
       # Remove this line if you don't want the container to have Docker access
       - /var/run/docker.sock:/var/run/docker.sock

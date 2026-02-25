@@ -263,6 +263,9 @@ VECTORAIZ_PORT=${PORT}
 
 # Mode: standalone (default) or connected (with Allie AI)
 VECTORAIZ_MODE=standalone
+
+# Local import directory (mounted read-only for direct file access)
+VECTORAIZ_IMPORT_DIR=${HOME}/vectoraiz-imports
 EOF
     success "Generated .env with secure defaults"
 else
@@ -274,6 +277,9 @@ else
     fi
     success "Using existing .env (port updated to ${PORT})"
 fi
+
+# Create local import directory (mounted read-only into the container)
+mkdir -p "${HOME}/vectoraiz-imports"
 
 # ─── Step 6: Pull images ─────────────────────────────────────────
 info "Pulling Docker images (this may take a few minutes)..."
@@ -417,6 +423,7 @@ sleep 1
 open "$URL" 2>/dev/null || true
 
 echo -e "  ${CYAN}Tip:${NC} Launch vectorAIz anytime from ~/Applications/vectorAIz.app"
+echo -e "  ${CYAN}Tip:${NC} Add files to ~/vectoraiz-imports/ for fast local import (no upload needed)"
 echo -e "  ${CYAN}Tip:${NC} View logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs -f"
 echo -e "  ${CYAN}Tip:${NC} Stop: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE down"
 echo ""
