@@ -24,8 +24,8 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useUpload, useDatasetStatus } from "@/hooks/useApi";
-import { DuplicateFileError } from "@/lib/api";
+import { useDatasetStatus } from "@/hooks/useApi";
+import { datasetsApi, DuplicateFileError } from "@/lib/api";
 import { toast } from "sonner";
 
 type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
@@ -200,7 +200,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const [isUploading, setIsUploading] = useState(false);
 
   const [showLargeWarning, setShowLargeWarning] = useState(false);
-  const { upload } = useUpload();
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   const hasFiles = queue.length > 0;
@@ -283,19 +282,15 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     updateFile(id, { state, error: error ?? null });
   };
 
-  /** Upload a single file via the single-file endpoint (backward compat) */
+  /** Upload a single file via the single-file endpoint with real progress */
   const uploadOne = async (item: QueuedFile, allowDuplicate: boolean) => {
     updateFile(item.id, { state: "uploading", progress: 0 });
 
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog = Math.min(prog + 12, 90);
-      updateFile(item.id, { progress: prog });
-    }, 150);
-
     try {
-      const result = await upload(item.file, { allowDuplicate });
-      clearInterval(interval);
+      const result = await datasetsApi.uploadWithProgress(item.file, {
+        allowDuplicate,
+        onProgress: (pct) => updateFile(item.id, { progress: pct }),
+      });
       updateFile(item.id, {
         state: "processing",
         progress: 100,
@@ -303,7 +298,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
       });
       return "ok";
     } catch (e) {
-      clearInterval(interval);
       if (e instanceof DuplicateFileError) {
         updateFile(item.id, {
           state: "duplicate",
@@ -436,7 +430,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                   </p>
                   {!hasFiles && (
                     <p className="text-xs text-muted-foreground">
-                      Up to {MAX_FILES} files. Supports 28+ formats.
+                      Supports 28+ formats
                     </p>
                   )}
                 </div>

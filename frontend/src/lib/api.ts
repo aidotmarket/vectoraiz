@@ -414,6 +414,53 @@ export const datasetsApi = {
     return response.json();
   },
   
+  uploadWithProgress: (
+    file: File,
+    options?: { allowDuplicate?: boolean; onProgress?: (percent: number) => void }
+  ): Promise<UploadResponse> => {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const params = options?.allowDuplicate ? '?allow_duplicate=true' : '';
+      xhr.open('POST', `${getApiUrl()}/api/datasets/upload${params}`);
+
+      const apiKey = getStoredApiKey();
+      if (apiKey) {
+        xhr.setRequestHeader('X-API-Key', apiKey);
+      }
+
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable && options?.onProgress) {
+          // Cap at 95% — the last 5% is server-side processing
+          const pct = Math.min(Math.round((e.loaded / e.total) * 100), 95);
+          options.onProgress(pct);
+        }
+      };
+
+      xhr.onload = () => {
+        if (xhr.status === 401) {
+          localStorage.removeItem('vectoraiz_api_key');
+        }
+        const body = JSON.parse(xhr.responseText || '{}');
+        if (xhr.status === 409 && body.error === 'duplicate_filename') {
+          reject(new DuplicateFileError(body.detail, body.existing_dataset));
+          return;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          options?.onProgress?.(100);
+          resolve(body);
+        } else {
+          reject(new Error(body.detail || 'Upload failed'));
+        }
+      };
+
+      xhr.onerror = () => reject(new Error('Network error'));
+
+      const formData = new FormData();
+      formData.append('file', file);
+      xhr.send(formData);
+    });
+  },
+
   delete: (id: string) => apiFetch<{ message: string }>(`/api/datasets/${id}`, { method: 'DELETE' }),
   
   getSample: (id: string, limit = 10) => 
