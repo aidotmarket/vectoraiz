@@ -106,7 +106,8 @@ const ACCEPT_MAP = {
 
 // Max limits (match backend)
 const MAX_FILES = 50;
-const MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500MB
+const LARGE_BATCH_WARNING_BYTES = 50 * 1024 * 1024 * 1024; // 50GB — show confirmation above this
+const JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore', 'desktop.ini']);
 
 /** Tracks processing status for a single dataset after upload */
 function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
@@ -198,6 +199,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [batchId, setBatchId] = useState<string | null>(null);
+  const [showLargeWarning, setShowLargeWarning] = useState(false);
   const { upload } = useUpload();
   const folderInputRef = useRef<HTMLInputElement>(null);
 
@@ -216,6 +218,9 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
         const file = files[i];
         const relPath = relativePaths?.[i] ?? null;
 
+        // Skip OS junk files
+        if (JUNK_FILES.has(file.name)) continue;
+
         // Client-side limit checks
         if (prev.length + newItems.length >= MAX_FILES) {
           newItems.push({
@@ -226,21 +231,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             progress: 0,
             datasetId: null,
             error: `Exceeds ${MAX_FILES} file limit`,
-            existingDatasetId: null,
-          });
-          continue;
-        }
-
-        const runningSize = currentSize + newItems.reduce((s, f) => s + f.file.size, 0) + file.size;
-        if (runningSize > MAX_TOTAL_BYTES) {
-          newItems.push({
-            id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            file,
-            relativePath: relPath,
-            state: "rejected",
-            progress: 0,
-            datasetId: null,
-            error: "Exceeds 500MB batch limit",
             existingDatasetId: null,
           });
           continue;
@@ -346,8 +336,16 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
   /** Upload all pending files — uses batch endpoint for 2+ files, single for 1 */
   const handleUploadAll = async () => {
-    setIsUploading(true);
     const pending = queue.filter((f) => f.state === "pending");
+    const totalPendingSize = pending.reduce((sum, f) => sum + f.file.size, 0);
+
+    // Show confirmation for very large batches
+    if (totalPendingSize > LARGE_BATCH_WARNING_BYTES && !showLargeWarning) {
+      setShowLargeWarning(true);
+      return;
+    }
+    setShowLargeWarning(false);
+    setIsUploading(true);
 
     if (pending.length === 1) {
       // Single file: use legacy endpoint for backward compatibility
@@ -511,7 +509,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                   </p>
                   {!hasFiles && (
                     <p className="text-xs text-muted-foreground">
-                      Up to {MAX_FILES} files, 500MB total. Supports 28+ formats.
+                      Up to {MAX_FILES} files. Supports 28+ formats.
                     </p>
                   )}
                 </div>
@@ -573,6 +571,23 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
               </Button>
               <Button variant="secondary" size="sm" className="h-7 text-xs" onClick={handleUploadDuplicates}>
                 Upload Anyway
+              </Button>
+            </div>
+          )}
+
+          {/* Large batch warning */}
+          {showLargeWarning && (
+            <div className="flex items-center gap-3 px-3 py-3 rounded-lg border border-yellow-500/30 bg-yellow-500/5">
+              <AlertTriangle className="w-4 h-4 text-yellow-500 flex-shrink-0" />
+              <p className="text-xs text-yellow-400 flex-1">
+                You have selected {pendingCount} file{pendingCount > 1 ? "s" : ""} totalling {formatFileSize(totalSize)}.
+                Are you sure?
+              </p>
+              <Button variant="ghost" size="sm" className="h-7 text-xs text-muted-foreground" onClick={() => setShowLargeWarning(false)}>
+                No
+              </Button>
+              <Button variant="secondary" size="sm" className="h-7 text-xs" onClick={handleUploadAll}>
+                Yes, Upload
               </Button>
             </div>
           )}
