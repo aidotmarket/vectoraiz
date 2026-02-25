@@ -59,4 +59,7 @@ class DatasetRecord(SQLModel, table=True):
     confirmed_by: Optional[str] = Field(default=None, nullable=True, max_length=64)
 
     # BQ-MCP-RAG: External LLM connectivity (M20 — least privilege, default FALSE)
-    externally_queryable: bool = Field(default=False)
+    externally_queryable: bool = Field(default=True)
+
+    # BQ-D1: Marketplace listing ID (set when published to ai.market)
+    listing_id: Optional[str] = Field(default=None, nullable=True, index=True, max_length=255)

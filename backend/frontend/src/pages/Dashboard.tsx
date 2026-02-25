@@ -28,12 +28,12 @@ const Dashboard = () => {
   const totalStorage = datasets.reduce((sum, d) => sum + (d.metadata?.size_bytes || 0), 0);
 
   const stats = [
-    { label: "Total Datasets", value: totalDatasets.toString(), icon: Database, loading: datasetsLoading },
-    { label: "Total Rows Processed", value: totalRows.toLocaleString(), icon: Rows3, loading: datasetsLoading },
-    { label: "Storage Used", value: `${(totalStorage / (1024 * 1024)).toFixed(1)} MB`, icon: HardDrive, loading: datasetsLoading },
+    { label: "Total Datasets", value: totalDatasets.toString(), icon: Database, loading: datasetsLoading, link: "/datasets" },
+    { label: "Total Rows Processed", value: totalRows.toLocaleString(), icon: Rows3, loading: datasetsLoading, link: "/datasets" },
+    { label: "Storage Used", value: `${(totalStorage / (1024 * 1024)).toFixed(1)} MB`, icon: HardDrive, loading: datasetsLoading, link: "/datasets" },
     ...(hasFeature("marketplace") ? [
-      { label: "Published", value: publishedCount.toString(), icon: TrendingUp, loading: false },
-      { label: "Marketplace Earnings", value: `$${totalEarnings.toLocaleString()}`, icon: DollarSign, loading: false },
+      { label: "Published", value: publishedCount.toString(), icon: TrendingUp, loading: false, link: "/datasets" },
+      { label: "Marketplace Earnings", value: `$${totalEarnings.toLocaleString()}`, icon: DollarSign, loading: false, link: "/datasets" },
     ] : []),
   ];
 
@@ -57,7 +57,7 @@ const Dashboard = () => {
       {/* Stats Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-5 gap-4">
         {stats.map((stat) => (
-          <Card key={stat.label} className="card-hover bg-card border-border">
+          <Card key={stat.label} className="card-hover bg-card border-border cursor-pointer" onClick={() => stat.link && navigate(stat.link)}>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium text-muted-foreground">
                 {stat.label}

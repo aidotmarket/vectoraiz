@@ -4,8 +4,6 @@ BQ-123B: Diagnostic bundle API endpoint.
 POST /api/diagnostics/bundle — generates a ZIP diagnostic bundle.
 Requires authentication. Rate limited to 1 per minute.
 """
-from __future__ import annotations
-
 import asyncio
 import logging
 import time

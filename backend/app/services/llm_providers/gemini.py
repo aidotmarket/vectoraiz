@@ -3,41 +3,51 @@ Gemini LLM Provider
 ===================
 
 Google Gemini implementation of BaseLLMProvider.
-Uses google-generativeai SDK with async support.
+Uses google-genai SDK (v1.0+) with Vertex AI support.
 
-Phase: 3.V.3
-Created: 2026-01-25
+Phase: AG-002
+Updated: 2026-02-20
 """
 
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
+import logging
 from typing import AsyncGenerator, Optional, Dict, Any
+from google import genai
+from google.genai import types
 
 from app.config import settings
 from .base import BaseLLMProvider, LLMProviderError, RateLimitError, AuthenticationError
 
+logger = logging.getLogger(__name__)
+
 
 class GeminiProvider(BaseLLMProvider):
     """
-    Gemini LLM provider using google-generativeai SDK.
+    Gemini LLM provider using google-genai SDK.
     
     Supports:
-    - Gemini 1.5 Flash (default, fast & cost-effective)
-    - Gemini 1.5 Pro (higher quality)
-    - Gemini 2.0 Flash (experimental)
-    - System instructions via system_instruction parameter
+    - Gemini 1.5 Flash (default)
+    - Gemini 1.5 Pro
+    - Gemini 2.0 Flash
+    - Vertex AI (GCA) mode
     """
     
     def __init__(self):
-        if not settings.gemini_api_key:
+        self.use_gca = settings.google_genai_use_gca
+        self.api_key = settings.gemini_api_key
+        self.model_name = settings.llm_model or "gemini-1.5-flash"
+        
+        if not self.use_gca and not self.api_key:
             raise AuthenticationError(
-                "Gemini API key not found. Set VECTORAIZ_GEMINI_API_KEY in environment.",
+                "Gemini API key not found. Set VECTORAIZ_GEMINI_API_KEY or use GCA.",
                 provider="gemini"
             )
         
-        genai.configure(api_key=settings.gemini_api_key)
-        self.model_name = settings.llm_model or "gemini-1.5-flash"
-        
+        if self.use_gca:
+            logger.info("🛡️ GeminiProvider: Initializing with Vertex AI (GCA)")
+            self.client = genai.Client(vertexai=True)
+        else:
+            self.client = genai.Client(api_key=self.api_key)
+            
     async def generate(
         self,
         prompt: str,
@@ -48,49 +58,28 @@ class GeminiProvider(BaseLLMProvider):
     ) -> str:
         """Generate a complete response using Gemini."""
         try:
-            model = self._get_model(system_prompt)
-            config = genai.GenerationConfig(
+            config = types.GenerateContentConfig(
                 temperature=temperature,
-                max_output_tokens=max_tokens
+                max_output_tokens=max_tokens,
+                system_instruction=system_prompt,
             )
             
-            response = await model.generate_content_async(
-                prompt,
-                generation_config=config
+            response = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config
             )
             
-            # Handle blocked responses
             if not response.candidates:
-                block_reason = "Unknown"
-                if response.prompt_feedback and hasattr(response.prompt_feedback, 'block_reason'):
-                    block_reason = response.prompt_feedback.block_reason.name
                 raise LLMProviderError(
-                    f"Generation blocked by safety filters: {block_reason}",
+                    "Generation blocked by safety filters or no candidates returned.",
                     provider="gemini"
                 )
             
             return response.text
             
-        except google_exceptions.ResourceExhausted as e:
-            raise RateLimitError(
-                "Gemini API quota exceeded. Please try again later.",
-                provider="gemini",
-                original_error=e
-            )
-        except google_exceptions.InvalidArgument as e:
-            raise LLMProviderError(
-                f"Invalid request to Gemini: {str(e)}",
-                provider="gemini",
-                original_error=e
-            )
-        except LLMProviderError:
-            raise
         except Exception as e:
-            raise LLMProviderError(
-                f"Gemini generation failed: {str(e)}",
-                provider="gemini",
-                original_error=e
-            )
+            self._handle_exception(e)
 
     async def generate_stream(
         self,
@@ -102,43 +91,49 @@ class GeminiProvider(BaseLLMProvider):
     ) -> AsyncGenerator[str, None]:
         """Stream response chunks from Gemini."""
         try:
-            model = self._get_model(system_prompt)
-            config = genai.GenerationConfig(
+            config = types.GenerateContentConfig(
                 temperature=temperature,
-                max_output_tokens=max_tokens
+                max_output_tokens=max_tokens,
+                system_instruction=system_prompt,
             )
             
-            response = await model.generate_content_async(
-                prompt,
-                generation_config=config,
+            stream = await self.client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
                 stream=True
             )
             
-            async for chunk in response:
+            async for chunk in stream:
                 if chunk.text:
                     yield chunk.text
                     
-        except google_exceptions.ResourceExhausted as e:
-            raise RateLimitError(
-                "Gemini API quota exceeded during streaming.",
-                provider="gemini",
-                original_error=e
-            )
         except Exception as e:
-            raise LLMProviderError(
-                f"Gemini streaming failed: {str(e)}",
+            self._handle_exception(e)
+
+    def _handle_exception(self, e: Exception):
+        """Map SDK errors to standard provider errors."""
+        err_str = str(e).lower()
+        
+        if "429" in err_str or "resource_exhausted" in err_str or "quota" in err_str:
+            raise RateLimitError(
+                f"Gemini quota exceeded: {str(e)}",
                 provider="gemini",
                 original_error=e
             )
-
-    def _get_model(self, system_prompt: Optional[str] = None):
-        """Get GenerativeModel instance with optional system instruction."""
-        if system_prompt:
-            return genai.GenerativeModel(
-                model_name=self.model_name,
-                system_instruction=system_prompt
+        
+        if "401" in err_str or "403" in err_str or "auth" in err_str:
+            raise AuthenticationError(
+                f"Gemini authentication failed: {str(e)}",
+                provider="gemini",
+                original_error=e
             )
-        return genai.GenerativeModel(model_name=self.model_name)
+            
+        raise LLMProviderError(
+            f"Gemini provider error: {str(e)}",
+            provider="gemini",
+            original_error=e
+        )
 
     def get_model_info(self) -> Dict[str, Any]:
         """Return Gemini model metadata."""
@@ -147,4 +142,5 @@ class GeminiProvider(BaseLLMProvider):
             "model": self.model_name,
             "capabilities": ["generate", "stream", "system_instruction"],
             "max_context_window": 1_000_000 if "1.5" in self.model_name else 128_000,
+            "auth_mode": "gca" if self.use_gca else "api_key"
         }

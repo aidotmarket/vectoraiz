@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import {
   Eye,
   EyeOff,
@@ -10,6 +10,7 @@ import {
   KeyRound,
   Webhook,
   Cpu,
+  Loader2,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -30,20 +31,135 @@ import {
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { Link } from "react-router-dom";
+import {
+  llmAdminApi,
+  type LLMProviderInfo,
+  type LLMSettingsListResponse,
+} from "@/lib/api";
 
-type ConnectionStatus = "not-configured" | "valid" | "invalid" | "testing";
+type ConnectionStatus = "not-configured" | "valid" | "invalid" | "testing" | "saving";
 
 const DeployAIPage = () => {
-  const [aiProvider, setAiProvider] = useState("openai");
+  const [aiProvider, setAiProvider] = useState("anthropic");
   const [aiApiKey, setAiApiKey] = useState("");
   const [showAiApiKey, setShowAiApiKey] = useState(false);
   const [aiStatus, setAiStatus] = useState<ConnectionStatus>("not-configured");
 
-  const testConnection = () => {
+  // Backend-loaded data
+  const [providers, setProviders] = useState<LLMProviderInfo[]>([]);
+  const [existingSettings, setExistingSettings] = useState<LLMSettingsListResponse | null>(null);
+  const [selectedModel, setSelectedModel] = useState("");
+
+  // Load providers catalog and existing settings on mount
+  useEffect(() => {
+    llmAdminApi.getProviders().then((res) => {
+      setProviders(res.providers);
+      // Default to first model of default provider
+      const anthropic = res.providers.find((p) => p.id === "anthropic");
+      if (anthropic?.models[0]) {
+        setSelectedModel(anthropic.models[0].id);
+      }
+    }).catch(() => {
+      // Fallback — providers endpoint unavailable
+    });
+
+    llmAdminApi.getSettings().then((res) => {
+      setExistingSettings(res);
+      if (res.active_provider) {
+        setAiProvider(res.active_provider);
+        const active = res.providers.find((p) => p.is_active);
+        if (active) {
+          setAiStatus(active.last_test_ok ? "valid" : "not-configured");
+          setSelectedModel(active.model);
+        }
+      }
+    }).catch(() => {
+      // Not configured yet
+    });
+  }, []);
+
+  // When provider changes, pick its first model
+  useEffect(() => {
+    const prov = providers.find((p) => p.id === aiProvider);
+    if (prov?.models[0]) {
+      // Check if existing settings already have a model for this provider
+      const existing = existingSettings?.providers.find((p) => p.provider === aiProvider);
+      setSelectedModel(existing?.model || prov.models[0].id);
+    }
+  }, [aiProvider, providers, existingSettings]);
+
+  const currentProviderInfo = providers.find((p) => p.id === aiProvider);
+  const currentModels = currentProviderInfo?.models || [];
+
+  const testConnection = async () => {
     setAiStatus("testing");
-    setTimeout(() => {
-      setAiStatus(aiApiKey.length > 10 ? "valid" : "invalid");
-    }, 1500);
+    try {
+      const result = await llmAdminApi.testConnection(aiProvider);
+      setAiStatus(result.ok ? "valid" : "invalid");
+      if (result.ok) {
+        toast({
+          title: "Connection successful",
+          description: `${result.provider} responded in ${result.latency_ms}ms`,
+        });
+      } else {
+        toast({
+          title: "Connection failed",
+          description: result.message,
+          variant: "destructive",
+        });
+      }
+    } catch (e) {
+      setAiStatus("invalid");
+      toast({
+        title: "Connection test failed",
+        description: e instanceof Error ? e.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const saveConfiguration = async () => {
+    if (!aiApiKey && !existingSettings?.providers.find((p) => p.provider === aiProvider)) {
+      toast({
+        title: "API key required",
+        description: "Enter your API key before saving.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setAiStatus("saving");
+    try {
+      // If user provided a new key, save it. Otherwise just test existing.
+      if (aiApiKey) {
+        await llmAdminApi.putSettings(aiProvider, aiApiKey, selectedModel);
+      }
+      // Re-fetch settings after save
+      const updated = await llmAdminApi.getSettings();
+      setExistingSettings(updated);
+      setAiApiKey(""); // Clear key from UI after save
+      setAiStatus("valid");
+      toast({
+        title: "Settings saved",
+        description: "Data Query Engine configuration updated.",
+      });
+    } catch (e) {
+      setAiStatus("invalid");
+      toast({
+        title: "Save failed",
+        description: e instanceof Error ? e.message : "Failed to save configuration",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const providerDisplayName = (id: string) => {
+    const prov = providers.find((p) => p.id === id);
+    return prov?.name || id;
+  };
+
+  const getDocsUrl = () => {
+    return currentProviderInfo?.docs_url || "#";
   };
 
   const getStatusBadge = (status: ConnectionStatus) => {
@@ -76,8 +192,20 @@ const DeployAIPage = () => {
             Testing...
           </span>
         );
+      case "saving":
+        return (
+          <span className="flex items-center gap-1.5 text-xs text-primary">
+            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            Saving...
+          </span>
+        );
     }
   };
+
+  // Show key_hint from existing settings
+  const existingKeyHint = existingSettings?.providers.find(
+    (p) => p.provider === aiProvider
+  )?.key_hint;
 
   return (
     <div className="space-y-6 max-w-3xl pb-20">
@@ -124,17 +252,46 @@ const DeployAIPage = () => {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="claude">Anthropic (Claude)</SelectItem>
-                <SelectItem value="openai">OpenAI</SelectItem>
-                <SelectItem value="gemini">Google (Gemini)</SelectItem>
+                {providers.length > 0 ? (
+                  providers.map((p) => (
+                    <SelectItem key={p.id} value={p.id}>{p.name}</SelectItem>
+                  ))
+                ) : (
+                  <>
+                    <SelectItem value="anthropic">Anthropic</SelectItem>
+                    <SelectItem value="openai">OpenAI</SelectItem>
+                    <SelectItem value="gemini">Google Gemini</SelectItem>
+                  </>
+                )}
               </SelectContent>
             </Select>
           </div>
 
+          {currentModels.length > 1 && (
+            <div className="space-y-2">
+              <Label className="text-foreground">Model</Label>
+              <Select value={selectedModel} onValueChange={setSelectedModel}>
+                <SelectTrigger className="bg-background border-border">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {currentModels.map((m) => (
+                    <SelectItem key={m.id} value={m.id}>
+                      {m.name}
+                      <span className="ml-2 text-xs text-muted-foreground">
+                        ({Math.round(m.context / 1000)}K context)
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+
           <div className="space-y-2">
             <div className="flex items-center justify-between">
               <Label htmlFor="ai-key" className="text-foreground">
-                {aiProvider === "claude" ? "Anthropic" : aiProvider === "openai" ? "OpenAI" : "Google"} API Key
+                {providerDisplayName(aiProvider)} API Key
               </Label>
               {getStatusBadge(aiStatus)}
             </div>
@@ -143,11 +300,13 @@ const DeployAIPage = () => {
                 <Input
                   id="ai-key"
                   type={showAiApiKey ? "text" : "password"}
-                  placeholder={`Enter your ${aiProvider === "claude" ? "Anthropic" : aiProvider === "openai" ? "OpenAI" : "Google"} API key`}
+                  placeholder={existingKeyHint ? `Current: ${existingKeyHint}` : `Enter your ${providerDisplayName(aiProvider)} API key`}
                   value={aiApiKey}
                   onChange={(e) => {
                     setAiApiKey(e.target.value);
-                    setAiStatus(e.target.value ? "not-configured" : "not-configured");
+                    if (aiStatus === "valid" || aiStatus === "invalid") {
+                      setAiStatus("not-configured");
+                    }
                   }}
                   className="bg-background border-border text-foreground pr-10"
                 />
@@ -168,19 +327,13 @@ const DeployAIPage = () => {
               <Button
                 variant="outline"
                 onClick={testConnection}
-                disabled={!aiApiKey || aiStatus === "testing"}
+                disabled={aiStatus === "testing" || aiStatus === "saving"}
               >
                 Test Connection
               </Button>
             </div>
             <a
-              href={
-                aiProvider === "claude"
-                  ? "https://console.anthropic.com/settings/keys"
-                  : aiProvider === "openai"
-                    ? "https://platform.openai.com/api-keys"
-                    : "https://aistudio.google.com/apikey"
-              }
+              href={getDocsUrl()}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
@@ -192,13 +345,12 @@ const DeployAIPage = () => {
 
           <div className="flex gap-2 pt-2">
             <Button
-              onClick={() => {
-                toast({
-                  title: "Settings saved",
-                  description: "Data Query Engine configuration updated.",
-                });
-              }}
+              onClick={saveConfiguration}
+              disabled={aiStatus === "testing" || aiStatus === "saving"}
             >
+              {aiStatus === "saving" ? (
+                <Loader2 className="w-4 h-4 animate-spin mr-2" />
+              ) : null}
               Save Configuration
             </Button>
           </div>

@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.customer
+          push: true
+          tags: |
+            ghcr.io/maxrobbins/vectoraiz:${{ github.ref_name }}
+            ghcr.io/maxrobbins/vectoraiz:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Make installer scripts executable
+        run: |
+          chmod +x install.sh
+          chmod +x installers/mac/install-mac.sh
+          chmod +x installers/mac/uninstall-mac.sh
+          chmod +x installers/linux/install-linux.sh
+          chmod +x installers/linux/uninstall-linux.sh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            install.sh
+            installers/mac/install-mac.sh
+            installers/mac/uninstall-mac.sh
+            installers/windows/install-vectoraiz.ps1
+            installers/windows/uninstall-vectoraiz.ps1
+            installers/linux/install-linux.sh
+            installers/linux/uninstall-linux.sh
+            docker-compose.customer.yml
+          generate_release_notes: true

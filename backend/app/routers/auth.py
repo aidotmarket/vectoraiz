@@ -16,8 +16,6 @@ Phase: BQ-127 — Air-Gap Architecture
 Created: S130 (2026-02-13)
 """
 
-from __future__ import annotations
-
 import json
 import logging
 import secrets

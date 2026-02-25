@@ -1,3 +1,4 @@
+import logging
 import os
 import uuid
 import asyncio
@@ -12,6 +13,8 @@ from app.config import settings
 from app.models.dataset import DatasetStatus
 from app.services.duckdb_service import get_duckdb_service
 from app.utils.sanitization import sanitize_filename, sql_quote_literal
+
+_log = logging.getLogger(__name__)
 
 
 # Backward-compat alias — existing code references ProcessingStatus
@@ -445,12 +448,35 @@ class ProcessingService:
         record.preview_text = preview_text
         record.preview_metadata = preview_meta
 
+    # ------------------------------------------------------------------
+    # BQ-VZ-LARGE-FILES: Streaming helpers
+    # ------------------------------------------------------------------
+
+    def _is_large_file(self, record: DatasetRecord) -> bool:
+        """Check if a file exceeds the streaming threshold."""
+        threshold_bytes = settings.large_file_threshold_mb * 1024 * 1024
+        file_size = record.file_size_bytes or 0
+        if not file_size and record.upload_path:
+            try:
+                file_size = os.path.getsize(record.upload_path)
+            except OSError:
+                pass
+        return file_size >= threshold_bytes
+
+    # ------------------------------------------------------------------
+    # Main entry point
+    # ------------------------------------------------------------------
+
     async def process_file(self, dataset_id: str, skip_indexing: bool = False) -> DatasetRecord:
         """Process an uploaded file based on its type.
 
         Args:
             dataset_id: The dataset to process.
             skip_indexing: If True, stop after extraction (preview mode).
+
+        BQ-VZ-LARGE-FILES: Routes large files (>= LARGE_FILE_THRESHOLD_MB) to
+        the streaming subprocess path. Falls back to in-memory for small files
+        if streaming fails (M10 graceful degradation).
         """
         record = self.get_dataset(dataset_id)
         if not record:
@@ -474,17 +500,46 @@ class ProcessingService:
 
         try:
             file_type = record.file_type.lower()
+            is_large = self._is_large_file(record)
 
-            if file_type in TABULAR_TYPES:
-                await self._extract_tabular(record)
-            elif file_type in DOCUMENT_TYPES:
-                await self._process_document(record)
-            elif file_type in SPREADSHEET_TYPES:
-                await self._process_spreadsheet(record)
-            elif file_type in TEXT_TYPES:
-                await self._process_text(record)
+            if is_large and file_type in (TABULAR_TYPES | DOCUMENT_TYPES):
+                # BQ-VZ-LARGE-FILES: streaming subprocess path
+                try:
+                    await self._extract_streaming(record)
+                    record.metadata["processing_mode"] = "streaming"
+                except Exception as streaming_err:
+                    # M10: Graceful degradation — fall back to in-memory
+                    # for files under fallback_max_size_mb (separate from
+                    # the streaming entry threshold so that files between
+                    # large_file_threshold_mb and fallback_max_size_mb can
+                    # still fall back).
+                    file_size = record.file_size_bytes or 0
+                    fallback_limit = settings.fallback_max_size_mb * 1024 * 1024
+                    if file_size < fallback_limit:
+                        # Small enough to fall back to in-memory
+                        _log.warning(
+                            "Streaming failed for %s (%s, %d bytes), "
+                            "falling back to in-memory: %s",
+                            record.id, file_type, file_size, streaming_err,
+                        )
+                        record.metadata["processing_mode"] = "fallback_in_memory"
+                        record.metadata["streaming_error"] = str(streaming_err)
+                        await self._extract_in_memory(record, file_type)
+                    else:
+                        # Too large for in-memory fallback
+                        _log.error(
+                            "Streaming failed for large file %s (%s, %d bytes), "
+                            "no fallback available: %s",
+                            record.id, file_type, file_size, streaming_err,
+                        )
+                        raise ValueError(
+                            f"Streaming processing failed for large file "
+                            f"({file_type}, {file_size / (1024**2):.0f}MB): {streaming_err}"
+                        ) from streaming_err
             else:
-                raise ValueError(f"Unsupported file type: {file_type}")
+                # Standard in-memory path (unchanged for small files)
+                record.metadata["processing_mode"] = "in_memory"
+                await self._extract_in_memory(record, file_type)
 
             # Cache preview data after extraction
             self._cache_preview(record)
@@ -529,6 +584,195 @@ class ProcessingService:
         storage_fn = record.upload_path.name if record.upload_path else f"{dataset_id}"
         self._save_record(record, storage_fn)
         return record
+
+    async def _extract_in_memory(self, record: DatasetRecord, file_type: str) -> None:
+        """Standard in-memory extraction path (unchanged from original)."""
+        if file_type in TABULAR_TYPES:
+            await self._extract_tabular(record)
+        elif file_type in DOCUMENT_TYPES:
+            await self._process_document(record)
+        elif file_type in SPREADSHEET_TYPES:
+            await self._process_spreadsheet(record)
+        elif file_type in TEXT_TYPES:
+            await self._process_text(record)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+
+    async def _extract_streaming(self, record: DatasetRecord) -> None:
+        """BQ-VZ-LARGE-FILES: Extract via streaming subprocess.
+
+        Routes tabular files through StreamingTabularProcessor and
+        document files through StreamingDocumentProcessor, both running
+        in isolated subprocesses via ProcessWorkerManager.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        from app.services.process_worker import (
+            get_worker_manager,
+            deserialize_record_batch,
+        )
+
+        file_type = record.file_type.lower()
+        parquet_filename = f"{record.id}.parquet"
+        partial_path = self.processed_dir / f"{record.id}.parquet.partial"
+        final_path = self.processed_dir / parquet_filename
+
+        manager = get_worker_manager()
+
+        if file_type in TABULAR_TYPES:
+            handle = manager.submit_tabular(record.upload_path, file_type)
+
+            # M3: Consume RecordBatch chunks and write Parquet incrementally
+            # with configurable row group size targeting PARQUET_ROW_GROUP_SIZE_MB.
+            writer: Optional[pq.ParquetWriter] = None
+            rows_total = 0
+            row_group_target_rows: Optional[int] = None
+            try:
+                for raw_data in handle.iter_data():
+                    batch = deserialize_record_batch(raw_data)
+                    if writer is None:
+                        writer = pq.ParquetWriter(
+                            str(partial_path),
+                            batch.schema,
+                            compression="zstd",
+                        )
+                        # Estimate target row count per row group from first batch.
+                        # nbytes gives the in-memory size; Parquet on-disk will be
+                        # smaller due to compression, but in-memory is a reasonable
+                        # proxy for controlling memory pressure during writes.
+                        target_bytes = settings.parquet_row_group_size_mb * 1024 * 1024
+                        bytes_per_row = max(batch.nbytes / max(batch.num_rows, 1), 1)
+                        row_group_target_rows = max(int(target_bytes / bytes_per_row), 1024)
+
+                    writer.write_batch(batch, row_group_size=row_group_target_rows)
+                    rows_total += batch.num_rows
+            except Exception:
+                # M3: On error/crash, clean up .partial and re-raise
+                if writer:
+                    writer.close()
+                    writer = None
+                if partial_path.exists():
+                    partial_path.unlink()
+                raise
+            finally:
+                if writer:
+                    writer.close()
+
+            # Check worker result
+            progress = handle.get_progress()
+            if progress and progress.get("status") == "error":
+                # Clean up partial file on worker-reported error
+                if partial_path.exists():
+                    partial_path.unlink()
+                raise RuntimeError(progress.get("error", "Unknown worker error"))
+
+            # Atomic rename: .partial → final
+            if partial_path.exists():
+                partial_path.rename(final_path)
+            record.processed_path = final_path
+
+            # Extract metadata from the final Parquet
+            try:
+                duckdb = get_duckdb_service()
+                record.metadata = duckdb.get_file_metadata(record.processed_path)
+                record.metadata["column_profiles"] = duckdb.get_column_profile(
+                    record.processed_path
+                )
+                record.metadata["sample_rows"] = duckdb.get_sample_rows(
+                    record.processed_path, limit=5
+                )
+                record.metadata["streaming_rows_total"] = rows_total
+            except Exception as e:
+                _log.exception("Metadata extraction failed for %s", record.id)
+                record.metadata = {
+                    "extraction_error": {
+                        "code": "METADATA_EXTRACTION_FAILED",
+                        "type": type(e).__name__,
+                    },
+                    "streaming_rows_total": rows_total,
+                }
+
+        elif file_type in DOCUMENT_TYPES:
+            handle = manager.submit_document(record.upload_path, file_type)
+
+            # Consume TextBlock dicts, build document content
+            text_content = []
+            tables = []
+            try:
+                for block_dict in handle.iter_data():
+                    text_content.append({
+                        "type": "Text",
+                        "text": block_dict["text"],
+                        "metadata": {
+                            "page_number": block_dict["page_num"],
+                            **block_dict.get("metadata", {}),
+                        },
+                    })
+                    for tbl in block_dict.get("tables", []):
+                        tables.append({
+                            "content": tbl,
+                            "metadata": {"page_number": block_dict["page_num"]},
+                        })
+            except Exception:
+                # M3: Clean up partial on document extraction failure
+                if partial_path.exists():
+                    partial_path.unlink()
+                raise
+
+            # Check worker result
+            progress = handle.get_progress()
+            if progress and progress.get("status") == "error":
+                if partial_path.exists():
+                    partial_path.unlink()
+                raise RuntimeError(progress.get("error", "Unknown worker error"))
+
+            record.document_content = {
+                "text_content": text_content,
+                "tables": tables,
+                "metadata": {
+                    "filename": record.original_filename,
+                    "file_type": file_type,
+                    "text_blocks": len(text_content),
+                    "table_count": len(tables),
+                    "processor": "streaming_subprocess",
+                },
+            }
+
+            # Convert to Parquet for consistent downstream processing
+            record.processed_path = final_path
+            temp_csv = self.processed_dir / f"{record.id}_temp.csv"
+            try:
+                with open(temp_csv, "w", newline="", encoding="utf-8") as f:
+                    csv_writer = csv.writer(f)
+                    csv_writer.writerow(["block_index", "block_type", "page_number", "content"])
+                    for i, block in enumerate(text_content):
+                        page_num = block.get("metadata", {}).get("page_number", 0)
+                        csv_writer.writerow([i, block.get("type", "Text"), page_num, block.get("text", "")])
+                    for i, table in enumerate(tables):
+                        page_num = table.get("metadata", {}).get("page_number", 0)
+                        csv_writer.writerow([
+                            len(text_content) + i, "Table", page_num, table.get("content", ""),
+                        ])
+
+                duckdb = get_duckdb_service()
+                safe_csv = sql_quote_literal(str(temp_csv))
+                safe_out = sql_quote_literal(str(record.processed_path))
+                duckdb.connection.execute(
+                    f"COPY (SELECT * FROM read_csv_auto('{safe_csv}')) "
+                    f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                )
+
+                metadata = duckdb.get_file_metadata(record.processed_path)
+                metadata["source_type"] = "document"
+                metadata["original_format"] = file_type
+                metadata["text_blocks"] = len(text_content)
+                metadata["tables_extracted"] = len(tables)
+                record.metadata = metadata
+            finally:
+                if temp_csv.exists():
+                    temp_csv.unlink()
+        else:
+            raise ValueError(f"Streaming not supported for file type: {file_type}")
 
     def _run_indexing(self, record: DatasetRecord) -> None:
         """Phase 2: chunk → embed → Qdrant. Extracted from _process_tabular etc."""

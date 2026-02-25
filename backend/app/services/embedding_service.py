@@ -5,6 +5,7 @@ Loads model once at startup for efficient inference.
 
 from typing import Optional, List, Dict, Any
 import time
+import sys
 
 from app.config import settings
 
@@ -38,12 +39,12 @@ class EmbeddingService:
         from sentence_transformers import SentenceTransformer
         
         start_time = time.time()
-        print(f"Loading embedding model: {self._model_name}...")
+        print(f"Loading embedding model: {self._model_name}...", file=sys.stderr)
         
         self._model = SentenceTransformer(self._model_name)
         
         self._load_time = time.time() - start_time
-        print(f"Model loaded in {self._load_time:.2f}s")
+        print(f"Model loaded in {self._load_time:.2f}s", file=sys.stderr)
     
     def embed_text(self, text: str) -> List[float]:
         """

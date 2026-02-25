@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from app.core.async_utils import run_sync
 from app.core.errors import VectorAIzError
 from app.services.batch_service import _check_magic_bytes, _MAGIC_SIGNATURES
+from app.utils.sanitization import validate_path_traversal
 
 from app.config import settings
 from app.models.dataset import DatasetStatus
@@ -36,6 +37,7 @@ from app.services.preview_service import get_preview_service, PreviewService
 from app.schemas.batch import ConfirmRequest, BatchConfirmResponse
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.services.llm_providers.base import LLMProviderError
+from app.services.serial_metering import metered, MeterDecision
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +88,7 @@ async def upload_dataset(
     processing: ProcessingService = Depends(get_processing_service),
     user: AuthenticatedUser = Depends(get_current_user),
     allow_duplicate: bool = Query(False, description="Skip duplicate filename check"),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Upload a new dataset file.
@@ -95,6 +98,11 @@ async def upload_dataset(
     Requires X-API-Key header.
     """
     max_size_mb = MAX_UPLOAD_FILE_BYTES // (1024 * 1024)
+
+    # Path traversal check on filename
+    fname_err = validate_path_traversal(file.filename or "")
+    if fname_err:
+        raise HTTPException(status_code=422, detail=f"Invalid filename: {fname_err}")
 
     # Validate file extension
     extension = get_file_extension(file.filename)
@@ -214,9 +222,38 @@ async def upload_dataset(
 
 
 async def process_dataset_task(dataset_id: str, skip_indexing: bool = False):
-    """Background task to process an uploaded dataset."""
+    """Background task to process an uploaded dataset.
+
+    Race-condition fix: after extraction in preview mode, check if the batch
+    was already confirmed (confirmed_at set). If so, auto-transition to
+    indexing so the user doesn't have to re-confirm.
+    """
     processing = get_processing_service()
     await processing.process_file(dataset_id, skip_indexing=skip_indexing)
+
+    if not skip_indexing:
+        return
+
+    # Check if the batch was confirmed while extraction was in progress
+    from app.core.database import get_session_context
+    from app.models.dataset import DatasetRecord as DBDatasetRecord
+
+    should_index = False
+    with get_session_context() as session:
+        db_row = session.get(DBDatasetRecord, dataset_id)
+        if db_row and db_row.confirmed_at and db_row.status == DatasetStatus.PREVIEW_READY.value:
+            logger.info(
+                "Auto-indexing dataset %s (batch confirmed during extraction)",
+                dataset_id,
+            )
+            db_row.status = DatasetStatus.INDEXING.value
+            db_row.updated_at = datetime.now(timezone.utc)
+            session.add(db_row)
+            session.commit()
+            should_index = True
+
+    if should_index:
+        await index_dataset_task(dataset_id)
 
 
 async def index_dataset_task(dataset_id: str):
@@ -237,6 +274,7 @@ async def batch_upload(
     mode: str = Form(default="preview"),
     batch_id: Optional[str] = Form(default=None),
     processing: ProcessingService = Depends(get_processing_service),
+    _meter: MeterDecision = Depends(metered("setup")),
     batch_service: BatchService = Depends(get_batch_service),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
@@ -246,6 +284,15 @@ async def batch_upload(
     """
     if not files:
         raise HTTPException(status_code=422, detail="No files provided")
+
+    # Validate filenames for path traversal
+    for i, f in enumerate(files):
+        fname_err = validate_path_traversal(f.filename or "")
+        if fname_err:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid filename at index {i}: {fname_err}",
+            )
 
     # Parse paths JSON array if provided
     path_list: Optional[List[str]] = None
@@ -261,6 +308,16 @@ async def batch_upload(
                 status_code=422,
                 detail=f"paths length ({len(path_list)}) must match files length ({len(files)})",
             )
+        # Path traversal protection — reject null bytes, "..", absolute, and "./" paths
+        for i, p in enumerate(path_list):
+            path_err = validate_path_traversal(p)
+            if path_err:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Invalid path at index {i}: {path_err}",
+                )
+            # Normalize and replace backslashes for consistency
+            path_list[i] = os.path.normpath(p).replace("\\", "/")
 
     # Read first 8 bytes of each file for magic-byte validation, plus sizes
     filenames = []
@@ -539,7 +596,8 @@ async def run_processing_pipeline(
     background_tasks: BackgroundTasks,
     pipeline_service: PipelineService = Depends(get_pipeline_service),
     processing: ProcessingService = Depends(get_processing_service),
-    user: AuthenticatedUser = Depends(get_current_user)
+    user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Run the full processing pipeline on a dataset.
@@ -573,7 +631,8 @@ async def process_full_pipeline(
     background_tasks: BackgroundTasks,
     pipeline_service: PipelineService = Depends(get_pipeline_service),
     processing: ProcessingService = Depends(get_processing_service),
-    user: AuthenticatedUser = Depends(get_current_user)
+    user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     BQ-088: Trigger the full processing pipeline on a dataset.
@@ -740,7 +799,8 @@ async def get_dataset_profile(
 async def generate_dataset_attestation(
     dataset_id: str,
     attestation_service: AttestationService = Depends(get_attestation_service),
-    processing: ProcessingService = Depends(get_processing_service)
+    processing: ProcessingService = Depends(get_processing_service),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """Get quality attestation report for a dataset."""
     record = processing.get_dataset(dataset_id)
@@ -793,7 +853,8 @@ async def get_dataset_compliance(
 async def generate_listing_metadata(
     dataset_id: str,
     listing_service: ListingMetadataService = Depends(get_listing_metadata_service),
-    processing: ProcessingService = Depends(get_processing_service)
+    processing: ProcessingService = Depends(get_processing_service),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """Generate marketplace-ready listing metadata for a dataset."""
     record = processing.get_dataset(dataset_id)
@@ -925,7 +986,8 @@ async def index_dataset(
     recreate: bool = False,
     processing: ProcessingService = Depends(get_processing_service),
     indexing: IndexingService = Depends(get_indexing_service),
-    user: AuthenticatedUser = Depends(get_current_user)
+    user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Trigger indexing for a dataset (runs in background).
@@ -1043,6 +1105,7 @@ async def publish_to_marketplace(
     processing: ProcessingService = Depends(get_processing_service),
     push_service: MarketplacePushService = Depends(get_marketplace_push_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Publish a processed dataset to ai.market.

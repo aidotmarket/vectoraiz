@@ -431,6 +431,11 @@ class ConnectivitySetupGenerator:
             "notes": [
                 "This token is a secret — do not share the GPT publicly with the token embedded.",
                 "Custom GPTs require the vectorAIz instance to be internet-accessible.",
+                (
+                    "If you're running vectorAIz locally (Docker/localhost), ChatGPT cannot reach it. "
+                    "Claude Desktop via MCP is the easiest local option — it connects directly to "
+                    "your Docker container with no tunneling needed."
+                ),
             ],
         }
 

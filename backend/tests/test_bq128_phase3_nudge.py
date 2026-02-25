@@ -76,6 +76,7 @@ class TestTriggerAllowlist:
         expected = {
             "error_event", "upload_complete", "processing_complete",
             "missing_config", "pii_detected", "long_running_op", "destructive_action",
+            "first_search",
         }
         assert set(nm.TRIGGER_ALLOWLIST.keys()) == expected
 

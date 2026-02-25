@@ -58,8 +58,8 @@ ADMIN_USER = os.environ.get("VZ_ADMIN_USER", "max")
 ADMIN_PASS = os.environ.get("VZ_ADMIN_PASS", "123letmein")
 
 # Timeouts (seconds)
-UPLOAD_TIMEOUT = 1200       # 20 min for very large files (400MB+)
-PROCESSING_POLL_TIMEOUT = 1800  # 30 min max wait for processing (large PDFs)
+UPLOAD_TIMEOUT = 300        # 5 min for very large files
+PROCESSING_POLL_TIMEOUT = 300   # 5 min max wait for processing
 PROCESSING_POLL_INTERVAL = 3
 REQUEST_TIMEOUT = 60
 
@@ -316,7 +316,7 @@ class VZClient:
 # Test functions
 # ---------------------------------------------------------------------------
 
-def test_auth(client: VZClient, suite: TestSuite):
+def _run_auth(client: VZClient, suite: TestSuite):
     """Test authentication — setup or login."""
     t0 = time.time()
     try:
@@ -530,7 +530,7 @@ def _test_delete(client: VZClient, dataset_id: str, fname: str, suite: TestSuite
         suite.record(f"{prefix}/verify-404", False, time.time() - t0, str(e))
 
 
-def test_upload_unsupported(client: VZClient, suite: TestSuite):
+def _run_upload_unsupported(client: VZClient, suite: TestSuite):
     """Upload unsupported file formats — expect rejection."""
     for fname in UNSUPPORTED_FILES:
         fp = TEST_DATA_DIR / fname
@@ -572,7 +572,7 @@ def test_upload_unsupported(client: VZClient, suite: TestSuite):
             suite.record(prefix, False, time.time() - t0, str(e))
 
 
-def test_batch_upload(client: VZClient, suite: TestSuite) -> List[str]:
+def _run_batch_upload(client: VZClient, suite: TestSuite) -> List[str]:
     """Batch upload 3 small files, confirm-all, wait for ready. Returns dataset_ids."""
     dataset_ids: List[str] = []
     filepaths = [TEST_DATA_DIR / f for f in BATCH_FILES]
@@ -626,7 +626,7 @@ def test_batch_upload(client: VZClient, suite: TestSuite) -> List[str]:
     return dataset_ids
 
 
-def test_negative(client: VZClient, suite: TestSuite):
+def _run_negative(client: VZClient, suite: TestSuite):
     """Negative / edge-case tests."""
     fake_id = "00000000-0000-0000-0000-000000000000"
 
@@ -999,7 +999,7 @@ def run_all_tests(base_url: str, include_xl: bool = False):
     # ------------------------------------------------------------------
     print("\n--- Auth ---")
     try:
-        test_auth(client, suite)
+        _run_auth(client, suite)
     except Exception:
         print("\n  FATAL: Auth failed. Aborting.")
         suite.summary()
@@ -1041,7 +1041,7 @@ def run_all_tests(base_url: str, include_xl: bool = False):
     # 6. Unsupported file upload
     # ------------------------------------------------------------------
     print("\n--- Upload: Unsupported Files ---")
-    test_upload_unsupported(client, suite)
+    _run_upload_unsupported(client, suite)
 
     # ------------------------------------------------------------------
     # 7. NEW FORMAT: Small doc files (concurrent)
@@ -1103,7 +1103,7 @@ def run_all_tests(base_url: str, include_xl: bool = False):
     # 12. Batch upload test
     # ------------------------------------------------------------------
     print("\n--- Batch Upload ---")
-    batch_ids = test_batch_upload(client, suite)
+    batch_ids = _run_batch_upload(client, suite)
 
     # Clean up batch datasets
     if batch_ids:
@@ -1115,7 +1115,7 @@ def run_all_tests(base_url: str, include_xl: bool = False):
     # 13. Negative tests
     # ------------------------------------------------------------------
     print("\n--- Negative Tests ---")
-    test_negative(client, suite)
+    _run_negative(client, suite)
 
     # ------------------------------------------------------------------
     # 14. Crash-Prone Large Files (run LAST — may take down VZ)
@@ -1172,6 +1172,24 @@ def _get_pytest_suite() -> TestSuite:
 
 class TestBetaReadiness:
     """Pytest class — each method is collected as a test."""
+
+    @classmethod
+    def setup_class(cls):
+        """Delete all existing datasets to avoid 409 Conflict from stale data."""
+        client = _get_pytest_client()
+        try:
+            r = client.get("/api/datasets")
+            if r.status_code == 200:
+                datasets = r.json()
+                # Handle both list response and dict with 'datasets' key
+                if isinstance(datasets, dict):
+                    datasets = datasets.get("datasets", [])
+                for ds in datasets:
+                    ds_id = ds.get("id") or ds.get("dataset_id")
+                    if ds_id:
+                        client.delete(f"/api/datasets/{ds_id}")
+        except Exception:
+            pass  # Best-effort cleanup; tests will report real errors
 
     # -- Auth --
 
@@ -1359,21 +1377,528 @@ class TestBetaReadiness:
 
     def test_delete_dataset(self):
         client = _get_pytest_client()
-        # Upload a small file just for deletion
-        fp = TEST_DATA_DIR / "barcelona_apartments.csv"
-        if not fp.exists():
-            import pytest as pt
-            pt.skip("File not found")
-        result = client.upload_file(fp)
-        did = result["dataset_id"]
-        status = client.wait_for_ready(did)
-        assert status == "ready"
+        # Use an already-uploaded dataset if available, otherwise upload fresh
+        global _pytest_datasets
+        did = _pytest_datasets.pop("barcelona_apartments.csv", None)
+        if not did:
+            fp = TEST_DATA_DIR / "barcelona_apartments.csv"
+            if not fp.exists():
+                import pytest as pt
+                pt.skip("File not found")
+            result = client.upload_file(fp)
+            did = result["dataset_id"]
+            status = client.wait_for_ready(did)
+            assert status == "ready"
 
         r = client.delete(f"/api/datasets/{did}")
         assert r.status_code in (200, 204)
 
         r = client.get(f"/api/datasets/{did}")
         assert r.status_code == 404
+
+    # =====================================================================
+    # NEW: BQ-VZ-LARGE-FILES, BQ-108, BQ-109, Gate 3 test cases
+    # =====================================================================
+
+    # -- Large file upload (generated in-memory) --
+
+    def test_large_generated_csv_50mb(self):
+        """BQ-VZ-LARGE-FILES: Generate and upload a 50MB+ CSV to test streaming processing."""
+        client = _get_pytest_client()
+        # Generate ~50MB CSV in-memory
+        buf = io.BytesIO()
+        buf.write(b"id,name,category,value_usd,score,region,status,date,amount,description\n")
+        for i in range(550_000):  # ~55MB at ~100 bytes/row
+            buf.write(
+                f"{i},item_{i % 10000},cat_{i % 50},"
+                f"{(i * 7 + 13) % 100000 / 100:.2f},"
+                f"{(i * 3 + 7) % 10000 / 10000:.4f},"
+                f"region_{i % 5},"
+                f"{'active' if i % 4 == 0 else 'inactive' if i % 4 == 1 else 'pending' if i % 4 == 2 else 'archived'},"
+                f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d},"
+                f"{(i * 11 + 3) % 999999},"
+                f"Row {i} stress test data\n"
+                .encode()
+            )
+
+        size_mb = buf.tell() / (1024 * 1024)
+        assert size_mb >= 50, f"Generated CSV is only {size_mb:.1f}MB, expected 50MB+"
+
+        buf.seek(0)
+        t0 = time.time()
+        r = client.post(
+            "/api/datasets/upload",
+            files={"file": ("stress_test_50mb.csv", buf)},
+            timeout=UPLOAD_TIMEOUT,
+        )
+        upload_time = time.time() - t0
+        assert r.status_code in (200, 202), \
+            f"50MB upload failed: {r.status_code}: {r.text[:300]}"
+
+        data = r.json()
+        dataset_id = data.get("dataset_id")
+        assert dataset_id, f"No dataset_id in response: {data}"
+
+        # Wait for processing — this exercises the streaming/chunked path
+        t0 = time.time()
+        status = client.wait_for_ready(dataset_id, timeout=PROCESSING_POLL_TIMEOUT)
+        proc_time = time.time() - t0
+        assert status == "ready", (
+            f"50MB CSV processing failed: status={status} "
+            f"(upload={upload_time:.1f}s, processing={proc_time:.1f}s)"
+        )
+
+        # Verify data is queryable
+        r = client.get(f"/api/datasets/{dataset_id}/sample")
+        assert r.status_code == 200, f"Sample failed after 50MB upload: {r.status_code}"
+
+        r = client.get(f"/api/datasets/{dataset_id}/statistics")
+        assert r.status_code == 200, f"Statistics failed after 50MB upload: {r.status_code}"
+
+        # Cleanup
+        client.delete(f"/api/datasets/{dataset_id}")
+
+    # -- 10MB generated CSV upload + processing --
+
+    def test_large_generated_csv_10mb(self):
+        """BQ-VZ-LARGE-FILES: Generate and upload a ~10MB CSV to test chunked path."""
+        client = _get_pytest_client()
+        buf = io.BytesIO()
+        buf.write(b"id,name,category,value_usd,score,region,status,date\n")
+        for i in range(170_000):  # ~10MB at ~62 bytes/row
+            buf.write(
+                f"{i},item_{i % 5000},cat_{i % 30},"
+                f"{(i * 7 + 13) % 100000 / 100:.2f},"
+                f"{(i * 3 + 7) % 10000 / 10000:.4f},"
+                f"region_{i % 5},"
+                f"{'active' if i % 2 == 0 else 'inactive'},"
+                f"2024-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}\n"
+                .encode()
+            )
+
+        size_mb = buf.tell() / (1024 * 1024)
+        assert size_mb >= 9, f"Generated CSV is only {size_mb:.1f}MB, expected ~10MB"
+
+        buf.seek(0)
+        t0 = time.time()
+        r = client.post(
+            "/api/datasets/upload",
+            files={"file": ("stress_test_10mb.csv", buf)},
+            timeout=UPLOAD_TIMEOUT,
+        )
+        upload_time = time.time() - t0
+        assert r.status_code in (200, 202), \
+            f"10MB upload failed: {r.status_code}: {r.text[:300]}"
+
+        data = r.json()
+        dataset_id = data.get("dataset_id")
+        assert dataset_id, f"No dataset_id in response: {data}"
+
+        t0 = time.time()
+        status = client.wait_for_ready(dataset_id, timeout=PROCESSING_POLL_TIMEOUT)
+        proc_time = time.time() - t0
+        assert status == "ready", (
+            f"10MB CSV processing failed: status={status} "
+            f"(upload={upload_time:.1f}s, processing={proc_time:.1f}s)"
+        )
+
+        # Verify sample is queryable
+        r = client.get(f"/api/datasets/{dataset_id}/sample")
+        assert r.status_code == 200, f"Sample failed after 10MB upload: {r.status_code}"
+
+        # Cleanup
+        client.delete(f"/api/datasets/{dataset_id}")
+
+    # -- Row count verification after processing --
+
+    def test_row_count_after_processing(self):
+        """Verify row count matches expected after processing a known CSV."""
+        client = _get_pytest_client()
+        expected_rows = 200
+        buf = io.BytesIO()
+        buf.write(b"id,value,label\n")
+        for i in range(expected_rows):
+            buf.write(f"{i},{i * 10},label_{i % 5}\n".encode())
+        buf.seek(0)
+
+        r = client.post(
+            "/api/datasets/upload",
+            files={"file": ("row_count_test.csv", buf)},
+            timeout=UPLOAD_TIMEOUT,
+        )
+        assert r.status_code in (200, 202), \
+            f"Upload failed: {r.status_code}: {r.text[:300]}"
+        dataset_id = r.json().get("dataset_id")
+        assert dataset_id
+
+        status = client.wait_for_ready(dataset_id, timeout=120)
+        assert status == "ready", f"Processing failed: {status}"
+
+        # Check row count via metadata or statistics
+        r = client.get(f"/api/datasets/{dataset_id}")
+        assert r.status_code == 200
+        meta = r.json()
+        row_count = (
+            meta.get("row_count")
+            or meta.get("rows")
+            or meta.get("num_rows")
+            or meta.get("total_rows")
+        )
+
+        # Also try statistics endpoint
+        r = client.get(f"/api/datasets/{dataset_id}/statistics")
+        if r.status_code == 200:
+            stats = r.json()
+            stats_rows = (
+                stats.get("row_count")
+                or stats.get("rows")
+                or stats.get("num_rows")
+                or stats.get("total_rows")
+            )
+            if stats_rows is not None:
+                row_count = row_count or stats_rows
+
+        if row_count is not None:
+            assert int(row_count) == expected_rows, \
+                f"Row count mismatch: expected {expected_rows}, got {row_count}"
+        # If row_count isn't exposed, verify via SQL
+        else:
+            r = client.post("/api/sql/query", json={
+                "query": f"SELECT COUNT(*) as cnt FROM dataset_{dataset_id.replace('-', '_')}",
+                "dataset_id": dataset_id,
+                "limit": 1,
+            })
+            if r.status_code == 200:
+                sql_data = r.json()
+                results = sql_data.get("results") or sql_data.get("rows") or sql_data.get("data") or []
+                if results:
+                    cnt = results[0].get("cnt") if isinstance(results[0], dict) else results[0][0]
+                    assert int(cnt) == expected_rows, \
+                        f"SQL row count mismatch: expected {expected_rows}, got {cnt}"
+
+        # Cleanup
+        client.delete(f"/api/datasets/{dataset_id}")
+
+    # -- Batch upload with 5+ files --
+
+    def test_batch_upload_5_plus_files(self):
+        """Batch upload with 5+ files to stress the batch pipeline."""
+        client = _get_pytest_client()
+        files_list = []
+        num_files = 6
+        for i in range(num_files):
+            rows = f"col_x,col_y,col_z\n"
+            for j in range(50):
+                rows += f"v{i}_{j},{j * i},{j % 3}\n"
+            files_list.append(
+                ("files", (f"batch5_file_{i}.csv", io.BytesIO(rows.encode())))
+            )
+
+        r = client.post(
+            "/api/datasets/batch",
+            files=files_list,
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code in (200, 202), \
+            f"Batch upload failed: {r.status_code}: {r.text[:300]}"
+        batch_data = r.json()
+        batch_id = batch_data.get("batch_id")
+        assert batch_id, f"No batch_id: {batch_data}"
+        accepted = batch_data.get("accepted", 0)
+        assert accepted >= 5, \
+            f"Expected 5+ accepted, got {accepted}: {batch_data}"
+
+        items = batch_data.get("items", [])
+        dataset_ids = [item["dataset_id"] for item in items if item.get("dataset_id")]
+
+        # Wait for all items to finish extraction (preview_ready) before confirming
+        preview_states = {"preview_ready", "ready", "error", "failed"}
+        for did in dataset_ids:
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                r = client.get(f"/api/datasets/{did}/status")
+                if r.status_code == 200:
+                    st = r.json().get("status", "").lower()
+                    if st in preview_states:
+                        break
+                time.sleep(2)
+
+        # Confirm all
+        r = client.post(f"/api/datasets/batch/{batch_id}/confirm-all")
+        assert r.status_code in (200, 202), \
+            f"Confirm-all failed: {r.status_code}: {r.text[:300]}"
+
+        # Wait for all to reach ready
+        ready_count = 0
+        for did in dataset_ids:
+            status = client.wait_for_ready(did, timeout=180)
+            if status == "ready":
+                ready_count += 1
+            client.delete(f"/api/datasets/{did}")
+
+        assert ready_count >= 5, \
+            f"Only {ready_count}/{len(dataset_ids)} batch items reached ready"
+
+    # -- Data preview before indexing (BQ-109) --
+
+    def test_data_preview_endpoint(self):
+        """BQ-109: Verify /preview endpoint returns schema/data for an uploaded dataset."""
+        client = _get_pytest_client()
+        did = self._ensure_dataset("saas_company_metrics.csv")
+        if not did:
+            import pytest as pt
+            pt.skip("No dataset available")
+
+        r = client.get(f"/api/datasets/{did}/preview")
+        assert r.status_code == 200, \
+            f"Preview failed: {r.status_code}: {r.text[:300]}"
+        preview = r.json()
+        assert ("status" in preview or "columns" in preview
+                or "rows" in preview or "schema" in preview), \
+            f"Preview response missing expected fields: {list(preview.keys())}"
+
+    def test_preview_flow_batch_upload(self):
+        """BQ-109: Batch upload (preview mode) -> preview -> confirm -> ready."""
+        client = _get_pytest_client()
+        csv_data = b"name,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago\n"
+
+        # Upload via batch with mode=preview
+        r = client.post(
+            "/api/datasets/batch",
+            files=[("files", ("preview_flow_test.csv", io.BytesIO(csv_data)))],
+            data={"mode": "preview"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code in (200, 202), \
+            f"Batch upload failed: {r.status_code}: {r.text[:300]}"
+        batch_data = r.json()
+        batch_id = batch_data.get("batch_id")
+        assert batch_id, f"No batch_id: {batch_data}"
+
+        items = batch_data.get("items", [])
+        assert len(items) >= 1, f"No items in batch response: {batch_data}"
+        dataset_id = items[0].get("dataset_id")
+        assert dataset_id, f"No dataset_id in first item: {items[0]}"
+
+        # Wait for extraction to finish (preview_ready or ready)
+        deadline = time.time() + 120
+        final_st = "unknown"
+        while time.time() < deadline:
+            r = client.get(f"/api/datasets/{dataset_id}/status")
+            if r.status_code == 200:
+                final_st = r.json().get("status", "").lower()
+                if final_st in ("preview_ready", "ready", "error", "failed"):
+                    break
+            time.sleep(2)
+
+        # Check preview endpoint
+        r = client.get(f"/api/datasets/{dataset_id}/preview")
+        assert r.status_code == 200, \
+            f"Preview failed (status={final_st}): {r.status_code}: {r.text[:300]}"
+
+        # Confirm for indexing (skip if already ready — single-file may auto-index)
+        if final_st == "preview_ready":
+            r = client.post(
+                f"/api/datasets/{dataset_id}/confirm",
+                json={"index": True},
+                timeout=REQUEST_TIMEOUT,
+            )
+            assert r.status_code in (200, 202, 409), \
+                f"Confirm failed: {r.status_code}: {r.text[:300]}"
+            if r.status_code == 202:
+                status = client.wait_for_ready(dataset_id, timeout=300)
+                assert status == "ready", f"After confirm, status: {status}"
+
+        # Cleanup
+        client.delete(f"/api/datasets/{dataset_id}")
+
+    # -- Batch upload progress tracking (BQ-108) --
+
+    def test_batch_status_tracking(self):
+        """BQ-108: Batch upload -> poll batch status endpoint for progress."""
+        client = _get_pytest_client()
+        csv_files = []
+        for i in range(3):
+            rows = "col_a,col_b,col_c\n"
+            for j in range(100):
+                rows += f"val_{i}_{j},{j * 10},{j % 5}\n"
+            csv_files.append(
+                ("files", (f"batch_track_{i}.csv", io.BytesIO(rows.encode())))
+            )
+
+        r = client.post(
+            "/api/datasets/batch",
+            files=csv_files,
+            data={"mode": "preview"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code in (200, 202), \
+            f"Batch upload failed: {r.status_code}: {r.text[:300]}"
+        batch_data = r.json()
+        batch_id = batch_data.get("batch_id")
+        assert batch_id, f"No batch_id: {batch_data}"
+
+        # Poll batch status endpoint
+        r = client.get(f"/api/datasets/batch/{batch_id}")
+        assert r.status_code == 200, \
+            f"Batch status failed: {r.status_code}: {r.text[:300]}"
+        status_data = r.json()
+        assert any(k in status_data for k in ("total", "items", "datasets", "count")), \
+            f"Batch status missing expected fields: {list(status_data.keys())}"
+
+        # Confirm all and cleanup
+        r = client.post(f"/api/datasets/batch/{batch_id}/confirm-all")
+        assert r.status_code in (200, 202), \
+            f"Confirm-all failed: {r.status_code}: {r.text[:300]}"
+
+        for item in batch_data.get("items", []):
+            did = item.get("dataset_id")
+            if did:
+                client.wait_for_ready(did, timeout=120)
+                client.delete(f"/api/datasets/{did}")
+
+    # -- Deep health check (Gate 3) --
+
+    def test_health_deep(self):
+        """Gate 3: Verify /api/health/deep returns component statuses."""
+        client = _get_pytest_client()
+        r = client.get("/api/health/deep")
+        assert r.status_code == 200, \
+            f"Deep health check failed: {r.status_code}: {r.text[:300]}"
+        data = r.json()
+        assert any(k in data for k in ("components", "checks", "status")), \
+            f"Deep health missing expected fields: {list(data.keys())}"
+
+    # -- SQL validation --
+
+    def test_sql_validate_valid_query(self):
+        """Verify SQL validate endpoint accepts valid SELECT."""
+        client = _get_pytest_client()
+        r = client.post("/api/sql/validate", json={"query": "SELECT 1"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data.get("valid") is True, f"Expected valid=True: {data}"
+
+    def test_sql_validate_rejects_drop(self):
+        """Verify SQL validate endpoint rejects DROP TABLE."""
+        client = _get_pytest_client()
+        r = client.post("/api/sql/validate", json={"query": "DROP TABLE users"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data.get("valid") is False, f"Expected valid=False: {data}"
+
+    # -- Concurrent upload stress --
+
+    def test_concurrent_upload_stress_5x(self):
+        """Stress: 5 concurrent in-memory CSV uploads to test server stability."""
+        client = _get_pytest_client()
+        dataset_ids: List[str] = []
+
+        def _upload_one(idx: int) -> Optional[str]:
+            csv = f"x,y,z\n"
+            for j in range(500):
+                csv += f"{idx}_{j},{j * idx},{j % 3}\n"
+            r = client.post(
+                "/api/datasets/upload",
+                files={"file": (f"concurrent_{idx}.csv",
+                                io.BytesIO(csv.encode()))},
+                timeout=UPLOAD_TIMEOUT,
+            )
+            if r.status_code in (200, 202):
+                return r.json().get("dataset_id")
+            return None
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = [pool.submit(_upload_one, i) for i in range(5)]
+            for f in as_completed(futures):
+                did = f.result()
+                if did:
+                    dataset_ids.append(did)
+
+        assert len(dataset_ids) >= 3, \
+            f"Only {len(dataset_ids)}/5 concurrent uploads succeeded"
+
+        # Wait and cleanup
+        for did in dataset_ids:
+            client.wait_for_ready(did, timeout=120)
+            client.delete(f"/api/datasets/{did}")
+
+    # -- Memory/timeout resilience --
+
+    def test_server_no_500_on_malformed_large_csv(self):
+        """Negative: Server should not 500 on a 10MB CSV with malformed rows."""
+        client = _get_pytest_client()
+        buf = io.BytesIO()
+        buf.write(b"a,b,c\n")
+        # Rows with inconsistent column counts
+        for i in range(100_000):
+            if i % 3 == 0:
+                buf.write(f"{i},{i+1},{i+2}\n".encode())
+            elif i % 3 == 1:
+                buf.write(f"{i},{i+1}\n".encode())      # missing column
+            else:
+                buf.write(f"{i},{i+1},{i+2},{i+3}\n".encode())  # extra column
+        buf.seek(0)
+
+        r = client.post(
+            "/api/datasets/upload",
+            files={"file": ("malformed_10mb.csv", buf)},
+            timeout=120,
+        )
+        # Should either accept or reject gracefully — NOT 500
+        assert r.status_code != 500, f"Server returned 500: {r.text[:300]}"
+
+        if r.status_code in (200, 202):
+            did = r.json().get("dataset_id")
+            if did:
+                # Even if processing fails, it should fail gracefully
+                status = client.wait_for_ready(did, timeout=120)
+                assert status in ("ready", "error", "failed"), \
+                    f"Unexpected status for malformed CSV: {status}"
+                client.delete(f"/api/datasets/{did}")
+
+    # -- Path traversal protection (BQ-108) --
+
+    def test_batch_path_traversal_blocked(self):
+        """BQ-108: Batch upload with path traversal in paths should be rejected."""
+        client = _get_pytest_client()
+        csv_data = b"a,b\n1,2\n"
+        r = client.post(
+            "/api/datasets/batch",
+            files=[("files", ("evil.csv", io.BytesIO(csv_data)))],
+            data={"mode": "preview",
+                  "paths": json.dumps(["../../etc/passwd"])},
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code == 422, \
+            f"Expected 422 for path traversal, got {r.status_code}: {r.text[:300]}"
+
+    def test_batch_null_byte_blocked(self):
+        """Batch upload with null byte in paths should be rejected."""
+        client = _get_pytest_client()
+        csv_data = b"a,b\n1,2\n"
+        r = client.post(
+            "/api/datasets/batch",
+            files=[("files", ("safe.csv", io.BytesIO(csv_data)))],
+            data={"mode": "preview",
+                  "paths": json.dumps(["file\x00.csv"])},
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code == 422, \
+            f"Expected 422 for null byte in path, got {r.status_code}: {r.text[:300]}"
+
+    def test_upload_traversal_filename(self):
+        """Single upload with path traversal in filename should be rejected."""
+        client = _get_pytest_client()
+        csv_data = b"a,b\n1,2\n"
+        r = client.post(
+            "/api/datasets/upload",
+            files={"file": ("../../../etc/passwd.csv", io.BytesIO(csv_data))},
+            headers=client.headers,
+            timeout=REQUEST_TIMEOUT,
+        )
+        assert r.status_code == 422, \
+            f"Expected 422 for traversal filename, got {r.status_code}: {r.text[:300]}"
 
     # -- Helpers --
 

@@ -17,6 +17,8 @@ from anthropic import (
 )
 from typing import AsyncGenerator, Optional, Dict, Any
 
+import os
+
 from app.config import settings
 from .base import BaseLLMProvider, LLMProviderError, RateLimitError, AuthenticationError
 
@@ -42,14 +44,21 @@ class AnthropicProvider(BaseLLMProvider):
     """
 
     def __init__(self):
-        if not settings.anthropic_api_key:
+        # Prefer VECTORAIZ_ANTHROPIC_API_KEY (user BYO key via pydantic-settings),
+        # fall back to ANTHROPIC_API_KEY (platform key for allAI).
+        api_key = settings.anthropic_api_key or os.environ.get("ANTHROPIC_API_KEY")
+        if not api_key:
             raise AuthenticationError(
-                "Anthropic API key not found. Set VECTORAIZ_ANTHROPIC_API_KEY in environment.",
+                "Anthropic API key not found. Set ANTHROPIC_API_KEY or VECTORAIZ_ANTHROPIC_API_KEY in environment.",
                 provider="anthropic",
             )
 
-        self.client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-        self.model_name = settings.llm_model or DEFAULT_MODEL
+        self.client = AsyncAnthropic(api_key=api_key)
+        # Only use settings.llm_model if it's a valid Anthropic model
+        if settings.llm_model and settings.llm_model in SUPPORTED_MODELS:
+            self.model_name = settings.llm_model
+        else:
+            self.model_name = DEFAULT_MODEL
 
     async def generate(
         self,

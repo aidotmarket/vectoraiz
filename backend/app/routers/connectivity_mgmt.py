@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 
 from app.auth.api_key_auth import AuthenticatedUser, get_current_user
 from app.config import settings
+from app.services.serial_metering import metered, MeterDecision
 from app.models.connectivity import VALID_SCOPES
 from app.services.connectivity_metrics import get_connectivity_metrics
 from app.services.connectivity_setup_generator import ConnectivitySetupGenerator, SUPPORTED_PLATFORMS
@@ -167,7 +168,7 @@ async def connectivity_status(user: AuthenticatedUser = Depends(get_current_user
     "/enable",
     summary="Enable external connectivity",
 )
-async def connectivity_enable(user: AuthenticatedUser = Depends(get_current_user)):
+async def connectivity_enable(user: AuthenticatedUser = Depends(get_current_user), _meter: MeterDecision = Depends(metered("setup"))):
     was_enabled = settings.connectivity_enabled
     settings.connectivity_enabled = True
     return {
@@ -260,6 +261,7 @@ async def connectivity_revoke_token(
 async def connectivity_test_token(
     body: TestRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     # NOTE: This endpoint is admin-only, protected by session auth (get_current_user).
     # On self-hosted instances, only authenticated admin users can invoke token testing.
@@ -318,6 +320,7 @@ async def connectivity_test_token(
 async def connectivity_generate_setup(
     body: SetupRequest,
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     if body.platform not in SUPPORTED_PLATFORMS:
         raise HTTPException(

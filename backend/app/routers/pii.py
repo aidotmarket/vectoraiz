@@ -18,6 +18,7 @@ from app.services.pii_service import (
 )
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.services.processing_service import get_processing_service, ProcessingService, ProcessingStatus
+from app.services.serial_metering import metered, MeterDecision
 
 router = APIRouter()
 
@@ -84,6 +85,7 @@ async def scan_dataset(
     processing: ProcessingService = Depends(get_processing_service),
     pii_service: PIIService = Depends(get_pii_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Scan a dataset for PII.
@@ -277,6 +279,7 @@ async def scrub_dataset(
     processing: ProcessingService = Depends(get_processing_service),
     pii_service: PIIService = Depends(get_pii_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("setup")),
 ):
     """
     Scrub PII from a dataset using the specified strategy.

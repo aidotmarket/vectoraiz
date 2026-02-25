@@ -197,8 +197,8 @@ export function useDatasetStatus(id: string, pollInterval = 2000) {
           setStatus(res.status);
           if (res.error) setError(res.error);
           
-          // Stop polling when done
-          if (res.status === 'ready' || res.status === 'error') {
+          // Stop polling when done or awaiting user action
+          if (res.status === 'ready' || res.status === 'error' || res.status === 'preview_ready' || res.status === 'cancelled') {
             return;
           }
         }

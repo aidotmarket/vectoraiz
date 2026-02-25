@@ -11,6 +11,9 @@ Created: S136
 """
 
 import argparse
+import os
+os.environ["TQDM_DISABLE"] = "1"  # Suppress progress bars on stdio
+os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 import asyncio
 import json
 import logging
@@ -149,6 +152,8 @@ async def vectoraiz_sql(sql: str, dataset_id: str = "") -> str:
 
 
 def main():
+    # Force all logging to stderr so stdout stays clean for JSON-RPC
+    logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
     global _token_raw
 
     if not MCP_AVAILABLE:

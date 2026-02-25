@@ -68,7 +68,7 @@ export interface ApiDataset {
   id: string;
   original_filename: string;
   file_type: string;
-  status: 'uploading' | 'processing' | 'ready' | 'error';
+  status: 'uploaded' | 'extracting' | 'preview_ready' | 'indexing' | 'ready' | 'cancelled' | 'error' | 'uploading' | 'processing';
   error?: string;
   created_at: string;
   updated_at: string;
@@ -247,6 +247,122 @@ export interface SearchSuggestResponse {
   }[];
 }
 
+// BQ-109: Dataset preview types
+export interface DatasetPreviewResponse {
+  dataset_id: string;
+  status: string;
+  file: {
+    original_filename: string;
+    file_type: string;
+    size_bytes: number;
+    encoding?: string;
+  } | null;
+  preview: {
+    text?: string;
+    kind: string;
+    row_count_estimate: number;
+    column_count: number;
+    schema: Array<{ name: string; type: string }>;
+    sample_rows: Record<string, unknown>[];
+  } | null;
+  warnings?: string[];
+  actions?: {
+    confirm_url: string;
+    cancel_url: string;
+  };
+  error_message?: string;
+}
+
+// BQ-107: LLM Admin types
+export interface LLMModelInfo {
+  id: string;
+  name: string;
+  context: number;
+  tier: string;
+}
+
+export interface LLMProviderInfo {
+  id: string;
+  name: string;
+  models: LLMModelInfo[];
+  key_prefix: string;
+  docs_url: string;
+}
+
+export interface LLMProvidersResponse {
+  providers: LLMProviderInfo[];
+}
+
+export interface LLMSettingsResponse {
+  provider: string;
+  model: string;
+  display_name?: string;
+  key_hint?: string;
+  is_active: boolean;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  total_requests: number;
+  total_tokens: number;
+}
+
+export interface LLMSettingsListResponse {
+  configured: boolean;
+  active_provider?: string;
+  providers: LLMSettingsResponse[];
+}
+
+export interface LLMTestResponse {
+  ok: boolean;
+  provider: string;
+  model?: string;
+  latency_ms?: number;
+  message: string;
+  error_code?: string;
+}
+
+// BQ-108: Batch upload types
+export interface BatchItemAccepted {
+  client_file_index: number;
+  original_filename: string;
+  relative_path?: string;
+  size_bytes: number;
+  status: 'accepted';
+  dataset_id: string;
+  preview_url: string;
+  status_url: string;
+}
+
+export interface BatchItemRejected {
+  client_file_index: number;
+  original_filename: string;
+  status: 'rejected';
+  error_code: string;
+  error: string;
+}
+
+export type BatchItem = BatchItemAccepted | BatchItemRejected;
+
+export interface BatchUploadResponse {
+  batch_id: string;
+  accepted: number;
+  rejected: number;
+  items: BatchItem[];
+}
+
+export interface BatchStatusItem {
+  dataset_id: string;
+  original_filename: string;
+  status: string;
+  size_bytes: number;
+}
+
+export interface BatchStatusResponse {
+  batch_id: string;
+  total: number;
+  by_status: Record<string, number>;
+  items: BatchStatusItem[];
+}
+
 // Dataset API
 export class DuplicateFileError extends Error {
   existingDataset: { id: string; filename: string; status: string; created_at: string };
@@ -259,7 +375,7 @@ export class DuplicateFileError extends Error {
 
 export const datasetsApi = {
   list: () => apiFetch<DatasetListResponse>('/api/datasets'),
-  
+
   get: (id: string) => apiFetch<ApiDataset>(`/api/datasets/${id}`),
   
   upload: async (file: File, options?: { allowDuplicate?: boolean }): Promise<UploadResponse> => {
@@ -316,6 +432,49 @@ export const datasetsApi = {
   
   getStatus: (id: string) =>
     apiFetch<DatasetStatusResponse>(`/api/datasets/${id}/status`),
+
+  getPreview: (id: string) =>
+    apiFetch<DatasetPreviewResponse>(`/api/datasets/${id}/preview`),
+
+  confirm: (id: string) =>
+    apiFetch<{ dataset_id: string; status: string }>(`/api/datasets/${id}/confirm`, { method: 'POST' }),
+
+  // BQ-108: Batch upload
+  batchUpload: async (files: File[], paths?: string[]): Promise<BatchUploadResponse> => {
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    if (paths) {
+      formData.append('paths', JSON.stringify(paths));
+    }
+
+    const headers: Record<string, string> = {};
+    const apiKey = getStoredApiKey();
+    if (apiKey) {
+      headers['X-API-Key'] = apiKey;
+    }
+
+    const response = await fetch(`${getApiUrl()}/api/datasets/batch`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+
+    if (response.status === 401) {
+      localStorage.removeItem('vectoraiz_api_key');
+    }
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({ detail: 'Batch upload failed' }));
+      throw new Error(error.detail);
+    }
+
+    return response.json();
+  },
+
+  getBatchStatus: (batchId: string) =>
+    apiFetch<BatchStatusResponse>(`/api/datasets/batch/${batchId}`),
 };
 
 // Search API
@@ -459,4 +618,33 @@ export const authApi = {
     apiFetch<{ message: string }>(`/api/auth/keys/${keyId}`, {
       method: 'DELETE',
     }),
+};
+
+// BQ-107: LLM Admin API
+export const llmAdminApi = {
+  getProviders: () =>
+    apiFetch<LLMProvidersResponse>('/api/admin/llm/providers'),
+
+  getSettings: () =>
+    apiFetch<LLMSettingsListResponse>('/api/admin/llm/settings'),
+
+  putSettings: (provider: string, apiKey: string, model: string) =>
+    apiFetch<LLMSettingsResponse>('/api/admin/llm/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ provider, api_key: apiKey, model, set_active: true }),
+    }),
+
+  deleteSettings: (provider: string) =>
+    apiFetch<{ message: string }>(`/api/admin/llm/settings/${provider}`, {
+      method: 'DELETE',
+    }),
+
+  testConnection: (provider: string) =>
+    apiFetch<LLMTestResponse>('/api/admin/llm/test', {
+      method: 'POST',
+      body: JSON.stringify({ provider }),
+    }),
+
+  getStatus: () =>
+    apiFetch<{ configured: boolean; active_provider?: string; status: string }>('/api/admin/llm/status'),
 };

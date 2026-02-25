@@ -39,7 +39,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, ValidationError
 from sqlmodel import Session as DBSession, select
 
@@ -53,6 +53,13 @@ from app.models.state import (
 )
 from app.services.metering_service import metering_service
 from app.services.copilot_service import copilot_service
+from app.services.serial_metering import (
+    metered, MeterDecision, MeteringStrategy, CreditExhaustedException, ActivationRequiredException, UnprovisionedException,
+    SerialMeteringStrategy, LedgerMeteringStrategy,
+    _make_request_id, DEFAULT_DATA_COST, DEFAULT_SETUP_COST,
+    classify_copilot_category,
+)
+from app.services.serial_store import get_serial_store, MIGRATED
 from app.services.allie_provider import AllieDisabledError
 from app.services.nudge_manager import nudge_manager, NudgeMessage
 from app.services.confirmation_service import confirmation_service
@@ -810,6 +817,32 @@ async def websocket_copilot(websocket: WebSocket):
             state_snapshot = manager.get_state_snapshot(sid)
             user_prefs = _get_user_preferences_dict(session_user.user_id)
 
+            # Load conversation history (last 20 messages = ~10 turns)
+            chat_history: list[dict[str, str]] = []
+            try:
+                from app.core.database import get_legacy_session_context
+                with get_legacy_session_context() as hist_db:
+                    chat_session = _get_or_create_chat_session(session_user.user_id, hist_db)
+                    hist_stmt = (
+                        select(Message)
+                        .where(Message.session_id == chat_session.id)
+                        .where(Message.kind == MessageKind.CHAT)
+                        .order_by(Message.created_at.asc())
+                    )
+                    all_msgs = hist_db.exec(hist_stmt).all()
+                    # Take last 20 messages, but exclude the very last one if it's
+                    # the user message we just persisted (it gets added fresh via user_content)
+                    recent = all_msgs[-21:]  # grab 21 so we can drop the trailing user msg
+                    for m in recent:
+                        chat_history.append({"role": m.role, "content": m.content})
+                    # Drop the trailing user message (just persisted above)
+                    if chat_history and chat_history[-1]["role"] == MessageRole.USER:
+                        chat_history.pop()
+                    # Cap at 20
+                    chat_history = chat_history[-20:]
+            except Exception as hist_err:
+                logger.warning("Failed to load chat history: session=%s err=%s", sid, hist_err)
+
             # Intro behavior: check DB first, then in-memory cache
             if not manager.get_intro_seen(sid):
                 # Load from DB on first check (survives restarts)
@@ -838,6 +871,7 @@ async def websocket_copilot(websocket: WebSocket):
                         user_preferences=user_prefs,
                         is_first_message=is_first,
                         attachments=attachments,
+                        chat_history=chat_history,
                     )
                 except (AllieDisabledError, asyncio.CancelledError):
                     raise
@@ -856,6 +890,7 @@ async def websocket_copilot(websocket: WebSocket):
                         user_preferences=user_prefs,
                         is_first_message=is_first,
                         attachments=attachments,
+                        chat_history=chat_history,
                     )
             else:
                 # No Anthropic key — use classic streaming path
@@ -869,6 +904,7 @@ async def websocket_copilot(websocket: WebSocket):
                     user_preferences=user_prefs,
                     is_first_message=is_first,
                     attachments=attachments,
+                    chat_history=chat_history,
                 )
 
             # Mark intro as seen after first successful response (memory + DB)
@@ -1187,6 +1223,46 @@ async def websocket_copilot(websocket: WebSocket):
                 # Balance gate only applies if running with local LLM keys + local billing
                 pass  # BQ-128: balance enforcement moved to ai.market proxy layer
 
+                # BQ-VZ-SERIAL-CLIENT: Serial metering check before LLM call
+                # Dual-category: classify based on active_view from frontend
+                try:
+                    store = get_serial_store()
+                    _active_view = data.get("active_view")
+                    _meter_category = classify_copilot_category(_active_view)
+                    _meter_cost = DEFAULT_SETUP_COST if _meter_category == "setup" else DEFAULT_DATA_COST
+                    if store.state.state == MIGRATED:
+                        _strategy = LedgerMeteringStrategy()
+                    else:
+                        _strategy = SerialMeteringStrategy(store)
+                    _req_id = _make_request_id(store.state.serial, "ws:brain_msg")
+                    await _strategy.check_and_meter(_meter_category, _meter_cost, _req_id)
+                except CreditExhaustedException as cex:
+                    register_url = f"https://ai.market/register?serial={cex.serial}" if cex.serial else "https://ai.market/register"
+                    await safe_send_json(websocket, {
+                        "type": "CREDIT_WALL",
+                        "category": cex.category,
+                        "message": f"You've used your free {cex.category} credits. Add a payment method to continue.",
+                        "setup_remaining_usd": cex.setup_remaining_usd,
+                        "register_url": register_url,
+                    })
+                    continue
+                except ActivationRequiredException as aex:
+                    await safe_send_json(websocket, {
+                        "type": "ERROR",
+                        "message": str(aex),
+                        "code": "ACTIVATION_REQUIRED",
+                    })
+                    continue
+                except UnprovisionedException as uex:
+                    await safe_send_json(websocket, {
+                        "type": "ERROR",
+                        "message": str(uex),
+                        "code": "UNPROVISIONED",
+                    })
+                    continue
+                except Exception as meter_exc:
+                    logger.debug("Serial metering check failed (allowing): %s", meter_exc)
+
                 if session_user is None:
                     await safe_send_json(websocket, {
                         "type": "ERROR",
@@ -1436,6 +1512,7 @@ class BrainMessageRequest(BaseModel):
     message: str
     session_id: str = ""
     message_id: Optional[str] = None
+    active_view: Optional[str] = None  # BQ-VZ-SERIAL-CLIENT: dual-category classification
 
 
 class BrainMessageResponse(BaseModel):
@@ -1467,6 +1544,7 @@ class BrainMessageResponse(BaseModel):
 )
 async def brain_message(
     request: BrainMessageRequest,
+    http_request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """
@@ -1476,6 +1554,17 @@ async def brain_message(
     Returns 402 with 'Purchase credits to use Co-Pilot' if balance
     is zero or insufficient.
     """
+    # BQ-VZ-SERIAL-CLIENT: dual-category serial metering
+    store = get_serial_store()
+    _cat = classify_copilot_category(request.active_view)
+    _cost = DEFAULT_SETUP_COST if _cat == "setup" else DEFAULT_DATA_COST
+    if store.state.state == MIGRATED:
+        _strat: MeteringStrategy = LedgerMeteringStrategy()
+    else:
+        _strat = SerialMeteringStrategy(store)
+    _rid = _make_request_id(store.state.serial, f"POST:/api/copilot/brain")
+    await _strat.check_and_meter(_cat, _cost, _rid)
+
     # Pre-flight balance check
     total_balance = (user.balance_cents or 0) + (user.free_trial_remaining_cents or 0)
     balance_check = metering_service.check_balance(total_balance)
@@ -1487,12 +1576,18 @@ async def brain_message(
         )
 
     # Process through CoPilotService (LLM call + usage report)
-    response_text, report = await copilot_service.process_message_metered(
-        user=user,
-        message=request.message,
-        session_id=request.session_id,
-        message_id=request.message_id,
-    )
+    try:
+        response_text, report = await copilot_service.process_message_metered(
+            user=user,
+            message=request.message,
+            session_id=request.session_id,
+            message_id=request.message_id,
+        )
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=501,
+            detail="CoPilot coming soon — use the streaming or agentic endpoints",
+        )
 
     new_balance = report.new_balance_cents if report else total_balance
     cost = report.cost_cents if report else 0

@@ -99,32 +99,16 @@ class CoPilotService:
                 detail="Purchase credits to use Co-Pilot",
             )
 
-        # 2. Call LLM (Stub for now)
-        # TODO: Integrate with actual ClaudeProvider (BQ-072 Brain)
-        response_text = f"I received your message: {message}. (This is a metered response)"
-
-        # Mock token counts (to be replaced with actual Claude usage)
-        input_tokens = len(message) // 4
-        output_tokens = len(response_text) // 4
-
-        # 3. Post-flight usage report
-        report = await metering_service.report_usage(
-            user_id=user.user_id,
-            service="copilot",
-            model="claude-sonnet-4-20250514",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            session_id=session_id,
-            message_id=message_id,
+        # Legacy method — CoPilot integration not available in beta.
+        # Streaming (process_message_streaming) and agentic
+        # (process_message_agentic) paths are the active interfaces.
+        logger.warning(
+            "process_message() called but CoPilot legacy path is not implemented. "
+            "user=%s session=%s", user.user_id, session_id,
         )
-
-        if not report.allowed:
-            logger.warning(
-                f"User {user.user_id} ran out of credits during request. "
-                f"Completing current response but next request will be blocked."
-            )
-
-        return response_text
+        raise NotImplementedError(
+            "CoPilot integration pending — not available in beta"
+        )
 
     async def process_message_metered(
         self,
@@ -159,43 +143,16 @@ class CoPilotService:
             asyncio.CancelledError: If the task is cancelled (e.g. STOP).
               Propagated to caller so no partial results are sent.
         """
-        # Call LLM (Stub for now)
-        # TODO: Integrate with actual ClaudeProvider (BQ-072 Brain)
-        # In real implementation:
-        #   response_text, usage = await brain.generate(message)
-        #   input_tokens = usage.input_tokens
-        #   output_tokens = usage.output_tokens
-        response_text = f"I received your message: {message}. (This is a metered response)"
-
-        # Mock token counts (to be replaced with actual Claude usage)
-        input_tokens = len(message) // 4
-        output_tokens = len(response_text) // 4
-
-        # Check for cancellation before reporting usage — no charge if STOP arrived
-        # during LLM call (before we report). This is the CancelledError checkpoint.
-        await asyncio.sleep(0)  # yield to event loop, allow cancel to fire
-
-        # Post-flight usage report — always report, even if balance will go negative
-        # (current response already completed; this is the mid-stream depletion rule)
-        # NOTE: If cancelled AFTER this point, usage was already reported (acceptable).
-        report = await metering_service.report_usage(
-            user_id=user.user_id,
-            service="copilot",
-            model="claude-sonnet-4-20250514",
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            session_id=session_id,
-            message_id=message_id,
+        # Legacy metered method — CoPilot integration not available in beta.
+        # Streaming (process_message_streaming) and agentic
+        # (process_message_agentic) paths are the active interfaces.
+        logger.warning(
+            "process_message_metered() called but CoPilot legacy path is not "
+            "implemented. user=%s session=%s", user.user_id, session_id,
         )
-
-        if not report.allowed:
-            logger.warning(
-                f"User {user.user_id} balance depleted after request. "
-                f"Response delivered, next request will be blocked. "
-                f"new_balance={report.new_balance_cents}¢ cost={report.cost_cents}¢"
-            )
-
-        return response_text, report
+        raise NotImplementedError(
+            "CoPilot integration pending — not available in beta"
+        )
 
     async def process_message_streaming(
         self,
@@ -208,6 +165,7 @@ class CoPilotService:
         user_preferences: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         attachments: Optional[list[ChatAttachment]] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Tuple[str, Optional[AllieUsage]]:
         """
         Stream a metered Co-Pilot response (BQ-128 Phase 1+2).
@@ -271,7 +229,7 @@ class CoPilotService:
         usage: Optional[AllieUsage] = None
 
         try:
-            async for chunk in provider.stream(clean_message, context=system_prompt, attachments=attachments):
+            async for chunk in provider.stream(clean_message, context=system_prompt, attachments=attachments, chat_history=chat_history):
                 if chunk.text:
                     full_text += chunk.text
                     await send_chunk(chunk.text)
@@ -300,6 +258,7 @@ class CoPilotService:
         user_preferences: Optional[Dict[str, Any]] = None,
         is_first_message: bool = False,
         attachments: Optional[list[ChatAttachment]] = None,
+        chat_history: Optional[List[Dict[str, str]]] = None,
     ) -> Tuple[str, Optional[AllieUsage]]:
         """
         Agentic Co-Pilot response with tool use (BQ-ALLAI-B).
@@ -373,7 +332,13 @@ class CoPilotService:
         # BQ-ALLAI-FILES: Build user message content with attachments
         provider = get_allie_provider()
         user_content = _build_user_content(clean_message, attachments, supports_vision=provider.supports_vision)
-        messages = [{"role": "user", "content": user_content}]
+
+        # Build messages from conversation history + current message
+        messages = []
+        if chat_history:
+            for msg in chat_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": user_content})
 
         try:
             agentic_text, usage = await agentic_provider.run_agentic_loop(

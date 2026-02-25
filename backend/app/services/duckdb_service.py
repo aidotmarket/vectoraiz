@@ -1,4 +1,5 @@
 import duckdb
+import logging
 import os
 import re
 from pathlib import Path
@@ -6,9 +7,12 @@ from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
 
 import pandas as pd
+import pyarrow.parquet as pq
 
 from app.config import settings
 from app.utils.sanitization import sql_quote_literal
+
+_log = logging.getLogger(__name__)
 
 
 class DuckDBService:
@@ -139,8 +143,70 @@ class DuckDBService:
         
         return sorted(datasets, key=lambda x: x.get("created_at", ""), reverse=True)
     
+    # ------------------------------------------------------------------
+    # M6: Arrow-based Parquet metadata (zero I/O for row count + schema)
+    # ------------------------------------------------------------------
+
+    def get_parquet_metadata_arrow(self, filepath: Path) -> Dict[str, Any]:
+        """Extract metadata from a Parquet file using PyArrow metadata only.
+
+        BQ-VZ-LARGE-FILES M6: Avoids full-scan COUNT(*) and DESCRIBE.
+        - Row count from parquet_file.metadata.num_rows (zero I/O)
+        - Schema from parquet_file.schema_arrow (metadata only)
+        """
+        pf = pq.ParquetFile(str(filepath))
+        parquet_meta = pf.metadata
+        arrow_schema = pf.schema_arrow
+
+        row_count = parquet_meta.num_rows
+        columns = [
+            {
+                "name": arrow_schema.field(i).name,
+                "type": str(arrow_schema.field(i).type),
+                "nullable": arrow_schema.field(i).nullable,
+            }
+            for i in range(len(arrow_schema))
+        ]
+
+        file_stat = filepath.stat()
+        return {
+            "id": filepath.stem,
+            "filename": filepath.name,
+            "filepath": str(filepath),
+            "file_type": "parquet",
+            "row_count": row_count,
+            "column_count": len(columns),
+            "columns": columns,
+            "size_bytes": file_stat.st_size,
+            "created_at": datetime.fromtimestamp(file_stat.st_ctime).isoformat(),
+            "modified_at": datetime.fromtimestamp(file_stat.st_mtime).isoformat(),
+            "status": "ready",
+            "num_row_groups": parquet_meta.num_row_groups,
+        }
+
+    def get_parquet_sample_arrow(self, filepath: Path, limit: int = 10) -> List[Dict[str, Any]]:
+        """Sample rows from Parquet using first row group only.
+
+        BQ-VZ-LARGE-FILES M6: Never reads full file. Uses
+        pf.read_row_group(0) for preview.
+        """
+        pf = pq.ParquetFile(str(filepath))
+        if pf.metadata.num_row_groups == 0:
+            return []
+
+        table = pf.read_row_group(0)
+        # Slice to limit
+        if table.num_rows > limit:
+            table = table.slice(0, limit)
+
+        return table.to_pydict()  # Returns {col: [values]}
+
     def get_file_metadata(self, filepath: Path) -> Dict[str, Any]:
-        """Extract metadata from a data file using DuckDB. Results are cached by filepath+mtime."""
+        """Extract metadata from a data file. Results are cached by filepath+mtime.
+
+        BQ-VZ-LARGE-FILES M6: For Parquet files, uses Arrow metadata
+        (zero I/O for row count + schema) instead of DuckDB COUNT(*)/DESCRIBE.
+        """
         file_type = self.detect_file_type(filepath)
         if not file_type:
             raise ValueError(f"Unsupported file type: {filepath.suffix}")
@@ -154,6 +220,18 @@ class DuckDBService:
             cached_mtime, cached_result = self._metadata_cache[cache_key]
             if cached_mtime == mtime:
                 return cached_result
+
+        # M6: Use Arrow metadata for Parquet (avoids full scan)
+        if file_type == "parquet":
+            try:
+                result = self.get_parquet_metadata_arrow(filepath)
+                self._metadata_cache[cache_key] = (mtime, result)
+                return result
+            except Exception as e:
+                _log.warning(
+                    "Arrow metadata extraction failed for %s, falling back to DuckDB: %s",
+                    filepath, e,
+                )
 
         read_func = self.get_read_function(file_type, str(filepath))
 
@@ -293,8 +371,9 @@ class DuckDBService:
             col_name = col_info[0]
             col_type = col_info[1]
 
-            # Escape column name for SQL
-            escaped_col = f'"{col_name}"'
+            # Escape column name for SQL (double any embedded quotes)
+            safe_name = col_name.replace('"', '""')
+            escaped_col = f'"{safe_name}"'
 
             # Get column statistics in a single query
             stats_query = f"""
@@ -564,6 +643,34 @@ class DuckDBService:
         finally:
             self.connection.unregister('_tmp_parquet_write')
     
+    # ------------------------------------------------------------------
+    # M5: DuckDB disk-spill cleanup on dataset deletion
+    # ------------------------------------------------------------------
+
+    def cleanup_dataset_temp(self, dataset_id: str) -> None:
+        """Remove temp/spill files for a deleted dataset.
+
+        BQ-VZ-LARGE-FILES M5: Ensures disk-spill artifacts are cleaned up
+        when a dataset is deleted.
+        """
+        temp_dir = Path(settings.data_directory) / "temp"
+        if not temp_dir.exists():
+            return
+        # DuckDB spill files are named with connection-specific prefixes,
+        # not dataset IDs. Clean up any orphaned files that are stale.
+        try:
+            import time
+            stale_threshold = time.time() - 3600  # 1 hour
+            for f in temp_dir.iterdir():
+                if f.is_file() and f.stat().st_mtime < stale_threshold:
+                    try:
+                        f.unlink()
+                        _log.debug("Cleaned up stale temp file: %s", f)
+                    except OSError:
+                        pass
+        except Exception as e:
+            _log.warning("Temp cleanup failed: %s", e)
+
     def close(self):
         """Close the DuckDB connection."""
         if self._connection:

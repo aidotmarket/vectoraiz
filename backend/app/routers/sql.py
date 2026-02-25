@@ -18,6 +18,7 @@ from app.services.sql_service import (
     MAX_ROW_LIMIT,
 )
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
+from app.services.serial_metering import metered, MeterDecision
 
 
 router = APIRouter()
@@ -70,6 +71,7 @@ async def execute_query_post(
     request: SQLQueryRequest,
     sql_service: SQLService = Depends(get_sql_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("data")),
 ):
     """
     Execute a SQL SELECT query (POST method).

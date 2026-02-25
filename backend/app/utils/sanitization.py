@@ -1,4 +1,5 @@
 """Filename and path sanitization utilities for secure file handling."""
+from __future__ import annotations
 
 import re
 from pathlib import Path
@@ -49,6 +50,22 @@ def sanitize_filename(original: str) -> str:
         name = stem[:max_stem] + suffix
 
     return name
+
+
+def validate_path_traversal(value: str) -> str | None:
+    """Check a user-supplied path or filename for path traversal attacks.
+
+    Returns an error message string if the value is unsafe, or None if safe.
+    """
+    if "\x00" in value:
+        return "contains null bytes"
+    if ".." in value:
+        return "contains path traversal sequence '..'"
+    if value.startswith("/"):
+        return "absolute paths are not allowed"
+    if value.startswith("./"):
+        return "contains current-directory prefix './'"
+    return None
 
 
 def sql_quote_literal(path: str) -> str:

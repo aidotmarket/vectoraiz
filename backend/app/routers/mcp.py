@@ -33,5 +33,8 @@ def mount_mcp_sse(app: FastAPI) -> None:
         logger.warning("MCP SDK not available — SSE transport not mounted")
         return
 
-    app.mount("/mcp", mcp_server.asgi)
+    try:
+        app.mount("/mcp", mcp_server.asgi)
+    except (AttributeError, Exception) as e:
+        logger.warning("MCP SSE mount failed (SDK version mismatch?): %s", e)
     logger.info("MCP SSE transport mounted at /mcp/sse and /mcp/messages")

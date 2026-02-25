@@ -83,6 +83,7 @@ class BaseAllieProvider:
 
     async def stream(
         self, message: str, context: Optional[str] = None, attachments: Optional[list] = None,
+        chat_history: Optional[list] = None,
     ) -> AsyncIterator[AllieStreamChunk]:
         """Stream a response token-by-token. Final chunk has done=True and usage set."""
         raise NotImplementedError
@@ -115,6 +116,7 @@ class MockAllieProvider(BaseAllieProvider):
 
     async def stream(
         self, message: str, context: Optional[str] = None, attachments: Optional[list] = None,
+        chat_history: Optional[list] = None,
     ) -> AsyncIterator[AllieStreamChunk]:
         """Stream mock response word-by-word."""
         response = self._pick_response(message)
@@ -160,11 +162,17 @@ class AiMarketAllieProvider(BaseAllieProvider):
 
     async def stream(
         self, message: str, context: Optional[str] = None, attachments: Optional[list] = None,
+        chat_history: Optional[list] = None,
     ) -> AsyncIterator[AllieStreamChunk]:
         """Stream response from ai.market Allie proxy via SSE."""
         messages = []
         if context:
             messages.append({"role": "user", "content": context})
+
+        # Inject conversation history before the current message
+        if chat_history:
+            for msg in chat_history:
+                messages.append({"role": msg["role"], "content": msg["content"]})
 
         # BQ-ALLAI-FILES: Build user content with attachment blocks
         if attachments:

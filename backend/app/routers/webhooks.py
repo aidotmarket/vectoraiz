@@ -25,11 +25,9 @@ async def railway_webhook(request: Request):
 
         data = json.loads(payload)
         event_type = data.get("type")
-        logger.info(f"Received Railway event: type={event_type}, data={data}")
+        logger.info("Received Railway webhook: type=%s payload=%s", event_type, data)
 
-        # TODO: Handle specific events, e.g., publish to event bus, update status, or log to allAI
-
-        return {"status": "ok"}
+        return {"status": "received", "message": "Webhook processing not yet implemented"}
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail="Invalid JSON")
     except Exception as e:

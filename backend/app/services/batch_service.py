@@ -238,12 +238,17 @@ class BatchService:
         }
 
     def confirm_batch(self, batch_id: str, user_id: str) -> Dict[str, Any]:
-        """Confirm all preview_ready datasets in a batch. Returns counts."""
+        """Confirm all preview_ready datasets in a batch. Returns counts.
+
+        Race-condition fix: items still in UPLOADED/EXTRACTING get confirmed_at
+        stamped so that process_dataset_task auto-indexes after extraction.
+        """
         from app.core.database import get_session_context
 
         confirmed = 0
         already = 0
         skipped_error = 0
+        pending_confirm = 0
 
         with get_session_context() as session:
             stmt = (
@@ -252,14 +257,26 @@ class BatchService:
             )
             rows = session.exec(stmt).all()
 
+            now = datetime.now(timezone.utc)
             for row in rows:
                 if row.status == DatasetStatus.PREVIEW_READY.value:
                     row.status = DatasetStatus.INDEXING.value
-                    row.confirmed_at = datetime.now(timezone.utc)
+                    row.confirmed_at = now
                     row.confirmed_by = user_id
-                    row.updated_at = datetime.now(timezone.utc)
+                    row.updated_at = now
                     session.add(row)
                     confirmed += 1
+                elif row.status in (
+                    DatasetStatus.UPLOADED.value,
+                    DatasetStatus.EXTRACTING.value,
+                ):
+                    # Still processing — stamp confirmed_at so the background
+                    # task auto-indexes when extraction completes.
+                    row.confirmed_at = now
+                    row.confirmed_by = user_id
+                    row.updated_at = now
+                    session.add(row)
+                    pending_confirm += 1
                 elif row.status in (
                     DatasetStatus.INDEXING.value,
                     DatasetStatus.READY.value,
@@ -284,6 +301,7 @@ class BatchService:
         return {
             "batch_id": batch_id,
             "confirmed": confirmed,
+            "pending_confirm": pending_confirm,
             "already_indexing_or_ready": already,
             "skipped_error": skipped_error,
             "confirmed_ids": confirmed_ids,

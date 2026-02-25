@@ -23,6 +23,11 @@ from app.core.log_middleware import CorrelationMiddleware
 from app.core.issue_tracker import issue_tracker
 from app.core.resource_guards import resource_monitor_loop, ensure_log_fallback
 from app.services.deduction_queue import deduction_queue
+from app.services.serial_metering import (
+    CreditExhaustedException,
+    ActivationRequiredException,
+    UnprovisionedException,
+)
 
 # BQ-127 (C5): Premium modules are NOT imported at module level.
 # DeviceCrypto, register_with_marketplace, stripe_connect_proxy,
@@ -35,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # API metadata
 API_TITLE = "vectorAIz API"
-API_VERSION = "1.2.0"  # BQ-127: Air-Gap Architecture
+API_VERSION = "1.4.0"  # BQ-127: Air-Gap Architecture
 
 # BQ-127 (§7): Mode-aware API descriptions
 API_DESCRIPTION_STANDALONE = """
@@ -228,6 +233,19 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Standalone mode — skipping device registration and marketplace connect.")
 
+    # BQ-D1: Trust Channel client + fulfillment service (connected mode only)
+    trust_channel_task = None
+    if settings.mode == "connected" and settings.internal_api_key:
+        from app.services.trust_channel_client import get_trust_channel_client
+        from app.services.fulfillment_service import get_fulfillment_service
+
+        tc_client = get_trust_channel_client()
+        get_fulfillment_service()  # Registers handler on creation
+        trust_channel_task = asyncio.create_task(tc_client.run())
+        logger.info("BQ-D1: Trust Channel client + fulfillment handler started")
+    elif settings.mode == "connected":
+        logger.warning("BQ-D1: Trust Channel skipped — no VECTORAIZ_INTERNAL_API_KEY")
+
     # BQ-110: Start queue processor with cancellation support
     queue_task = asyncio.create_task(queue_processor_loop())
 
@@ -242,6 +260,15 @@ async def lifespan(app: FastAPI):
             chat_attachment_service.cleanup_expired()
 
     attachment_cleanup_task = asyncio.create_task(_attachment_cleanup_loop())
+
+    # BQ-VZ-AUTO-UPDATE: Background update check (startup + every 6h)
+    from app.services.update_service import background_update_check_loop
+    update_check_task = asyncio.create_task(background_update_check_loop())
+
+    # BQ-VZ-SERIAL-CLIENT: Serial activation lifecycle
+    from app.services.activation_manager import get_activation_manager
+    _activation_mgr = get_activation_manager()
+    await _activation_mgr.startup()
 
     yield
 
@@ -265,12 +292,33 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    # BQ-VZ-AUTO-UPDATE: Cancel background update checker
+    update_check_task.cancel()
+    try:
+        await update_check_task
+    except asyncio.CancelledError:
+        pass
+
+    # BQ-VZ-SERIAL-CLIENT: Shutdown activation manager
+    await _activation_mgr.shutdown()
+
     # BQ-110: Cancel queue processor gracefully
     queue_task.cancel()
     try:
         await queue_task
     except asyncio.CancelledError:
         logger.info("Queue processor cancelled")
+
+    # BQ-D1: Stop Trust Channel client
+    if trust_channel_task is not None:
+        from app.services.trust_channel_client import get_trust_channel_client
+        await get_trust_channel_client().stop()
+        trust_channel_task.cancel()
+        try:
+            await trust_channel_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Trust Channel client stopped")
 
     # BQ-127: Only close stripe proxy in connected mode
     if settings.mode == "connected":
@@ -327,6 +375,36 @@ def create_app() -> FastAPI:
 
     # BQ-123A: Structured error handler for VectorAIzError
     app.add_exception_handler(VectorAIzError, vectoraiz_error_handler)
+
+    # BQ-VZ-SERIAL-CLIENT: Credit wall exception handlers
+    @app.exception_handler(CreditExhaustedException)
+    async def _credit_exhausted_handler(request: Request, exc: CreditExhaustedException):
+        register_url = f"https://ai.market/register?serial={exc.serial}" if exc.serial else "https://ai.market/register"
+        return JSONResponse(
+            status_code=402,
+            content={
+                "error": "data_credits_exhausted" if exc.category == "data" else "setup_credits_exhausted",
+                "message": f"You've used your free {exc.category} credits.",
+                "setup_remaining_usd": exc.setup_remaining_usd,
+                "data_remaining_usd": exc.remaining_usd,
+                "payment_enabled": exc.payment_enabled,
+                "register_url": register_url,
+            },
+        )
+
+    @app.exception_handler(ActivationRequiredException)
+    async def _activation_required_handler(request: Request, exc: ActivationRequiredException):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "activation_required", "message": str(exc)},
+        )
+
+    @app.exception_handler(UnprovisionedException)
+    async def _unprovisioned_handler(request: Request, exc: UnprovisionedException):
+        return JSONResponse(
+            status_code=403,
+            content={"error": "serial_required", "message": str(exc)},
+        )
 
     # Catch-all handler so unhandled exceptions return JSON (not bare text)
     @app.exception_handler(Exception)
@@ -391,6 +469,15 @@ def create_app() -> FastAPI:
         dependencies=protected_route_dependency,
     )
 
+    # BQ-VZ-DB-CONNECT: Database connectivity (always mounted, auth-protected)
+    from app.routers.database import router as database_router
+    app.include_router(
+        database_router,
+        prefix="/api/v1/db",
+        tags=["database"],
+        dependencies=protected_route_dependency,
+    )
+
     # BQ-128: Co-Pilot routers (REST + WebSocket) — always mounted
     from app.routers.copilot import router as copilot_rest_router, ws_router as copilot_ws_router
     app.include_router(
@@ -432,12 +519,46 @@ def create_app() -> FastAPI:
     else:
         logger.info("Standalone mode: premium routers NOT mounted")
 
+    # Website chat — public endpoint for vectoraiz.com chat widget (no auth)
+    from app.routers.website_chat import router as website_chat_router
+    app.include_router(
+        website_chat_router,
+        prefix="/api/website-chat",
+        tags=["website-chat"],
+    )
+
     # BQ-MCP-RAG Phase 3: Connectivity management endpoints (always mounted for Settings UI)
     from app.routers.connectivity_mgmt import router as connectivity_mgmt_router
     app.include_router(
         connectivity_mgmt_router,
         prefix="/api/connectivity",
         tags=["Connectivity Management"],
+        dependencies=protected_route_dependency,
+    )
+
+    # Feedback endpoint (admin, auth required)
+    from app.routers.feedback import router as feedback_router
+    app.include_router(
+        feedback_router,
+        prefix="/api",
+        tags=["feedback"],
+        dependencies=protected_route_dependency,
+    )
+
+    # BQ-VZ-AUTO-UPDATE: Version check + auto-update endpoints
+    from app.routers.version import router as version_router
+    app.include_router(
+        version_router,
+        prefix="/api",
+        tags=["version"],
+    )
+
+    # BQ-TUNNEL: Public URL tunnel management (always mounted, auth-protected)
+    from app.routers.tunnel import router as tunnel_router
+    app.include_router(
+        tunnel_router,
+        prefix="/api/tunnel",
+        tags=["tunnel"],
         dependencies=protected_route_dependency,
     )
 

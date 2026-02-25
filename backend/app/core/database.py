@@ -213,6 +213,9 @@ def init_db() -> None:
             "Legacy database init failed (non-fatal, sessions will not persist): %s", exc
         )
 
+    # Ensure feedback table model is registered for Alembic
+    from app.models.feedback import Feedback  # noqa: F401
+
     # --- BQ-111+ tables (managed by Alembic on DATABASE_URL) ---
     _run_alembic_upgrade()
 

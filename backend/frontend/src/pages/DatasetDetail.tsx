@@ -49,6 +49,7 @@ import {
 import { type ColumnSchema, type Dataset } from "@/data/mockDatasets";
 import { toast } from "@/hooks/use-toast";
 import PublishModal from "@/components/PublishModal";
+import DatasetPreview from "@/components/DatasetPreview";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useMode } from "@/contexts/ModeContext";
 
@@ -105,7 +106,10 @@ const mapApiDatasetToFrontend = (apiDataset: ApiDataset): Dataset => ({
   id: apiDataset.id,
   name: apiDataset.original_filename,
   type: apiDataset.file_type as "csv" | "xlsx" | "json" | "pdf" | "parquet",
-  status: apiDataset.status === "ready" ? "ready" as const : "processing" as const,
+  status: apiDataset.status === "ready" ? "ready" as const
+    : apiDataset.status === "error" ? "error" as const
+    : apiDataset.status === "preview_ready" ? "preview_ready" as const
+    : "processing" as const,
   rows: apiDataset.metadata?.row_count || 0,
   columns: apiDataset.metadata?.column_count || 0,
   size: apiDataset.metadata?.size_bytes
@@ -337,6 +341,13 @@ const DatasetDetail = () => {
                   >
                     Ready
                   </Badge>
+                ) : dataset.status === "preview_ready" ? (
+                  <Badge
+                    variant="secondary"
+                    className="bg-primary/20 text-primary border-primary/30"
+                  >
+                    Preview Ready
+                  </Badge>
                 ) : (
                   <Badge
                     variant="secondary"
@@ -358,6 +369,7 @@ const DatasetDetail = () => {
             </div>
           </div>
 
+          {dataset.status !== "preview_ready" && (
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -391,10 +403,17 @@ const DatasetDetail = () => {
               Delete
             </Button>
           </div>
+          )}
         </div>
       </div>
 
-      {/* Tabs */}
+      {/* Preview UI for preview_ready status */}
+      {dataset.status === "preview_ready" && (
+        <DatasetPreview datasetId={dataset.id} />
+      )}
+
+      {/* Tabs — only shown when dataset is fully ready */}
+      {dataset.status !== "preview_ready" && (
       <Tabs defaultValue="overview" className="space-y-6">
         <TabsList className="bg-secondary">
           <TabsTrigger value="overview">Overview</TabsTrigger>
@@ -837,6 +856,7 @@ const DatasetDetail = () => {
           </TabsContent>
         )}
       </Tabs>
+      )}
 
       {/* Publish Modal */}
       <PublishModal

@@ -38,10 +38,18 @@ The installer will:
 1. Check that Docker is installed and running
 2. Find an available port (prefers 80, falls back to 8080, 3000, etc.)
 3. Generate secure credentials on first run
-4. Build and start all containers
+4. Pull the pre-built image from `ghcr.io/maxrobbins/vectoraiz` and start all containers
 5. Open your browser when ready
 
 To stop: `./stop.sh`
+
+### Updating
+
+To pull the latest version:
+
+```bash
+cd vectoraiz && docker compose -f backend/docker-compose.customer.yml pull && ./start.sh
+```
 
 ### Platform installers
 

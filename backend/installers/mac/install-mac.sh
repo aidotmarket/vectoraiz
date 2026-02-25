@@ -1,0 +1,392 @@
+#!/bin/bash
+# =============================================================================
+# vectorAIz — macOS Installer
+# =============================================================================
+# Usage:
+#   curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/installers/mac/install-mac.sh | bash
+#
+# Or download and run:
+#   chmod +x install-mac.sh && ./install-mac.sh
+# =============================================================================
+
+set -e
+
+# --- Configuration ---
+INSTALL_DIR="$HOME/vectoraiz"
+COMPOSE_FILE="docker-compose.customer.yml"
+COMPOSE_URL="https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/docker-compose.customer.yml"
+APP_BUNDLE="$HOME/Applications/vectorAIz.app"
+PREFERRED_PORTS=(80 8080 3000 8888 9000)
+
+# --- Colors ---
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+DIM='\033[2m'
+NC='\033[0m'
+
+# --- Helpers ---
+print_banner() {
+    echo ""
+    echo -e "${CYAN}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║                                           ║"
+    echo "  ║       ⚡ vectorAIz Installer ⚡           ║"
+    echo "  ║                                           ║"
+    echo "  ║   Self-hosted data processing & search    ║"
+    echo "  ║                  macOS                    ║"
+    echo "  ║                                           ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_ready() {
+    echo ""
+    echo -e "${GREEN}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║                                           ║"
+    echo "  ║       ✅ vectorAIz is Installed!          ║"
+    echo "  ║                                           ║"
+    echo "  ║   Open your browser to:                   ║"
+    echo "  ║                                           ║"
+    echo -e "  ║   ${BOLD}${CYAN}➜  ${URL} $(printf '%*s' $((25 - ${#URL})) '')${GREEN}║"
+    echo "  ║                                           ║"
+    echo "  ║   App: ~/Applications/vectorAIz.app       ║"
+    echo "  ║   Data: ~/vectoraiz/                      ║"
+    echo "  ║                                           ║"
+    echo "  ║   To uninstall: run uninstall-mac.sh      ║"
+    echo "  ║                                           ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+fail() {
+    echo -e "\n  ${RED}${BOLD}ERROR:${NC} $1\n"
+    exit 1
+}
+
+info() {
+    echo -e "  ${BLUE}▸${NC} $1"
+}
+
+success() {
+    echo -e "  ${GREEN}✓${NC} $1"
+}
+
+warn() {
+    echo -e "  ${YELLOW}⚠${NC} $1"
+}
+
+generate_secret() {
+    openssl rand -hex 16
+}
+
+is_port_free() {
+    local port=$1
+    ! lsof -i :"$port" -sTCP:LISTEN &>/dev/null
+}
+
+make_url() {
+    local port=$1
+    if [ "$port" = "80" ]; then
+        echo "http://localhost"
+    else
+        echo "http://localhost:${port}"
+    fi
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+print_banner
+
+# ─── Step 1: Check / Install Docker ─────────────────────────────
+info "Checking for Docker..."
+
+if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
+    success "Docker is running"
+elif [ -d "/Applications/Docker.app" ] || [ -d "/Applications/OrbStack.app" ]; then
+    warn "Docker is installed but not running."
+    info "Starting Docker..."
+    if [ -d "/Applications/Docker.app" ]; then
+        open -a Docker
+    elif [ -d "/Applications/OrbStack.app" ]; then
+        open -a OrbStack
+    fi
+    info "Waiting for Docker to start..."
+    DOCKER_WAIT=0
+    DOCKER_MAX=120
+    while ! docker info &>/dev/null 2>&1; do
+        if [ $DOCKER_WAIT -ge $DOCKER_MAX ]; then
+            fail "Docker did not start within ${DOCKER_MAX}s. Please start Docker Desktop manually and re-run this installer."
+        fi
+        printf "\r  ${BLUE}⏳${NC} Waiting for Docker daemon... (%ds)" "$DOCKER_WAIT"
+        sleep 3
+        DOCKER_WAIT=$((DOCKER_WAIT + 3))
+    done
+    printf "\r                                                          \r"
+    success "Docker is running"
+else
+    warn "Docker is not installed."
+    echo ""
+
+    # Try Homebrew first
+    if command -v brew &>/dev/null; then
+        echo -e "  ${CYAN}Installing Docker Desktop via Homebrew...${NC}"
+        echo ""
+        brew install --cask docker
+        echo ""
+        info "Starting Docker Desktop..."
+        open -a Docker
+
+        info "Waiting for Docker to start (this may take a minute on first launch)..."
+        DOCKER_WAIT=0
+        DOCKER_MAX=180
+        while ! docker info &>/dev/null 2>&1; do
+            if [ $DOCKER_WAIT -ge $DOCKER_MAX ]; then
+                fail "Docker did not start within ${DOCKER_MAX}s.\n  Please open Docker Desktop from your Applications folder and re-run this installer."
+            fi
+            printf "\r  ${BLUE}⏳${NC} Waiting for Docker daemon... (%ds)" "$DOCKER_WAIT"
+            sleep 3
+            DOCKER_WAIT=$((DOCKER_WAIT + 3))
+        done
+        printf "\r                                                          \r"
+        success "Docker is installed and running"
+    else
+        echo -e "  Docker Desktop is required to run vectorAIz."
+        echo ""
+        echo -e "  ${BOLD}Option 1:${NC} Install Homebrew first, then re-run this installer:"
+        echo -e "  ${DIM}/bin/bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"${NC}"
+        echo ""
+        echo -e "  ${BOLD}Option 2:${NC} Download Docker Desktop manually:"
+        echo -e "  ${CYAN}https://docs.docker.com/desktop/install/mac-install/${NC}"
+        echo ""
+        echo -e "  After installing Docker, re-run this installer."
+        exit 1
+    fi
+fi
+
+# ─── Step 2: Create install directory ────────────────────────────
+info "Setting up install directory..."
+
+mkdir -p "$INSTALL_DIR"
+cd "$INSTALL_DIR"
+success "Install directory: $INSTALL_DIR"
+
+# ─── Step 3: Download compose file ──────────────────────────────
+info "Downloading docker-compose configuration..."
+
+if curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/$COMPOSE_FILE"; then
+    success "Downloaded $COMPOSE_FILE"
+else
+    fail "Failed to download compose file from GitHub.\n  Check your internet connection and try again."
+fi
+
+# ─── Step 4: Find available port ─────────────────────────────────
+info "Finding available port..."
+
+PORT=""
+if [ -f "$INSTALL_DIR/.env" ] && grep -q "^VECTORAIZ_PORT=" "$INSTALL_DIR/.env" 2>/dev/null; then
+    PORT=$(grep "^VECTORAIZ_PORT=" "$INSTALL_DIR/.env" | cut -d'=' -f2 | tr -d ' "'"'"'')
+    if ! is_port_free "$PORT"; then
+        warn "Previously configured port $PORT is in use. Finding another..."
+        PORT=""
+    fi
+fi
+
+if [ -z "$PORT" ]; then
+    for TRY_PORT in "${PREFERRED_PORTS[@]}"; do
+        if is_port_free "$TRY_PORT"; then
+            PORT="$TRY_PORT"
+            break
+        fi
+    done
+fi
+
+if [ -z "$PORT" ]; then
+    PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()" 2>/dev/null || echo "8080")
+fi
+
+success "Using port $PORT"
+URL=$(make_url "$PORT")
+
+# ─── Step 5: Generate .env ───────────────────────────────────────
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+    info "Generating secure configuration..."
+    cat > "$INSTALL_DIR/.env" <<EOF
+# vectorAIz Configuration
+# Generated on $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+# Install directory: $INSTALL_DIR
+
+# Database password (auto-generated, keep this safe)
+POSTGRES_PASSWORD=$(generate_secret)
+
+# Application secrets
+VECTORAIZ_SECRET_KEY=$(generate_secret)
+VECTORAIZ_APIKEY_HMAC_SECRET=$(generate_secret)
+
+# Port to serve on
+VECTORAIZ_PORT=${PORT}
+
+# Mode: standalone (default) or connected (with Allie AI)
+VECTORAIZ_MODE=standalone
+EOF
+    success "Generated .env with secure defaults"
+else
+    # Update port in existing .env
+    if grep -q "^VECTORAIZ_PORT=" "$INSTALL_DIR/.env" 2>/dev/null; then
+        sed -i.bak "s/^VECTORAIZ_PORT=.*/VECTORAIZ_PORT=${PORT}/" "$INSTALL_DIR/.env" && rm -f "$INSTALL_DIR/.env.bak"
+    else
+        echo "VECTORAIZ_PORT=${PORT}" >> "$INSTALL_DIR/.env"
+    fi
+    success "Using existing .env (port updated to ${PORT})"
+fi
+
+# ─── Step 6: Pull images ─────────────────────────────────────────
+info "Pulling Docker images (this may take a few minutes)..."
+echo ""
+
+cd "$INSTALL_DIR"
+docker compose -f "$COMPOSE_FILE" pull 2>&1 | while IFS= read -r line; do
+    case "$line" in
+        *"Pulling"*|*"Downloaded"*|*"Pull"*|*"Image"*|*"Up to date"*|*"digest"*)
+            echo -e "  ${CYAN}│${NC} $line"
+            ;;
+    esac
+done
+echo ""
+success "All images pulled"
+
+# ─── Step 7: Start containers ────────────────────────────────────
+info "Starting vectorAIz..."
+
+docker compose -f "$COMPOSE_FILE" up -d 2>&1 | while IFS= read -r line; do
+    case "$line" in
+        *"Created"*|*"Started"*|*"Running"*)
+            echo -e "  ${CYAN}│${NC} $line"
+            ;;
+    esac
+done
+
+# ─── Step 8: Wait for health check ───────────────────────────────
+info "Waiting for vectorAIz to be ready..."
+MAX_WAIT=180
+WAITED=0
+while [ $WAITED -lt $MAX_WAIT ]; do
+    if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+        break
+    fi
+    printf "\r  ${BLUE}⏳${NC} Waiting for services to initialize... (%ds)" "$WAITED"
+    sleep 3
+    WAITED=$((WAITED + 3))
+done
+printf "\r                                                          \r"
+
+if [ $WAITED -ge $MAX_WAIT ]; then
+    warn "Timed out waiting for health check."
+    echo -e "  ${DIM}The app may still be starting. Try opening ${URL} in a minute.${NC}"
+    echo -e "  ${DIM}Check logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs${NC}"
+else
+    success "All services healthy"
+fi
+
+# ─── Step 9: Create .app bundle ──────────────────────────────────
+info "Creating vectorAIz.app..."
+
+mkdir -p "$HOME/Applications"
+rm -rf "$APP_BUNDLE"
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+# Create the launcher script
+cat > "$APP_BUNDLE/Contents/MacOS/vectorAIz" <<'LAUNCHER'
+#!/bin/bash
+INSTALL_DIR="$HOME/vectoraiz"
+COMPOSE_FILE="docker-compose.customer.yml"
+
+cd "$INSTALL_DIR" || exit 1
+
+# Read port from .env
+PORT=$(grep "^VECTORAIZ_PORT=" .env 2>/dev/null | cut -d'=' -f2 | tr -d ' "'"'"'')
+PORT="${PORT:-80}"
+
+if [ "$PORT" = "80" ]; then
+    URL="http://localhost"
+else
+    URL="http://localhost:${PORT}"
+fi
+
+# Start Docker if not running
+if ! docker info &>/dev/null 2>&1; then
+    if [ -d "/Applications/OrbStack.app" ]; then
+        open -a OrbStack
+    elif [ -d "/Applications/Docker.app" ]; then
+        open -a Docker
+    fi
+    # Wait up to 60s for Docker
+    for i in $(seq 1 20); do
+        docker info &>/dev/null 2>&1 && break
+        sleep 3
+    done
+fi
+
+# Start containers
+docker compose -f "$COMPOSE_FILE" up -d 2>/dev/null
+
+# Wait for health then open browser
+for i in $(seq 1 40); do
+    if curl -sf "${URL}/api/health" >/dev/null 2>&1; then
+        open "$URL"
+        exit 0
+    fi
+    sleep 3
+done
+
+# Open anyway after timeout
+open "$URL"
+LAUNCHER
+chmod +x "$APP_BUNDLE/Contents/MacOS/vectorAIz"
+
+# Create Info.plist
+cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>vectorAIz</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.vectoraiz.app</string>
+    <key>CFBundleName</key>
+    <string>vectorAIz</string>
+    <key>CFBundleDisplayName</key>
+    <string>vectorAIz</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>
+PLIST
+
+success "Created ~/Applications/vectorAIz.app"
+
+# ─── Step 10: Open browser ───────────────────────────────────────
+print_ready
+
+sleep 1
+open "$URL" 2>/dev/null || true
+
+echo -e "  ${CYAN}Tip:${NC} Launch vectorAIz anytime from ~/Applications/vectorAIz.app"
+echo -e "  ${CYAN}Tip:${NC} View logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs -f"
+echo -e "  ${CYAN}Tip:${NC} Stop: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE down"
+echo ""

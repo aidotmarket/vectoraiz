@@ -30,6 +30,7 @@ const topNavItems: NavItem[] = [
   { path: "/earnings", label: "Earnings", icon: DollarSign, feature: "marketplace" },
   { path: "/search", label: "Search", icon: Search },
   { path: "/sql", label: "SQL Query", icon: Code },
+  { path: "/databases", label: "Databases", icon: Database },
   { path: "/settings", label: "Settings", icon: Settings },
 ];
 

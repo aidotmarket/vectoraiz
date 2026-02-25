@@ -268,6 +268,7 @@ class TestAnthropicMissingKey:
     def test_missing_key_raises(self, monkeypatch):
         """AnthropicProvider() without key should raise AuthenticationError."""
         monkeypatch.delenv("VECTORAIZ_ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
         from app.config import Settings
         test_settings = Settings()

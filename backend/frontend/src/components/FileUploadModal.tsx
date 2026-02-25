@@ -21,22 +21,24 @@ import {
   File,
   X,
   AlertTriangle,
+  FolderOpen,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUpload, useDatasetStatus } from "@/hooks/useApi";
-import { DuplicateFileError } from "@/lib/api";
+import { datasetsApi, DuplicateFileError } from "@/lib/api";
 import { toast } from "sonner";
 
-type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate";
+type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
 
 interface QueuedFile {
   id: string;
   file: File;
+  relativePath: string | null;
   state: FileState;
   progress: number;
   datasetId: string | null;
   error: string | null;
-  existingDatasetId: string | null; // Set when duplicate detected
+  existingDatasetId: string | null;
 }
 
 interface FileUploadModalProps {
@@ -102,6 +104,10 @@ const ACCEPT_MAP = {
   "application/wordperfect": [".wpd"],
 };
 
+// Max limits (match backend)
+const MAX_FILES = 50;
+const MAX_TOTAL_BYTES = 500 * 1024 * 1024; // 500MB
+
 /** Tracks processing status for a single dataset after upload */
 function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
   const { status, error } = useDatasetStatus(datasetId || "");
@@ -109,7 +115,7 @@ function useProcessingTracker(datasetId: string | null, onReady: () => void, onE
 
   useEffect(() => {
     if (!datasetId || firedRef.current) return;
-    if (status === "ready") {
+    if (status === "ready" || status === "preview_ready") {
       firedRef.current = true;
       onReady();
     } else if (status === "error") {
@@ -139,7 +145,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
     <div className={cn(
       "flex items-center gap-3 px-3 py-2 rounded-lg border transition-colors",
       item.state === "complete" && "border-green-500/30 bg-green-500/5",
-      item.state === "error" && "border-destructive/30 bg-destructive/5",
+      (item.state === "error" || item.state === "rejected") && "border-destructive/30 bg-destructive/5",
       item.state === "duplicate" && "border-yellow-500/30 bg-yellow-500/5",
       item.state === "pending" && "border-border",
       (item.state === "uploading" || item.state === "processing") && "border-primary/30 bg-primary/5",
@@ -149,7 +155,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
           <Loader2 className="w-4 h-4 text-primary animate-spin" />
         ) : item.state === "complete" ? (
           <CheckCircle2 className="w-4 h-4 text-green-500" />
-        ) : item.state === "error" ? (
+        ) : item.state === "error" || item.state === "rejected" ? (
           <XCircle className="w-4 h-4 text-destructive" />
         ) : item.state === "duplicate" ? (
           <AlertTriangle className="w-4 h-4 text-yellow-500" />
@@ -159,14 +165,17 @@ function FileRow({ item, onRemove, onStatusChange }: {
       </div>
 
       <div className="flex-1 min-w-0">
-        <p className="text-sm text-foreground truncate">{item.file.name}</p>
+        <p className="text-sm text-foreground truncate">
+          {item.relativePath || item.file.name}
+        </p>
         <p className="text-xs text-muted-foreground">
           {item.state === "pending" && formatFileSize(item.file.size)}
-          {item.state === "uploading" && `Uploading… ${Math.round(item.progress)}%`}
-          {item.state === "processing" && "Processing…"}
+          {item.state === "uploading" && `Uploading\u2026 ${Math.round(item.progress)}%`}
+          {item.state === "processing" && "Processing\u2026"}
           {item.state === "complete" && "Ready"}
           {item.state === "error" && (item.error || "Failed")}
-          {item.state === "duplicate" && "Already exists — upload anyway?"}
+          {item.state === "rejected" && (item.error || "Skipped")}
+          {item.state === "duplicate" && "Already exists \u2014 upload anyway?"}
         </p>
       </div>
 
@@ -188,31 +197,102 @@ function FileRow({ item, onRemove, onStatusChange }: {
 const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps) => {
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
+  const [batchId, setBatchId] = useState<string | null>(null);
   const { upload } = useUpload();
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   const hasFiles = queue.length > 0;
   const hasPending = queue.some((f) => f.state === "pending");
   const hasDuplicates = queue.some((f) => f.state === "duplicate");
-  const allDone = hasFiles && queue.every((f) => f.state === "complete" || f.state === "error");
+  const allDone = hasFiles && queue.every((f) => f.state === "complete" || f.state === "error" || f.state === "rejected");
+
+  /** Add files from drop or file picker */
+  const addFiles = useCallback((files: File[], relativePaths?: (string | undefined)[]) => {
+    setQueue((prev) => {
+      const currentSize = prev.reduce((sum, f) => sum + f.file.size, 0);
+      const newItems: QueuedFile[] = [];
+
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const relPath = relativePaths?.[i] ?? null;
+
+        // Client-side limit checks
+        if (prev.length + newItems.length >= MAX_FILES) {
+          newItems.push({
+            id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            file,
+            relativePath: relPath,
+            state: "rejected",
+            progress: 0,
+            datasetId: null,
+            error: `Exceeds ${MAX_FILES} file limit`,
+            existingDatasetId: null,
+          });
+          continue;
+        }
+
+        const runningSize = currentSize + newItems.reduce((s, f) => s + f.file.size, 0) + file.size;
+        if (runningSize > MAX_TOTAL_BYTES) {
+          newItems.push({
+            id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            file,
+            relativePath: relPath,
+            state: "rejected",
+            progress: 0,
+            datasetId: null,
+            error: "Exceeds 500MB batch limit",
+            existingDatasetId: null,
+          });
+          continue;
+        }
+
+        newItems.push({
+          id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          file,
+          relativePath: relPath,
+          state: "pending",
+          progress: 0,
+          datasetId: null,
+          error: null,
+          existingDatasetId: null,
+        });
+      }
+
+      return [...prev, ...newItems];
+    });
+  }, []);
 
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    const newItems: QueuedFile[] = acceptedFiles.map((file) => ({
-      id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      file,
-      state: "pending" as FileState,
-      progress: 0,
-      datasetId: null,
-      error: null,
-      existingDatasetId: null,
-    }));
-    setQueue((prev) => [...prev, ...newItems]);
-  }, []);
+    // Extract webkitRelativePath if available (folder drops)
+    const paths = acceptedFiles.map((f) => {
+      const wrp = (f as any).webkitRelativePath;
+      return wrp || undefined;
+    });
+    const hasPaths = paths.some((p) => p !== undefined);
+    addFiles(acceptedFiles, hasPaths ? paths : undefined);
+  }, [addFiles]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: ACCEPT_MAP,
     multiple: true,
   });
+
+  /** Handle folder selection via hidden input */
+  const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const fileList = e.target.files;
+    if (!fileList || fileList.length === 0) return;
+    const files: File[] = [];
+    const paths: string[] = [];
+    for (let i = 0; i < fileList.length; i++) {
+      const f = fileList[i];
+      files.push(f);
+      paths.push((f as any).webkitRelativePath || f.name);
+    }
+    addFiles(files, paths);
+    // Reset input so same folder can be re-selected
+    e.target.value = "";
+  };
 
   const removeFile = (id: string) => {
     setQueue((prev) => prev.filter((f) => f.id !== id));
@@ -226,7 +306,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     updateFile(id, { state, error: error ?? null });
   };
 
-  /** Upload a single file, handling duplicates */
+  /** Upload a single file via the single-file endpoint (backward compat) */
   const uploadOne = async (item: QueuedFile, allowDuplicate: boolean) => {
     updateFile(item.id, { state: "uploading", progress: 0 });
 
@@ -264,17 +344,79 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     }
   };
 
-  /** Upload all pending files */
+  /** Upload all pending files — uses batch endpoint for 2+ files, single for 1 */
   const handleUploadAll = async () => {
     setIsUploading(true);
     const pending = queue.filter((f) => f.state === "pending");
-    for (const item of pending) {
-      await uploadOne(item, false);
+
+    if (pending.length === 1) {
+      // Single file: use legacy endpoint for backward compatibility
+      await uploadOne(pending[0], false);
+      setIsUploading(false);
+      return;
     }
+
+    // Multiple files: use batch endpoint
+    // Mark all as uploading
+    for (const item of pending) {
+      updateFile(item.id, { state: "uploading", progress: 0 });
+    }
+
+    // Simulated progress while uploading
+    let prog = 0;
+    const interval = setInterval(() => {
+      prog = Math.min(prog + 8, 85);
+      setQueue((prev) =>
+        prev.map((f) =>
+          f.state === "uploading" ? { ...f, progress: prog } : f
+        )
+      );
+    }, 200);
+
+    try {
+      const files = pending.map((p) => p.file);
+      const paths = pending.some((p) => p.relativePath)
+        ? pending.map((p) => p.relativePath || p.file.name)
+        : undefined;
+
+      const result = await datasetsApi.batchUpload(files, paths);
+      clearInterval(interval);
+      setBatchId(result.batch_id);
+
+      // Map batch response items back to queue items
+      for (const batchItem of result.items) {
+        const queueItem = pending[batchItem.client_file_index];
+        if (!queueItem) continue;
+
+        if (batchItem.status === "accepted") {
+          updateFile(queueItem.id, {
+            state: "processing",
+            progress: 100,
+            datasetId: batchItem.dataset_id,
+          });
+        } else {
+          updateFile(queueItem.id, {
+            state: "rejected",
+            progress: 0,
+            error: batchItem.error || "Rejected by server",
+          });
+        }
+      }
+    } catch (e) {
+      clearInterval(interval);
+      // Mark all uploading files as error
+      for (const item of pending) {
+        updateFile(item.id, {
+          state: "error",
+          error: e instanceof Error ? e.message : "Batch upload failed",
+        });
+      }
+    }
+
     setIsUploading(false);
   };
 
-  /** Force upload duplicate files */
+  /** Force upload duplicate files (single-file endpoint) */
   const handleUploadDuplicates = async () => {
     setIsUploading(true);
     const dupes = queue.filter((f) => f.state === "duplicate");
@@ -294,11 +436,21 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     if (allDone && queue.length > 0) {
       const ok = queue.filter((f) => f.state === "complete").length;
       const fail = queue.filter((f) => f.state === "error").length;
+      const skipped = queue.filter((f) => f.state === "rejected").length;
+
+      const parts: string[] = [];
+      if (ok > 0) parts.push(`${ok} succeeded`);
+      if (fail > 0) parts.push(`${fail} failed`);
+      if (skipped > 0) parts.push(`${skipped} skipped`);
+
       if (ok > 0) {
-        toast.success(`${ok} dataset${ok > 1 ? "s" : ""} ready${fail > 0 ? ` (${fail} failed)` : ""}`);
+        toast.success(parts.join(", "));
       } else if (fail > 0) {
-        toast.error(`${fail} upload${fail > 1 ? "s" : ""} failed`);
+        toast.error(parts.join(", "));
+      } else if (skipped > 0) {
+        toast.warning(parts.join(", "));
       }
+
       const timer = setTimeout(() => {
         if (ok > 0) onSuccess?.();
         handleClose();
@@ -310,8 +462,12 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const handleClose = () => {
     if (isUploading) return;
     setQueue([]);
+    setBatchId(null);
     onOpenChange(false);
   };
+
+  const pendingCount = queue.filter((f) => f.state === "pending").length;
+  const totalSize = queue.filter((f) => f.state === "pending").reduce((sum, f) => sum + f.file.size, 0);
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
@@ -319,6 +475,17 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
         <DialogHeader>
           <DialogTitle className="text-foreground">Upload Datasets</DialogTitle>
         </DialogHeader>
+
+        {/* Hidden folder input */}
+        <input
+          ref={folderInputRef}
+          type="file"
+          className="hidden"
+          // @ts-expect-error webkitdirectory is a non-standard attribute
+          webkitdirectory=""
+          multiple
+          onChange={handleFolderSelect}
+        />
 
         <div className="py-4 space-y-3">
           {/* Drop zone */}
@@ -340,20 +507,43 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                 </div>
                 <div className="space-y-1">
                   <p className="text-foreground font-medium text-sm">
-                    {isDragActive ? "Drop files here" : hasFiles ? "Add more files" : "Drag and drop files here, or click to browse"}
+                    {isDragActive ? "Drop files or folders here" : hasFiles ? "Add more files" : "Drag and drop files or folders here"}
                   </p>
                   {!hasFiles && (
                     <p className="text-xs text-muted-foreground">
-                      Supports 28+ formats: CSV, JSON, Excel, Parquet, PDF, Word, PowerPoint, and more
+                      Up to {MAX_FILES} files, 500MB total. Supports 28+ formats.
                     </p>
                   )}
                 </div>
                 {!hasFiles && (
-                  <Button variant="secondary" size="sm" type="button">
-                    Browse Files
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button variant="secondary" size="sm" type="button">
+                      Browse Files
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      type="button"
+                      className="gap-1.5"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        folderInputRef.current?.click();
+                      }}
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      Browse Folder
+                    </Button>
+                  </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Limits indicator */}
+          {hasPending && pendingCount > 1 && (
+            <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
+              <span>{pendingCount} file{pendingCount > 1 ? "s" : ""} ({formatFileSize(totalSize)})</span>
+              {pendingCount > 10 && <span className="text-yellow-500">{MAX_FILES - pendingCount} slots remaining</span>}
             </div>
           )}
 
@@ -386,6 +576,33 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
               </Button>
             </div>
           )}
+
+          {/* Batch summary when all done */}
+          {allDone && queue.length > 1 && (
+            <div className="px-3 py-3 rounded-lg border border-border bg-secondary/30">
+              <p className="text-sm font-medium text-foreground mb-1">Batch complete</p>
+              <div className="flex gap-4 text-xs text-muted-foreground">
+                {queue.filter((f) => f.state === "complete").length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <CheckCircle2 className="w-3 h-3 text-green-500" />
+                    {queue.filter((f) => f.state === "complete").length} succeeded
+                  </span>
+                )}
+                {queue.filter((f) => f.state === "error").length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <XCircle className="w-3 h-3 text-destructive" />
+                    {queue.filter((f) => f.state === "error").length} failed
+                  </span>
+                )}
+                {queue.filter((f) => f.state === "rejected").length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <AlertTriangle className="w-3 h-3 text-yellow-500" />
+                    {queue.filter((f) => f.state === "rejected").length} skipped
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </div>
 
         <DialogFooter>
@@ -404,7 +621,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                 ) : (
                   <Upload className="w-4 h-4" />
                 )}
-                Upload {hasPending ? `(${queue.filter((f) => f.state === "pending").length})` : ""}
+                Upload {hasPending ? `(${pendingCount})` : ""}
               </Button>
             </>
           )}

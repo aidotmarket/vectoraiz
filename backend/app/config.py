@@ -124,6 +124,7 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2  # Lower for factual RAG responses
     llm_max_tokens: int = 1024
     gemini_api_key: Optional[str] = None
+    google_genai_use_gca: bool = False  # AG-002: Vertex AI support
     openai_api_key: Optional[str] = None
     anthropic_api_key: Optional[str] = None
     
@@ -141,8 +142,29 @@ class Settings(BaseSettings):
     connectivity_sql_memory_mb: int = 256
     connectivity_sql_max_length: int = 4096
 
+    # BQ-VZ-LARGE-FILES: Streaming/chunked processing for large files
+    large_file_threshold_mb: int = 100           # Files above this use streaming path
+    fallback_max_size_mb: int = 200              # Max file size (MB) for in-memory fallback on streaming failure
+    process_worker_memory_limit_mb: int = 2048   # Per-worker memory cap
+    process_worker_timeout_s: int = 1800         # 30 min per file default
+    process_worker_grace_period_s: int = 60      # Seconds for checkpoint flush after SIGTERM
+    process_worker_max_concurrent: int = 2       # Max parallel workers
+    duckdb_memory_limit_mb: int = 512            # DuckDB in-memory budget for streaming path
+    max_upload_size_gb: int = 10                 # Hard upload limit
+    streaming_queue_maxsize: int = 8             # Backpressure queue depth
+    streaming_batch_target_rows: int = 50000     # Target rows per RecordBatch
+    parquet_row_group_size_mb: int = 64           # Target row group size for ParquetWriter
+
+    # BQ-VZ-DB-CONNECT: Database extraction limits
+    db_extract_max_rows: int = 5_000_000  # Max rows per extraction (M3)
+
+    # BQ-VZ-SERIAL-CLIENT: Serial activation & metering
+    aimarket_url: str = _DEFAULT_AI_MARKET_URL  # ai-market serial authority base URL
+    app_version: str = "1.0.0"  # Set via VECTORAIZ_APP_VERSION in Docker image
+    serial_data_dir: str = "/data"  # Directory for serial.json + pending_usage.jsonl
+
     # CORS
-    cors_origins: List[str] = ["http://localhost:5173", "http://localhost:3000", "http://localhost:8080", "https://vectoraiz-frontend-production.up.railway.app", "https://dev.vectoraiz.com"]
+    cors_origins: List[str] = ["http://localhost:5173", "http://localhost:3000", "http://localhost:8080", "https://vectoraiz-frontend-production.up.railway.app", "https://dev.vectoraiz.com", "https://vectoraiz.com", "https://www.vectoraiz.com", "https://vectoraiz-website-production.up.railway.app"]
     
     class Config:
         env_file = ".env"

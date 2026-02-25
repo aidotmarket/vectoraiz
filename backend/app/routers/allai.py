@@ -20,6 +20,7 @@ from app.services.rag_service import get_rag_service, RAGService
 from app.services.llm_service import get_llm_service
 from app.models.rag import RAGRequest, RAGResponse
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
+from app.services.serial_metering import metered, MeterDecision
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ async def generate(
     request: RAGRequest,
     rag_service: RAGService = Depends(get_rag_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("data")),
 ):
     """
     Generate an AI response grounded in your indexed datasets.
@@ -111,6 +113,7 @@ async def generate_stream(
     request: RAGRequest,
     rag_service: RAGService = Depends(get_rag_service),
     user: AuthenticatedUser = Depends(get_current_user),
+    _meter: MeterDecision = Depends(metered("data")),
 ):
     """
     Stream a RAG response for real-time display.

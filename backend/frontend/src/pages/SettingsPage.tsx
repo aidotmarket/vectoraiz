@@ -22,7 +22,10 @@ import {
   KeyRound,
   Plus,
   Copy,
-  LogOut
+  LogOut,
+  ArrowUpCircle,
+  Download,
+  Terminal,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -112,6 +115,22 @@ const SettingsPage = () => {
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [showCreatedKeyDialog, setShowCreatedKeyDialog] = useState(false);
 
+  // Software update state
+  interface VersionInfo {
+    current: string;
+    latest: string | null;
+    update_available: boolean;
+    latest_published_at: string | null;
+    changelog_url: string;
+    can_auto_update: boolean;
+    error?: string;
+  }
+  const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
+  const [versionLoading, setVersionLoading] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "updating" | "done" | "error">("idle");
+  const [updateMessage, setUpdateMessage] = useState("");
+  const [lastChecked, setLastChecked] = useState<Date | null>(null);
+
   const fetchLocalKeys = useCallback(async () => {
     setKeysLoading(true);
     try {
@@ -130,6 +149,59 @@ const SettingsPage = () => {
       setKeysLoading(false);
     }
   }, []);
+
+  const fetchVersionInfo = useCallback(async (force = false) => {
+    setVersionLoading(true);
+    try {
+      const url = `${getApiUrl()}/api/version${force ? "?force=true" : ""}`;
+      const res = await fetch(url);
+      if (res.ok) {
+        const data: VersionInfo = await res.json();
+        setVersionInfo(data);
+        setLastChecked(new Date());
+      }
+    } catch {
+      // Silently fail
+    } finally {
+      setVersionLoading(false);
+    }
+  }, []);
+
+  const triggerUpdate = async () => {
+    setUpdateStatus("updating");
+    setUpdateMessage("Pulling latest image... This may take a minute.");
+    try {
+      const storedKey = localStorage.getItem("vectoraiz_api_key");
+      if (!storedKey) {
+        setUpdateStatus("error");
+        setUpdateMessage("Authentication required. Please sign in.");
+        return;
+      }
+      const res = await fetch(`${getApiUrl()}/api/version/update`, {
+        method: "POST",
+        headers: { "X-API-Key": storedKey },
+      });
+      const data = await res.json();
+      if (data.status === "updating") {
+        setUpdateStatus("done");
+        setUpdateMessage("Update downloaded. Restarting...");
+        // Auto-refresh after 10 seconds to pick up the new version
+        setTimeout(() => window.location.reload(), 10000);
+      } else if (data.status === "up_to_date") {
+        setUpdateStatus("idle");
+        toast({ title: "Up to date", description: data.message });
+      } else if (data.status === "docker_not_available") {
+        setUpdateStatus("error");
+        setUpdateMessage(data.message);
+      } else {
+        setUpdateStatus("error");
+        setUpdateMessage(data.message || "Update failed.");
+      }
+    } catch (e) {
+      setUpdateStatus("error");
+      setUpdateMessage(e instanceof Error ? e.message : "Update request failed.");
+    }
+  };
 
   const createLocalKey = async () => {
     try {
@@ -198,6 +270,11 @@ const SettingsPage = () => {
   useEffect(() => {
     fetchLocalKeys();
   }, [fetchLocalKeys]);
+
+  // Fetch version info on mount
+  useEffect(() => {
+    fetchVersionInfo();
+  }, [fetchVersionInfo]);
 
   // Validate URL format
   const isValidUrl = (url: string): boolean => {
@@ -863,60 +940,164 @@ client = QdrantClient(host="localhost", port=6333)`}
         </Card>
       )}
 
-      {/* Section 6: About */}
+      {/* Section 6: Software Updates & About */}
       <Card className="bg-card border-border">
         <CardHeader>
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
-              <Info className="w-5 h-5 text-primary" />
+              <ArrowUpCircle className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <CardTitle className="text-foreground">About vectorAIz</CardTitle>
-              <CardDescription>Application information</CardDescription>
+              <CardTitle className="text-foreground">Software Updates</CardTitle>
+              <CardDescription>Application information and updates</CardDescription>
             </div>
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div className="flex justify-between text-sm">
-            <span className="text-muted-foreground">Version</span>
-            <span className="text-foreground font-mono">1.0.0</span>
+          {/* Version info */}
+          <div className="space-y-2">
+            <div className="flex justify-between text-sm">
+              <span className="text-muted-foreground">Current Version</span>
+              <span className="text-foreground font-mono">{versionInfo?.current ?? "..."}</span>
+            </div>
+            <div className="flex justify-between text-sm items-center">
+              <span className="text-muted-foreground">Latest Version</span>
+              <div className="flex items-center gap-2">
+                <span className="text-foreground font-mono">{versionInfo?.latest ?? "..."}</span>
+                {versionInfo?.update_available && (
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-[hsl(var(--haven-warning))]/15 text-[hsl(var(--haven-warning))]">
+                    Update available
+                  </span>
+                )}
+                {versionInfo && !versionInfo.update_available && !versionInfo.error && (
+                  <span className="inline-flex items-center gap-1 text-xs text-[hsl(var(--haven-success))]">
+                    <CheckCircle className="w-3.5 h-3.5" />
+                    Up to date
+                  </span>
+                )}
+              </div>
+            </div>
+            {lastChecked && (
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Last Checked</span>
+                <span className="text-muted-foreground text-xs">
+                  {lastChecked.toLocaleTimeString()}
+                </span>
+              </div>
+            )}
           </div>
 
-          <div className="flex flex-wrap gap-4 pt-2 border-t border-border">
-            <a 
-              href="#" 
-              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-              onClick={(e) => e.preventDefault()}
+          {/* Error state */}
+          {versionInfo?.error && (
+            <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+              <XCircle className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-destructive">
+                Could not check for updates: {versionInfo.error}
+              </p>
+            </div>
+          )}
+
+          {/* Update status messages */}
+          {updateStatus === "updating" && (
+            <div className="flex items-center gap-2 p-3 bg-primary/10 border border-primary/30 rounded-lg">
+              <Loader2 className="w-4 h-4 text-primary animate-spin flex-shrink-0" />
+              <p className="text-sm text-primary">{updateMessage}</p>
+            </div>
+          )}
+          {updateStatus === "done" && (
+            <div className="flex items-center gap-2 p-3 bg-[hsl(var(--haven-success))]/10 border border-[hsl(var(--haven-success))]/30 rounded-lg">
+              <CheckCircle className="w-4 h-4 text-[hsl(var(--haven-success))] flex-shrink-0" />
+              <p className="text-sm text-[hsl(var(--haven-success))]">{updateMessage}</p>
+            </div>
+          )}
+          {updateStatus === "error" && (
+            <div className="flex items-start gap-2 p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
+              <XCircle className="w-4 h-4 text-destructive mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-destructive whitespace-pre-wrap">{updateMessage}</p>
+            </div>
+          )}
+
+          {/* Manual update instructions (when Docker socket not available) */}
+          {versionInfo && !versionInfo.can_auto_update && versionInfo.update_available && (
+            <div className="space-y-2 p-3 bg-secondary/50 rounded-lg">
+              <div className="flex items-center gap-2">
+                <Terminal className="w-4 h-4 text-muted-foreground" />
+                <span className="text-sm font-medium text-foreground">Manual update</span>
+              </div>
+              <pre className="text-xs font-mono bg-background p-2 rounded border border-border overflow-x-auto">
+{`cd your-vectoraiz-directory
+docker compose -f docker-compose.customer.yml pull vectoraiz
+docker compose -f docker-compose.customer.yml up -d vectoraiz`}
+              </pre>
+            </div>
+          )}
+
+          {/* Action buttons */}
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              className="gap-2"
+              disabled={versionLoading}
+              onClick={() => fetchVersionInfo(true)}
             >
-              Documentation
-              <ExternalLink className="w-3 h-3" />
-            </a>
-            <a 
-              href="#" 
-              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-              onClick={(e) => e.preventDefault()}
-            >
-              GitHub
-              <ExternalLink className="w-3 h-3" />
-            </a>
-            <a 
-              href="#" 
-              className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
-              onClick={(e) => e.preventDefault()}
-            >
-              Report Issue
-              <ExternalLink className="w-3 h-3" />
-            </a>
+              {versionLoading ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : (
+                <RefreshCw className="w-4 h-4" />
+              )}
+              Check Now
+            </Button>
+            {versionInfo?.update_available && versionInfo?.can_auto_update && (
+              <Button
+                className="gap-2"
+                disabled={updateStatus === "updating" || updateStatus === "done"}
+                onClick={triggerUpdate}
+              >
+                {updateStatus === "updating" ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Download className="w-4 h-4" />
+                )}
+                Update to {versionInfo.latest}
+              </Button>
+            )}
           </div>
 
-          <Button 
-            variant="outline" 
-            className="gap-2"
-            onClick={() => toast({ title: "You're running the latest version" })}
-          >
-            <RefreshCw className="w-4 h-4" />
-            Check for Updates
-          </Button>
+          {/* About footer */}
+          <div className="pt-3 border-t border-border space-y-3">
+            <p className="text-sm text-muted-foreground">
+              vectorAIz{versionInfo?.current ? ` v${versionInfo.current}` : ""}
+            </p>
+            <div className="flex flex-wrap gap-4">
+              <a
+                href="https://github.com/maxrobbins/vectoraiz"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+              >
+                Documentation
+                <ExternalLink className="w-3 h-3" />
+              </a>
+              <a
+                href="https://github.com/maxrobbins/vectoraiz"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+              >
+                GitHub
+                <ExternalLink className="w-3 h-3" />
+              </a>
+              <a
+                href="https://github.com/maxrobbins/vectoraiz/issues"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+              >
+                Report Issue
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          </div>
         </CardContent>
       </Card>
 

@@ -71,8 +71,10 @@ COPY --chown=vectoraiz:vectoraiz alembic/ ./alembic/
 COPY --chown=root:root entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
-# NOTE: Running as root for Railway compatibility (volume mounts are root-owned).
-# For self-hosted deployments, uncomment: USER vectoraiz
+# Ensure non-root user owns the app directory
+RUN chown -R vectoraiz:vectoraiz /app
+
+USER vectoraiz
 
 EXPOSE 8000
 

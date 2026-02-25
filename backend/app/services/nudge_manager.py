@@ -75,6 +75,7 @@ NUDGE_TEMPLATES: Dict[str, str] = {
     "pii_detected": "I noticed potential personal information (PII) in this dataset. Want me to help you review and handle it?",
     "long_running_op": "This operation is taking a while. I'll keep an eye on it and let you know when it's done.",
     "destructive_action": "This action will permanently modify your data. Please confirm you want to proceed.",
+    "first_search": "Nice — your first search worked! How's the experience so far?",
 }
 
 # Trigger-appropriate icons (for frontend reference)
@@ -86,6 +87,7 @@ NUDGE_ICONS: Dict[str, str] = {
     "pii_detected": "Shield",
     "long_running_op": "Clock",
     "destructive_action": "AlertOctagon",
+    "first_search": "MessageCircle",
 }
 
 
@@ -130,6 +132,10 @@ class NudgeManager:
         "destructive_action": TriggerConfig(
             max_per_event=1, cooldown_s=0, dismissable=False, required=True,
             message_template=NUDGE_TEMPLATES["destructive_action"],
+        ),
+        "first_search": TriggerConfig(
+            max_per_session=1, cooldown_s=30, dismissable=True,
+            message_template=NUDGE_TEMPLATES["first_search"],
         ),
     }
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from uuid import UUID
+import uuid
 
 from app.config import settings
 from app.services.embedding_service import get_embedding_service, EmbeddingService
@@ -205,6 +206,167 @@ class IndexingService:
             return {"__type__": "uuid", "value": str(value)}
         return str(value)
     
+    # ------------------------------------------------------------------
+    # BQ-VZ-LARGE-FILES R5: Chunked streaming indexing
+    # ------------------------------------------------------------------
+
+    def index_streaming(
+        self,
+        dataset_id: str,
+        chunk_iterator,
+        text_columns: Optional[List[str]] = None,
+        recreate_collection: bool = False,
+    ) -> Dict[str, Any]:
+        """Index a dataset from a streaming chunk iterator.
+
+        BQ-VZ-LARGE-FILES R5: Processes one chunk at a time — never loads
+        the full dataset into memory.
+
+        Per chunk: extract text → chunk_text() → embed_batch() → upsert_batch()
+        Batch size: 100 points per Qdrant upsert.
+        Stable point IDs: {dataset_id}:{chunk_index}:{row_index}
+
+        Args:
+            dataset_id: Dataset identifier.
+            chunk_iterator: Iterator yielding pyarrow.RecordBatch or dict items.
+            text_columns: Columns to embed. Auto-detected from first batch if None.
+            recreate_collection: Delete existing collection first.
+        """
+        import pyarrow as pa
+
+        start_time = datetime.utcnow()
+        collection_name = f"dataset_{dataset_id}"
+        self.qdrant_service.create_collection(
+            collection_name,
+            recreate_if_exists=recreate_collection,
+        )
+
+        QDRANT_BATCH_SIZE = 100
+        total_indexed = 0
+        chunk_index = 0
+
+        texts_buf: List[str] = []
+        payloads_buf: List[Dict[str, Any]] = []
+
+        for chunk in chunk_iterator:
+            # Convert RecordBatch to list of row dicts
+            if isinstance(chunk, pa.RecordBatch):
+                table = pa.Table.from_batches([chunk])
+                cols = table.to_pydict()
+                col_names = table.column_names
+                num_rows = table.num_rows
+                row_dicts = [
+                    {c: cols[c][i] for c in col_names}
+                    for i in range(num_rows)
+                ]
+            elif isinstance(chunk, dict):
+                row_dicts = [chunk]
+            else:
+                row_dicts = [chunk] if not isinstance(chunk, list) else chunk
+
+            # Auto-detect text columns from first batch
+            if text_columns is None and row_dicts:
+                text_columns = self._detect_text_columns_from_rows(row_dicts[0])
+
+            if not text_columns:
+                chunk_index += 1
+                continue
+
+            for row_idx, row in enumerate(row_dicts):
+                text_parts = []
+                for col in text_columns:
+                    val = row.get(col)
+                    if val is not None:
+                        text_parts.append(f"{col}: {val}")
+
+                if not text_parts:
+                    continue
+
+                text = " | ".join(text_parts)
+                point_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{dataset_id}:{chunk_index}:{row_idx}"))
+
+                texts_buf.append(text)
+                payloads_buf.append({
+                    "dataset_id": dataset_id,
+                    "row_id": point_id,
+                    "chunk_index": chunk_index,
+                    "row_index": row_idx,
+                    "text_content": text,
+                    "row_data": {k: self._serialize_value(v) for k, v in row.items()},
+                })
+
+                if len(texts_buf) >= QDRANT_BATCH_SIZE:
+                    total_indexed += self._flush_index_batch(
+                        collection_name, texts_buf, payloads_buf,
+                    )
+                    texts_buf = []
+                    payloads_buf = []
+
+            chunk_index += 1
+
+        # Flush remaining
+        if texts_buf:
+            total_indexed += self._flush_index_batch(
+                collection_name, texts_buf, payloads_buf,
+            )
+
+        end_time = datetime.utcnow()
+        duration = (end_time - start_time).total_seconds()
+
+        return {
+            "dataset_id": dataset_id,
+            "status": "completed",
+            "collection": collection_name,
+            "rows_indexed": total_indexed,
+            "chunks_processed": chunk_index,
+            "text_columns_used": text_columns or [],
+            "duration_seconds": round(duration, 2),
+            "rows_per_second": round(total_indexed / duration, 1) if duration > 0 else 0,
+        }
+
+    def _flush_index_batch(
+        self,
+        collection_name: str,
+        texts: List[str],
+        payloads: List[Dict[str, Any]],
+    ) -> int:
+        """Embed texts and upsert to Qdrant. Returns count upserted.
+
+        Uses the ``row_id`` from each payload as the Qdrant point ID so
+        that streaming-indexed points have stable, deterministic IDs
+        (format: ``{dataset_id}:{chunk_index}:{row_index}``).
+        """
+        if not texts:
+            return 0
+        embeddings = self.embedding_service.embed_texts(
+            texts, batch_size=DEFAULT_BATCH_SIZE, show_progress=False,
+        )
+        # Extract stable point IDs from payloads (B5)
+        ids = [p["row_id"] for p in payloads]
+        result = self.qdrant_service.upsert_vectors(
+            collection_name=collection_name,
+            vectors=embeddings,
+            payloads=payloads,
+            ids=ids,
+        )
+        return result.get("upserted", len(texts))
+
+    def _detect_text_columns_from_rows(self, sample_row: Dict[str, Any]) -> List[str]:
+        """Detect text columns from a sample row dict (no DuckDB needed).
+
+        Used by index_streaming where we don't have a Parquet file to profile.
+        """
+        text_cols = []
+        text_keywords = {"name", "description", "title", "content", "text", "comment", "note"}
+        for col, val in sample_row.items():
+            col_lower = col.lower()
+            if isinstance(val, str) and len(val) > 10:
+                text_cols.append(col)
+            elif any(kw in col_lower for kw in text_keywords):
+                if col not in text_cols:
+                    text_cols.append(col)
+        return text_cols
+
     def delete_dataset_index(self, dataset_id: str) -> bool:
         """Delete the vector index for a dataset."""
         collection_name = f"dataset_{dataset_id}"
