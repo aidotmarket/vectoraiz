@@ -8,6 +8,7 @@ import os
 import pytest
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
+from fastapi import Depends
 
 from app.services.serial_metering import (
     ActivationRequiredException,
@@ -268,3 +269,81 @@ class TestCopilotCategoryClassification:
 
     def test_empty_string_defaults_to_data(self):
         assert classify_copilot_category("") == "data"
+
+
+class TestMeteredStandaloneMode:
+    """Standalone mode should bypass all serial metering checks."""
+
+    @pytest.mark.asyncio
+    async def test_metered_standalone_mode_bypasses_serial(self, mock_store, mock_client, mock_queue):
+        """In standalone mode, metered() returns allowed=True without checking serial state."""
+        from app.services.serial_metering import metered
+        from fastapi import FastAPI
+        from httpx import AsyncClient, ASGITransport
+
+        mock_store.state.state = UNPROVISIONED  # Would normally raise UnprovisionedException
+
+        test_app = FastAPI()
+
+        @test_app.get("/test")
+        async def test_endpoint(_meter: MeterDecision = Depends(metered("data"))):
+            return {"allowed": _meter.allowed, "category": _meter.category}
+
+        with patch("app.services.serial_metering.settings") as mock_settings, \
+             patch("app.services.serial_metering.get_serial_store", return_value=mock_store):
+            mock_settings.mode = "standalone"
+            async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
+                resp = await ac.get("/test")
+            assert resp.status_code == 200
+            assert resp.json()["allowed"] is True
+            assert resp.json()["category"] == "data"
+
+    @pytest.mark.asyncio
+    async def test_metered_standalone_mode_all_categories(self, mock_store, mock_client, mock_queue):
+        """Both 'setup' and 'data' categories return allowed in standalone mode."""
+        from app.services.serial_metering import metered
+        from fastapi import FastAPI
+        from httpx import AsyncClient, ASGITransport
+
+        mock_store.state.state = UNPROVISIONED
+
+        test_app = FastAPI()
+
+        @test_app.get("/test-setup")
+        async def test_setup(_meter: MeterDecision = Depends(metered("setup"))):
+            return {"allowed": _meter.allowed, "category": _meter.category}
+
+        @test_app.get("/test-data")
+        async def test_data(_meter: MeterDecision = Depends(metered("data"))):
+            return {"allowed": _meter.allowed, "category": _meter.category}
+
+        with patch("app.services.serial_metering.settings") as mock_settings, \
+             patch("app.services.serial_metering.get_serial_store", return_value=mock_store):
+            mock_settings.mode = "standalone"
+            async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
+                resp_setup = await ac.get("/test-setup")
+                resp_data = await ac.get("/test-data")
+
+            assert resp_setup.status_code == 200
+            assert resp_setup.json() == {"allowed": True, "category": "setup"}
+            assert resp_data.status_code == 200
+            assert resp_data.json() == {"allowed": True, "category": "data"}
+
+    @pytest.mark.asyncio
+    async def test_metered_connected_mode_still_checks_serial(self, mock_store, mock_client, mock_queue):
+        """In connected mode, serial state IS checked (existing behavior preserved)."""
+        from app.services.serial_metering import metered
+
+        mock_store.state.state = UNPROVISIONED
+
+        # Directly invoke the dependency instead of going through a test app,
+        # since UnprovisionedException is unhandled by our minimal FastAPI test app.
+        dep = metered("data")
+        mock_request = MagicMock()
+        mock_request.method = "GET"
+        mock_request.url.path = "/test"
+
+        with patch("app.services.serial_metering.settings") as mock_settings:
+            mock_settings.mode = "connected"
+            with pytest.raises(UnprovisionedException):
+                await dep(mock_request, mock_store)
