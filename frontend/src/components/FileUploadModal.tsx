@@ -186,7 +186,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
         </button>
       )}
 
-      {(item.state === "uploading") && (
+      {(item.state === "uploading" || item.state === "processing") && (
         <div className="w-16">
           <Progress value={item.progress} className="h-1" />
         </div>
