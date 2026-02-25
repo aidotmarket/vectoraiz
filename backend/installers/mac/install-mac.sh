@@ -10,6 +10,7 @@
 # =============================================================================
 
 set -e
+cd "$HOME" 2>/dev/null || cd /tmp
 
 # --- Configuration ---
 INSTALL_DIR="$HOME/vectoraiz"
