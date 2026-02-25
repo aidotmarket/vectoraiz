@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useUpload, useDatasetStatus } from "@/hooks/useApi";
-import { datasetsApi, DuplicateFileError } from "@/lib/api";
+import { DuplicateFileError } from "@/lib/api";
 import { toast } from "sonner";
 
 type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
@@ -198,7 +198,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
 const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps) => {
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [isUploading, setIsUploading] = useState(false);
-  const [batchId, setBatchId] = useState<string | null>(null);
+
   const [showLargeWarning, setShowLargeWarning] = useState(false);
   const { upload } = useUpload();
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -334,7 +334,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     }
   };
 
-  /** Upload all pending files — uses batch endpoint for 2+ files, single for 1 */
+  /** Upload all pending files — one at a time, sequentially */
   const handleUploadAll = async () => {
     const pending = queue.filter((f) => f.state === "pending");
     const totalPendingSize = pending.reduce((sum, f) => sum + f.file.size, 0);
@@ -347,68 +347,9 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     setShowLargeWarning(false);
     setIsUploading(true);
 
-    if (pending.length === 1) {
-      // Single file: use legacy endpoint for backward compatibility
-      await uploadOne(pending[0], false);
-      setIsUploading(false);
-      return;
-    }
-
-    // Multiple files: use batch endpoint
-    // Mark all as uploading
+    // Upload files sequentially — one at a time
     for (const item of pending) {
-      updateFile(item.id, { state: "uploading", progress: 0 });
-    }
-
-    // Simulated progress while uploading
-    let prog = 0;
-    const interval = setInterval(() => {
-      prog = Math.min(prog + 8, 85);
-      setQueue((prev) =>
-        prev.map((f) =>
-          f.state === "uploading" ? { ...f, progress: prog } : f
-        )
-      );
-    }, 200);
-
-    try {
-      const files = pending.map((p) => p.file);
-      const paths = pending.some((p) => p.relativePath)
-        ? pending.map((p) => p.relativePath || p.file.name)
-        : undefined;
-
-      const result = await datasetsApi.batchUpload(files, paths);
-      clearInterval(interval);
-      setBatchId(result.batch_id);
-
-      // Map batch response items back to queue items
-      for (const batchItem of result.items) {
-        const queueItem = pending[batchItem.client_file_index];
-        if (!queueItem) continue;
-
-        if (batchItem.status === "accepted") {
-          updateFile(queueItem.id, {
-            state: "processing",
-            progress: 100,
-            datasetId: batchItem.dataset_id,
-          });
-        } else {
-          updateFile(queueItem.id, {
-            state: "rejected",
-            progress: 0,
-            error: batchItem.error || "Rejected by server",
-          });
-        }
-      }
-    } catch (e) {
-      clearInterval(interval);
-      // Mark all uploading files as error
-      for (const item of pending) {
-        updateFile(item.id, {
-          state: "error",
-          error: e instanceof Error ? e.message : "Batch upload failed",
-        });
-      }
+      await uploadOne(item, false);
     }
 
     setIsUploading(false);
@@ -460,7 +401,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const handleClose = () => {
     if (isUploading) return;
     setQueue([]);
-    setBatchId(null);
     onOpenChange(false);
   };
 
