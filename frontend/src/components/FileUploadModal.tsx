@@ -315,7 +315,24 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     }
   };
 
-  /** Upload all pending files — one at a time, sequentially */
+  const CONCURRENT_UPLOADS = 3;
+
+  async function runWithConcurrency<T>(
+    items: T[],
+    fn: (item: T) => Promise<unknown>,
+    concurrency: number,
+  ): Promise<void> {
+    const queue = [...items];
+    const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
+      while (queue.length > 0) {
+        const item = queue.shift()!;
+        await fn(item);
+      }
+    });
+    await Promise.all(workers);
+  }
+
+  /** Upload all pending files — up to 3 concurrent uploads */
   const handleUploadAll = async () => {
     const pending = queue.filter((f) => f.state === "pending");
     const totalPendingSize = pending.reduce((sum, f) => sum + f.file.size, 0);
@@ -328,10 +345,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     setShowLargeWarning(false);
     setIsUploading(true);
 
-    // Upload files sequentially — one at a time
-    for (const item of pending) {
-      await uploadOne(item, false);
-    }
+    await runWithConcurrency(pending, (item) => uploadOne(item, false), CONCURRENT_UPLOADS);
 
     setIsUploading(false);
   };
@@ -340,9 +354,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const handleUploadDuplicates = async () => {
     setIsUploading(true);
     const dupes = queue.filter((f) => f.state === "duplicate");
-    for (const item of dupes) {
-      await uploadOne(item, true);
-    }
+    await runWithConcurrency(dupes, (item) => uploadOne(item, true), CONCURRENT_UPLOADS);
     setIsUploading(false);
   };
 
