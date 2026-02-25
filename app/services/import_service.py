@@ -29,7 +29,7 @@ def validate_import_path(path_str: str) -> Path:
     """Validate path is within /imports/ and not a symlink."""
     p = Path(path_str)
     resolved = p.resolve()
-    if not str(resolved).startswith(str(IMPORT_ROOT)):
+    if not resolved.is_relative_to(IMPORT_ROOT):
         raise ValueError(f"Path outside import directory: {path_str}")
     # Walk the *original* (unresolved) path to detect symlinks before resolve
     # hides them. Normalize first to collapse redundant separators.
@@ -71,7 +71,12 @@ class ImportJob:
 
 
 class ImportService:
-    """Manages local file import jobs."""
+    """Manages local file import jobs.
+
+    Note: Job state is in-memory. This is safe because vectorAIz runs
+    uvicorn workers as threads in the same process. If deployment changes
+    to multi-process workers, migrate to Redis/DB-backed job state.
+    """
 
     def __init__(self):
         self._jobs: Dict[str, ImportJob] = {}
@@ -225,22 +230,46 @@ class ImportService:
             src = Path(entry.source_path)
             filename = src.name
 
-            # Create dataset record
-            file_type = src.suffix.lstrip('.')
-            record = processing.create_dataset(
-                original_filename=filename,
-                file_type=file_type,
-            )
-            entry.dataset_id = record.id
-            dest = Path(record.upload_path)
-            dest.parent.mkdir(parents=True, exist_ok=True)
+            # Re-validate at copy time (TOCTOU protection)
+            try:
+                validate_import_path(str(src))
+            except ValueError as e:
+                logger.error("TOCTOU: path changed since import start: %s", e)
+                entry.status = "error"
+                entry.error = f"Security: path changed since import start"
+                continue
+
+            # Use O_NOFOLLOW to prevent symlink following at open time
+            try:
+                fd = os.open(str(src), os.O_RDONLY | os.O_NOFOLLOW)
+                fin = os.fdopen(fd, 'rb')
+            except OSError as e:
+                logger.error("Cannot open file (symlink?): %s: %s", src, e)
+                entry.status = "error"
+                entry.error = f"Cannot open file: {e}"
+                continue
 
             try:
-                # Chunked copy with progress
+                # Create dataset record
+                file_type = src.suffix.lstrip('.')
+                record = processing.create_dataset(
+                    original_filename=filename,
+                    file_type=file_type,
+                )
+                entry.dataset_id = record.id
+                dest = Path(record.upload_path)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+
+                # Chunked copy with progress, bounded to recorded size
+                max_bytes = entry.size_bytes
                 copied = 0
-                with open(str(src), 'rb') as fin, open(str(dest), 'wb') as fout:
+                with open(str(dest), 'wb') as fout:
                     while True:
-                        chunk = fin.read(COPY_CHUNK)
+                        remaining = max_bytes - copied
+                        if remaining <= 0:
+                            break
+                        to_read = min(COPY_CHUNK, remaining)
+                        chunk = fin.read(to_read)
                         if not chunk:
                             break
                         fout.write(chunk)
@@ -259,6 +288,8 @@ class ImportService:
                 logger.error("Import copy failed for %s: %s", entry.relative_path, e)
                 entry.status = "error"
                 entry.error = str(e)
+            finally:
+                fin.close()
 
         # Mark complete
         if not job.cancelled:

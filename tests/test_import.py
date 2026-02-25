@@ -1,11 +1,14 @@
 """Tests for BQ-VZ-LOCAL-IMPORT: local directory import service & endpoints."""
 import os
+import asyncio
 import pytest
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from app.services.import_service import (
     ImportService,
+    ImportFileEntry,
+    ImportJob,
     validate_import_path,
     IMPORT_ROOT,
     JUNK_FILES,
@@ -298,3 +301,44 @@ class TestStartImport:
         assert job.files[0].relative_path == "test.csv"
         assert job.total_bytes == test_file.stat().st_size
         assert svc.get_job(job.job_id) is job
+
+
+# ---------------------------------------------------------------------------
+# TOCTOU revalidation tests
+# ---------------------------------------------------------------------------
+
+class TestTOCTOURevalidation:
+    @pytest.mark.asyncio
+    async def test_toctou_revalidation(self, svc, import_root):
+        """File replaced with symlink between validation and copy is caught."""
+        # Create a valid file and build a job entry pointing at it
+        legit = import_root / "legit.csv"
+        legit.write_text("a,b\n1,2")
+        size = legit.stat().st_size
+
+        entry = ImportFileEntry(
+            relative_path="legit.csv",
+            source_path=str(legit),
+            size_bytes=size,
+        )
+        job = ImportJob(job_id="imp_toctou_test", files=[entry])
+
+        # Now replace the file with a symlink to something outside the import root
+        legit.unlink()
+        legit.symlink_to("/etc/passwd")
+
+        # Mock the processing service and process_dataset_task so run_import
+        # doesn't need the real app wired up
+        mock_processing = MagicMock()
+        mock_task = AsyncMock()
+
+        with patch("app.services.processing_service.get_processing_service", return_value=mock_processing), \
+             patch("app.services.import_service.UPLOAD_DIR", import_root / "uploads"), \
+             patch("app.routers.datasets.process_dataset_task", mock_task):
+            await svc.run_import(job)
+
+        # The entry must be marked as error with a security message
+        assert entry.status == "error"
+        assert "Security" in entry.error or "Symlinks not allowed" in entry.error
+        # create_dataset must NOT have been called (we stopped before copy)
+        mock_processing.create_dataset.assert_not_called()
