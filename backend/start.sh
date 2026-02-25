@@ -8,11 +8,10 @@
 #   1. Checks Docker is installed and running
 #   2. Checks for port conflicts and finds a free port
 #   3. Generates secrets if first run
-#   4. Configures Allie AI assistant (if API key provided)
-#   5. Builds and starts all containers
-#   6. Waits for the app to be healthy
-#   7. Creates a desktop shortcut
-#   8. Opens your browser
+#   4. Pulls and starts all containers
+#   5. Waits for the app to be healthy
+#   6. Creates a desktop shortcut
+#   7. Opens your browser
 # =============================================================================
 
 set -e
@@ -22,7 +21,6 @@ COMPOSE_FILE="docker-compose.customer.yml"
 APP_NAME="vectorAIz"
 SHORTCUT_NAME="vectorAIz"
 PREFERRED_PORTS=(80 8080 3000 8888 9000)
-AI_MARKET_URL="https://ai-market-backend-production.up.railway.app"
 
 # --- Colors ---
 RED='\033[0;31m'
@@ -49,7 +47,6 @@ print_banner() {
 }
 
 print_ready() {
-    local allie_status="$1"
     echo ""
     echo -e "${GREEN}${BOLD}"
     echo "  ╔═══════════════════════════════════════════╗"
@@ -59,12 +56,6 @@ print_ready() {
     echo "  ║   Open your browser to:                   ║"
     echo "  ║                                           ║"
     echo -e "  ║   ${BOLD}${CYAN}➜  ${URL} $(printf '%*s' $((25 - ${#URL})) '')${GREEN}║"
-    echo "  ║                                           ║"
-    if [ "$allie_status" = "enabled" ]; then
-    echo -e "  ║   ${CYAN}🤖 Allie AI assistant: ON${GREEN}              ║"
-    else
-    echo -e "  ║   ${DIM}🤖 Allie AI assistant: OFF${GREEN}             ║"
-    fi
     echo "  ║                                           ║"
     echo "  ║   To stop: ./stop.sh                      ║"
     echo "  ║                                           ║"
@@ -160,11 +151,11 @@ if [ -n "$PORT" ]; then
         echo -e "    ${BOLD}2)${NC} Enter a specific port"
         echo -e "    ${BOLD}3)${NC} Abort"
         echo ""
-        read -rp "  Choice [1/2/3]: " CHOICE
+        read -rp "  Choice [1/2/3]: " CHOICE < /dev/tty
         case "$CHOICE" in
             1) PORT="" ;;
             2)
-                read -rp "  Enter port number: " PORT
+                read -rp "  Enter port number: " PORT < /dev/tty
                 if ! is_port_free "$PORT"; then
                     fail "Port $PORT is also in use."
                 fi
@@ -211,7 +202,6 @@ POSTGRES_PASSWORD=${POSTGRES_PW}
 # Port to serve on
 VECTORAIZ_PORT=${PORT}
 
-# Mode: standalone (default) or connected (with Allie AI)
 VECTORAIZ_MODE=standalone
 EOF
     success "Generated .env with secure defaults"
@@ -224,82 +214,7 @@ else
     success "Using existing .env (port: ${PORT})"
 fi
 
-# ─── Step 5: Allie AI Setup ─────────────────────────────────────
-ALLIE_ENABLED=false
-
-# Check if already configured
-if grep -q "^VECTORAIZ_INTERNAL_API_KEY=aim_" .env 2>/dev/null; then
-    ALLIE_ENABLED=true
-    success "Allie AI assistant: already configured"
-elif [ "$FIRST_RUN" = true ]; then
-    # First run — ask about Allie
-    echo ""
-    echo -e "  ${CYAN}${BOLD}─── Allie AI Assistant ────────────────────${NC}"
-    echo ""
-    echo -e "  Allie is your AI-powered data assistant. She can help"
-    echo -e "  you understand, clean, and optimize your datasets."
-    echo ""
-    echo -e "  To enable Allie, you need an API key from ${BOLD}ai.market${NC}."
-    echo -e "  ${DIM}(Your beta invitation email includes this key)${NC}"
-    echo ""
-    read -rp "  Enter your API key (or press Enter to skip): " API_KEY
-    
-    if [ -n "$API_KEY" ]; then
-        # Validate key format
-        if [[ "$API_KEY" == aim_* ]]; then
-            # Write Allie config to .env
-            cat >> .env <<EOF
-
-# Allie AI Assistant (connected mode)
-VECTORAIZ_MODE=connected
-VECTORAIZ_AI_MARKET_URL=${AI_MARKET_URL}
-VECTORAIZ_ALLIE_PROVIDER=aimarket
-VECTORAIZ_INTERNAL_API_KEY=${API_KEY}
-EOF
-            ALLIE_ENABLED=true
-            success "Allie enabled! She'll be ready when vectorAIz starts."
-        else
-            warn "API key should start with 'aim_' — skipping Allie setup."
-            echo -e "  ${DIM}You can enable Allie later by re-running ./start.sh --setup-allie${NC}"
-        fi
-    else
-        info "Skipping Allie — running in standalone mode."
-        echo -e "  ${DIM}You can enable Allie later by re-running ./start.sh --setup-allie${NC}"
-    fi
-    echo ""
-fi
-
-# Handle --setup-allie flag for re-runs
-if [[ "$1" == "--setup-allie" ]] && [ "$ALLIE_ENABLED" = false ]; then
-    echo ""
-    echo -e "  ${CYAN}${BOLD}─── Allie AI Setup ───────────────────────${NC}"
-    echo ""
-    read -rp "  Enter your API key: " API_KEY
-    
-    if [ -n "$API_KEY" ] && [[ "$API_KEY" == aim_* ]]; then
-        # Remove old mode line, add connected config
-        sed -i.bak '/^VECTORAIZ_MODE=/d' .env && rm -f .env.bak
-        sed -i.bak '/^VECTORAIZ_AI_MARKET_URL=/d' .env && rm -f .env.bak
-        sed -i.bak '/^VECTORAIZ_ALLIE_PROVIDER=/d' .env && rm -f .env.bak
-        sed -i.bak '/^VECTORAIZ_INTERNAL_API_KEY=/d' .env && rm -f .env.bak
-        sed -i.bak '/^# Allie AI/d' .env && rm -f .env.bak
-        cat >> .env <<EOF
-
-# Allie AI Assistant (connected mode)
-VECTORAIZ_MODE=connected
-VECTORAIZ_AI_MARKET_URL=${AI_MARKET_URL}
-VECTORAIZ_ALLIE_PROVIDER=aimarket
-VECTORAIZ_INTERNAL_API_KEY=${API_KEY}
-EOF
-        ALLIE_ENABLED=true
-        success "Allie enabled!"
-    else
-        fail "Invalid API key. Keys start with 'aim_'."
-    fi
-    echo ""
-fi
-
-# ─── Step 6: Build and start ────────────────────────────────────
+# ─── Step 5: Pull and start ─────────────────────────────────────
 info "Starting vectorAIz..."
 echo ""
 
@@ -321,7 +236,7 @@ done
 
 echo ""
 
-# ─── Step 7: Wait for healthy ───────────────────────────────────
+# ─── Step 6: Wait for healthy ───────────────────────────────────
 info "Waiting for vectorAIz to be ready..."
 MAX_WAIT=180
 WAITED=0
@@ -329,7 +244,7 @@ while [ $WAITED -lt $MAX_WAIT ]; do
     if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
         break
     fi
-    
+
     CONTAINER_STATUS=$(docker compose -f "$COMPOSE_FILE" ps --format json 2>/dev/null | grep vectoraiz | grep -o '"State":"[^"]*"' | cut -d'"' -f4)
     if [ "$CONTAINER_STATUS" = "restarting" ] && [ $WAITED -gt 30 ]; then
         echo ""
@@ -341,7 +256,7 @@ while [ $WAITED -lt $MAX_WAIT ]; do
         echo ""
         fail "Container failed to start. Check full logs with: docker compose -f $COMPOSE_FILE logs vectoraiz"
     fi
-    
+
     printf "\r  ${BLUE}⏳${NC} Waiting for services to initialize... (%ds)" "$WAITED"
     sleep 3
     WAITED=$((WAITED + 3))
@@ -356,7 +271,7 @@ else
     success "All services healthy"
 fi
 
-# ─── Step 8: Desktop shortcut ───────────────────────────────────
+# ─── Step 7: Desktop shortcut ───────────────────────────────────
 create_webloc() {
     local dir="$1"
     local shortcut_path="${dir}/${SHORTCUT_NAME}.webloc"
@@ -403,10 +318,8 @@ elif [[ "$OSTYPE" == "linux"* ]]; then
     create_desktop_file "${SCRIPT_DIR}/${SHORTCUT_NAME}.desktop"
 fi
 
-# ─── Step 9: Open browser ───────────────────────────────────────
-ALLIE_FLAG="disabled"
-[ "$ALLIE_ENABLED" = true ] && ALLIE_FLAG="enabled"
-print_ready "$ALLIE_FLAG"
+# ─── Step 8: Done ───────────────────────────────────────────────
+print_ready
 
 if [[ "$OSTYPE" == "darwin"* ]]; then
     sleep 1
@@ -417,7 +330,4 @@ elif command -v xdg-open &>/dev/null; then
 fi
 
 echo -e "  ${CYAN}Tip:${NC} View logs with: docker compose -f $COMPOSE_FILE logs -f"
-if [ "$ALLIE_ENABLED" = false ]; then
-    echo -e "  ${CYAN}Tip:${NC} Enable Allie later with: ./start.sh --setup-allie"
-fi
 echo ""
