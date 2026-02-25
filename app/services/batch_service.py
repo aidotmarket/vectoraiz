@@ -30,8 +30,8 @@ from app.utils.sanitization import sanitize_filename
 logger = logging.getLogger(__name__)
 
 # Limits
-MAX_FILES = 50
-MAX_TOTAL_BYTES = 500 * 1024 * 1024   # 500 MB
+MAX_FILES = 10_000
+MAX_TOTAL_BYTES = 500 * 1024 * 1024 * 1024  # 500 GB (effectively unlimited for local app)
 MAX_FILE_BYTES = 100 * 1024 * 1024    # 100 MB
 
 SUPPORTED_EXTENSIONS = {
