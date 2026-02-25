@@ -16,10 +16,14 @@ Most AI data tools send your data to the cloud. vectorAIz doesn't. Everything ru
 
 - **Private by design** — data stays on your machine, always
 - **Bring your own LLM** — OpenAI, Anthropic Claude, or Google Gemini
-- **Upload anything** — CSV, JSON, TXT, Markdown, HTML, and more
+- **Upload anything** — CSV, JSON, TXT, Markdown, HTML, PDF, DOCX, PPTX, XLS, and more
+- **Local directory import** — mount a local folder and import files directly, no upload needed
+- **Database connectivity** — connect to Postgres and MySQL databases, extract and vectorize table data
 - **Natural language queries** — ask questions about your data in plain English
 - **AI copilot** — allAI assistant helps you explore and understand your datasets
-- **Bulk upload** — batch process hundreds of files with progress tracking
+- **Parallel upload** — concurrent upload workers with real progress tracking
+- **Large file streaming** — handles files of any size with chunked processing
+- **Auto-update** — automatic software updates for Docker deployments
 - **Data preview** — inspect schemas, stats, and samples before vectorizing
 - **Diagnostic tools** — structured logging, health checks, one-click diagnostic export
 
@@ -69,34 +73,39 @@ Once running:
 |--------|-----------|
 | Tabular | `.csv`, `.tsv`, `.json`, `.jsonl` |
 | Text | `.txt`, `.md`, `.rst`, `.html` |
-| More coming | PDF, DOCX, PPTX (via Apache Tika — planned) |
+| Documents | `.pdf`, `.docx`, `.pptx`, `.xls`, `.xlsx` (via Apache Tika) |
 
 ## Architecture
 
-vectorAIz runs as two Docker containers on your machine:
+vectorAIz runs as Docker containers on your machine:
 
 ```
-┌─────────────────────────────────┐
-│         Your Machine            │
-│                                 │
-│  ┌───────────┐  ┌────────────┐  │
-│  │ vectorAIz │  │   Qdrant   │  │
-│  │   API     │──│  (vectors) │  │
-│  │  :8000    │  │   :6333    │  │
-│  └─────┬─────┘  └────────────┘  │
-│        │                        │
-│        │ Your LLM key           │
-│        ▼                        │
-│  ┌───────────┐                  │
-│  │ OpenAI /  │  (external,      │
-│  │ Anthropic │   API calls only)│
-│  │ / Gemini  │                  │
-│  └───────────┘                  │
-└─────────────────────────────────┘
+┌──────────────────────────────────────────┐
+│              Your Machine                │
+│                                          │
+│  ┌───────────┐  ┌────────────┐           │
+│  │ vectorAIz │──│   Qdrant   │           │
+│  │   API     │  │  (vectors) │           │
+│  │  :8000    │  │   :6333    │           │
+│  │           │  └────────────┘           │
+│  │           │  ┌────────────┐           │
+│  │           │──│   DuckDB   │           │
+│  │           │  │ (tabular)  │           │
+│  └─────┬─────┘  └────────────┘           │
+│        │                                 │
+│        │ Your LLM key                    │
+│        ▼                                 │
+│  ┌───────────┐                           │
+│  │ OpenAI /  │  (external, API calls     │
+│  │ Anthropic │   only — no data sent)    │
+│  │ / Gemini  │                           │
+│  └───────────┘                           │
+└──────────────────────────────────────────┘
 ```
 
 - **vectorAIz API** — FastAPI backend handling uploads, vectorization, search, and the AI copilot
 - **Qdrant** — vector database storing embeddings locally
+- **DuckDB** — embedded analytical database for tabular data storage and queries
 - **Your LLM** — queries go to your chosen provider using your own API key
 
 No data is sent to ai.market or any third party. Only metadata (if you choose to publish) leaves your network.
