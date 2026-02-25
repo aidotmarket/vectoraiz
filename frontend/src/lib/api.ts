@@ -684,6 +684,90 @@ export const authApi = {
     }),
 };
 
+// BQ-VZ-LOCAL-IMPORT: Local Import types
+export interface ImportBrowseEntry {
+  name: string;
+  type: "file" | "directory";
+  size_bytes?: number;
+  extension?: string;
+}
+
+export interface ImportBrowseResponse {
+  path: string;
+  entries: ImportBrowseEntry[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ImportScanResponse {
+  files: { relative_path: string; size_bytes: number; extension: string }[];
+  total_files: number;
+  total_bytes: number;
+  skipped: number;
+  truncated: boolean;
+}
+
+export interface ImportStartResponse {
+  job_id: string;
+  total_files: number;
+  total_bytes: number;
+  status: string;
+}
+
+export interface ImportProgress {
+  files_total: number;
+  files_complete: number;
+  files_copying: number;
+  files_pending: number;
+  bytes_copied: number;
+  bytes_total: number;
+  current_file?: string;
+  current_file_pct?: number;
+}
+
+export interface ImportFileResult {
+  file: string;
+  status: string;
+  dataset_id?: string;
+  error?: string;
+}
+
+export interface ImportStatusResponse {
+  job_id: string;
+  status: string;
+  progress: ImportProgress;
+  results: ImportFileResult[];
+}
+
+// Local Import API
+export const importApi = {
+  browse: (path: string, limit = 500, offset = 0) =>
+    apiFetch<ImportBrowseResponse>(
+      `/api/datasets/import/browse?path=${encodeURIComponent(path)}&limit=${limit}&offset=${offset}`
+    ),
+
+  scan: (path: string, recursive = true, maxDepth = 5) =>
+    apiFetch<ImportScanResponse>('/api/datasets/import/scan', {
+      method: 'POST',
+      body: JSON.stringify({ path, recursive, max_depth: maxDepth }),
+    }),
+
+  start: (path: string, files: string[]) =>
+    apiFetch<ImportStartResponse>('/api/datasets/import/start', {
+      method: 'POST',
+      body: JSON.stringify({ path, files }),
+    }),
+
+  getStatus: (jobId: string) =>
+    apiFetch<ImportStatusResponse>(`/api/datasets/import/${jobId}`),
+
+  cancel: (jobId: string) =>
+    apiFetch<{ status: string }>(`/api/datasets/import/${jobId}/cancel`, {
+      method: 'POST',
+    }),
+};
+
 // BQ-107: LLM Admin API
 export const llmAdminApi = {
   getProviders: () =>

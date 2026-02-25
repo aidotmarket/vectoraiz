@@ -22,11 +22,14 @@ import {
   X,
   AlertTriangle,
   FolderOpen,
+  HardDrive,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatasetStatus } from "@/hooks/useApi";
 import { datasetsApi, DuplicateFileError } from "@/lib/api";
 import { toast } from "sonner";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { LocalImportBrowser } from "@/components/LocalImportBrowser";
 
 type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
 
@@ -201,6 +204,8 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
   const [showLargeWarning, setShowLargeWarning] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
+  const [activeTab, setActiveTab] = useState("upload");
+  const [isImporting, setIsImporting] = useState(false);
 
   const hasFiles = queue.length > 0;
   const hasPending = queue.some((f) => f.state === "pending");
@@ -401,8 +406,9 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   }, [allDone]);
 
   const handleClose = () => {
-    if (isUploading) return;
+    if (isUploading || isImporting) return;
     setQueue([]);
+    setActiveTab("upload");
     onOpenChange(false);
   };
 
@@ -416,6 +422,19 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           <DialogTitle className="text-foreground">Upload Datasets</DialogTitle>
         </DialogHeader>
 
+        <Tabs value={activeTab} onValueChange={setActiveTab}>
+          <TabsList className="w-full">
+            <TabsTrigger value="upload" disabled={isImporting} className="flex-1 gap-1.5">
+              <Upload className="w-3.5 h-3.5" />
+              Upload Files
+            </TabsTrigger>
+            <TabsTrigger value="import" disabled={isUploading || hasFiles} className="flex-1 gap-1.5">
+              <HardDrive className="w-3.5 h-3.5" />
+              Import Local
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="upload">
         {/* Hidden folder input */}
         <input
           ref={folderInputRef}
@@ -561,7 +580,18 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </div>
           )}
         </div>
+          </TabsContent>
 
+          <TabsContent value="import" className="py-4">
+            <LocalImportBrowser
+              onImportingChange={setIsImporting}
+              onSuccess={onSuccess}
+              onClose={handleClose}
+            />
+          </TabsContent>
+        </Tabs>
+
+        {activeTab === "upload" && (
         <DialogFooter>
           {!allDone && !hasDuplicates && (
             <>
@@ -588,6 +618,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </Button>
           )}
         </DialogFooter>
+        )}
       </DialogContent>
     </Dialog>
   );
