@@ -131,6 +131,27 @@ if [ ! -f "$COMPOSE_FILE" ]; then
     fail "Cannot find $COMPOSE_FILE in $(pwd)"
 fi
 
+# ─── Step 2b: Clean stale Docker resources from previous install ─
+EXISTING_VOLUMES=$(docker volume ls --filter "name=vectoraiz_" --format "{{.Name}}" 2>/dev/null)
+if [ -n "$EXISTING_VOLUMES" ]; then
+    info "Found existing vectorAIz volumes. Cleaning up stale data..."
+    # Stop any running containers first
+    if [ -f "$COMPOSE_FILE" ]; then
+        docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+    else
+        # No compose file, remove volumes directly
+        docker container ls -a --filter "name=vectoraiz" --format "{{.ID}}" | xargs -r docker rm -f 2>/dev/null || true
+        echo "$EXISTING_VOLUMES" | xargs -r docker volume rm 2>/dev/null || true
+    fi
+    success "Cleaned up previous installation"
+fi
+
+EXISTING_CONTAINERS=$(docker container ls -a --filter "name=vectoraiz" --format "{{.ID}}" 2>/dev/null)
+if [ -n "$EXISTING_CONTAINERS" ]; then
+    info "Removing stale containers..."
+    echo "$EXISTING_CONTAINERS" | xargs -r docker rm -f 2>/dev/null || true
+fi
+
 # ─── Step 3: Port detection ─────────────────────────────────────
 info "Checking for available port..."
 
@@ -238,7 +259,7 @@ echo ""
 
 # ─── Step 6: Wait for healthy ───────────────────────────────────
 info "Waiting for vectorAIz to be ready..."
-MAX_WAIT=180
+MAX_WAIT=120
 WAITED=0
 while [ $WAITED -lt $MAX_WAIT ]; do
     if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
@@ -267,6 +288,7 @@ if [ $WAITED -ge $MAX_WAIT ]; then
     warn "Timed out waiting for health check."
     echo -e "  Check logs: ${BOLD}docker compose -f $COMPOSE_FILE logs${NC}"
     echo -e "  The app may still be starting. Try opening ${BOLD}$URL${NC} in a minute."
+    echo -e "  ${YELLOW}If this is a reinstall, try:${NC} docker volume rm vectoraiz_postgres-data && rerun the installer"
 else
     success "All services healthy"
 fi
