@@ -1,142 +1,112 @@
-/**
- * App.tsx — Root application component with hash-based routing
- * =============================================================
- *
- * Simple client-side navigation using window.location.hash.
- * No external router dependency required.
- *
- * Routes:
- *   #/            → Browse (marketplace)
- *   #/browse      → Browse (marketplace)
- *   #/listing/:s  → Listing detail
- *   #/purchases   → Buyer dashboard
- *   #/seller      → Seller dashboard
- *   #/download    → Download page (GitHub releases)
- *   #/contact     → Contact form
- *
- * UPDATED: BQ-027 (2026-02-10) — Added download route + nav link
- * UPDATED: BQ-097 st-3 (2026-02-10) — Added dashboard navigation
- * UPDATED: 2026-02-11 — Added contact route
- * UPDATED: S101 (2026-02-10) — Added allAI Support Chat floating widget
- */
+import { Toaster } from "@/components/ui/toaster";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
+import { ModeProvider, useMode } from "./contexts/ModeContext";
+import { MarketplaceProvider } from "./contexts/MarketplaceContext";
+import { CoPilotProvider } from "./contexts/CoPilotContext";
+import ErrorBoundary from "./components/ErrorBoundary";
+import MainLayout from "./components/layout/MainLayout";
+import ChatPanel from "./components/copilot/ChatPanel";
+import CoPilotFab from "./components/copilot/CoPilotFab";
+import Dashboard from "./pages/Dashboard";
+import Datasets from "./pages/Datasets";
+import DatasetDetail from "./pages/DatasetDetail";
+import EarningsPage from "./pages/EarningsPage";
+import SearchPage from "./pages/SearchPage";
+import SqlQuery from "./pages/SqlQuery";
+import DatabasePage from "./pages/DatabasePage";
+import SettingsPage from "./pages/SettingsPage";
+import DeployAIPage from "./pages/DeployAIPage";
+import DataTypesPage from "./pages/DataTypesPage";
+import AiMarketPage from "./pages/AiMarketPage";
+import SetupPage from "./pages/SetupPage";
+import LoginPage from "./pages/LoginPage";
+import NotFound from "./pages/NotFound";
 
-import { useState, useEffect, useCallback } from "react";
-import Browse from "./pages/Browse";
-import ListingDetailPage from "./pages/ListingDetail";
-import BuyerDashboard from "./pages/BuyerDashboard";
-import SellerDashboard from "./pages/SellerDashboard";
-import Download from "./pages/Download";
-import Contact from "./pages/Contact";
-import SupportChat from "./pages/SupportChat";
+const queryClient = new QueryClient();
 
-// ---------------------------------------------------------------------------
-// Hash-based route resolution
-// ---------------------------------------------------------------------------
+/** Redirects to /login when not authenticated. Shows nothing while auth is loading. */
+const RequireAuth = ({ children }: { children: React.ReactNode }) => {
+  const { isAuthenticated, isLoading } = useAuth();
 
-type Route =
-  | { page: "browse" }
-  | { page: "listing"; slug: string }
-  | { page: "purchases" }
-  | { page: "seller" }
-  | { page: "download" }
-  | { page: "contact" };
-
-function resolveRoute(hash: string): Route {
-  const path = hash.replace(/^#\/?/, "/");
-  if (path.startsWith("/listing/")) {
-    return { page: "listing", slug: path.replace("/listing/", "") };
-  }
-  if (path === "/purchases") return { page: "purchases" };
-  if (path === "/seller") return { page: "seller" };
-  if (path === "/download") return { page: "download" };
-  if (path === "/contact") return { page: "contact" };
-  return { page: "browse" };
-}
-
-// ---------------------------------------------------------------------------
-// Navigation bar
-// ---------------------------------------------------------------------------
-
-function NavBar({ currentPage }: { currentPage: string }) {
-  const isLoggedIn = !!(
-    localStorage.getItem("auth_token") || localStorage.getItem("token")
-  );
-
-  const linkClass = (page: string) =>
-    `px-3 py-2 text-sm font-medium rounded-md transition-colors ${
-      currentPage === page
-        ? "bg-indigo-100 text-indigo-700"
-        : "text-gray-600 hover:text-gray-900 hover:bg-gray-100"
-    }`;
-
-  return (
-    <nav className="bg-white border-b border-gray-200 sticky top-0 z-50">
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-        <div className="flex items-center justify-between h-14">
-          {/* Brand */}
-          <a href="#/" className="flex items-center gap-2">
-            <span className="text-lg font-bold text-indigo-600">ai.market</span>
-          </a>
-
-          {/* Nav links */}
-          <div className="flex items-center gap-1">
-            <a href="#/browse" className={linkClass("browse")}>
-              Browse
-            </a>
-            <a href="#/download" className={linkClass("download")}>
-              Download
-            </a>
-            <a href="#/contact" className={linkClass("contact")}>
-              Contact
-            </a>
-            {isLoggedIn && (
-              <>
-                <a href="#/purchases" className={linkClass("purchases")}>
-                  My Purchases
-                </a>
-                <a href="#/seller" className={linkClass("seller")}>
-                  Seller Dashboard
-                </a>
-              </>
-            )}
-          </div>
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center animate-pulse">
+          <span className="text-primary-foreground font-bold text-lg">V</span>
         </div>
       </div>
-    </nav>
-  );
-}
+    );
+  }
 
-// ---------------------------------------------------------------------------
-// App
-// ---------------------------------------------------------------------------
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
 
-function App() {
-  const [route, setRoute] = useState<Route>(() => resolveRoute(window.location.hash));
+  return <>{children}</>;
+};
 
-  const onHashChange = useCallback(() => {
-    setRoute(resolveRoute(window.location.hash));
-  }, []);
+/** Redirects to / when a required feature flag is disabled. */
+const RequireFeature = ({ feature, children }: { feature: "marketplace" | "allai" | "earnings"; children: React.ReactNode }) => {
+  const { hasFeature } = useMode();
+  if (!hasFeature(feature)) {
+    return <Navigate to="/" replace />;
+  }
+  return <>{children}</>;
+};
 
-  useEffect(() => {
-    window.addEventListener("hashchange", onHashChange);
-    return () => window.removeEventListener("hashchange", onHashChange);
-  }, [onHashChange]);
+const App = () => (
+  <ErrorBoundary>
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <BrowserRouter>
+          <AuthProvider>
+            <ModeProvider>
+              <CoPilotProvider>
+                <Toaster />
+                <Sonner />
+                <Routes>
+                  {/* Public routes — outside MainLayout */}
+                  <Route path="/setup" element={<SetupPage />} />
+                  <Route path="/login" element={<LoginPage />} />
 
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <NavBar currentPage={route.page} />
-      <main>
-        {route.page === "browse" && <Browse />}
-        {route.page === "listing" && <ListingDetailPage />}
-        {route.page === "purchases" && <BuyerDashboard />}
-        {route.page === "seller" && <SellerDashboard />}
-        {route.page === "download" && <Download />}
-        {route.page === "contact" && <Contact />}
-      </main>
-      {/* allAI Support Chat — floating widget on all pages */}
-      <SupportChat />
-    </div>
-  );
-}
+                  {/* Protected routes — inside MainLayout */}
+                  <Route
+                    element={
+                      <RequireAuth>
+                        <MarketplaceProvider>
+                          <ChatPanel />
+                          <CoPilotFab />
+                          <MainLayout />
+                        </MarketplaceProvider>
+                      </RequireAuth>
+                    }
+                  >
+                    <Route path="/" element={<Dashboard />} />
+                    <Route path="/datasets" element={<Datasets />} />
+                    <Route path="/datasets/:id" element={<DatasetDetail />} />
+                    <Route path="/earnings" element={<EarningsPage />} />
+                    <Route path="/search" element={<SearchPage />} />
+                    <Route path="/sql" element={<SqlQuery />} />
+                    <Route path="/databases" element={<DatabasePage />} />
+                    <Route path="/settings" element={<SettingsPage />} />
+                    <Route path="/deploy-ai" element={<DeployAIPage />} />
+                    <Route path="/data-types" element={<DataTypesPage />} />
+                    <Route path="/ai-market" element={<AiMarketPage />} />
+                  </Route>
+
+                  <Route path="*" element={<NotFound />} />
+                </Routes>
+              </CoPilotProvider>
+            </ModeProvider>
+          </AuthProvider>
+        </BrowserRouter>
+      </TooltipProvider>
+    </QueryClientProvider>
+  </ErrorBoundary>
+);
 
 export default App;

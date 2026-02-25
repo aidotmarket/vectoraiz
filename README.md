@@ -1,153 +1,157 @@
-<p align="center">
-  <img src="backend/frontend/public/vectoraiz-logo-sm.png" alt="vectorAIz" width="200" />
-</p>
+# vectorAIz
 
-<h1 align="center">vectorAIz</h1>
+**Your data. Your infrastructure. AI-ready.**
 
-<p align="center">
-  <strong>Turn your data into AI-ready assets — locally, privately, for free.</strong>
-</p>
+vectorAIz transforms your corporate data into searchable, AI-optimized assets — completely private, running entirely on your hardware. Connect your own LLM, upload your files, and query everything with natural language.
 
-<p align="center">
-  <a href="#install">Install</a> · <a href="#features">Features</a> · <a href="https://vectoraiz.com">Website</a> · <a href="#architecture">Architecture</a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/status-public%20beta-teal" alt="Public Beta" />
-  <img src="https://img.shields.io/badge/license-ELv2-blue" alt="License" />
-  <img src="https://img.shields.io/badge/docker-required-2496ED?logo=docker&logoColor=white" alt="Docker" />
-  <img src="https://img.shields.io/badge/platforms-macOS%20%7C%20Linux%20%7C%20Windows%20(WSL)-lightgrey" alt="Platforms" />
-</p>
+[![License: ELv2](https://img.shields.io/badge/License-ELv2-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![Docker](https://img.shields.io/badge/docker-required-blue.svg)](https://www.docker.com/)
 
 ---
 
-vectorAIz is a free, self-hosted tool that processes your documents locally, generates vector embeddings, and makes your data queryable with natural language. Upload files, ask questions, get AI-powered answers — everything runs on your machine. Your data never leaves your network.
+## Why vectorAIz?
 
-## Install
+Most AI data tools send your data to the cloud. vectorAIz doesn't. Everything runs locally — your files never leave your network.
 
-### One-command install (all platforms)
+- **Private by design** — data stays on your machine, always
+- **Bring your own LLM** — OpenAI, Anthropic Claude, or Google Gemini
+- **Upload anything** — CSV, JSON, TXT, Markdown, HTML, and more
+- **Natural language queries** — ask questions about your data in plain English
+- **AI copilot** — allAI assistant helps you explore and understand your datasets
+- **Bulk upload** — batch process hundreds of files with progress tracking
+- **Data preview** — inspect schemas, stats, and samples before vectorizing
+- **Diagnostic tools** — structured logging, health checks, one-click diagnostic export
+
+## Quick Start
+
+### Option 1: One-line install (recommended)
 
 ```bash
 git clone https://github.com/maxrobbins/vectoraiz.git && cd vectoraiz && ./start.sh
 ```
 
-**Requirements:** [Docker](https://docs.docker.com/get-docker/) (Docker Desktop, OrbStack, or docker.io)  
-**Works on:** macOS (Apple Silicon & Intel) · Linux (Ubuntu, Debian, Fedora) · Windows (WSL)
+### Option 2: Platform installers
 
-The installer will:
-1. Check that Docker is installed and running
-2. Find an available port (prefers 80, falls back to 8080, 3000, etc.)
-3. Generate secure credentials on first run
-4. Pull the pre-built image from `ghcr.io/maxrobbins/vectoraiz` and start all containers
-5. Open your browser when ready
+Download from the [latest release](https://github.com/maxrobbins/vectoraiz/releases/latest):
 
-To stop: `./stop.sh`
+| Platform | Download | Run |
+|----------|----------|-----|
+| **macOS** | `install-mac.sh` | `chmod +x install-mac.sh && ./install-mac.sh` |
+| **Linux** | `install-linux.sh` | `chmod +x install-linux.sh && ./install-linux.sh` |
+| **Windows** | `install-vectoraiz.ps1` | Run in PowerShell as Administrator |
 
-### Updating
-
-To pull the latest version:
+### Option 3: Docker Compose (manual)
 
 ```bash
-cd vectoraiz && docker compose -f backend/docker-compose.customer.yml pull && ./start.sh
+git clone https://github.com/maxrobbins/vectoraiz.git
+cd vectoraiz
+docker-compose up --build
 ```
 
-### Platform installers
+Once running:
 
-| Platform | Download | Notes |
-|----------|----------|-------|
-| **macOS** | [install-mac.sh](https://github.com/maxrobbins/vectoraiz/releases/latest) | `chmod +x install-mac.sh && ./install-mac.sh` |
-| **Windows** | [install-vectoraiz.ps1](https://github.com/maxrobbins/vectoraiz/releases/latest) | Requires Docker Desktop + WSL2 |
-| **Linux** | [install-linux.sh](https://github.com/maxrobbins/vectoraiz/releases/latest) | `chmod +x install-linux.sh && ./install-linux.sh` |
+- **vectorAIz UI** → [http://localhost:8000](http://localhost:8000)
+- **API docs** → [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health check** → [http://localhost:8000/api/health](http://localhost:8000/api/health)
 
-### Allie AI Assistant (optional)
+## First-Time Setup
 
-vectorAIz includes Allie, an AI-powered data assistant. To enable her, run:
+1. **Launch vectorAIz** — open `http://localhost:8000` in your browser
+2. **Create your account** — set up a local admin username and password
+3. **Connect your LLM** — go to Settings → LLM and add your API key (OpenAI, Anthropic, or Gemini)
+4. **Upload data** — drag and drop files or use bulk upload
+5. **Start querying** — ask questions about your data in the chat interface
 
-```bash
-./start.sh --setup-allie
-```
+## Supported File Formats
 
-You'll need an API key from [ai.market](https://ai.market). Without Allie, vectorAIz runs in standalone mode with full functionality using your own LLM keys.
-
-## Features
-
-- **Local-first processing** — Your data never leaves your machine. All parsing, chunking, and embedding happens locally.
-- **Multi-format ingestion** — PDF, DOCX, XLSX, CSV, TXT, HTML, Markdown, and more. Drag and drop any document.
-- **Vector search** — Automatic chunking and embedding into Qdrant for fast semantic search.
-- **RAG queries** — Ask natural-language questions against your documents and get cited, context-aware answers.
-- **BYO LLM** — Bring your own API key from OpenAI, Anthropic, Google, or any compatible provider.
-- **Data attestation** — Cryptographic hashing and metadata tracking for data provenance and integrity.
-- **MCP server** — Expose your processed data to AI assistants via the Model Context Protocol.
-- **Privacy scoring** — Automatic PII detection with GDPR, CCPA, and HIPAA compliance reporting.
-- **Clean UI** — Web-based interface for uploading, searching, managing datasets, and configuring providers.
+| Format | Extensions |
+|--------|-----------|
+| Tabular | `.csv`, `.tsv`, `.json`, `.jsonl` |
+| Text | `.txt`, `.md`, `.rst`, `.html` |
+| More coming | PDF, DOCX, PPTX (via Apache Tika — planned) |
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────┐
-│               Web Interface (frontend/)          │
-│            React + Vite + Tailwind CSS           │
-└──────────────────────┬──────────────────────────┘
-                       │ REST API
-┌──────────────────────▼──────────────────────────┐
-│               vectorAIz API (backend/)           │
-│          FastAPI · Python · Uvicorn               │
-│                                                   │
-│  ┌─────────┐  ┌──────────┐  ┌────────────────┐  │
-│  │ Upload  │  │  Search  │  │  RAG Query     │  │
-│  │ Pipeline│  │  Engine  │  │  Engine        │  │
-│  └────┬────┘  └────┬─────┘  └───────┬────────┘  │
-│       │            │                │            │
-│  ┌────▼────────────▼────────────────▼─────────┐  │
-│  │           Qdrant Vector Database           │  │
-│  └────────────────────────────────────────────┘  │
-└──────────────────────────────────────────────────┘
-```
-
-## Quick Start
-
-Once running, visit **http://localhost** (or the port shown in the terminal) to:
-
-1. **Upload documents** — Drag and drop PDFs, CSVs, Excel files, or any supported format
-2. **Browse datasets** — View uploaded data, metadata, and processing status
-3. **Search** — Run natural-language queries across all your indexed data
-4. **Configure LLMs** — Add your API keys for OpenAI, Anthropic, Google, etc.
-5. **API access** — Full REST API at `/docs` (Swagger UI)
-
-## Project Structure
+vectorAIz runs as two Docker containers on your machine:
 
 ```
-vectoraiz/
-├── start.sh              # ← Run this to get started
-├── stop.sh               # ← Run this to stop
-├── backend/
-│   ├── app/              # FastAPI application source
-│   ├── frontend/         # Embedded web UI
-│   ├── tests/            # Test suite
-│   ├── alembic/          # Database migrations
-│   ├── docker-compose.customer.yml
-│   ├── start.sh          # Core installer script
-│   └── Dockerfile
-├── frontend/             # Standalone frontend (development)
-├── LICENSE               # Elastic License v2 (ELv2)
-└── README.md
+┌─────────────────────────────────┐
+│         Your Machine            │
+│                                 │
+│  ┌───────────┐  ┌────────────┐  │
+│  │ vectorAIz │  │   Qdrant   │  │
+│  │   API     │──│  (vectors) │  │
+│  │  :8000    │  │   :6333    │  │
+│  └─────┬─────┘  └────────────┘  │
+│        │                        │
+│        │ Your LLM key           │
+│        ▼                        │
+│  ┌───────────┐                  │
+│  │ OpenAI /  │  (external,      │
+│  │ Anthropic │   API calls only)│
+│  │ / Gemini  │                  │
+│  └───────────┘                  │
+└─────────────────────────────────┘
 ```
 
-## Contributing
+- **vectorAIz API** — FastAPI backend handling uploads, vectorization, search, and the AI copilot
+- **Qdrant** — vector database storing embeddings locally
+- **Your LLM** — queries go to your chosen provider using your own API key
 
-We welcome contributions! Please open an issue or pull request.
+No data is sent to ai.market or any third party. Only metadata (if you choose to publish) leaves your network.
+
+## Configuration
+
+Environment variables (set in `.env` or `docker-compose.yml`):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `DEBUG` | `false` | Enable debug logging |
+| `VECTORAIZ_AUTH_ENABLED` | `true` | Require authentication |
+| `QDRANT_HOST` | `qdrant` | Qdrant hostname |
+| `QDRANT_PORT` | `6333` | Qdrant port |
+
+LLM keys are configured through the UI (Settings → LLM) and stored encrypted on disk.
+
+## Development
+
+```bash
+# Clone and start with hot reload
+git clone https://github.com/maxrobbins/vectoraiz.git
+cd vectoraiz
+docker-compose up --build
+
+# Run tests
+docker-compose exec vectoraiz-api pytest
+
+# API docs (auto-generated)
+open http://localhost:8000/docs
+```
+
+The `docker-compose.yml` mounts `app/` as a volume — code changes reflect immediately without rebuilding.
+
+## Connect to ai.market (optional)
+
+vectorAIz can optionally connect to [ai.market](https://ai.market) to publish your dataset metadata and make it discoverable by AI agents and buyers. This is entirely opt-in — no data is shared, only metadata you explicitly publish.
+
+## Requirements
+
+- **Docker** and **Docker Compose** (v2+)
+- **4GB RAM** minimum (8GB recommended)
+- An API key from OpenAI, Anthropic, or Google (for LLM queries)
 
 ## License
 
-Licensed under [Elastic License v2 (ELv2)](LICENSE). You can use, copy, distribute, and modify the software — but you can't provide it as a managed service to third parties.
+Source available under [Elastic License 2.0](LICENSE). Free to use, modify, and run internally. You may not offer vectorAIz as a managed service.
 
 ## Links
 
-- [vectoraiz.com](https://vectoraiz.com)
-- [@vectoraiz](https://x.com/vectoraiz) on X
-- [Vectoraiz](https://linkedin.com/company/111660309) on LinkedIn
-- [ai.market](https://ai.market) — Data marketplace for AI
+- 🌐 [vectoraiz.com](https://vectoraiz.com) — project homepage
+- 🛒 [ai.market](https://ai.market) — data marketplace
+- 📦 [Releases](https://github.com/maxrobbins/vectoraiz/releases) — downloads
+- 🐛 [Issues](https://github.com/maxrobbins/vectoraiz/issues) — bug reports
 
 ---
 
-<p align="center">Built with ❤️ by the vectorAIz team</p>
+Built by [ai.market](https://ai.market) · Made with ❤️ for data teams who take privacy seriously.

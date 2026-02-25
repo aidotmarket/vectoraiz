@@ -1,39 +1,55 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.so
+.Python
 venv/
+ENV/
 .venv/
-*.egg-info/
 
-# Node
-node_modules/
-dist/
+# Data
+data/
+*.parquet
+*.csv
+*.json
+!.devcontainer/*.json
+!frontend/*.json
+!frontend/src/**/*.json
 
 # Environment
 .env
 .env.*
 !.env.example
 
-# Data
-*.db
-*.sqlite
-data/
-
 # IDE
 .vscode/
 .idea/
 *.swp
+*.swo
+.gemini/
+.ai-conventions.md
 
-# OS
-.DS_Store
-Thumbs.db
-
-# Logs
-logs/
-*.log
+# Docker
+.docker/
 
 # Testing
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Build artifacts
+logs/
+*.webloc
+AUDIT-*.md
+QA-REPORT-*.md
+P0-FIX-REPORT-*.md
+AUDIT-FIX-QUEUE.md
+
+# OS
+.DS_Store
+Thumbs.db

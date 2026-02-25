@@ -1,291 +1,57 @@
-#!/bin/sh
+#!/bin/bash
 # =============================================================================
-# vectorAIz Installer
+# vectorAIz — Universal Installer
 # =============================================================================
-# Usage: curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | sh
+# Auto-detects your OS and runs the appropriate installer.
 #
-# Works on stock macOS (zsh) and Linux.
-# Only requires: curl (pre-installed on macOS and most Linux)
-# Installs Docker automatically if missing.
+# Usage:
+#   curl -fsSL https://get.vectoraiz.com/install.sh | bash
+#
+# Or from GitHub:
+#   curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | bash
 # =============================================================================
 
 set -e
 cd "$HOME" 2>/dev/null || cd /tmp
 
-# --- Colors (POSIX-safe) ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
 DIM='\033[2m'
 NC='\033[0m'
 
-info()    { printf "  ${CYAN}▸${NC} %s\n" "$1"; }
-success() { printf "  ${GREEN}✓${NC} %s\n" "$1"; }
-warn()    { printf "  ${YELLOW}⚠${NC} %s\n" "$1"; }
-fail()    { printf "\n  ${RED}${BOLD}ERROR:${NC} %s\n\n" "$1"; exit 1; }
+GITHUB_RAW="https://raw.githubusercontent.com/maxrobbins/vectoraiz/main"
 
-# Spinner — runs a command in the background with an animated spinner
-# Usage: spin "Downloading Docker Desktop..." curl -fSL ...
-spin() {
-    local msg="$1"
-    shift
-    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    local len=${#frames}
+echo ""
+echo -e "${CYAN}${BOLD}  vectorAIz — Universal Installer${NC}"
+echo ""
 
-    "$@" &
-    local pid=$!
-    local i=0
-
-    while kill -0 "$pid" 2>/dev/null; do
-        i=$(( (i + 1) % len ))
-        frame=$(printf '%s' "$frames" | cut -c$((i + 1))-$((i + 1)))
-        printf "\r  ${CYAN}%s${NC} %s" "$frame" "$msg"
-        sleep 0.1
-    done
-
-    wait "$pid"
-    local exit_code=$?
-    printf "\r                                                                    \r"
-    return $exit_code
-}
-
-# Waiting spinner — spins while checking a condition
-# Usage: spin_wait "Waiting for Docker..." 120 "docker info"
-spin_wait() {
-    local msg="$1"
-    local max_wait="$2"
-    local check_cmd="$3"
-    local frames='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
-    local len=${#frames}
-    local waited=0
-    local i=0
-
-    while [ "$waited" -lt "$max_wait" ]; do
-        if eval "$check_cmd" >/dev/null 2>&1; then
-            printf "\r                                                                    \r"
-            return 0
-        fi
-        i=$(( (i + 1) % len ))
-        frame=$(printf '%s' "$frames" | cut -c$((i + 1))-$((i + 1)))
-        printf "\r  ${CYAN}%s${NC} %s (%ds)" "$frame" "$msg" "$waited"
-        sleep 0.5
-        # Increment by 1 every 2 loops (since we sleep 0.5)
-        if [ $((i % 2)) -eq 0 ]; then
-            waited=$((waited + 1))
-        fi
-    done
-    printf "\r                                                                    \r"
-    return 1
-}
-
-REPO="maxrobbins/vectoraiz"
-BRANCH="main"
-INSTALL_DIR="$HOME/vectoraiz"
-
-printf "\n"
-printf "  ${CYAN}${BOLD}⚡ vectorAIz Installer${NC}\n"
-printf "\n"
-
-# ─── Check curl ──────────────────────────────────────────────────
-if ! command -v curl >/dev/null 2>&1; then
-    fail "curl is required but not found. Install it with your package manager."
-fi
-
-# ─── Detect OS ───────────────────────────────────────────────────
-OS="unknown"
 case "$(uname -s)" in
-    Darwin*) OS="macos" ;;
-    Linux*)  OS="linux" ;;
+    Darwin)
+        echo -e "  ${CYAN}▸${NC} Detected: macOS"
+        echo ""
+        curl -fsSL "${GITHUB_RAW}/installers/mac/install-mac.sh" | bash
+        ;;
+    Linux)
+        echo -e "  ${CYAN}▸${NC} Detected: Linux"
+        echo ""
+        curl -fsSL "${GITHUB_RAW}/installers/linux/install-linux.sh" | bash
+        ;;
+    MINGW*|MSYS*|CYGWIN*)
+        echo -e "  ${CYAN}▸${NC} Detected: Windows (via Git Bash / MSYS2)"
+        echo ""
+        echo "  Windows requires the PowerShell installer. Run this command in PowerShell:"
+        echo ""
+        echo -e "  ${BOLD}irm ${GITHUB_RAW}/installers/windows/install-vectoraiz.ps1 | iex${NC}"
+        echo ""
+        echo -e "  ${DIM}Or download from: https://github.com/maxrobbins/vectoraiz/releases${NC}"
+        echo ""
+        ;;
+    *)
+        echo "  Unsupported operating system: $(uname -s)"
+        echo ""
+        echo "  Please install Docker manually and use docker-compose:"
+        echo "  https://github.com/maxrobbins/vectoraiz#manual-installation"
+        echo ""
+        exit 1
+        ;;
 esac
-
-# ─── Install Docker if missing ───────────────────────────────────
-install_docker_macos() {
-    ARCH="$(uname -m)"
-    if [ "$ARCH" = "arm64" ]; then
-        DMG_URL="https://desktop.docker.com/mac/main/arm64/Docker.dmg"
-        info "Detected Apple Silicon Mac"
-    else
-        DMG_URL="https://desktop.docker.com/mac/main/amd64/Docker.dmg"
-        info "Detected Intel Mac"
-    fi
-
-    DMG_PATH="/tmp/Docker.dmg"
-    spin "Downloading Docker Desktop..." curl -fSL "$DMG_URL" -o "$DMG_PATH" \
-        || fail "Failed to download Docker Desktop."
-    success "Downloaded Docker Desktop"
-
-    info "Installing Docker Desktop (you may be prompted for your password)..."
-    hdiutil attach "$DMG_PATH" -quiet -nobrowse -mountpoint /tmp/docker-mount || fail "Failed to mount Docker DMG."
-    sudo cp -R /tmp/docker-mount/Docker.app /Applications/ 2>/dev/null || cp -R /tmp/docker-mount/Docker.app /Applications/
-    hdiutil detach /tmp/docker-mount -quiet 2>/dev/null
-    rm -f "$DMG_PATH"
-    success "Docker Desktop installed"
-
-    open /Applications/Docker.app
-
-    printf "\n"
-    printf "  ${DIM}First launch takes 30-60 seconds...${NC}\n"
-
-    if spin_wait "Starting Docker Desktop..." 120 "docker info"; then
-        success "Docker is ready"
-    else
-        printf "\n"
-        warn "Docker is still starting. Please wait for the Docker icon in your menu bar,"
-        warn "then re-run this installer:"
-        printf "\n"
-        printf "    curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | sh\n"
-        printf "\n"
-        exit 0
-    fi
-}
-
-install_docker_linux() {
-    info "Installing Docker via official script..."
-    printf "  ${DIM}(You may be prompted for your sudo password)${NC}\n"
-    printf "\n"
-
-    curl -fsSL https://get.docker.com | sudo sh || fail "Docker installation failed."
-
-    if command -v usermod >/dev/null 2>&1; then
-        sudo usermod -aG docker "$USER" 2>/dev/null || true
-    fi
-
-    if command -v systemctl >/dev/null 2>&1; then
-        sudo systemctl start docker 2>/dev/null || true
-        sudo systemctl enable docker 2>/dev/null || true
-    fi
-
-    success "Docker installed"
-
-    if ! docker info >/dev/null 2>&1; then
-        printf "\n"
-        warn "Docker was installed, but you need to log out and back in"
-        warn "for group permissions to take effect. Then re-run:"
-        printf "\n"
-        printf "    curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.sh | sh\n"
-        printf "\n"
-        exit 0
-    fi
-}
-
-if ! command -v docker >/dev/null 2>&1; then
-    printf "\n"
-    info "Docker is not installed. vectorAIz needs Docker to run."
-    printf "\n"
-
-    printf "  Install Docker now? [Y/n] "
-    read -r REPLY < /dev/tty 2>/dev/null || REPLY="y"
-    REPLY="${REPLY:-y}"
-
-    case "$REPLY" in
-        [Nn]*)
-            printf "\n"
-            info "You can install Docker manually:"
-            if [ "$OS" = "macos" ]; then
-                printf "    https://orbstack.dev  ${DIM}(recommended for Mac)${NC}\n"
-                printf "    https://docker.com/get-started\n"
-            else
-                printf "    https://docs.docker.com/engine/install/\n"
-            fi
-            printf "\n"
-            info "Then re-run this installer."
-            printf "\n"
-            exit 0
-            ;;
-    esac
-
-    if [ "$OS" = "macos" ]; then
-        install_docker_macos
-    elif [ "$OS" = "linux" ]; then
-        install_docker_linux
-    else
-        fail "Unsupported OS. Please install Docker manually: https://docs.docker.com/get-started/"
-    fi
-elif ! docker info >/dev/null 2>&1; then
-    if [ "$OS" = "macos" ]; then
-        info "Docker is installed but not running. Starting it..."
-        open /Applications/Docker.app 2>/dev/null || open -a OrbStack 2>/dev/null || true
-
-        if spin_wait "Waiting for Docker..." 90 "docker info"; then
-            success "Docker is running"
-        else
-            fail "Docker didn't start. Please start Docker Desktop manually and re-run."
-        fi
-    else
-        fail "Docker is installed but not running. Start it with: sudo systemctl start docker"
-    fi
-fi
-
-success "Docker is ready"
-
-# ─── Check unzip (install if missing) ────────────────────────────
-if ! command -v unzip >/dev/null 2>&1; then
-    info "Installing unzip..."
-    if command -v apt-get >/dev/null 2>&1; then
-        sudo apt-get install -y unzip >/dev/null 2>&1
-    elif command -v yum >/dev/null 2>&1; then
-        sudo yum install -y unzip >/dev/null 2>&1
-    elif command -v dnf >/dev/null 2>&1; then
-        sudo dnf install -y unzip >/dev/null 2>&1
-    else
-        fail "unzip is required. Install it with your package manager."
-    fi
-    success "unzip installed"
-fi
-
-# ─── Download ────────────────────────────────────────────────────
-if [ -d "$INSTALL_DIR/backend" ]; then
-    info "Existing installation found — updating..."
-    EXISTING=true
-else
-    EXISTING=false
-fi
-
-TMPDIR_DL=$(mktemp -d)
-ZIPFILE="$TMPDIR_DL/vectoraiz.zip"
-
-spin "Downloading vectorAIz..." curl -fsSL "https://github.com/${REPO}/archive/refs/heads/${BRANCH}.zip" -o "$ZIPFILE" \
-    || fail "Failed to download. Check your internet connection."
-success "Downloaded vectorAIz"
-
-# ─── Extract ─────────────────────────────────────────────────────
-info "Extracting..."
-
-unzip -qo "$ZIPFILE" -d "$TMPDIR_DL"
-
-EXTRACTED_DIR="$TMPDIR_DL/vectoraiz-${BRANCH}"
-if [ ! -d "$EXTRACTED_DIR" ]; then
-    EXTRACTED_DIR=$(find "$TMPDIR_DL" -maxdepth 1 -type d -name "vectoraiz*" | head -1)
-fi
-if [ -z "$EXTRACTED_DIR" ] || [ ! -d "$EXTRACTED_DIR" ]; then
-    fail "Failed to extract archive."
-fi
-
-if [ "$EXISTING" = true ] && [ -f "$INSTALL_DIR/backend/.env" ]; then
-    cp "$INSTALL_DIR/backend/.env" "$TMPDIR_DL/.env.backup"
-fi
-
-mkdir -p "$INSTALL_DIR"
-cp -R "$EXTRACTED_DIR/"* "$INSTALL_DIR/"
-
-if [ -f "$TMPDIR_DL/.env.backup" ]; then
-    cp "$TMPDIR_DL/.env.backup" "$INSTALL_DIR/backend/.env"
-    success "Preserved existing configuration"
-fi
-
-rm -r "$TMPDIR_DL"
-success "Installed to $INSTALL_DIR"
-
-# ─── Make scripts executable ─────────────────────────────────────
-chmod +x "$INSTALL_DIR/backend/start.sh" "$INSTALL_DIR/backend/stop.sh" 2>/dev/null
-chmod +x "$INSTALL_DIR/start.sh" "$INSTALL_DIR/stop.sh" 2>/dev/null
-
-# ─── Launch ──────────────────────────────────────────────────────
-printf "\n"
-info "Starting vectorAIz..."
-printf "\n"
-
-cd "$INSTALL_DIR/backend"
-exec ./start.sh
