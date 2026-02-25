@@ -105,7 +105,7 @@ const ACCEPT_MAP = {
 };
 
 // Max limits (match backend)
-const MAX_FILES = 50;
+const MAX_FILES = Infinity; // No artificial limit — local app, customers resources
 const LARGE_BATCH_WARNING_BYTES = 50 * 1024 * 1024 * 1024; // 50GB — show confirmation above this
 const JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore', 'desktop.ini']);
 
@@ -221,20 +221,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
         // Skip OS junk files
         if (JUNK_FILES.has(file.name)) continue;
 
-        // Client-side limit checks
-        if (prev.length + newItems.length >= MAX_FILES) {
-          newItems.push({
-            id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            file,
-            relativePath: relPath,
-            state: "rejected",
-            progress: 0,
-            datasetId: null,
-            error: `Exceeds ${MAX_FILES} file limit`,
-            existingDatasetId: null,
-          });
-          continue;
-        }
+
 
         newItems.push({
           id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
@@ -481,7 +468,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           {hasPending && pendingCount > 1 && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
               <span>{pendingCount} file{pendingCount > 1 ? "s" : ""} ({formatFileSize(totalSize)})</span>
-              {pendingCount > 10 && <span className="text-yellow-500">{MAX_FILES - pendingCount} slots remaining</span>}
+              
             </div>
           )}
 
