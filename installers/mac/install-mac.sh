@@ -170,6 +170,32 @@ else
     fi
 fi
 
+# ─── Step 1.5: Clean up previous installation ───────────────────
+EXISTING_CONTAINERS=$(docker ps -a --filter "name=vectoraiz-" --format "{{.Names}}" 2>/dev/null)
+EXISTING_VOLUMES=$(docker volume ls --filter "name=vectoraiz_" --format "{{.Name}}" 2>/dev/null)
+
+if [ -n "$EXISTING_CONTAINERS" ] || [ -n "$EXISTING_VOLUMES" ]; then
+    warn "Existing vectorAIz installation detected (Docker containers/volumes)."
+    info "Cleaning up previous installation..."
+
+    if [ -f "$INSTALL_DIR/$COMPOSE_FILE" ]; then
+        # Preferred: use compose to tear down cleanly (removes containers + volumes)
+        cd "$INSTALL_DIR" && docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null
+        cd "$HOME" 2>/dev/null || cd /tmp
+    else
+        # Fallback: manually stop/remove containers and volumes
+        if [ -n "$EXISTING_CONTAINERS" ]; then
+            echo "$EXISTING_CONTAINERS" | xargs -r docker stop 2>/dev/null
+            echo "$EXISTING_CONTAINERS" | xargs -r docker rm 2>/dev/null
+        fi
+        if [ -n "$EXISTING_VOLUMES" ]; then
+            echo "$EXISTING_VOLUMES" | xargs -r docker volume rm 2>/dev/null
+        fi
+    fi
+
+    success "Previous installation cleaned up"
+fi
+
 # ─── Step 2: Create install directory ────────────────────────────
 info "Setting up install directory..."
 
@@ -215,6 +241,9 @@ success "Using port $PORT"
 URL=$(make_url "$PORT")
 
 # ─── Step 5: Generate .env ───────────────────────────────────────
+# On reinstall the .env won't exist because the user removed ~/vectoraiz.
+# The matching Docker volumes were already cleaned up in Step 1.5, so a fresh
+# POSTGRES_PASSWORD here will match the fresh postgres volume created at start.
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     info "Generating secure configuration..."
     cat > "$INSTALL_DIR/.env" <<EOF
