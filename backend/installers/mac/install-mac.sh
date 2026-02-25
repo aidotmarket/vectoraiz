@@ -17,7 +17,7 @@ INSTALL_DIR="$HOME/vectoraiz"
 COMPOSE_FILE="docker-compose.customer.yml"
 COMPOSE_URL="https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/docker-compose.customer.yml"
 APP_BUNDLE="$HOME/Applications/vectorAIz.app"
-PREFERRED_PORTS=(80 8080 3000 8888 9000)
+PREFERRED_PORTS=(8080 3000 8888 9000 80)
 
 # --- Colors ---
 RED='\033[0;31m'

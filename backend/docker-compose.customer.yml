@@ -17,7 +17,7 @@ services:
   vectoraiz:
     image: ghcr.io/maxrobbins/vectoraiz:${VECTORAIZ_VERSION:-latest}
     ports:
-      - "${VECTORAIZ_PORT:-80}:80"
+      - "${VECTORAIZ_PORT:-8080}:8000"
     volumes:
       - vectoraiz-data:/data
       # Optional: enables one-click auto-update from the UI

@@ -20,7 +20,7 @@ set -e
 COMPOSE_FILE="docker-compose.customer.yml"
 APP_NAME="vectorAIz"
 SHORTCUT_NAME="vectorAIz"
-PREFERRED_PORTS=(80 8080 3000 8888 9000)
+PREFERRED_PORTS=(8080 3000 8888 9000 80)
 
 # --- Colors ---
 RED='\033[0;31m'
