@@ -54,11 +54,18 @@ echo "[INFO] Migrations complete"
 echo "[INFO] Starting web server..."
 nginx
 
+# Auto-detect workers based on CPU cores if not explicitly set
+if [ -z "$VECTORAIZ_WORKERS" ]; then
+    CPU_CORES=$(nproc 2>/dev/null || echo 4)
+    VECTORAIZ_WORKERS=$(python3 -c "import os; cores=os.cpu_count() or 4; print(min(max(cores//4, 2), 4))")
+    echo "[INFO] Auto-detected $CPU_CORES CPU cores → $VECTORAIZ_WORKERS workers"
+fi
+
 # Start uvicorn (foreground — tini handles signals)
-echo "[INFO] Starting API server..."
+echo "[INFO] Starting API server with $VECTORAIZ_WORKERS workers..."
 echo ""
 exec uvicorn app.main:app \
     --host 0.0.0.0 \
     --port 8000 \
-    --workers ${VECTORAIZ_WORKERS:-1} \
+    --workers ${VECTORAIZ_WORKERS} \
     --log-level ${VECTORAIZ_LOG_LEVEL:-info}
