@@ -151,26 +151,21 @@ class TestTotalMessageCount:
 # ---------------------------------------------------------------------------
 
 class TestUploadSizeEnforcement:
-    """Single upload should enforce byte-count limits during streaming."""
+    """Upload should have no artificial file size limits — local app, customer resources."""
 
-    def test_default_upload_size_is_reasonable(self):
-        """Default max_upload_size_bytes should be ≤ 500MB (code default)."""
-        # The code default is 500MB. Env overrides may differ, so just check
-        # the code defines a sensible default (not 100GB).
-        import inspect
+    def test_no_max_upload_size_bytes_config(self):
+        """Settings should not have max_upload_size_bytes — removed for local app."""
         from app.config import Settings
 
-        source = inspect.getsource(Settings)
-        assert "500 * 1024 * 1024" in source
+        assert "max_upload_size_bytes" not in Settings.model_fields
 
-    def test_upload_endpoint_has_size_enforcement(self):
-        """The upload endpoint should check bytes_written against MAX_UPLOAD_FILE_BYTES."""
+    def test_upload_endpoint_has_no_size_rejection(self):
+        """The upload endpoint should not reject files based on size."""
         import inspect
         from app.routers import datasets
 
         source = inspect.getsource(datasets.upload_dataset)
-        assert "MAX_UPLOAD_FILE_BYTES" in source
-        assert "413" in source
+        assert "MAX_UPLOAD_FILE_BYTES" not in source
 
 
 # ---------------------------------------------------------------------------

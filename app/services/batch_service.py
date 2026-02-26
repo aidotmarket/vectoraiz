@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 # Limits
 MAX_FILES = 10_000
 MAX_TOTAL_BYTES = 500 * 1024 * 1024 * 1024  # 500 GB (effectively unlimited for local app)
-MAX_FILE_BYTES = 100 * 1024 * 1024    # 100 MB
 
 SUPPORTED_EXTENSIONS = {
     # Data formats (pandas/DuckDB pipeline)
@@ -142,17 +141,6 @@ class BatchService:
                     "status": "rejected",
                     "error_code": "unsupported_type",
                     "error": f"Unsupported file type: {ext}",
-                })
-                continue
-
-            # Per-file size check
-            if size > MAX_FILE_BYTES:
-                rejected.append({
-                    "client_file_index": i,
-                    "original_filename": fname,
-                    "status": "rejected",
-                    "error_code": "file_too_large",
-                    "error": f"File exceeds {MAX_FILE_BYTES // (1024*1024)}MB limit",
                 })
                 continue
 

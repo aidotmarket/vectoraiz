@@ -43,9 +43,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Maximum file size for single-file uploads — use the global config value (default 500MB)
-MAX_UPLOAD_FILE_BYTES = settings.max_upload_size_bytes
-
 SUPPORTED_EXTENSIONS = {
     # Data formats (pandas/DuckDB pipeline)
     '.csv', '.tsv', '.json', '.parquet', '.xlsx', '.xls',
@@ -97,8 +94,6 @@ async def upload_dataset(
     Files are streamed to disk, then processed in the background.
     Requires X-API-Key header.
     """
-    max_size_mb = MAX_UPLOAD_FILE_BYTES // (1024 * 1024)
-
     # Path traversal check on filename
     fname_err = validate_path_traversal(file.filename or "")
     if fname_err:
@@ -108,20 +103,6 @@ async def upload_dataset(
     extension = get_file_extension(file.filename)
     if extension not in SUPPORTED_EXTENSIONS:
         raise VectorAIzError("VAI-ING-001", detail=f"Unsupported file type: {extension}")
-
-    # Early file size check — use Content-Length header for instant reject
-    # before any streaming, preventing timeout on very large uploads (BUG-4/6)
-    content_length = request.headers.get("content-length")
-    if content_length and int(content_length) > MAX_UPLOAD_FILE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
-        )
-    if file.size and file.size > MAX_UPLOAD_FILE_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
-        )
 
     file_type = extension[1:]  # Remove the dot
 
@@ -156,24 +137,12 @@ async def upload_dataset(
     )
     
     try:
-        # Stream file to disk in chunks, enforcing byte-count limit
+        # Stream file to disk in chunks
         bytes_written = 0
         magic_header = b""
         async with aiofiles.open(record.upload_path, 'wb') as out_file:
             while chunk := await file.read(settings.chunk_size):
                 bytes_written += len(chunk)
-                if bytes_written > MAX_UPLOAD_FILE_BYTES:
-                    # Abort: delete partial file and return 413
-                    await out_file.close()
-                    try:
-                        os.unlink(record.upload_path)
-                    except OSError:
-                        pass
-                    processing.delete_dataset(record.id)
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"File too large. Maximum supported file size is {max_size_mb}MB.",
-                    )
                 # Capture first 8 bytes for magic-byte validation
                 if len(magic_header) < 8:
                     magic_header += chunk[:8 - len(magic_header)]
@@ -361,33 +330,14 @@ async def batch_upload(
             relative_path=rel_path,
         )
 
-        # Stream file to disk, enforcing byte-count limit per file
-        size_exceeded = False
+        # Stream file to disk
         try:
             bytes_written = 0
             async with aiofiles.open(record.upload_path, "wb") as out_file:
                 await f.seek(0)
                 while chunk := await f.read(settings.chunk_size):
                     bytes_written += len(chunk)
-                    if bytes_written > settings.max_upload_size_bytes:
-                        size_exceeded = True
-                        break
                     await out_file.write(chunk)
-
-            if size_exceeded:
-                try:
-                    os.unlink(record.upload_path)
-                except OSError:
-                    pass
-                processing.delete_dataset(record.id)
-                items.append({
-                    "client_file_index": idx,
-                    "original_filename": fname,
-                    "status": "rejected",
-                    "error_code": "file_too_large",
-                    "error": f"File exceeds {settings.max_upload_size_bytes // (1024*1024)}MB limit (actual bytes)",
-                })
-                continue
 
             # Update actual file size
             record.file_size_bytes = bytes_written

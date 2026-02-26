@@ -96,7 +96,6 @@ class Settings(BaseSettings):
     # Upload settings
     upload_directory: str = "/data/uploads"
     processed_directory: str = "/data/processed"
-    max_upload_size_bytes: int = 500 * 1024 * 1024  # 500MB
     chunk_size: int = 1024 * 1024  # 1MB chunks for streaming
     
     # Qdrant settings
@@ -150,7 +149,7 @@ class Settings(BaseSettings):
     process_worker_grace_period_s: int = 60      # Seconds for checkpoint flush after SIGTERM
     process_worker_max_concurrent: int = 2       # Max parallel workers
     duckdb_memory_limit_mb: int = 512            # DuckDB in-memory budget for streaming path
-    max_upload_size_gb: int = 10                 # Hard upload limit
+    max_upload_size_gb: int = 1000               # Safety valve only — local app, disk is the real limit
     streaming_queue_maxsize: int = 8             # Backpressure queue depth
     streaming_batch_target_rows: int = 50000     # Target rows per RecordBatch
     parquet_row_group_size_mb: int = 64           # Target row group size for ParquetWriter
@@ -160,7 +159,7 @@ class Settings(BaseSettings):
 
     # BQ-VZ-SERIAL-CLIENT: Serial activation & metering
     aimarket_url: str = _DEFAULT_AI_MARKET_URL  # ai-market serial authority base URL
-    app_version: str = "1.8.2"  # Set via VECTORAIZ_APP_VERSION in Docker image
+    app_version: str = "1.8.3"  # Set via VECTORAIZ_APP_VERSION in Docker image
     serial_data_dir: str = "/data"  # Directory for serial.json + pending_usage.jsonl
 
     # CORS
