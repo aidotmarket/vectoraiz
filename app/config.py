@@ -30,30 +30,30 @@ _DEFAULT_AI_MARKET_URL = "https://ai-market-backend-production.up.railway.app"
 # VZ-PERF-P1: Dynamic resource detection
 # ---------------------------------------------------------------------------
 def _detect_cpu_workers() -> int:
-    """Auto-detect concurrent workers: max(2, min(physical_cores - 1, 16))."""
+    """Auto-detect concurrent workers: max(2, min(cores // 4, 8))."""
     try:
-        cores = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 4
-        return max(2, min(cores - 1, 16))
+        cores = os.cpu_count() or 4
+        return max(2, min(cores // 4, 8))
     except Exception:
         return 2
 
 
 def _detect_worker_memory_mb() -> int:
-    """Auto-detect per-worker memory: max(2048, min(total_ram // 8, 32768))."""
+    """Auto-detect per-worker memory: max(2048, min(total_ram // 8, 16384))."""
     try:
         total_mb = psutil.virtual_memory().total // (1024 * 1024)
-        return max(2048, min(total_mb // 8, 32768))
+        return max(2048, min(total_mb // 8, 16384))
     except Exception:
         return 2048
 
 
 def _detect_duckdb_memory_mb() -> int:
-    """Auto-detect DuckDB memory budget: max(1024, min(total_ram // 4, 65536))."""
+    """Auto-detect DuckDB memory budget: max(512, min(total_ram // 4, 32768))."""
     try:
         total_mb = psutil.virtual_memory().total // (1024 * 1024)
-        return max(1024, min(total_mb // 4, 65536))
+        return max(512, min(total_mb // 4, 32768))
     except Exception:
-        return 1024
+        return 512
 
 
 _DETECTED_CPU_WORKERS = _detect_cpu_workers()
@@ -183,7 +183,7 @@ class Settings(BaseSettings):
     connectivity_sql_max_length: int = 4096
 
     # BQ-VZ-LARGE-FILES: Streaming/chunked processing for large files
-    large_file_threshold_mb: int = 25             # Files above this use streaming path
+    large_file_threshold_mb: int = 50             # Files above this use streaming path
     fallback_max_size_mb: int = 200              # Max file size (MB) for in-memory fallback on streaming failure
     process_worker_memory_limit_mb: int = _DETECTED_WORKER_MEM  # Per-worker memory cap (auto-detected)
     process_worker_timeout_s: int = 1800         # 30 min per file default
@@ -191,7 +191,7 @@ class Settings(BaseSettings):
     process_worker_max_concurrent: int = _DETECTED_CPU_WORKERS  # Max parallel workers (auto-detected)
     duckdb_memory_limit_mb: int = _DETECTED_DUCKDB_MEM  # DuckDB in-memory budget (auto-detected)
     max_upload_size_gb: int = 1000               # Safety valve only — local app, disk is the real limit
-    streaming_queue_maxsize: int = 8             # Backpressure queue depth
+    streaming_queue_maxsize: int = 32            # Backpressure queue depth
     streaming_batch_target_rows: int = 10000     # Target rows per RecordBatch
     parquet_row_group_size_mb: int = 64           # Target row group size for ParquetWriter
 
@@ -243,6 +243,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+logger.info(
+    "Resource detection: %d CPU cores, %.1f GB RAM -> %d workers @ %d MB, DuckDB %d MB, batch %d rows",
+    os.cpu_count() or 0,
+    psutil.virtual_memory().total / (1024**3),
+    settings.process_worker_max_concurrent,
+    settings.process_worker_memory_limit_mb,
+    settings.duckdb_memory_limit_mb,
+    settings.streaming_batch_target_rows,
+)
 
 # ---------------------------------------------------------------------------
 # BQ-127: Mode inference for backward compatibility (C6)
