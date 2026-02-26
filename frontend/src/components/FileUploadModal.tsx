@@ -417,12 +417,15 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-lg bg-card border-border">
+      <DialogContent
+        className="sm:max-w-lg bg-card border-border flex flex-col"
+        style={{ resize: 'both', overflow: 'hidden', minWidth: 384, minHeight: 300, maxWidth: '90vw', maxHeight: '90vh' }}
+      >
         <DialogHeader>
           <DialogTitle className="text-foreground">Upload Datasets</DialogTitle>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
           <TabsList className="w-full">
             <TabsTrigger value="upload" disabled={isImporting} className="flex-1 gap-1.5">
               <Upload className="w-3.5 h-3.5" />
@@ -434,7 +437,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="upload">
+          <TabsContent value="upload" className="flex-1 min-h-0 flex flex-col">
         {/* Hidden folder input */}
         <input
           ref={folderInputRef}
@@ -446,7 +449,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           onChange={handleFolderSelect}
         />
 
-        <div className="py-4 space-y-3">
+        <div className="py-4 space-y-3 flex-1 min-h-0 overflow-hidden flex flex-col">
           {/* Drop zone */}
           {!isUploading && !allDone && (
             <div
@@ -508,7 +511,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
           {/* File queue */}
           {hasFiles && (
-            <div className="space-y-2 max-h-64 overflow-y-auto">
+            <div className="space-y-2 flex-1 min-h-[8rem] overflow-y-auto">
               {queue.map((item) => (
                 <FileRow
                   key={item.id}
