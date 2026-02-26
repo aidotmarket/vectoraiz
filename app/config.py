@@ -159,7 +159,7 @@ class Settings(BaseSettings):
 
     # BQ-VZ-SERIAL-CLIENT: Serial activation & metering
     aimarket_url: str = _DEFAULT_AI_MARKET_URL  # ai-market serial authority base URL
-    app_version: str = "1.8.3"  # Set via VECTORAIZ_APP_VERSION in Docker image
+    app_version: str = "1.8.4"  # Set via VECTORAIZ_APP_VERSION in Docker image
     serial_data_dir: str = "/data"  # Directory for serial.json + pending_usage.jsonl
 
     # CORS
