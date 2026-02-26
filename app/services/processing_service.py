@@ -775,18 +775,29 @@ class ProcessingService:
             raise ValueError(f"Streaming not supported for file type: {file_type}")
 
     def _run_indexing(self, record: DatasetRecord) -> None:
-        """Phase 2: chunk → embed → Qdrant. Extracted from _process_tabular etc."""
+        """Phase 2: chunk → embed → Qdrant via streaming for memory safety.
+
+        Always uses the streaming indexing path (index_streaming) so that
+        large datasets are processed one batch at a time without loading
+        the entire Parquet file into memory.
+        """
         if not record.processed_path or not record.processed_path.exists():
             return
         try:
+            import pyarrow.parquet as pq
             from app.services.indexing_service import get_indexing_service
+
             indexing_service = get_indexing_service()
-            index_result = indexing_service.index_dataset(
+            pf = pq.ParquetFile(record.processed_path)
+            chunk_iter = pf.iter_batches(batch_size=1000)
+            index_result = indexing_service.index_streaming(
                 dataset_id=record.id,
-                filepath=record.processed_path,
+                chunk_iterator=chunk_iter,
+                recreate_collection=True,
             )
             record.metadata["index_status"] = index_result
         except Exception as e:
+            _log.error("Indexing failed for dataset %s: %s", record.id, e, exc_info=True)
             record.metadata["index_status"] = {"status": "error", "error": str(e)}
 
         # PII scan

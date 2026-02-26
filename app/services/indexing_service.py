@@ -9,10 +9,14 @@ from datetime import datetime, date
 from uuid import UUID
 import uuid
 
+import logging
+
 from app.config import settings
 from app.services.embedding_service import get_embedding_service, EmbeddingService
 from app.services.qdrant_service import get_qdrant_service, QdrantService
 from app.services.duckdb_service import get_duckdb_service, DuckDBService
+
+logger = logging.getLogger(__name__)
 
 
 # Indexing configuration
@@ -234,6 +238,7 @@ class IndexingService:
         """
         import pyarrow as pa
 
+        logger.info("index_streaming: dataset_id=%s — streaming mode", dataset_id)
         start_time = datetime.utcnow()
         collection_name = f"dataset_{dataset_id}"
         self.qdrant_service.create_collection(
@@ -312,6 +317,11 @@ class IndexingService:
 
         end_time = datetime.utcnow()
         duration = (end_time - start_time).total_seconds()
+
+        logger.info(
+            "index_streaming: dataset_id=%s done — total_indexed=%d, chunks_processed=%d, duration=%.2fs",
+            dataset_id, total_indexed, chunk_index, duration,
+        )
 
         return {
             "dataset_id": dataset_id,
