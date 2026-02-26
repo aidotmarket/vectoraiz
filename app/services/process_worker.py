@@ -426,7 +426,7 @@ class ProcessWorkerManager:
                 file_type,
                 data_queue,
                 progress_child,
-                control_child,
+                control_parent,   # read end for poll/recv
                 settings.process_worker_memory_limit_mb,
                 settings.streaming_batch_target_rows,
             ),
@@ -445,7 +445,7 @@ class ProcessWorkerManager:
             future=proc,
             data_queue=data_queue,
             progress_conn=progress_parent,
-            control_conn=control_parent,
+            control_conn=control_child,    # write end for send
             timeout_s=settings.process_worker_timeout_s,
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
@@ -473,7 +473,7 @@ class ProcessWorkerManager:
                 file_type,
                 data_queue,
                 progress_child,
-                control_child,
+                control_parent,   # read end for poll/recv
                 settings.process_worker_memory_limit_mb,
             ),
             daemon=True,
@@ -491,7 +491,7 @@ class ProcessWorkerManager:
             future=proc,
             data_queue=data_queue,
             progress_conn=progress_parent,
-            control_conn=control_parent,
+            control_conn=control_child,    # write end for send
             timeout_s=settings.process_worker_timeout_s,
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
