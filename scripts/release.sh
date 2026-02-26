@@ -95,9 +95,9 @@ echo "▸ Verifying image (customer perspective)..."
 echo "  Checking: nginx installed, frontend bundled, version env set"
 
 # Check image contents without starting full stack (which needs postgres/qdrant)
-has_nginx=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" which nginx 2>/dev/null && echo "yes" || echo "no")
-has_frontend=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" ls /usr/share/nginx/html/index.html 2>/dev/null && echo "yes" || echo "no")
-has_tini=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" which tini 2>/dev/null && echo "yes" || echo "no")
+has_nginx=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" which nginx >/dev/null 2>&1 && echo "yes" || echo "no")
+has_frontend=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" ls /usr/share/nginx/html/index.html >/dev/null 2>&1 && echo "yes" || echo "no")
+has_tini=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" which tini >/dev/null 2>&1 && echo "yes" || echo "no")
 img_version=$("$DOCKER" run --rm --entrypoint="" "$IMAGE:$new_version" printenv VECTORAIZ_VERSION 2>/dev/null || echo "none")
 
 echo "  nginx binary:     $has_nginx"
