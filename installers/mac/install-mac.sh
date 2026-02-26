@@ -50,6 +50,7 @@ print_ready() {
     echo "  ╔═══════════════════════════════════════════╗"
     echo "  ║                                           ║"
     echo "  ║       ✅ vectorAIz is Installed!          ║"
+    echo -e "  ║          version ${VECTORAIZ_APP_VERSION}$(printf '%*s' $((24 - ${#VECTORAIZ_APP_VERSION})) '')║"
     echo "  ║                                           ║"
     echo "  ║   Open your browser to:                   ║"
     echo "  ║                                           ║"
@@ -211,6 +212,11 @@ if curl -fsSL "$COMPOSE_URL" -o "$INSTALL_DIR/$COMPOSE_FILE"; then
 else
     fail "Failed to download compose file from GitHub.\n  Check your internet connection and try again."
 fi
+
+# Parse default version from compose file (e.g. ghcr.io/…:${VECTORAIZ_VERSION:-1.8.1})
+VECTORAIZ_APP_VERSION=$(grep -oE '\$\{VECTORAIZ_VERSION:-[0-9]+\.[0-9]+\.[0-9]+\}' "$INSTALL_DIR/$COMPOSE_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+VECTORAIZ_APP_VERSION="${VECTORAIZ_APP_VERSION:-unknown}"
+info "vectorAIz version: ${BOLD}${VECTORAIZ_APP_VERSION}${NC}"
 
 # ─── Step 4: Find available port ─────────────────────────────────
 info "Finding available port..."
@@ -387,7 +393,7 @@ LAUNCHER
 chmod +x "$APP_BUNDLE/Contents/MacOS/vectorAIz"
 
 # Create Info.plist
-cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
+cat > "$APP_BUNDLE/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -401,9 +407,9 @@ cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDisplayName</key>
     <string>vectorAIz</string>
     <key>CFBundleVersion</key>
-    <string>1.0</string>
+    <string>${VECTORAIZ_APP_VERSION}</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.0</string>
+    <string>${VECTORAIZ_APP_VERSION}</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>

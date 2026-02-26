@@ -6,6 +6,7 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Loader2, AlertCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
+import VersionBadge from "@/components/VersionBadge";
 
 const LoginPage = () => {
   const navigate = useNavigate();
@@ -112,6 +113,7 @@ const LoginPage = () => {
           </CardContent>
         </Card>
       </div>
+      <VersionBadge />
     </div>
   );
 };

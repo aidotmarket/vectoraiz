@@ -8,6 +8,7 @@ import { Loader2, AlertCircle } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "@/hooks/use-toast";
 import { getApiUrl } from "@/lib/api";
+import VersionBadge from "@/components/VersionBadge";
 
 const SetupPage = () => {
   const navigate = useNavigate();
@@ -169,6 +170,7 @@ const SetupPage = () => {
           </CardContent>
         </Card>
       </div>
+      <VersionBadge />
     </div>
   );
 };

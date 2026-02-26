@@ -8,6 +8,7 @@ import KeyboardShortcutsModal from "@/components/KeyboardShortcutsModal";
 import FileUploadModal from "@/components/FileUploadModal";
 import useKeyboardShortcuts from "@/hooks/useKeyboardShortcuts";
 import { useToast } from "@/hooks/use-toast";
+import VersionBadge from "@/components/VersionBadge";
 
 const MainLayout = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -63,6 +64,7 @@ const MainLayout = () => {
         onOpenChange={setUploadModalOpen}
         onSuccess={handleUploadSuccess}
       />
+      <VersionBadge />
     </div>
   );
 };
