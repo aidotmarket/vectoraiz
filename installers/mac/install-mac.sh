@@ -214,8 +214,8 @@ else
 fi
 
 # Parse default version from compose file (e.g. ghcr.io/…:${VECTORAIZ_VERSION:-1.8.1})
-VECTORAIZ_APP_VERSION=$(grep -oE '\$\{VECTORAIZ_VERSION:-[0-9]+\.[0-9]+\.[0-9]+\}' "$INSTALL_DIR/$COMPOSE_FILE" | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-VECTORAIZ_APP_VERSION="${VECTORAIZ_APP_VERSION:-unknown}"
+VECTORAIZ_APP_VERSION=$(sed -n 's/.*VECTORAIZ_VERSION:-\([^}]*\)}.*/\1/p' "$INSTALL_DIR/$COMPOSE_FILE" | head -1)
+VECTORAIZ_APP_VERSION="${VECTORAIZ_APP_VERSION:-latest}"
 info "vectorAIz version: ${BOLD}${VECTORAIZ_APP_VERSION}${NC}"
 
 # ─── Step 4: Find available port ─────────────────────────────────
