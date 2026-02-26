@@ -54,15 +54,11 @@ echo "[INFO] Migrations complete"
 echo "[INFO] Starting web server..."
 nginx
 
-# Auto-detect workers based on CPU cores if not explicitly set
-if [ -z "$VECTORAIZ_WORKERS" ]; then
-    CPU_CORES=$(nproc 2>/dev/null || echo 4)
-    VECTORAIZ_WORKERS=$(python3 -c "import os; cores=os.cpu_count() or 4; print(min(max(cores//4, 2), 4))")
-    echo "[INFO] Auto-detected $CPU_CORES CPU cores → $VECTORAIZ_WORKERS workers"
-fi
-
-# Start uvicorn (foreground — tini handles signals)
-echo "[INFO] Starting API server with $VECTORAIZ_WORKERS workers..."
+# Co-Pilot requires single-worker mode (file lock enforced).
+# Multi-worker support would require switching Co-Pilot to Redis pub/sub.
+# nginx handles concurrent connections; uvicorn single worker handles async I/O.
+VECTORAIZ_WORKERS=1
+echo "[INFO] Starting API server..."
 echo ""
 exec uvicorn app.main:app \
     --host 0.0.0.0 \
