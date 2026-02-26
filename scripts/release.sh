@@ -137,6 +137,16 @@ echo "▸ Pushing to GHCR..."
 "$DOCKER" push "$IMAGE:latest"
 echo "✓ Pushed $IMAGE:$new_version + :latest"
 
+# --- Update compose default version ---
+echo ""
+echo "▸ Updating docker-compose.customer.yml default version..."
+sed -i '' "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-${new_version}/" docker-compose.customer.yml 2>/dev/null || \
+sed -i "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-${new_version}/" docker-compose.customer.yml
+git add docker-compose.customer.yml
+git commit -m "Release ${new_version}: update compose default" --allow-empty
+git push origin main
+echo "✓ Compose default updated to ${new_version}"
+
 # --- Git tag ---
 echo ""
 echo "▸ Tagging git: v$new_version"
