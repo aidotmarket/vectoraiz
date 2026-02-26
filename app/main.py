@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # API metadata
 API_TITLE = "vectorAIz API"
-API_VERSION = "1.8.4"
+API_VERSION = os.environ.get("VECTORAIZ_VERSION", "dev")
 
 # BQ-127 (§7): Mode-aware API descriptions
 API_DESCRIPTION_STANDALONE = """

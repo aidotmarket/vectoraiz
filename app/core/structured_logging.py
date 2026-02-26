@@ -21,7 +21,7 @@ request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
 correlation_id_var: ContextVar[str | None] = ContextVar("correlation_id", default=None)
 session_id_var: ContextVar[str | None] = ContextVar("session_id", default=None)
 
-APP_VERSION = "1.8.1"
+APP_VERSION = os.environ.get("VECTORAIZ_VERSION", "dev")
 SERVICE_NAME = "vectoraiz-backend"
 
 _startup_time: float = time.time()

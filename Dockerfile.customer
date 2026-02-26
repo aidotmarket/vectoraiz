@@ -50,7 +50,9 @@ FROM python:3.11.11-slim-bookworm AS runtime
 
 LABEL maintainer="ai.market <ops@ai.market>"
 LABEL description="vectorAIz — Self-hosted data processing & semantic search"
-LABEL version="1.8.4"
+ARG VERSION=dev
+LABEL version="${VERSION}"
+ENV VECTORAIZ_VERSION=${VERSION}
 
 WORKDIR /app
 
