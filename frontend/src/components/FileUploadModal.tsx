@@ -207,6 +207,32 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const [activeTab, setActiveTab] = useState("upload");
   const [isImporting, setIsImporting] = useState(false);
 
+  // Resizable dialog state
+  const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | null>(null);
+  const resizeRef = useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
+
+  const onResizeMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    const dialog = (e.target as HTMLElement).closest('[role="dialog"]') as HTMLElement;
+    if (!dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    resizeRef.current = { startX: e.clientX, startY: e.clientY, startW: rect.width, startH: rect.height };
+
+    const onMouseMove = (ev: MouseEvent) => {
+      if (!resizeRef.current) return;
+      const newW = Math.max(384, resizeRef.current.startW + (ev.clientX - resizeRef.current.startX));
+      const newH = Math.max(300, resizeRef.current.startH + (ev.clientY - resizeRef.current.startY));
+      setDialogSize({ width: Math.min(newW, window.innerWidth * 0.9), height: Math.min(newH, window.innerHeight * 0.9) });
+    };
+    const onMouseUp = () => {
+      resizeRef.current = null;
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+  }, []);
+
   const hasFiles = queue.length > 0;
   const hasPending = queue.some((f) => f.state === "pending");
   const hasDuplicates = queue.some((f) => f.state === "duplicate");
@@ -418,14 +444,14 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   return (
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent
-        className="sm:max-w-lg bg-card border-border flex flex-col"
-        style={{ resize: 'both', overflow: 'hidden', minWidth: 384, minHeight: 300, maxWidth: '90vw', maxHeight: '90vh' }}
+        className="sm:max-w-lg bg-card border-border overflow-hidden flex flex-col"
+        style={dialogSize ? { width: dialogSize.width, height: dialogSize.height, maxWidth: '90vw', maxHeight: '90vh' } : undefined}
       >
         <DialogHeader>
           <DialogTitle className="text-foreground">Upload Datasets</DialogTitle>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 min-h-0 flex flex-col">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className={dialogSize ? "flex-1 min-h-0 flex flex-col" : ""}>
           <TabsList className="w-full">
             <TabsTrigger value="upload" disabled={isImporting} className="flex-1 gap-1.5">
               <Upload className="w-3.5 h-3.5" />
@@ -437,7 +463,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </TabsTrigger>
           </TabsList>
 
-          <TabsContent value="upload" className="flex-1 min-h-0 flex flex-col">
+          <TabsContent value="upload" className={dialogSize ? "flex-1 min-h-0 flex flex-col" : ""}>
         {/* Hidden folder input */}
         <input
           ref={folderInputRef}
@@ -449,7 +475,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           onChange={handleFolderSelect}
         />
 
-        <div className="py-4 space-y-3 flex-1 min-h-0 overflow-hidden flex flex-col">
+        <div className={cn("py-4 space-y-3", dialogSize && "flex-1 min-h-0 flex flex-col overflow-hidden")}>
           {/* Drop zone */}
           {!isUploading && !allDone && (
             <div
@@ -511,7 +537,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
           {/* File queue */}
           {hasFiles && (
-            <div className="space-y-2 flex-1 min-h-[8rem] overflow-y-auto">
+            <div className={cn("space-y-2 overflow-y-auto", dialogSize ? "flex-1 min-h-[8rem]" : "max-h-64")}>
               {queue.map((item) => (
                 <FileRow
                   key={item.id}
@@ -622,6 +648,17 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           )}
         </DialogFooter>
         )}
+        {/* Resize handle */}
+        <div
+          onMouseDown={onResizeMouseDown}
+          className="absolute bottom-0 right-0 w-4 h-4 cursor-se-resize opacity-50 hover:opacity-100 transition-opacity"
+          style={{ touchAction: "none" }}
+        >
+          <svg width="16" height="16" viewBox="0 0 16 16" className="text-muted-foreground">
+            <path d="M14 14L8 14L14 8Z" fill="currentColor" fillOpacity="0.4" />
+            <path d="M14 14L11 14L14 11Z" fill="currentColor" fillOpacity="0.6" />
+          </svg>
+        </div>
       </DialogContent>
     </Dialog>
   );
