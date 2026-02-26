@@ -41,12 +41,10 @@ SUPPORTED_EXTENSIONS = {
     '.pdf', '.docx', '.doc', '.pptx', '.ppt',
     # Plain text
     '.txt', '.md', '.html', '.htm',
-    # Tika-powered document formats (BQ-TIKA)
+    # Native document formats (BQ-VZ-PERF Phase 3)
     '.rtf', '.odt', '.ods', '.odp', '.epub',
     '.eml', '.msg', '.mbox',
     '.xml', '.rss',
-    '.pages', '.numbers', '.key',
-    '.wps', '.wpd',
     '.ics', '.vcf',
 }
 
@@ -60,17 +58,13 @@ _MAGIC_SIGNATURES: Dict[str, List[bytes]] = {
     ".pptx": [b"PK\x03\x04"],
     ".ppt": [b"\xd0\xcf\x11\xe0"],
     ".parquet": [b"PAR1"],
-    # Tika-powered formats (BQ-TIKA)
+    # Native document formats (BQ-VZ-PERF Phase 3)
     ".rtf": [b"{\\rtf"],
     ".epub": [b"PK\x03\x04"],
     ".odt": [b"PK\x03\x04"],
     ".ods": [b"PK\x03\x04"],
     ".odp": [b"PK\x03\x04"],
-    ".pages": [b"PK\x03\x04"],
-    ".numbers": [b"PK\x03\x04"],
-    ".key": [b"PK\x03\x04"],
-    ".wps": [b"\xd0\xcf\x11\xe0"],
-    # Text-based formats (.xml, .rss, .eml, .msg, .mbox, .ics, .vcf, .wpd)
+    # Text-based formats (.xml, .rss, .eml, .msg, .mbox, .ics, .vcf)
     # have no magic byte entry → _check_magic_bytes returns True
 }
 
@@ -82,7 +76,7 @@ def _check_magic_bytes(data: bytes, extension: str) -> bool:
         # No signature check for plain text formats (csv, json, txt, md, html, etc.)
         return True
 
-    # RTF BOM fix (MP/BQ-TIKA): strip UTF-8 BOM and leading whitespace before checking
+    # RTF BOM fix: strip UTF-8 BOM and leading whitespace before checking
     check_data = data
     if extension == '.rtf':
         check_data = data.lstrip(b'\xef\xbb\xbf \t\r\n')

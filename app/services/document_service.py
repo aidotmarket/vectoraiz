@@ -2,17 +2,15 @@
 Document processing service using Unstructured library.
 Provides abstraction layer for local processing with optional upgrade path to paid API.
 
-BQ-TIKA: Added TikaDocumentProcessor + fallback chain for 28+ format support.
+BQ-VZ-PERF Phase 3: Replaced Tika sidecar with NativeFormatProcessor (pure Python).
 """
 
 import logging
-import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Protocol
 from abc import ABC, abstractmethod
 from datetime import datetime
 import json
-import tempfile
 
 from app.config import settings
 
@@ -215,83 +213,17 @@ class PremiumDocumentProcessor(DocumentProcessor):
         }
 
 
-class TikaDocumentProcessor(DocumentProcessor):
-    """Process documents via Apache Tika REST API (BQ-TIKA)."""
-
-    TIKA_TYPES = {
-        'rtf', 'odt', 'ods', 'odp', 'epub',
-        'eml', 'msg', 'mbox',
-        'xml', 'rss',
-        'pages', 'numbers', 'key',
-        'wps', 'wpd',
-        'ics', 'vcf',
-    }
-
-    def __init__(self, tika_url: str = "http://tika:9998"):
-        self.tika_url = tika_url
-
-    def supported_types(self) -> List[str]:
-        return list(self.TIKA_TYPES)
-
-    def process(self, filepath: Path) -> Dict[str, Any]:
-        """PUT file to Tika, get extracted text. Returns SAME format as LocalDocumentProcessor."""
-        import httpx
-
-        if not filepath.exists():
-            raise FileNotFoundError(f"File not found: {filepath}")
-
-        with open(filepath, 'rb') as f:
-            response = httpx.put(
-                f"{self.tika_url}/tika",
-                content=f.read(),
-                headers={
-                    "Accept": "text/plain",
-                    "Content-Disposition": f'attachment; filename="{filepath.name}"',
-                },
-                timeout=120,
-            )
-
-        if response.status_code != 200:
-            raise Exception(f"Tika processing failed: HTTP {response.status_code}")
-
-        text = response.text.strip()
-
-        # Split into paragraphs as text blocks — matches Unstructured output format
-        paragraphs = [p.strip() for p in text.split('\n\n') if p.strip()]
-
-        text_content = [
-            {
-                "type": "NarrativeText",
-                "text": p,
-                "metadata": {"page_number": 0, "block_index": i}
-            }
-            for i, p in enumerate(paragraphs)
-        ]
-
-        return {
-            "text_content": text_content,
-            "tables": [],
-            "metadata": {
-                "filename": filepath.name,
-                "file_type": filepath.suffix[1:],
-                "element_count": len(text_content),
-                "text_blocks": len(text_content),
-                "table_count": 0,
-                "processor": "tika",
-            }
-        }
-
-
 class DocumentService:
     """
     Main document service that manages processor selection.
     Uses local processor by default, premium if API key configured.
+    NativeFormatProcessor handles formats previously routed to Tika.
     """
-    
+
     def __init__(self):
         self.local_processor = None
         self.premium_processor = None
-        self.tika_processor = None
+        self.native_processor = None
         self._init_processors()
 
     def _init_processors(self):
@@ -307,15 +239,9 @@ class DocumentService:
         if api_key:
             self.premium_processor = PremiumDocumentProcessor(api_key)
 
-        # BQ-TIKA: Init Tika processor if URL configured
-        tika_url = getattr(settings, 'tika_url', None) or os.environ.get('TIKA_URL')
-        if tika_url:
-            try:
-                self.tika_processor = TikaDocumentProcessor(tika_url)
-                logger.info("Tika processor initialized: %s", tika_url)
-            except Exception as e:
-                logger.warning("Tika processor unavailable: %s", e)
-                self.tika_processor = None
+        # BQ-VZ-PERF Phase 3: Native format processor (replaces Tika sidecar)
+        from app.services.native_document_processors import NativeFormatProcessor
+        self.native_processor = NativeFormatProcessor()
 
     def get_processor(
         self,
@@ -325,25 +251,21 @@ class DocumentService:
     ) -> DocumentProcessor:
         """Get the appropriate processor.
 
-        BQ-TIKA: Routes Tika-specific formats to TikaDocumentProcessor.
+        Routes native-handled formats to NativeFormatProcessor.
         Keyword-only ``filepath`` param is backward-compatible.
         """
         ext = filepath.suffix.lower() if filepath else None
         file_type = ext[1:] if ext else None
 
-        # Route Tika-specific formats to Tika
-        if file_type and self.tika_processor and file_type in TikaDocumentProcessor.TIKA_TYPES:
-            return self.tika_processor
+        # Route native-handled formats
+        if file_type and self.native_processor and file_type in self.native_processor.NATIVE_TYPES:
+            return self.native_processor
 
         # Existing chain: premium → local
         if prefer_premium and self.premium_processor:
             return self.premium_processor
         if self.local_processor:
             return self.local_processor
-
-        # Tika as final fallback for any document type
-        if self.tika_processor:
-            return self.tika_processor
         if self.premium_processor:
             return self.premium_processor
 
@@ -356,21 +278,12 @@ class DocumentService:
     ) -> Dict[str, Any]:
         """Process a document with the best available processor.
 
-        BQ-TIKA: Includes fallback chain — if primary fails, tries Tika,
-        then returns metadata-only on total failure (XAI recommendation).
+        Returns metadata-only on total failure (XAI recommendation).
         """
         processor = self.get_processor(prefer_premium, filepath=Path(filepath))
         try:
             return processor.process(Path(filepath))
         except Exception as e:
-            # Fallback: if primary processor fails, try Tika
-            if self.tika_processor and not isinstance(processor, TikaDocumentProcessor):
-                logger.warning("Primary processor failed, falling back to Tika: %s", e)
-                try:
-                    return self.tika_processor.process(Path(filepath))
-                except Exception as tika_err:
-                    logger.error("Tika fallback also failed: %s", tika_err)
-
             # Graceful failure: return metadata-only (XAI recommendation)
             logger.error("All processors failed for %s: %s", filepath, e)
             return {

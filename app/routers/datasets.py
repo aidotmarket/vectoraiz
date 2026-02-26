@@ -50,12 +50,10 @@ SUPPORTED_EXTENSIONS = {
     '.pdf', '.docx', '.doc', '.pptx', '.ppt',
     # Plain text
     '.txt', '.md', '.html', '.htm',
-    # Tika-powered document formats (BQ-TIKA)
+    # Native document formats (BQ-VZ-PERF Phase 3)
     '.rtf', '.odt', '.ods', '.odp', '.epub',
     '.eml', '.msg', '.mbox',
     '.xml', '.rss',
-    '.pages', '.numbers', '.key',
-    '.wps', '.wpd',
     '.ics', '.vcf',
 }
 

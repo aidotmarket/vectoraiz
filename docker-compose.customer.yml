@@ -38,7 +38,6 @@ services:
       - VECTORAIZ_AI_MARKET_URL=${VECTORAIZ_AI_MARKET_URL:-}
       - VECTORAIZ_ALLIE_PROVIDER=${VECTORAIZ_ALLIE_PROVIDER:-}
       - VECTORAIZ_INTERNAL_API_KEY=${VECTORAIZ_INTERNAL_API_KEY:-}
-      - TIKA_URL=http://tika:9998
       # BQ-VZ-DB-CONNECT: Max rows per database extraction (default 5M)
       - DB_EXTRACT_MAX_ROWS=${DB_EXTRACT_MAX_ROWS:-5000000}
       # BQ-VZ-DB-CONNECT: To connect to databases on the Docker host, use:
@@ -49,8 +48,6 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
-      tika:
         condition: service_healthy
     restart: unless-stopped
 
@@ -75,19 +72,6 @@ services:
       - qdrant-storage:/qdrant/storage
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/6333'"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-
-  tika:
-    image: apache/tika:3.1.0.0
-    deploy:
-      resources:
-        limits:
-          memory: 4G
-    healthcheck:
-      test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/9998'"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -146,9 +146,6 @@ class Settings(BaseSettings):
     # Document processing (optional premium)
     unstructured_api_key: Optional[str] = None
 
-    # Apache Tika sidecar (BQ-TIKA)
-    tika_url: Optional[str] = None
-    
     # Stripe billing (BQ-098)
     stripe_secret_key: Optional[str] = None
     stripe_price_id: Optional[str] = None
