@@ -14,6 +14,7 @@ UPDATED:
 """
 
 import logging
+import os
 from pydantic_settings import BaseSettings
 from typing import List, Optional, Literal
 from cryptography.fernet import Fernet
