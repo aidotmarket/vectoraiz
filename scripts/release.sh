@@ -25,7 +25,7 @@ if ! command -v "$DOCKER" &>/dev/null; then
 fi
 
 # --- Get current version from latest git tag ---
-current_tag=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+current_tag=$(git tag -l 'v*' --sort=-v:refname | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | head -1)
 current="${current_tag#v}"
 if [ -z "$current" ]; then
   current="0.0.0"
