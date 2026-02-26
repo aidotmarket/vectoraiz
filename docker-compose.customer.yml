@@ -15,7 +15,7 @@
 
 services:
   vectoraiz:
-    image: ghcr.io/maxrobbins/vectoraiz:${VECTORAIZ_VERSION:-1.8.2}
+    image: ghcr.io/maxrobbins/vectoraiz:${VECTORAIZ_VERSION:-1.8.3}
     ports:
       - "${VECTORAIZ_PORT:-8080}:80"
     volumes:
