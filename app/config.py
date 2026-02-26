@@ -18,11 +18,52 @@ import os
 from pydantic_settings import BaseSettings
 from typing import List, Optional, Literal
 from cryptography.fernet import Fernet
+import psutil
 
 logger = logging.getLogger(__name__)
 
 # BQ-127: Default ai.market URL used for mode inference
 _DEFAULT_AI_MARKET_URL = "https://ai-market-backend-production.up.railway.app"
+
+
+# ---------------------------------------------------------------------------
+# VZ-PERF-P1: Dynamic resource detection
+# ---------------------------------------------------------------------------
+def _detect_cpu_workers() -> int:
+    """Auto-detect concurrent workers: max(2, min(physical_cores - 1, 16))."""
+    try:
+        cores = psutil.cpu_count(logical=False) or psutil.cpu_count(logical=True) or 4
+        return max(2, min(cores - 1, 16))
+    except Exception:
+        return 2
+
+
+def _detect_worker_memory_mb() -> int:
+    """Auto-detect per-worker memory: max(2048, min(total_ram // 8, 32768))."""
+    try:
+        total_mb = psutil.virtual_memory().total // (1024 * 1024)
+        return max(2048, min(total_mb // 8, 32768))
+    except Exception:
+        return 2048
+
+
+def _detect_duckdb_memory_mb() -> int:
+    """Auto-detect DuckDB memory budget: max(1024, min(total_ram // 4, 65536))."""
+    try:
+        total_mb = psutil.virtual_memory().total // (1024 * 1024)
+        return max(1024, min(total_mb // 4, 65536))
+    except Exception:
+        return 1024
+
+
+_DETECTED_CPU_WORKERS = _detect_cpu_workers()
+_DETECTED_WORKER_MEM = _detect_worker_memory_mb()
+_DETECTED_DUCKDB_MEM = _detect_duckdb_memory_mb()
+
+logger.info(
+    "VZ-PERF: detected resources — workers=%d, worker_mem=%dMB, duckdb_mem=%dMB",
+    _DETECTED_CPU_WORKERS, _DETECTED_WORKER_MEM, _DETECTED_DUCKDB_MEM,
+)
 
 
 def _generate_fernet_key() -> str:
@@ -90,7 +131,6 @@ class Settings(BaseSettings):
     copilot_estimated_query_cost_cents: int = 3
     
     # DuckDB settings
-    duckdb_memory_limit: str = "12GB"
     duckdb_threads: int = 8
     data_directory: str = "/data"
     
@@ -143,16 +183,16 @@ class Settings(BaseSettings):
     connectivity_sql_max_length: int = 4096
 
     # BQ-VZ-LARGE-FILES: Streaming/chunked processing for large files
-    large_file_threshold_mb: int = 100           # Files above this use streaming path
+    large_file_threshold_mb: int = 25             # Files above this use streaming path
     fallback_max_size_mb: int = 200              # Max file size (MB) for in-memory fallback on streaming failure
-    process_worker_memory_limit_mb: int = 2048   # Per-worker memory cap
+    process_worker_memory_limit_mb: int = _DETECTED_WORKER_MEM  # Per-worker memory cap (auto-detected)
     process_worker_timeout_s: int = 1800         # 30 min per file default
     process_worker_grace_period_s: int = 60      # Seconds for checkpoint flush after SIGTERM
-    process_worker_max_concurrent: int = 2       # Max parallel workers
-    duckdb_memory_limit_mb: int = 512            # DuckDB in-memory budget for streaming path
+    process_worker_max_concurrent: int = _DETECTED_CPU_WORKERS  # Max parallel workers (auto-detected)
+    duckdb_memory_limit_mb: int = _DETECTED_DUCKDB_MEM  # DuckDB in-memory budget (auto-detected)
     max_upload_size_gb: int = 1000               # Safety valve only — local app, disk is the real limit
     streaming_queue_maxsize: int = 8             # Backpressure queue depth
-    streaming_batch_target_rows: int = 50000     # Target rows per RecordBatch
+    streaming_batch_target_rows: int = 10000     # Target rows per RecordBatch
     parquet_row_group_size_mb: int = 64           # Target row group size for ParquetWriter
 
     # BQ-VZ-DB-CONNECT: Database extraction limits
@@ -169,6 +209,14 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_prefix = "VECTORAIZ_"
+
+    @property
+    def duckdb_memory_limit(self) -> str:
+        """Derive DuckDB memory limit string from duckdb_memory_limit_mb."""
+        mb = self.duckdb_memory_limit_mb
+        if mb >= 1024 and mb % 1024 == 0:
+            return f"{mb // 1024}GB"
+        return f"{mb}MB"
 
     def get_secret_key(self) -> str:
         """Return the SECRET_KEY, auto-generating if not set.

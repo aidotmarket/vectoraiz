@@ -20,6 +20,8 @@ services:
       - "${VECTORAIZ_PORT:-8080}:80"
     volumes:
       - vectoraiz-data:/data
+      # Optional: host directory for local file import (read-only)
+      - ${HOST_IMPORT_DIR:-./import}:/data/import:ro
       # Optional: enables one-click auto-update from the UI
       # Remove this line if you don't want the container to have Docker access
       - /var/run/docker.sock:/var/run/docker.sock
@@ -83,7 +85,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 4G
     healthcheck:
       test: ["CMD-SHELL", "bash -c 'cat < /dev/null > /dev/tcp/localhost/9998'"]
       interval: 10s

@@ -33,6 +33,8 @@ jobs:
           tags: |
             ghcr.io/maxrobbins/vectoraiz:${{ github.ref_name }}
             ghcr.io/maxrobbins/vectoraiz:latest
+          build-args: |
+            VERSION=${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

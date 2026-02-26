@@ -477,6 +477,15 @@ def create_app() -> FastAPI:
         dependencies=protected_route_dependency,
     )
 
+    # VZ-PERF-P1: Local directory import from host-mounted /data/import
+    from app.routers.local_import import router as local_import_router
+    app.include_router(
+        local_import_router,
+        prefix="/api/v1/import",
+        tags=["import"],
+        dependencies=protected_route_dependency,
+    )
+
     # BQ-VZ-DB-CONNECT: Database connectivity (always mounted, auth-protected)
     from app.routers.database import router as database_router
     app.include_router(
