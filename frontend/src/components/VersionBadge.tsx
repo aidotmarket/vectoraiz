@@ -17,8 +17,8 @@ const VersionBadge = () => {
 
   return (
     <span
-      className="fixed bottom-2 right-3 text-muted-foreground select-none pointer-events-none"
-      style={{ fontSize: 11, opacity: 0.45 }}
+      className="fixed bottom-3 right-4 text-muted-foreground/70 select-none pointer-events-none"
+      style={{ fontSize: 12 }}
     >
       v{version}
     </span>
