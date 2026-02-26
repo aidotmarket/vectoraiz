@@ -8,7 +8,7 @@ export TRANSFORMERS_OFFLINE=1
 echo ""
 echo "  ╔═══════════════════════════════════════════╗"
 echo "  ║                                           ║"
-echo "  ║       ⚡ vectorAIz v${VECTORAIZ_VERSION:-1.8.1}               ║"
+echo "  ║       ⚡ vectorAIz v${VECTORAIZ_VERSION:-1.8.4}               ║"
 echo "  ║                                           ║"
 echo "  ║   Mode: $(printf '%-34s' "${VECTORAIZ_MODE:-standalone}")║"
 echo "  ║                                           ║"
