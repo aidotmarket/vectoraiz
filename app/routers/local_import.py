@@ -5,7 +5,7 @@ a host-mounted directory into the vectorAIz processing pipeline.
 """
 import os
 import uuid
-import asyncio
+
 import logging
 from pathlib import Path
 from typing import List, Optional, Set
@@ -141,7 +141,7 @@ async def process_import(req: ProcessRequest):
         raise HTTPException(status_code=400, detail="No paths provided")
 
     from app.services.processing_service import get_processing_service
-    from app.routers.datasets import process_dataset_task
+    from app.services.processing_queue import get_processing_queue
 
     processing = get_processing_service()
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -171,8 +171,8 @@ async def process_import(req: ProcessRequest):
             import shutil
             shutil.copy2(str(source), str(dest))
 
-            # Trigger async processing
-            asyncio.create_task(process_dataset_task(record.id))
+            # Queue for sequential processing
+            await get_processing_queue().submit(record.id)
 
             results.append({
                 "path": rel_path,

@@ -304,6 +304,13 @@ async def lifespan(app: FastAPI):
         _safe_background_task("activation_manager", _activation_mgr.startup())
     )
 
+    # BQ-VZ-QUEUE: Sequential file processing queue (1 file at a time)
+    from app.services.processing_queue import get_processing_queue
+    _processing_queue = get_processing_queue()
+    processing_queue_task = asyncio.create_task(
+        _safe_background_task("processing_queue", _processing_queue.worker_loop())
+    )
+
     logger.info("API ready — all background tasks launched")
 
     yield
@@ -342,6 +349,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     await _activation_mgr.shutdown()
+
+    # BQ-VZ-QUEUE: Stop processing queue worker
+    processing_queue_task.cancel()
+    try:
+        await processing_queue_task
+    except asyncio.CancelledError:
+        pass
 
     # BQ-110: Cancel queue processor gracefully
     queue_task.cancel()

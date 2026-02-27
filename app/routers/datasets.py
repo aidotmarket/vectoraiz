@@ -158,8 +158,9 @@ async def upload_dataset(
                 detail=f"File content does not match extension {extension}",
             )
 
-        # Queue background processing
-        background_tasks.add_task(process_dataset_task, record.id)
+        # Queue background processing (sequential — one file at a time)
+        from app.services.processing_queue import get_processing_queue
+        await get_processing_queue().submit(record.id)
 
         return JSONResponse(
             status_code=202,  # Accepted
@@ -353,8 +354,9 @@ async def batch_upload(
             })
             continue
 
-        # Queue background extraction
-        background_tasks.add_task(process_dataset_task, record.id, skip_indexing)
+        # Queue background extraction (sequential — one file at a time)
+        from app.services.processing_queue import get_processing_queue
+        await get_processing_queue().submit(record.id, skip_indexing=skip_indexing)
 
         items.append({
             "client_file_index": idx,
@@ -410,9 +412,11 @@ async def confirm_batch(
 
     result = batch_service.confirm_batch(batch_id, user.user_id)
 
-    # Queue indexing for each confirmed dataset
+    # Queue indexing for each confirmed dataset (sequential)
+    from app.services.processing_queue import get_processing_queue
+    queue = get_processing_queue()
     for ds_id in result.pop("confirmed_ids", []):
-        background_tasks.add_task(index_dataset_task, ds_id)
+        await queue.submit(ds_id, index_only=True)
 
     return JSONResponse(status_code=202, content=result)
 
@@ -452,13 +456,22 @@ async def get_dataset_status(
         raise VectorAIzError("VAI-UX-001", detail=f"Dataset '{dataset_id}' not found")
 
     status_val = record.status.value if isinstance(record.status, DatasetStatus) else record.status
-    return {
+    result = {
         "dataset_id": dataset_id,
         "status": status_val,
         "original_filename": record.original_filename,
         "batch_id": record.batch_id,
         "error_message": record.error if status_val == DatasetStatus.ERROR.value else None,
     }
+
+    # Show queue position for datasets waiting to be processed
+    from app.services.processing_queue import get_processing_queue
+    pos = get_processing_queue().get_position(dataset_id)
+    if pos is not None:
+        result["queue_position"] = pos
+        result["queue_depth"] = get_processing_queue().queue_depth
+
+    return result
 
 
 @router.get("/{dataset_id}/preview")
@@ -528,7 +541,8 @@ async def confirm_dataset(
                 session.add(db_row)
                 session.commit()
 
-        background_tasks.add_task(index_dataset_task, dataset_id)
+        from app.services.processing_queue import get_processing_queue
+        await get_processing_queue().submit(dataset_id, index_only=True)
         return JSONResponse(status_code=202, content={"status": "indexing"})
 
     # Fallback for uploaded state

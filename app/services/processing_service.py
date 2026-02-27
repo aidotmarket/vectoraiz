@@ -573,7 +573,11 @@ class ProcessingService:
         self._save_record(record, storage_fn)
 
         try:
-            self._run_indexing(record)
+            # Run indexing in thread pool so embedding computation
+            # doesn't block the event loop (health checks stay responsive)
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._run_indexing, record,
+            )
             record.status = DatasetStatus.READY
             record.updated_at = datetime.now(timezone.utc)
         except Exception as e:
@@ -825,7 +829,11 @@ class ProcessingService:
         self._save_record(record, storage_fn)
 
         try:
-            self._run_indexing(record)
+            # Run indexing in thread pool so embedding computation
+            # doesn't block the event loop (health checks stay responsive)
+            await asyncio.get_event_loop().run_in_executor(
+                None, self._run_indexing, record,
+            )
             if self._is_cancelled(dataset_id):
                 record.status = DatasetStatus.CANCELLED
             else:

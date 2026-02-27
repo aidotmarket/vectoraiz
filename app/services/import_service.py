@@ -216,7 +216,6 @@ class ImportService:
     async def run_import(self, job: ImportJob):
         """Execute the import — copy files and trigger processing."""
         from app.services.processing_service import get_processing_service
-        from app.routers.datasets import process_dataset_task
 
         processing = get_processing_service()
         UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -281,8 +280,9 @@ class ImportService:
 
                 entry.status = "processing"
 
-                # Trigger processing (same as upload endpoint)
-                asyncio.create_task(process_dataset_task(record.id))
+                # Queue processing (sequential — one file at a time)
+                from app.services.processing_queue import get_processing_queue
+                await get_processing_queue().submit(record.id)
 
             except Exception as e:
                 logger.error("Import copy failed for %s: %s", entry.relative_path, e)
