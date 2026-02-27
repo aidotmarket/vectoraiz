@@ -220,6 +220,7 @@ class IndexingService:
         chunk_iterator,
         text_columns: Optional[List[str]] = None,
         recreate_collection: bool = False,
+        progress_callback: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """Index a dataset from a streaming chunk iterator.
 
@@ -306,6 +307,8 @@ class IndexingService:
                     )
                     texts_buf = []
                     payloads_buf = []
+                    if progress_callback:
+                        progress_callback(total_indexed)
 
             chunk_index += 1
 
@@ -314,6 +317,8 @@ class IndexingService:
             total_indexed += self._flush_index_batch(
                 collection_name, texts_buf, payloads_buf,
             )
+            if progress_callback:
+                progress_callback(total_indexed)
 
         end_time = datetime.utcnow()
         duration = (end_time - start_time).total_seconds()

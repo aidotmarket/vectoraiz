@@ -13,7 +13,7 @@ consumed 1300%+ CPU and starved the event loop for 2-5 minutes.
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from datetime import datetime, timezone
 
@@ -34,7 +34,8 @@ class ProcessingQueue:
     def __init__(self):
         self._queue: asyncio.Queue[_QueueItem] = asyncio.Queue()
         self._current: Optional[_QueueItem] = None
-        self._worker_task: Optional[asyncio.Task] = None
+        self._worker_tasks: List[asyncio.Task] = []
+        self._progress: Dict[str, Dict[str, Any]] = {}
 
     async def submit(
         self,
@@ -54,7 +55,27 @@ class ProcessingQueue:
             "Queued %s (queue_depth=%d, skip_indexing=%s, index_only=%s)",
             dataset_id, depth, skip_indexing, index_only,
         )
+        self.update_progress(dataset_id, "queued", 0, f"Queue position #{depth}")
         return depth
+
+    # ------------------------------------------------------------------
+    # Progress tracking (in-memory only, no DB writes)
+    # ------------------------------------------------------------------
+
+    def update_progress(
+        self, dataset_id: str, phase: str, progress_pct: float, detail: str = "",
+    ) -> None:
+        self._progress[dataset_id] = {
+            "phase": phase,
+            "progress_pct": min(progress_pct, 100),
+            "detail": detail,
+        }
+
+    def get_progress(self, dataset_id: str) -> Optional[Dict[str, Any]]:
+        return self._progress.get(dataset_id)
+
+    def clear_progress(self, dataset_id: str) -> None:
+        self._progress.pop(dataset_id, None)
 
     @property
     def queue_depth(self) -> int:
@@ -77,13 +98,15 @@ class ProcessingQueue:
 
     async def worker_loop(self):
         """Process one dataset at a time, forever."""
-        logger.info("Processing queue worker started (concurrency=1)")
+        logger.info("Processing queue worker started")
         while True:
             item = await self._queue.get()
             self._current = item
+            self.update_progress(item.dataset_id, "extracting", 0, "Starting…")
             try:
                 if item.index_only:
                     logger.info("Indexing dataset %s", item.dataset_id)
+                    self.update_progress(item.dataset_id, "indexing", 0, "Starting indexing…")
                     await self._run_index(item.dataset_id)
                 else:
                     logger.info(
@@ -95,6 +118,7 @@ class ProcessingQueue:
             except Exception:
                 logger.exception("Failed dataset %s", item.dataset_id)
             finally:
+                self.clear_progress(item.dataset_id)
                 self._current = None
                 self._queue.task_done()
                 await asyncio.sleep(0)  # yield to event loop
@@ -146,21 +170,34 @@ class ProcessingQueue:
         processing = get_processing_service()
         await processing.run_index_phase(dataset_id)
 
-    def start(self) -> asyncio.Task:
-        """Start the worker as a background task."""
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self.worker_loop())
-        return self._worker_task
+    _CONCURRENCY = 2
+
+    def start(self, wrapper=None) -> List[asyncio.Task]:
+        """Start worker tasks (concurrency=2).
+
+        Args:
+            wrapper: Optional async wrapper(name, coro) for error isolation.
+        """
+        # Clean up finished tasks
+        self._worker_tasks = [t for t in self._worker_tasks if not t.done()]
+        while len(self._worker_tasks) < self._CONCURRENCY:
+            idx = len(self._worker_tasks)
+            coro = self.worker_loop()
+            if wrapper:
+                coro = wrapper(f"processing_queue_{idx}", coro)
+            self._worker_tasks.append(asyncio.create_task(coro))
+        return self._worker_tasks
 
     async def shutdown(self):
-        """Cancel the worker task."""
-        if self._worker_task:
-            self._worker_task.cancel()
+        """Cancel all worker tasks."""
+        for task in self._worker_tasks:
+            task.cancel()
+        for task in self._worker_tasks:
             try:
-                await self._worker_task
+                await task
             except asyncio.CancelledError:
                 pass
-            self._worker_task = None
+        self._worker_tasks = []
 
 
 _instance: Optional[ProcessingQueue] = None

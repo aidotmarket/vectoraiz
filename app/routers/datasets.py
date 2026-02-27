@@ -466,10 +466,18 @@ async def get_dataset_status(
 
     # Show queue position for datasets waiting to be processed
     from app.services.processing_queue import get_processing_queue
-    pos = get_processing_queue().get_position(dataset_id)
+    pq_inst = get_processing_queue()
+    pos = pq_inst.get_position(dataset_id)
     if pos is not None:
         result["queue_position"] = pos
-        result["queue_depth"] = get_processing_queue().queue_depth
+        result["queue_depth"] = pq_inst.queue_depth
+
+    # Real-time progress data (in-memory)
+    progress_info = pq_inst.get_progress(dataset_id)
+    if progress_info:
+        result["phase"] = progress_info["phase"]
+        result["progress_pct"] = progress_info["progress_pct"]
+        result["progress_detail"] = progress_info["detail"]
 
     return result
 

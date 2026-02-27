@@ -184,19 +184,27 @@ export function useSearchStats() {
 export function useDatasetStatus(id: string, pollInterval = 2000) {
   const [status, setStatus] = useState<string>('unknown');
   const [error, setError] = useState<string | null>(null);
+  const [progressPct, setProgressPct] = useState<number>(0);
+  const [progressDetail, setProgressDetail] = useState<string>('');
+  const [phase, setPhase] = useState<string>('');
+  const [queuePosition, setQueuePosition] = useState<number | null>(null);
 
   useEffect(() => {
     if (!id) return;
 
     let active = true;
-    
+
     const poll = async () => {
       try {
         const res = await datasetsApi.getStatus(id);
         if (active) {
           setStatus(res.status);
           if (res.error) setError(res.error);
-          
+          if (res.progress_pct !== undefined) setProgressPct(res.progress_pct);
+          if (res.progress_detail !== undefined) setProgressDetail(res.progress_detail);
+          if (res.phase !== undefined) setPhase(res.phase);
+          setQueuePosition(res.queue_position ?? null);
+
           // Stop polling when done or awaiting user action
           if (res.status === 'ready' || res.status === 'error' || res.status === 'preview_ready' || res.status === 'cancelled') {
             return;
@@ -206,7 +214,7 @@ export function useDatasetStatus(id: string, pollInterval = 2000) {
         if (active) setError(e instanceof Error ? e.message : 'Status check failed');
         return;
       }
-      
+
       // Continue polling
       if (active) {
         setTimeout(poll, pollInterval);
@@ -218,7 +226,7 @@ export function useDatasetStatus(id: string, pollInterval = 2000) {
     return () => { active = false; };
   }, [id, pollInterval]);
 
-  return { status, error };
+  return { status, error, progressPct, progressDetail, phase, queuePosition };
 }
 
 // Backend connection status hook

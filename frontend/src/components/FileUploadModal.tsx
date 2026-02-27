@@ -113,7 +113,7 @@ const JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore', 
 
 /** Tracks processing status for a single dataset after upload */
 function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
-  const { status, error } = useDatasetStatus(datasetId || "");
+  const { status, error, progressPct, progressDetail, phase, queuePosition } = useDatasetStatus(datasetId || "");
   const firedRef = useRef(false);
 
   useEffect(() => {
@@ -127,7 +127,7 @@ function useProcessingTracker(datasetId: string | null, onReady: () => void, onE
     }
   }, [status, error, datasetId]);
 
-  return status;
+  return { status, progressPct, progressDetail, phase, queuePosition };
 }
 
 /** Individual file row that self-tracks processing */
@@ -138,7 +138,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
 }) {
   const Icon = getFileIcon(item.file.name);
 
-  useProcessingTracker(
+  const proc = useProcessingTracker(
     item.state === "processing" ? item.datasetId : null,
     () => onStatusChange(item.id, "complete"),
     (msg) => onStatusChange(item.id, "error", msg),
@@ -174,7 +174,12 @@ function FileRow({ item, onRemove, onStatusChange }: {
         <p className="text-xs text-muted-foreground">
           {item.state === "pending" && formatFileSize(item.file.size)}
           {item.state === "uploading" && `Uploading\u2026 ${Math.round(item.progress)}%`}
-          {item.state === "processing" && "Processing\u2026"}
+          {item.state === "processing" && (
+            proc.phase === "queued" ? `Queued (#${proc.queuePosition ?? "?"})` :
+            proc.phase === "extracting" ? `Extracting\u2026 ${Math.round(proc.progressPct)}%${proc.progressDetail ? ` \u2014 ${proc.progressDetail}` : ""}` :
+            proc.phase === "indexing" ? `Indexing\u2026 ${Math.round(proc.progressPct)}%${proc.progressDetail ? ` \u2014 ${proc.progressDetail}` : ""}` :
+            "Processing\u2026"
+          )}
           {item.state === "complete" && "Ready"}
           {item.state === "error" && (item.error || "Failed")}
           {item.state === "rejected" && (item.error || "Skipped")}
@@ -190,7 +195,7 @@ function FileRow({ item, onRemove, onStatusChange }: {
 
       {(item.state === "uploading" || item.state === "processing") && (
         <div className="w-16">
-          <Progress value={item.progress} className="h-1" />
+          <Progress value={item.state === "processing" ? proc.progressPct : item.progress} className="h-1" />
         </div>
       )}
     </div>

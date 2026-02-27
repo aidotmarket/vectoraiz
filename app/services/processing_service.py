@@ -628,6 +628,10 @@ class ProcessingService:
         if file_type in TABULAR_TYPES:
             handle = manager.submit_tabular(record.upload_path, file_type)
 
+            # Estimate total rows from file size (~150 bytes/row avg) for progress
+            file_bytes = record.file_size_bytes or 0
+            estimated_rows = max(file_bytes / 150, 1)
+
             # M3: Consume RecordBatch chunks and write Parquet incrementally
             # with configurable row group size targeting PARQUET_ROW_GROUP_SIZE_MB.
             writer: Optional[pq.ParquetWriter] = None
@@ -649,9 +653,19 @@ class ProcessingService:
                         target_bytes = settings.parquet_row_group_size_mb * 1024 * 1024
                         bytes_per_row = max(batch.nbytes / max(batch.num_rows, 1), 1)
                         row_group_target_rows = max(int(target_bytes / bytes_per_row), 1024)
+                        # Refine estimate with actual bytes-per-row from first batch
+                        estimated_rows = max(file_bytes / bytes_per_row, 1)
 
                     writer.write_batch(batch, row_group_size=row_group_target_rows)
                     rows_total += batch.num_rows
+
+                    # Update progress (cap extraction at 90%)
+                    from app.services.processing_queue import get_processing_queue
+                    pct = min((rows_total / estimated_rows) * 90, 90)
+                    get_processing_queue().update_progress(
+                        record.id, "extracting", pct,
+                        f"{rows_total:,} rows extracted",
+                    )
             except Exception:
                 # M3: On error/crash, clean up .partial and re-raise
                 if writer:
@@ -698,6 +712,11 @@ class ProcessingService:
                     "streaming_rows_total": rows_total,
                 }
 
+            from app.services.processing_queue import get_processing_queue
+            get_processing_queue().update_progress(
+                record.id, "extracting", 100, "Extraction complete",
+            )
+
         elif file_type in DOCUMENT_TYPES:
             handle = manager.submit_document(record.upload_path, file_type)
 
@@ -714,6 +733,9 @@ class ProcessingService:
             text_blocks_count = 0
             table_count = 0
             first_text_preview = None
+            # Estimate total pages from file size (~5KB/page avg) for progress
+            doc_file_bytes = record.file_size_bytes or 0
+            estimated_pages = max(doc_file_bytes / 5000, 1)
 
             try:
                 for block_dict in handle.iter_data():
@@ -747,6 +769,14 @@ class ProcessingService:
                         doc_writer.write_batch(batch)
                         block_idx += 1
                         table_count += 1
+
+                    # Update progress (cap at 90% for extraction)
+                    from app.services.processing_queue import get_processing_queue
+                    pct = min((page / estimated_pages) * 90, 90)
+                    get_processing_queue().update_progress(
+                        record.id, "extracting", pct,
+                        f"{text_blocks_count} blocks, {table_count} tables",
+                    )
             except Exception:
                 if doc_writer:
                     doc_writer.close()
@@ -799,6 +829,11 @@ class ProcessingService:
                     "text_blocks": text_blocks_count,
                     "tables_extracted": table_count,
                 }
+
+            from app.services.processing_queue import get_processing_queue
+            get_processing_queue().update_progress(
+                record.id, "extracting", 100, "Extraction complete",
+            )
         else:
             raise ValueError(f"Streaming not supported for file type: {file_type}")
 
@@ -817,11 +852,22 @@ class ProcessingService:
 
             indexing_service = get_indexing_service()
             pf = pq.ParquetFile(record.processed_path)
+            total_rows = pf.metadata.num_rows if pf.metadata else 0
             chunk_iter = pf.iter_batches(batch_size=1000)
+
+            def _indexing_progress(rows_done: int) -> None:
+                from app.services.processing_queue import get_processing_queue
+                pct = min((rows_done / max(total_rows, 1)) * 100, 99) if total_rows else 50
+                get_processing_queue().update_progress(
+                    record.id, "indexing", pct,
+                    f"{rows_done:,} / {total_rows:,} rows indexed",
+                )
+
             index_result = indexing_service.index_streaming(
                 dataset_id=record.id,
                 chunk_iterator=chunk_iter,
                 recreate_collection=True,
+                progress_callback=_indexing_progress,
             )
             record.metadata["index_status"] = index_result
         except Exception as e:
