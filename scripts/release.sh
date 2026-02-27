@@ -60,12 +60,15 @@ if ! git diff --quiet HEAD; then
   exit 1
 fi
 
-# GHCR auth
-if ! "$DOCKER" pull "$IMAGE:latest" &>/dev/null 2>&1; then
+# GHCR auth — try env var first, then doppler
+echo "▸ Checking GHCR auth..."
+if ! "$DOCKER" pull --platform linux/amd64 "$IMAGE:latest" &>/dev/null 2>&1; then
   echo "▸ Logging into GHCR..."
-  GITHUB_TOKEN=$(doppler secrets get GITHUB_TOKEN --plain -p ai-market -c dev_personal 2>/dev/null || echo "")
+  if [ -z "${GITHUB_TOKEN:-}" ]; then
+    GITHUB_TOKEN=$(doppler secrets get GITHUB_TOKEN --plain -p ai-market -c dev_personal 2>/dev/null || echo "")
+  fi
   if [ -z "$GITHUB_TOKEN" ]; then
-    echo "✗ No GITHUB_TOKEN found. Run: doppler secrets get GITHUB_TOKEN --plain -p ai-market -c dev_personal"
+    echo "✗ No GITHUB_TOKEN found. Set GITHUB_TOKEN env var or run: doppler secrets get GITHUB_TOKEN --plain -p ai-market -c dev_personal"
     exit 1
   fi
   echo "$GITHUB_TOKEN" | "$DOCKER" login ghcr.io -u aidotmarket --password-stdin
