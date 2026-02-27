@@ -505,20 +505,25 @@ def create_app() -> FastAPI:
     )
     app.include_router(copilot_ws_router)  # WebSocket at /ws/copilot (no prefix)
 
-    # BQ-127 (C5): CONNECTED MODE ONLY — lazy imports to avoid loading
-    # premium deps (Stripe, billing, integrations) in standalone mode.
+    # allAI features: mount when enabled (works in both standalone and connected)
+    if settings.allai_enabled:
+        from app.routers import allai
+
+        app.include_router(
+            allai.router,
+            prefix="/api/allai",
+            tags=["allai"],
+        )
+        logger.info("allAI router mounted (allai_enabled=True)")
+
+    # BQ-127 (C5): Billing/marketplace — connected mode only (requires ai.market + Stripe)
     if settings.mode == "connected":
-        from app.routers import allai, billing, integrations, webhooks
+        from app.routers import billing, integrations, webhooks
 
         app.include_router(
             webhooks.router,
             prefix="/api/webhooks",
             tags=["webhooks"],
-        )
-        app.include_router(
-            allai.router,
-            prefix="/api/allai",
-            tags=["allai"],
         )
         app.include_router(
             billing.router,
@@ -532,8 +537,8 @@ def create_app() -> FastAPI:
             tags=["integrations"],
             dependencies=protected_route_dependency,
         )
-        logger.info("Connected mode: premium routers mounted (allai, billing, integrations, webhooks)")
-    else:
+        logger.info("Connected mode: premium routers mounted (billing, integrations, webhooks)")
+    elif not settings.allai_enabled:
         logger.info("Standalone mode: premium routers NOT mounted")
 
     # Website chat — public endpoint for vectoraiz.com chat widget (no auth)
