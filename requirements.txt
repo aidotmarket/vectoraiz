@@ -66,6 +66,7 @@ pymysql>=1.1
 # BQ-VZ-LARGE-FILES: Streaming PDF processing
 pypdfium2>=4.0.0
 pdfplumber>=0.10.0
+ijson>=3.2.0
 
 # BQ-VZ-AUTO-UPDATE: Docker SDK for auto-update via Docker socket
 docker>=7.0.0

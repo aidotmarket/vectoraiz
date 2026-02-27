@@ -403,16 +403,18 @@ class ProcessingService:
 
         # Extract preview text
         if record.document_content:
-            # For documents: first 500 chars from text blocks
-            text_blocks = record.document_content.get("text_content", [])
-            if isinstance(text_blocks, list):
-                full_text = " ".join(
-                    b.get("text", "") if isinstance(b, dict) else str(b)
-                    for b in text_blocks
-                )
+            # Use pre-computed preview if available (streaming path)
+            doc_meta = record.document_content.get("metadata", {})
+            if doc_meta.get("preview_text"):
+                preview_text = doc_meta["preview_text"][:500]
             else:
-                full_text = str(text_blocks)
-            preview_text = full_text[:500]
+                # Legacy path: take first block only, never join all
+                text_blocks = record.document_content.get("text_content", [])
+                if text_blocks:
+                    first = text_blocks[0]
+                    preview_text = (first.get("text", "") if isinstance(first, dict) else str(first))[:500]
+                else:
+                    preview_text = None
             preview_meta["kind"] = "document"
         elif record.processed_path and record.processed_path.exists():
             # For tabular: get sample rows + schema via DuckDB
@@ -699,29 +701,62 @@ class ProcessingService:
         elif file_type in DOCUMENT_TYPES:
             handle = manager.submit_document(record.upload_path, file_type)
 
-            # Consume TextBlock dicts, build document content
-            text_content = []
-            tables = []
+            # Incremental Parquet writing — never accumulate all blocks in memory
+            doc_schema = pa.schema([
+                ("block_index", pa.int64()),
+                ("block_type", pa.string()),
+                ("page_number", pa.int64()),
+                ("content", pa.string()),
+            ])
+
+            doc_writer = None
+            block_idx = 0
+            text_blocks_count = 0
+            table_count = 0
+            first_text_preview = None
+
             try:
                 for block_dict in handle.iter_data():
-                    text_content.append({
-                        "type": "Text",
-                        "text": block_dict["text"],
-                        "metadata": {
-                            "page_number": block_dict["page_num"],
-                            **block_dict.get("metadata", {}),
-                        },
-                    })
-                    for tbl in block_dict.get("tables", []):
-                        tables.append({
-                            "content": tbl,
-                            "metadata": {"page_number": block_dict["page_num"]},
-                        })
+                    page = int(block_dict.get("page_num") or 0)
+                    text = block_dict.get("text") or ""
+
+                    if text.strip():
+                        if first_text_preview is None:
+                            first_text_preview = text[:500]
+                        batch = pa.RecordBatch.from_arrays([
+                            pa.array([block_idx], type=pa.int64()),
+                            pa.array(["Text"]),
+                            pa.array([page], type=pa.int64()),
+                            pa.array([text]),
+                        ], schema=doc_schema)
+                        if doc_writer is None:
+                            doc_writer = pq.ParquetWriter(str(partial_path), doc_schema, compression="zstd")
+                        doc_writer.write_batch(batch)
+                        block_idx += 1
+                        text_blocks_count += 1
+
+                    for tbl in block_dict.get("tables", []) or []:
+                        batch = pa.RecordBatch.from_arrays([
+                            pa.array([block_idx], type=pa.int64()),
+                            pa.array(["Table"]),
+                            pa.array([page], type=pa.int64()),
+                            pa.array([tbl]),
+                        ], schema=doc_schema)
+                        if doc_writer is None:
+                            doc_writer = pq.ParquetWriter(str(partial_path), doc_schema, compression="zstd")
+                        doc_writer.write_batch(batch)
+                        block_idx += 1
+                        table_count += 1
             except Exception:
-                # M3: Clean up partial on document extraction failure
+                if doc_writer:
+                    doc_writer.close()
+                    doc_writer = None
                 if partial_path.exists():
                     partial_path.unlink()
                 raise
+            finally:
+                if doc_writer:
+                    doc_writer.close()
 
             # Check worker result
             progress = handle.get_progress()
@@ -730,51 +765,40 @@ class ProcessingService:
                     partial_path.unlink()
                 raise RuntimeError(progress.get("error", "Unknown worker error"))
 
+            # Atomic rename
+            if partial_path.exists():
+                partial_path.rename(final_path)
+            record.processed_path = final_path
+
+            # Store SUMMARY metadata only — data lives in Parquet
             record.document_content = {
-                "text_content": text_content,
-                "tables": tables,
+                "text_content": [],
+                "tables": [],
                 "metadata": {
                     "filename": record.original_filename,
                     "file_type": file_type,
-                    "text_blocks": len(text_content),
-                    "table_count": len(tables),
+                    "text_blocks": text_blocks_count,
+                    "table_count": table_count,
                     "processor": "streaming_subprocess",
+                    "preview_text": first_text_preview,
                 },
             }
 
-            # Convert to Parquet for consistent downstream processing
-            record.processed_path = final_path
-            temp_csv = self.processed_dir / f"{record.id}_temp.csv"
             try:
-                with open(temp_csv, "w", newline="", encoding="utf-8") as f:
-                    csv_writer = csv.writer(f)
-                    csv_writer.writerow(["block_index", "block_type", "page_number", "content"])
-                    for i, block in enumerate(text_content):
-                        page_num = block.get("metadata", {}).get("page_number", 0)
-                        csv_writer.writerow([i, block.get("type", "Text"), page_num, block.get("text", "")])
-                    for i, table in enumerate(tables):
-                        page_num = table.get("metadata", {}).get("page_number", 0)
-                        csv_writer.writerow([
-                            len(text_content) + i, "Table", page_num, table.get("content", ""),
-                        ])
-
                 duckdb = get_duckdb_service()
-                safe_csv = sql_quote_literal(str(temp_csv))
-                safe_out = sql_quote_literal(str(record.processed_path))
-                duckdb.connection.execute(
-                    f"COPY (SELECT * FROM read_csv_auto('{safe_csv}')) "
-                    f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-                )
-
                 metadata = duckdb.get_file_metadata(record.processed_path)
                 metadata["source_type"] = "document"
                 metadata["original_format"] = file_type
-                metadata["text_blocks"] = len(text_content)
-                metadata["tables_extracted"] = len(tables)
+                metadata["text_blocks"] = text_blocks_count
+                metadata["tables_extracted"] = table_count
                 record.metadata = metadata
-            finally:
-                if temp_csv.exists():
-                    temp_csv.unlink()
+            except Exception as e:
+                _log.exception("Metadata extraction failed for %s", record.id)
+                record.metadata = {
+                    "source_type": "document",
+                    "text_blocks": text_blocks_count,
+                    "tables_extracted": table_count,
+                }
         else:
             raise ValueError(f"Streaming not supported for file type: {file_type}")
 
@@ -851,6 +875,42 @@ class ProcessingService:
     # Large CSVs/TSVs (400MB+) may need several minutes.
     EXTRACT_TIMEOUT_S = 300  # 5 minutes
 
+    MAX_PROCESSING_ATTEMPTS = 3
+
+    def recover_stuck_records(self) -> int:
+        """On startup: find records stuck in processing states and handle retries."""
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from sqlmodel import select
+
+        with self._get_session() as session:
+            stmt = select(DBDatasetRecord).where(
+                DBDatasetRecord.status.in_(["extracting", "indexing"])
+            )
+            stuck = session.exec(stmt).all()
+            recovered = 0
+            for row in stuck:
+                meta = json.loads(row.metadata_json) if row.metadata_json else {}
+                attempts = meta.get("processing_attempts", 0) + 1
+                meta["processing_attempts"] = attempts
+
+                if attempts >= self.MAX_PROCESSING_ATTEMPTS:
+                    row.status = "error"
+                    meta["error"] = f"Failed after {attempts} attempts (likely OOM for large file)"
+                    meta["error_permanent"] = True
+                    _log.warning("Marking %s as permanently failed after %d attempts", row.id, attempts)
+                else:
+                    row.status = "uploaded"
+                    _log.info("Resetting %s for retry (attempt %d/%d)", row.id, attempts, self.MAX_PROCESSING_ATTEMPTS)
+
+                row.metadata_json = json.dumps(meta, default=str)
+                row.updated_at = datetime.now(timezone.utc)
+                session.add(row)
+                recovered += 1
+
+            if recovered:
+                session.commit()
+            return recovered
+
     async def _extract_tabular(self, record: DatasetRecord):
         """Extract phase for tabular files (CSV, JSON, Parquet) - convert to Parquet."""
         import logging
@@ -904,8 +964,10 @@ class ProcessingService:
             # Retry with a fresh connection and higher memory limit for large files
             if file_size > 100 * 1024 * 1024:  # >100MB
                 _log.info("Retrying large file %s with dedicated connection", record.id)
+                # Cap at 60% of detected worker memory, never exceed 8GB
+                mem_cap_mb = min(int(settings.process_worker_memory_limit_mb * 0.6), 8192)
                 large_conn = duckdb.create_ephemeral_connection(
-                    memory_limit="16GB", threads=4,
+                    memory_limit=f"{mem_cap_mb}MB", threads=4,
                 )
                 try:
                     large_read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))

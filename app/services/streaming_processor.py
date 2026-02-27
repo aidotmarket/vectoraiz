@@ -175,7 +175,6 @@ class StreamingTabularProcessor:
         """Line-buffered JSON (JSONL) or array JSON reading."""
         import pandas as pd
 
-        # Peek at the file to determine format
         fh = _open_text_with_fallback(self.filepath)
         try:
             first_char = ""
@@ -186,18 +185,23 @@ class StreamingTabularProcessor:
             fh.seek(0)
 
             if first_char == "[":
-                # JSON array — load and yield in batches
-                data = json.load(fh)
-                fh.close()
-                if isinstance(data, list):
-                    df = pd.DataFrame(data)
-                else:
-                    df = pd.DataFrame([data])
-                table = pa.Table.from_pandas(df, preserve_index=False)
-                for batch in table.to_batches(max_chunksize=self.batch_target):
-                    yield batch
+                # JSON array — stream with ijson (never loads full file)
+                import ijson
+                fh.close()  # ijson needs binary mode
+                buf = []
+                with open(self.filepath, 'rb') as bf:
+                    for obj in ijson.items(bf, 'item'):
+                        if not isinstance(obj, dict):
+                            obj = {"value": obj}
+                        buf.append(obj)
+                        if len(buf) >= self.batch_target:
+                            yield pa.RecordBatch.from_pylist(buf)
+                            buf.clear()
+                    if buf:
+                        yield pa.RecordBatch.from_pylist(buf)
+                return
             else:
-                # JSONL (one object per line)
+                # JSONL (one object per line) — already streams correctly
                 reader = pd.read_json(
                     fh, lines=True, chunksize=self.batch_target
                 )
@@ -207,7 +211,8 @@ class StreamingTabularProcessor:
                         yield batch
                 fh.close()
         except Exception:
-            fh.close()
+            if not fh.closed:
+                fh.close()
             raise
 
 
@@ -225,6 +230,7 @@ class StreamingDocumentProcessor:
     def __init__(self, filepath: Path, file_type: str):
         self.filepath = filepath
         self.file_type = file_type.lower()
+        self._pypdf_reader = None
 
     def __iter__(self) -> Iterator[TextBlock]:
         if self.file_type == "pdf":
@@ -326,13 +332,14 @@ class StreamingDocumentProcessor:
     def _fallback_page_text(self, page_idx: int) -> str:
         """Extract text from a single page using PyPDF as fallback."""
         try:
-            try:
-                from PyPDF2 import PdfReader
-            except ImportError:
-                from pypdf import PdfReader
-            reader = PdfReader(str(self.filepath))
-            if page_idx < len(reader.pages):
-                return reader.pages[page_idx].extract_text() or ""
+            if self._pypdf_reader is None:
+                try:
+                    from PyPDF2 import PdfReader
+                except ImportError:
+                    from pypdf import PdfReader
+                self._pypdf_reader = PdfReader(str(self.filepath))
+            if page_idx < len(self._pypdf_reader.pages):
+                return self._pypdf_reader.pages[page_idx].extract_text() or ""
         except Exception as e:
             logger.debug("PyPDF fallback failed for page %d: %s", page_idx, e)
         return ""

@@ -304,6 +304,16 @@ async def lifespan(app: FastAPI):
         _safe_background_task("activation_manager", _activation_mgr.startup())
     )
 
+    # BQ-VZ-LARGE-FILES: Recover records stuck in processing states (OOM crash recovery)
+    try:
+        from app.services.processing_service import get_processing_service
+        _ps = get_processing_service()
+        _recovered = _ps.recover_stuck_records()
+        if _recovered:
+            logger.info("Recovered %d stuck processing records on startup", _recovered)
+    except Exception as e:
+        logger.error("Failed to recover stuck records: %s", e)
+
     # BQ-VZ-QUEUE: Sequential file processing queue (1 file at a time)
     from app.services.processing_queue import get_processing_queue
     _processing_queue = get_processing_queue()
