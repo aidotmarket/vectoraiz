@@ -93,8 +93,8 @@ class Settings(BaseSettings):
     local_auth_secret: Optional[str] = None    # JWT signing key (Phase 2, not used yet)
 
     # BQ-127: Premium feature flags (only relevant in connected mode)
-    allai_enabled: bool = False
-    marketplace_enabled: bool = False
+    allai_enabled: bool = True
+    marketplace_enabled: bool = True
 
     # ai.market platform integration
     ai_market_url: str = _DEFAULT_AI_MARKET_URL
