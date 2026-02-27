@@ -1100,7 +1100,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
             </p>
             <div className="flex flex-wrap gap-4">
               <a
-                href="https://github.com/maxrobbins/vectoraiz"
+                href="https://github.com/aidotmarket/vectoraiz"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
@@ -1109,7 +1109,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
                 <ExternalLink className="w-3 h-3" />
               </a>
               <a
-                href="https://github.com/maxrobbins/vectoraiz"
+                href="https://github.com/aidotmarket/vectoraiz"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
@@ -1118,7 +1118,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
                 <ExternalLink className="w-3 h-3" />
               </a>
               <a
-                href="https://github.com/maxrobbins/vectoraiz/issues"
+                href="https://github.com/aidotmarket/vectoraiz/issues"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"

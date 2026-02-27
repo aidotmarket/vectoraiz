@@ -1,7 +1,7 @@
 # =============================================================================
 # vectorAIz Installer for Windows
 # =============================================================================
-# Usage: irm https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/install.ps1 | iex
 #
 # Installs Docker Desktop automatically if missing (via winget).
 # =============================================================================
@@ -109,7 +109,7 @@ function Wait-ForHealthWithSpinner {
     return $false
 }
 
-$repo   = "maxrobbins/vectoraiz"
+$repo   = "aidotmarket/vectoraiz"
 $branch = "main"
 $installDir = "$HOME\vectoraiz"
 
@@ -213,7 +213,7 @@ if (-not $dockerCmd) {
             Write-Warn "Docker is still starting up."
             Write-Warn "Wait for it to finish, then re-run:"
             Write-Host ""
-            Write-Host "    irm https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/install.ps1 | iex" -ForegroundColor White
+            Write-Host "    irm https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/install.ps1 | iex" -ForegroundColor White
             Write-Host ""
             exit 0
         }
@@ -250,7 +250,7 @@ Invoke-WithSpinner -Message "Downloading vectorAIz..." -Action {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $tmpDir = Join-Path $env:TEMP (Get-ChildItem $env:TEMP -Directory -Filter "vectoraiz-install-*" | Select-Object -Last 1).Name
     $zipFile = Join-Path $tmpDir "vectoraiz.zip"
-    Invoke-WebRequest -Uri "https://github.com/maxrobbins/vectoraiz/archive/refs/heads/main.zip" -OutFile $zipFile -UseBasicParsing
+    Invoke-WebRequest -Uri "https://github.com/aidotmarket/vectoraiz/archive/refs/heads/main.zip" -OutFile $zipFile -UseBasicParsing
 }
 
 if (-not (Test-Path $zipFile)) {

@@ -31,8 +31,8 @@ jobs:
           file: Dockerfile.customer
           push: true
           tags: |
-            ghcr.io/maxrobbins/vectoraiz:${{ github.ref_name }}
-            ghcr.io/maxrobbins/vectoraiz:latest
+            ghcr.io/aidotmarket/vectoraiz:${{ github.ref_name }}
+            ghcr.io/aidotmarket/vectoraiz:latest
           build-args: |
             VERSION=${{ github.ref_name }}
           cache-from: type=gha

@@ -32,12 +32,12 @@ Most AI data tools send your data to the cloud. vectorAIz doesn't. Everything ru
 ### Option 1: One-line install (recommended)
 
 ```bash
-git clone https://github.com/maxrobbins/vectoraiz.git && cd vectoraiz && ./start.sh
+git clone https://github.com/aidotmarket/vectoraiz.git && cd vectoraiz && ./start.sh
 ```
 
 ### Option 2: Platform installers
 
-Download from the [latest release](https://github.com/maxrobbins/vectoraiz/releases/latest):
+Download from the [latest release](https://github.com/aidotmarket/vectoraiz/releases/latest):
 
 | Platform | Download | Run |
 |----------|----------|-----|
@@ -48,7 +48,7 @@ Download from the [latest release](https://github.com/maxrobbins/vectoraiz/relea
 ### Option 3: Docker Compose (manual)
 
 ```bash
-git clone https://github.com/maxrobbins/vectoraiz.git
+git clone https://github.com/aidotmarket/vectoraiz.git
 cd vectoraiz
 docker-compose up --build
 ```
@@ -127,7 +127,7 @@ LLM keys are configured through the UI (Settings → LLM) and stored encrypted o
 
 ```bash
 # Clone and start with hot reload
-git clone https://github.com/maxrobbins/vectoraiz.git
+git clone https://github.com/aidotmarket/vectoraiz.git
 cd vectoraiz
 docker-compose up --build
 
@@ -158,8 +158,8 @@ Source available under [Elastic License 2.0](LICENSE). Free to use, modify, and 
 
 - 🌐 [vectoraiz.com](https://vectoraiz.com) — project homepage
 - 🛒 [ai.market](https://ai.market) — data marketplace
-- 📦 [Releases](https://github.com/maxrobbins/vectoraiz/releases) — downloads
-- 🐛 [Issues](https://github.com/maxrobbins/vectoraiz/issues) — bug reports
+- 📦 [Releases](https://github.com/aidotmarket/vectoraiz/releases) — downloads
+- 🐛 [Issues](https://github.com/aidotmarket/vectoraiz/issues) — bug reports
 
 ---
 

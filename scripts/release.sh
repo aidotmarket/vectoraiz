@@ -14,7 +14,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-IMAGE="ghcr.io/maxrobbins/vectoraiz"
+IMAGE="ghcr.io/aidotmarket/vectoraiz"
 DOCKER="${DOCKER_BIN:-docker}"
 
 # --- Resolve docker binary (OrbStack or standard) ---
@@ -68,7 +68,7 @@ if ! "$DOCKER" pull "$IMAGE:latest" &>/dev/null 2>&1; then
     echo "✗ No GITHUB_TOKEN found. Run: doppler secrets get GITHUB_TOKEN --plain -p ai-market -c dev_personal"
     exit 1
   fi
-  echo "$GITHUB_TOKEN" | "$DOCKER" login ghcr.io -u maxrobbins --password-stdin
+  echo "$GITHUB_TOKEN" | "$DOCKER" login ghcr.io -u aidotmarket --password-stdin
 fi
 
 echo "✓ Pre-flight passed"

@@ -12,7 +12,7 @@
 set -euo pipefail
 
 TAG="${1:-latest}"
-IMAGE="ghcr.io/maxrobbins/vectoraiz:${TAG}"
+IMAGE="ghcr.io/aidotmarket/vectoraiz:${TAG}"
 CONTAINER="vz-verify-$$"
 PASS=0
 FAIL=0

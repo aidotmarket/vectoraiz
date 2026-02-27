@@ -3,7 +3,7 @@
 # vectorAIz — macOS Installer
 # =============================================================================
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/installers/mac/install-mac.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/mac/install-mac.sh | bash
 #
 # Or download and run:
 #   chmod +x install-mac.sh && ./install-mac.sh
@@ -15,7 +15,7 @@ cd "$HOME" 2>/dev/null || cd /tmp
 # --- Configuration ---
 INSTALL_DIR="$HOME/vectoraiz"
 COMPOSE_FILE="docker-compose.customer.yml"
-COMPOSE_URL="https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/docker-compose.customer.yml"
+COMPOSE_URL="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml"
 APP_BUNDLE="$HOME/Applications/vectorAIz.app"
 PREFERRED_PORTS=(8080 3000 8888 9000 80)
 

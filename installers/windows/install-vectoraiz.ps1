@@ -2,7 +2,7 @@
 # vectorAIz — Windows Installer
 # =============================================================================
 # Usage:
-#   irm https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/installers/windows/install-vectoraiz.ps1 | iex
+#   irm https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/windows/install-vectoraiz.ps1 | iex
 #
 # Or download and run:
 #   Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -14,7 +14,7 @@ $ErrorActionPreference = "Stop"
 # --- Configuration ---
 $InstallDir = "$env:USERPROFILE\vectoraiz"
 $ComposeFile = "docker-compose.customer.yml"
-$ComposeUrl = "https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/docker-compose.customer.yml"
+$ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml"
 $PreferredPorts = @(80, 8080, 3000, 8888, 9000)
 
 # --- Helpers ---

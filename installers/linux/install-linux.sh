@@ -3,7 +3,7 @@
 # vectorAIz — Linux Installer
 # =============================================================================
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/installers/linux/install-linux.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/linux/install-linux.sh | bash
 #
 # Or download and run:
 #   chmod +x install-linux.sh && ./install-linux.sh
@@ -14,7 +14,7 @@ set -e
 # --- Configuration ---
 INSTALL_DIR="$HOME/vectoraiz"
 COMPOSE_FILE="docker-compose.customer.yml"
-COMPOSE_URL="https://raw.githubusercontent.com/maxrobbins/vectoraiz/main/docker-compose.customer.yml"
+COMPOSE_URL="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml"
 PREFERRED_PORTS=(8080 3000 8888 9000 80)
 
 # --- Colors ---

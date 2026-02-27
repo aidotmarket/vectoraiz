@@ -16,11 +16,11 @@ cd /Users/max/Projects/vectoraiz/vectoraiz-monorepo
 
 # ALWAYS use Dockerfile.customer for GHCR
 docker build -f Dockerfile.customer \
-  -t ghcr.io/maxrobbins/vectoraiz:VERSION \
-  -t ghcr.io/maxrobbins/vectoraiz:latest .
+  -t ghcr.io/aidotmarket/vectoraiz:VERSION \
+  -t ghcr.io/aidotmarket/vectoraiz:latest .
 
-docker push ghcr.io/maxrobbins/vectoraiz:VERSION
-docker push ghcr.io/maxrobbins/vectoraiz:latest
+docker push ghcr.io/aidotmarket/vectoraiz:VERSION
+docker push ghcr.io/aidotmarket/vectoraiz:latest
 ```
 
 ## Version Strings — ALL THREE must match
