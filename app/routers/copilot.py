@@ -44,6 +44,7 @@ from pydantic import BaseModel, ValidationError
 from sqlmodel import Session as DBSession, select
 
 from app.core.errors import VectorAIzError
+from app.config import settings
 from app.core.local_only_guard import is_local_only
 from app.auth.api_key_auth import AuthenticatedUser, get_current_user, get_current_user_ws
 from app.models.copilot import SCICommand, CommandResult, StateSnapshot
@@ -666,7 +667,7 @@ async def websocket_copilot(websocket: WebSocket):
         nudge_manager.set_quiet_mode(session_id, True)
 
     # BQ-128: Allie availability check
-    allie_available = not is_local_only()
+    allie_available = settings.allai_enabled or not is_local_only()
     standalone = is_local_only()
 
     # Send CONNECTED message with balance info + allie flags (BQ-128 Task 1.6)
