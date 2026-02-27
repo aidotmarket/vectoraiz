@@ -22,13 +22,12 @@ import {
   X,
   AlertTriangle,
   FolderOpen,
-  HardDrive,
+  ChevronRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatasetStatus } from "@/hooks/useApi";
-import { datasetsApi, DuplicateFileError } from "@/lib/api";
+import { datasetsApi, DuplicateFileError, importApi } from "@/lib/api";
 import { toast } from "sonner";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { LocalImportBrowser } from "@/components/LocalImportBrowser";
 
 type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
@@ -204,8 +203,9 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
   const [showLargeWarning, setShowLargeWarning] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const [activeTab, setActiveTab] = useState("upload");
   const [isImporting, setIsImporting] = useState(false);
+  const [showLocalImport, setShowLocalImport] = useState(false);
+  const [hasImportFiles, setHasImportFiles] = useState<boolean | null>(null);
 
   // Resizable dialog state
   const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | null>(null);
@@ -232,6 +232,18 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     window.addEventListener("mousemove", onMouseMove);
     window.addEventListener("mouseup", onMouseUp);
   }, []);
+
+  // Check if server has importable files
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    importApi.browse("", 1, 0).then((res) => {
+      if (!cancelled) setHasImportFiles(res.entries.length > 0);
+    }).catch(() => {
+      if (!cancelled) setHasImportFiles(false);
+    });
+    return () => { cancelled = true; };
+  }, [open]);
 
   const hasFiles = queue.length > 0;
   const hasPending = queue.some((f) => f.state === "pending");
@@ -434,7 +446,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const handleClose = () => {
     if (isUploading || isImporting) return;
     setQueue([]);
-    setActiveTab("upload");
+    setShowLocalImport(false);
     onOpenChange(false);
   };
 
@@ -451,19 +463,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           <DialogTitle className="text-foreground">Upload Datasets</DialogTitle>
         </DialogHeader>
 
-        <Tabs value={activeTab} onValueChange={setActiveTab} className={dialogSize ? "flex-1 min-h-0 flex flex-col" : ""}>
-          <TabsList className="w-full">
-            <TabsTrigger value="upload" disabled={isImporting} className="flex-1 gap-1.5">
-              <Upload className="w-3.5 h-3.5" />
-              Upload Files
-            </TabsTrigger>
-            <TabsTrigger value="import" disabled={isUploading || hasFiles} className="flex-1 gap-1.5">
-              <HardDrive className="w-3.5 h-3.5" />
-              Import Local
-            </TabsTrigger>
-          </TabsList>
-
-          <TabsContent value="upload" className={dialogSize ? "flex-1 min-h-0 flex flex-col" : ""}>
+        <div className={dialogSize ? "flex-1 min-h-0 flex flex-col" : ""}>
         {/* Hidden folder input */}
         <input
           ref={folderInputRef}
@@ -477,7 +477,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
         <div className={cn("py-4 space-y-3", dialogSize && "flex-1 min-h-0 flex flex-col overflow-hidden")}>
           {/* Drop zone */}
-          {!isUploading && !allDone && (
+          {!isUploading && !allDone && !isImporting && (
             <div
               {...getRootProps()}
               className={cn(
@@ -531,7 +531,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           {hasPending && pendingCount > 1 && (
             <div className="flex items-center justify-between text-xs text-muted-foreground px-1">
               <span>{pendingCount} file{pendingCount > 1 ? "s" : ""} ({formatFileSize(totalSize)})</span>
-              
+
             </div>
           )}
 
@@ -608,19 +608,49 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
               </div>
             </div>
           )}
+
+          {/* Local import section — only when server has importable files */}
+          {hasImportFiles && !isUploading && !allDone && (
+            <div className="pt-1">
+              {!showLocalImport ? (
+                <button
+                  onClick={() => setShowLocalImport(true)}
+                  disabled={hasFiles}
+                  className={cn(
+                    "flex items-center gap-1.5 text-xs transition-colors",
+                    hasFiles
+                      ? "text-muted-foreground/50 cursor-not-allowed"
+                      : "text-muted-foreground hover:text-foreground"
+                  )}
+                >
+                  Or import files from server directory
+                  <ChevronRight className="w-3 h-3" />
+                </button>
+              ) : (
+                <div className="border rounded-lg p-3 border-border bg-secondary/20">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-medium text-muted-foreground">Server directory</span>
+                    <button
+                      onClick={() => setShowLocalImport(false)}
+                      disabled={isImporting}
+                      className="text-xs text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                    >
+                      Close
+                    </button>
+                  </div>
+                  <LocalImportBrowser
+                    onImportingChange={setIsImporting}
+                    onSuccess={onSuccess}
+                    onClose={handleClose}
+                  />
+                </div>
+              )}
+            </div>
+          )}
         </div>
-          </TabsContent>
+        </div>
 
-          <TabsContent value="import" className="py-4">
-            <LocalImportBrowser
-              onImportingChange={setIsImporting}
-              onSuccess={onSuccess}
-              onClose={handleClose}
-            />
-          </TabsContent>
-        </Tabs>
-
-        {activeTab === "upload" && (
+        {!showLocalImport && (
         <DialogFooter>
           {!allDone && !hasDuplicates && (
             <>
