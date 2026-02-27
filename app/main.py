@@ -137,6 +137,22 @@ TAGS_METADATA = [
 ]
 
 
+async def _safe_background_task(name: str, coro):
+    """Run a coroutine with error isolation — never let it crash the API."""
+    try:
+        await coro
+    except asyncio.CancelledError:
+        raise  # Allow cancellation to propagate for clean shutdown
+    except MemoryError:
+        logger.critical(
+            "%s failed with MemoryError — task stopped but API continues serving", name,
+        )
+    except Exception:
+        logger.exception(
+            "%s failed — task stopped but API continues serving", name,
+        )
+
+
 async def queue_processor_loop():
     while True:
         processed = await deduction_queue.process_all_pending()
@@ -184,13 +200,16 @@ async def lifespan(app: FastAPI):
         raise RuntimeError("Co-Pilot requires single-worker mode")
 
     # BQ-110: Configure thread pool for run_sync() / asyncio.to_thread()
-    executor = ThreadPoolExecutor(max_workers=32)
+    executor = ThreadPoolExecutor(max_workers=4)
     loop = asyncio.get_running_loop()
     loop.set_default_executor(executor)
-    logger.info("ThreadPoolExecutor configured (max_workers=32)")
+    logger.info("ThreadPoolExecutor configured (max_workers=4)")
 
-    init_db()  # Initialize SQLite databases + run Alembic migrations
-    logger.info("Database initialized")
+    try:
+        init_db()  # Initialize SQLite databases + run Alembic migrations
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.critical("Database initialization failed: %s", e, exc_info=True)
 
     # BQ-111: Auto-migrate datasets.json → SQL on first startup
     try:
@@ -241,16 +260,22 @@ async def lifespan(app: FastAPI):
 
         tc_client = get_trust_channel_client()
         get_fulfillment_service()  # Registers handler on creation
-        trust_channel_task = asyncio.create_task(tc_client.run())
+        trust_channel_task = asyncio.create_task(
+            _safe_background_task("trust_channel", tc_client.run())
+        )
         logger.info("BQ-D1: Trust Channel client + fulfillment handler started")
     elif settings.mode == "connected":
         logger.warning("BQ-D1: Trust Channel skipped — no VECTORAIZ_INTERNAL_API_KEY")
 
     # BQ-110: Start queue processor with cancellation support
-    queue_task = asyncio.create_task(queue_processor_loop())
+    queue_task = asyncio.create_task(
+        _safe_background_task("queue_processor", queue_processor_loop())
+    )
 
     # BQ-123A: Start resource monitor (disk/memory checks every 60s)
-    resource_task = asyncio.create_task(resource_monitor_loop())
+    resource_task = asyncio.create_task(
+        _safe_background_task("resource_monitor", resource_monitor_loop())
+    )
 
     # BQ-ALLAI-FILES: Start chat attachment cleanup (every 10 min)
     async def _attachment_cleanup_loop():
@@ -259,16 +284,27 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(600)
             chat_attachment_service.cleanup_expired()
 
-    attachment_cleanup_task = asyncio.create_task(_attachment_cleanup_loop())
+    attachment_cleanup_task = asyncio.create_task(
+        _safe_background_task("attachment_cleanup", _attachment_cleanup_loop())
+    )
 
     # BQ-VZ-AUTO-UPDATE: Background update check (startup + every 6h)
     from app.services.update_service import background_update_check_loop
-    update_check_task = asyncio.create_task(background_update_check_loop())
+    update_check_task = asyncio.create_task(
+        _safe_background_task("update_checker", background_update_check_loop())
+    )
 
     # BQ-VZ-SERIAL-CLIENT: Serial activation lifecycle
+    # Non-blocking — run in background so API starts serving immediately.
+    # Previously this was `await _activation_mgr.startup()` which blocked
+    # the lifespan for up to 34s on HTTP retries, making the API unresponsive.
     from app.services.activation_manager import get_activation_manager
     _activation_mgr = get_activation_manager()
-    await _activation_mgr.startup()
+    activation_task = asyncio.create_task(
+        _safe_background_task("activation_manager", _activation_mgr.startup())
+    )
+
+    logger.info("API ready — all background tasks launched")
 
     yield
 
@@ -300,6 +336,11 @@ async def lifespan(app: FastAPI):
         pass
 
     # BQ-VZ-SERIAL-CLIENT: Shutdown activation manager
+    activation_task.cancel()
+    try:
+        await activation_task
+    except asyncio.CancelledError:
+        pass
     await _activation_mgr.shutdown()
 
     # BQ-110: Cancel queue processor gracefully

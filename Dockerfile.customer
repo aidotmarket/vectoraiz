@@ -106,7 +106,7 @@ VOLUME ["/data"]
 EXPOSE 80
 
 # Health check — nginx on :80 proxies to API
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost/api/health || exit 1
 
 # tini as PID 1 (Council condition C7)

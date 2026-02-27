@@ -163,18 +163,24 @@ class ActivationManager:
         """Background loop: retry activation if PROVISIONED, poll status if ACTIVE."""
         try:
             while True:
-                state = self._store.state
-                if state.state == PROVISIONED:
-                    await self._attempt_activation()
-                    await asyncio.sleep(ACTIVATION_RETRY_INTERVAL)
-                elif state.state in (ACTIVE, DEGRADED):
-                    await self._poll_status()
-                    await asyncio.sleep(STATUS_POLL_INTERVAL)
-                elif state.state == MIGRATED:
-                    # No serial ops needed
-                    await asyncio.sleep(STATUS_POLL_INTERVAL)
-                else:
-                    # UNPROVISIONED — wait for external trigger
+                try:
+                    state = self._store.state
+                    if state.state == PROVISIONED:
+                        await self._attempt_activation()
+                        await asyncio.sleep(ACTIVATION_RETRY_INTERVAL)
+                    elif state.state in (ACTIVE, DEGRADED):
+                        await self._poll_status()
+                        await asyncio.sleep(STATUS_POLL_INTERVAL)
+                    elif state.state == MIGRATED:
+                        # No serial ops needed
+                        await asyncio.sleep(STATUS_POLL_INTERVAL)
+                    else:
+                        # UNPROVISIONED — wait for external trigger
+                        await asyncio.sleep(STATUS_POLL_INTERVAL)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Activation background loop iteration failed")
                     await asyncio.sleep(STATUS_POLL_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Activation manager background loop cancelled")
