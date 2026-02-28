@@ -223,10 +223,11 @@ class QdrantService:
         
         for i in range(0, len(points), batch_size):
             batch = points[i:i + batch_size]
+            is_last_batch = (i + batch_size >= len(points))
             self.client.upsert(
                 collection_name=collection_name,
                 points=batch,
-                wait=True,
+                wait=is_last_batch,
             )
             total_upserted += len(batch)
         

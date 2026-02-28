@@ -5,6 +5,17 @@ set -e
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1
 
+# MemoryError fix: cap native threadpools to prevent thread-explosion
+# under x86 emulation (OrbStack/Rosetta2 on Apple Silicon).
+: "${OMP_NUM_THREADS:=1}"
+: "${OPENBLAS_NUM_THREADS:=1}"
+: "${MKL_NUM_THREADS:=1}"
+: "${VECLIB_MAXIMUM_THREADS:=1}"
+: "${NUMEXPR_NUM_THREADS:=1}"
+: "${TORCH_NUM_THREADS:=1}"
+: "${TOKENIZERS_PARALLELISM:=false}"
+export OMP_NUM_THREADS OPENBLAS_NUM_THREADS MKL_NUM_THREADS VECLIB_MAXIMUM_THREADS NUMEXPR_NUM_THREADS TORCH_NUM_THREADS TOKENIZERS_PARALLELISM
+
 echo ""
 echo "  ╔═══════════════════════════════════════════╗"
 echo "  ║                                           ║"

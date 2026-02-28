@@ -228,7 +228,7 @@ class IndexingService:
         the full dataset into memory.
 
         Per chunk: extract text → chunk_text() → embed_batch() → upsert_batch()
-        Batch size: 100 points per Qdrant upsert.
+        Batch size: 500 points per Qdrant upsert.
         Stable point IDs: {dataset_id}:{chunk_index}:{row_index}
 
         Args:
@@ -247,7 +247,7 @@ class IndexingService:
             recreate_if_exists=recreate_collection,
         )
 
-        QDRANT_BATCH_SIZE = 100
+        QDRANT_BATCH_SIZE = 500
         total_indexed = 0
         chunk_index = 0
 
@@ -257,14 +257,7 @@ class IndexingService:
         for chunk in chunk_iterator:
             # Convert RecordBatch to list of row dicts
             if isinstance(chunk, pa.RecordBatch):
-                table = pa.Table.from_batches([chunk])
-                cols = table.to_pydict()
-                col_names = table.column_names
-                num_rows = table.num_rows
-                row_dicts = [
-                    {c: cols[c][i] for c in col_names}
-                    for i in range(num_rows)
-                ]
+                row_dicts = chunk.to_pylist()
             elif isinstance(chunk, dict):
                 row_dicts = [chunk]
             else:

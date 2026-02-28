@@ -170,10 +170,10 @@ class ProcessingQueue:
         processing = get_processing_service()
         await processing.run_index_phase(dataset_id)
 
-    _CONCURRENCY = 2
+    _CONCURRENCY = 1 # Single worker: safer under x86 emulation, prevents concurrent embedding spikes
 
     def start(self, wrapper=None) -> List[asyncio.Task]:
-        """Start worker tasks (concurrency=2).
+        """Start worker tasks (concurrency=1).
 
         Args:
             wrapper: Optional async wrapper(name, coro) for error isolation.

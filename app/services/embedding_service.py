@@ -36,12 +36,22 @@ class EmbeddingService:
     
     def _load_model(self):
         """Load the sentence-transformers model."""
+        import os
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
         from sentence_transformers import SentenceTransformer
         
         start_time = time.time()
         print(f"Loading embedding model: {self._model_name}...", file=sys.stderr)
         
         self._model = SentenceTransformer(self._model_name)
+        
+        try:
+            import torch
+            torch.set_num_threads(1)
+            torch.set_num_interop_threads(1)
+        except Exception:
+            pass
         
         self._load_time = time.time() - start_time
         print(f"Model loaded in {self._load_time:.2f}s", file=sys.stderr)
