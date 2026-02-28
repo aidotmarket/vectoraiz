@@ -61,6 +61,31 @@ print_ready() {
     echo -e "${NC}"
 }
 
+print_failed() {
+    echo ""
+    echo -e "${RED}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║                                           ║"
+    echo "  ║     ❌ vectorAIz failed to start          ║"
+    echo "  ║                                           ║"
+    echo "  ║   The health check timed out.             ║"
+    echo "  ║                                           ║"
+    echo "  ║   Troubleshooting:                        ║"
+    echo "  ║                                           ║"
+    echo "  ║   1. Check logs:                          ║"
+    echo -e "  ║   ${NC}${DIM}cd ~/vectoraiz${RED}${BOLD}                           ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE logs${RED}${BOLD}     ║"
+    echo "  ║                                           ║"
+    echo "  ║   2. Retry:                               ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE restart${RED}${BOLD}  ║"
+    echo "  ║                                           ║"
+    echo "  ║   3. Reinstall:                           ║"
+    echo -e "  ║   ${NC}${DIM}curl -fsSL get.vectoraiz.com | bash${RED}${BOLD}      ║"
+    echo "  ║                                           ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
 fail() {
     echo -e "\n  ${RED}${BOLD}ERROR:${NC} $1\n"
     exit 1
@@ -344,10 +369,12 @@ done
 
 # ─── Step 10: Wait for health check ──────────────────────────────
 info "Waiting for vectorAIz to be ready..."
-MAX_WAIT=180
+MAX_WAIT=300
 WAITED=0
+HEALTH_OK=false
 while [ $WAITED -lt $MAX_WAIT ]; do
     if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+        HEALTH_OK=true
         break
     fi
     printf "\r  ${BLUE}⏳${NC} Waiting for services to initialize... (%ds)" "$WAITED"
@@ -356,12 +383,10 @@ while [ $WAITED -lt $MAX_WAIT ]; do
 done
 printf "\r                                                          \r"
 
-if [ $WAITED -ge $MAX_WAIT ]; then
-    warn "Timed out waiting for health check."
-    echo -e "  ${DIM}The app may still be starting. Try opening ${URL} in a minute.${NC}"
-    echo -e "  ${DIM}Check logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs${NC}"
-else
+if [ "$HEALTH_OK" = true ]; then
     success "All services healthy"
+else
+    warn "Timed out waiting for health check after ${MAX_WAIT}s."
 fi
 
 # ─── Step 11: Create .desktop file ───────────────────────────────

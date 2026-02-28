@@ -65,6 +65,60 @@ print_ready() {
     echo -e "${NC}"
 }
 
+print_failed() {
+    echo ""
+    echo -e "${RED}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║                                           ║"
+    echo "  ║     ❌ vectorAIz failed to start          ║"
+    echo "  ║                                           ║"
+    echo "  ║   The health check timed out.             ║"
+    echo "  ║                                           ║"
+    echo "  ║   Troubleshooting:                        ║"
+    echo "  ║                                           ║"
+    echo "  ║   1. Check logs:                          ║"
+    echo -e "  ║   ${NC}${DIM}cd ~/vectoraiz${RED}${BOLD}                           ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE logs${RED}${BOLD}     ║"
+    echo "  ║                                           ║"
+    echo "  ║   2. Retry:                               ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE restart${RED}${BOLD}  ║"
+    echo "  ║                                           ║"
+    echo "  ║   3. Reinstall:                           ║"
+    echo -e "  ║   ${NC}${DIM}curl -fsSL get.vectoraiz.com | bash${RED}${BOLD}      ║"
+    echo "  ║                                           ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
+print_warning() {
+    echo ""
+    echo -e "${YELLOW}${BOLD}"
+    echo "  ╔═══════════════════════════════════════════╗"
+    echo "  ║                                           ║"
+    echo "  ║    ⚠  vectorAIz may not be ready yet     ║"
+    echo "  ║                                           ║"
+    echo "  ║   Health check did not pass in time.      ║"
+    echo "  ║   Services may still be loading.          ║"
+    echo "  ║                                           ║"
+    echo "  ║   Troubleshooting:                        ║"
+    echo "  ║                                           ║"
+    echo "  ║   1. Check logs:                          ║"
+    echo -e "  ║   ${NC}${DIM}cd ~/vectoraiz${YELLOW}${BOLD}                           ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE logs${YELLOW}${BOLD}     ║"
+    echo "  ║                                           ║"
+    echo "  ║   2. Check health endpoint:               ║"
+    echo -e "  ║   ${NC}${DIM}curl localhost:${PORT}/api/health${YELLOW}${BOLD}           ║"
+    echo "  ║                                           ║"
+    echo "  ║   3. Container status:                    ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE ps${YELLOW}${BOLD}       ║"
+    echo "  ║                                           ║"
+    echo "  ║   4. Restart:                             ║"
+    echo -e "  ║   ${NC}${DIM}docker compose -f $COMPOSE_FILE restart${YELLOW}${BOLD}  ║"
+    echo "  ║                                           ║"
+    echo "  ╚═══════════════════════════════════════════╝"
+    echo -e "${NC}"
+}
+
 fail() {
     echo -e "\n  ${RED}${BOLD}ERROR:${NC} $1\n"
     exit 1
@@ -315,10 +369,12 @@ done
 
 # ─── Step 8: Wait for health check ───────────────────────────────
 info "Waiting for vectorAIz to be ready..."
-MAX_WAIT=180
+MAX_WAIT=120
 WAITED=0
+HEALTH_OK=false
 while [ $WAITED -lt $MAX_WAIT ]; do
     if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+        HEALTH_OK=true
         break
     fi
     printf "\r  ${BLUE}⏳${NC} Waiting for services to initialize... (%ds)" "$WAITED"
@@ -327,13 +383,24 @@ while [ $WAITED -lt $MAX_WAIT ]; do
 done
 printf "\r                                                          \r"
 
-if [ $WAITED -ge $MAX_WAIT ]; then
-    warn "Timed out waiting for health check."
-    echo -e "  ${DIM}The app may still be starting. Try opening ${URL} in a minute.${NC}"
-    echo -e "  ${DIM}Check logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs${NC}"
-else
+if [ "$HEALTH_OK" = true ]; then
     success "All services healthy"
+else
+    warn "Timed out waiting for health check after ${MAX_WAIT}s."
 fi
+
+# ─── Step 8.5: Verify all containers are running ────────────────
+info "Verifying container status..."
+CONTAINERS_OK=true
+for SVC in postgres qdrant vectoraiz; do
+    SVC_STATE=$(docker compose -f "$COMPOSE_FILE" ps "$SVC" --format '{{.State}}' 2>/dev/null)
+    if echo "$SVC_STATE" | grep -qi "running"; then
+        success "$SVC is running"
+    else
+        warn "$SVC is not running (state: ${SVC_STATE:-not found})"
+        CONTAINERS_OK=false
+    fi
+done
 
 # ─── Step 9: Create .app bundle ──────────────────────────────────
 info "Creating vectorAIz.app..."
@@ -423,13 +490,25 @@ PLIST
 success "Created ~/Applications/vectorAIz.app"
 
 # ─── Step 10: Open browser ───────────────────────────────────────
-print_ready
+if [ "$HEALTH_OK" = true ] && [ "$CONTAINERS_OK" = true ]; then
+    print_ready
 
-sleep 1
-open "$URL" 2>/dev/null || true
+    sleep 1
+    open "$URL" 2>/dev/null || true
 
-echo -e "  ${CYAN}Tip:${NC} Launch vectorAIz anytime from ~/Applications/vectorAIz.app"
-echo -e "  ${CYAN}Tip:${NC} Add files to ~/vectoraiz-imports/ for fast local import (no upload needed)"
-echo -e "  ${CYAN}Tip:${NC} View logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs -f"
-echo -e "  ${CYAN}Tip:${NC} Stop: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE down"
-echo ""
+    echo -e "  ${CYAN}Tip:${NC} Launch vectorAIz anytime from ~/Applications/vectorAIz.app"
+    echo -e "  ${CYAN}Tip:${NC} Add files to ~/vectoraiz-imports/ for fast local import (no upload needed)"
+    echo -e "  ${CYAN}Tip:${NC} View logs: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE logs -f"
+    echo -e "  ${CYAN}Tip:${NC} Stop: cd ~/vectoraiz && docker compose -f $COMPOSE_FILE down"
+    echo ""
+else
+    echo ""
+    echo -e "  ${YELLOW}${BOLD}Recent vectoraiz container logs:${NC}"
+    echo -e "  ${DIM}────────────────────────────────────────────${NC}"
+    docker compose -f "$COMPOSE_FILE" logs --tail=20 vectoraiz 2>/dev/null | while IFS= read -r line; do
+        echo -e "  ${DIM}│${NC} $line"
+    done
+    echo -e "  ${DIM}────────────────────────────────────────────${NC}"
+
+    print_warning
+fi
