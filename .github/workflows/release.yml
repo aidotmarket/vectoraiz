@@ -227,14 +227,12 @@ jobs:
           TAG="${{ needs.verify-release.outputs.version }}"
           
           # Create minimal .env
-          cat > .env <<EOF
-POSTGRES_PASSWORD=testpassword123
-VECTORAIZ_SECRET_KEY=testsecret123
-VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123
-VECTORAIZ_PORT=8080
-VECTORAIZ_MODE=standalone
-VECTORAIZ_IMPORT_DIR=/tmp/vectoraiz-imports
-EOF
+          echo "POSTGRES_PASSWORD=testpassword123" > .env
+          echo "VECTORAIZ_SECRET_KEY=testsecret123" >> .env
+          echo "VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123" >> .env
+          echo "VECTORAIZ_PORT=8080" >> .env
+          echo "VECTORAIZ_MODE=standalone" >> .env
+          echo "VECTORAIZ_IMPORT_DIR=/tmp/vectoraiz-imports" >> .env
           mkdir -p /tmp/vectoraiz-imports
           
           # Start with compose
