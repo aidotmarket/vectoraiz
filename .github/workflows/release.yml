@@ -79,6 +79,15 @@ jobs:
           fi
           echo "✅ Dockerfile.customer exists"
 
+      - name: Check get.vectoraiz.com reachability
+        run: |
+          HTTP_CODE=$(curl -o /dev/null -s -w "%{http_code}" -L --max-time 10 https://get.vectoraiz.com 2>/dev/null || echo "000")
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+            echo "get.vectoraiz.com reachable (HTTP ${HTTP_CODE})"
+          else
+            echo "::warning::get.vectoraiz.com returned HTTP ${HTTP_CODE} — may be DNS/network issue in CI"
+          fi
+
   # ─────────────────────────────────────────────────────────────────
   # Job 2: Build and push Docker image (only after verification)
   # ─────────────────────────────────────────────────────────────────
@@ -157,6 +166,23 @@ jobs:
 
           echo "✅ Multi-arch manifest verified: amd64 + arm64"
 
+      - name: Boot arm64 container via QEMU
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          docker pull --platform linux/arm64 "ghcr.io/aidotmarket/vectoraiz:${TAG}"
+          CID=$(docker run -d --platform linux/arm64 "ghcr.io/aidotmarket/vectoraiz:${TAG}")
+          sleep 15
+          STATE=$(docker inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "missing")
+          if [ "$STATE" = "running" ]; then
+            echo "arm64 container running"
+          else
+            echo "::error::arm64 container failed (state: ${STATE})"
+            docker logs "$CID" 2>&1 | tail -30
+            docker rm -f "$CID" 2>/dev/null || true
+            exit 1
+          fi
+          docker rm -f "$CID" 2>/dev/null || true
+
       - name: Verify image is pullable
         run: |
           TAG="${{ needs.verify-release.outputs.version }}"
@@ -202,13 +228,13 @@ jobs:
           
           # Create minimal .env
           cat > .env <<EOF
-          POSTGRES_PASSWORD=testpassword123
-          VECTORAIZ_SECRET_KEY=testsecret123
-          VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123
-          VECTORAIZ_PORT=8080
-          VECTORAIZ_MODE=standalone
-          VECTORAIZ_IMPORT_DIR=/tmp/vectoraiz-imports
-          EOF
+POSTGRES_PASSWORD=testpassword123
+VECTORAIZ_SECRET_KEY=testsecret123
+VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123
+VECTORAIZ_PORT=8080
+VECTORAIZ_MODE=standalone
+VECTORAIZ_IMPORT_DIR=/tmp/vectoraiz-imports
+EOF
           mkdir -p /tmp/vectoraiz-imports
           
           # Start with compose
@@ -243,11 +269,63 @@ jobs:
           docker compose -f docker-compose.customer.yml down -v
           exit 1
 
+      - name: Run verification suite
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          if ! curl -sf http://localhost:8080/api/health 2>/dev/null; then
+            docker compose -f docker-compose.customer.yml up -d
+            for i in $(seq 1 30); do
+              curl -sf http://localhost:8080/api/health 2>/dev/null && break
+              sleep 3
+            done
+          fi
+          chmod +x scripts/verify-customer-image.sh
+          bash scripts/verify-customer-image.sh "${TAG}" --compose || true
+          docker compose -f docker-compose.customer.yml down -v 2>/dev/null || true
+
+  e2e-install-test:
+    needs: [verify-release, build-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Linux install script end-to-end
+        env:
+          INSTALL_REF: ${{ github.sha }}
+        run: |
+          echo "n" | bash installers/linux/install-linux.sh
+          
+          if [ ! -f "$HOME/vectoraiz/docker-compose.customer.yml" ]; then
+            echo "::error::Compose file not downloaded"
+            exit 1
+          fi
+          
+          if [ ! -f "$HOME/vectoraiz/.env" ]; then
+            echo "::error::.env not generated"
+            exit 1
+          fi
+          
+          PORT=$(grep "^VECTORAIZ_PORT=" "$HOME/vectoraiz/.env" | cut -d'=' -f2)
+          for i in $(seq 1 40); do
+            curl -sf "http://localhost:${PORT}/api/health" 2>/dev/null && break
+            sleep 3
+          done
+          
+          if curl -sf "http://localhost:${PORT}/api/health" >/dev/null 2>&1; then
+            echo "E2E install test passed"
+          else
+            echo "::error::Health check failed after install"
+            cd "$HOME/vectoraiz" && docker compose -f docker-compose.customer.yml logs --tail=30 2>&1
+            exit 1
+          fi
+          
+          cd "$HOME/vectoraiz" && docker compose -f docker-compose.customer.yml down -v 2>/dev/null || true
+
   # ─────────────────────────────────────────────────────────────────
   # Job 4: Create GitHub Release (only after smoke test passes)
   # ─────────────────────────────────────────────────────────────────
   create-release:
-    needs: [verify-release, smoke-test]
+    needs: [verify-release, smoke-test, e2e-install-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

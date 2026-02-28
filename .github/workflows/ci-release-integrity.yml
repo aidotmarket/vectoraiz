@@ -73,6 +73,22 @@ jobs:
 
           echo "✅ Multi-arch build configuration verified"
 
+      - name: Verify install scripts use versioned downloads
+        run: |
+          for script in installers/mac/install-mac.sh installers/linux/install-linux.sh; do
+            if [ -f "$script" ]; then
+              if grep -q 'COMPOSE_URL="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/' "$script"; then
+                echo "::error::${script} hardcodes compose from main branch"
+                exit 1
+              fi
+              if ! grep -q 'INSTALL_REF' "$script"; then
+                echo "::error::${script} missing INSTALL_REF override"
+                exit 1
+              fi
+              echo "${script} OK"
+            fi
+          done
+
       - name: Shell script syntax check
         run: |
           ERRORS=0

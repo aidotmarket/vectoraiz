@@ -1,0 +1,58 @@
+name: Rollback Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Version to rollback to (e.g., v1.18.0)'
+        required: true
+        type: string
+      confirm:
+        description: 'Type ROLLBACK to confirm'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'ROLLBACK'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate target version exists
+        run: |
+          TAG="${{ github.event.inputs.target_version }}"
+          if ! git ls-remote --tags origin | grep -q "refs/tags/${TAG}$"; then
+            echo "::error::Tag ${TAG} does not exist"
+            exit 1
+          fi
+          echo "Target: ${TAG}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag image as latest
+        run: |
+          TAG="${{ github.event.inputs.target_version }}"
+          IMAGE="ghcr.io/aidotmarket/vectoraiz"
+          docker pull "${IMAGE}:${TAG}"
+          docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+
+      - name: Update compose on main
+        run: |
+          TAG="${{ github.event.inputs.target_version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          sed -i "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-${TAG}/" docker-compose.customer.yml
+          git add docker-compose.customer.yml
+          git commit -m "rollback: revert to ${TAG}" || true
+          git push origin main

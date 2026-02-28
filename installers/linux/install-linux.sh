@@ -14,7 +14,21 @@ set -e
 # --- Configuration ---
 INSTALL_DIR="$HOME/vectoraiz"
 COMPOSE_FILE="docker-compose.customer.yml"
-COMPOSE_URL="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml"
+# --- Versioned compose download (Council S197: no main branch race) ---
+INSTALL_REF="${INSTALL_REF:-}"
+GITHUB_REPO="aidotmarket/vectoraiz"
+
+if [ -n "$INSTALL_REF" ]; then
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${INSTALL_REF}/docker-compose.customer.yml"
+elif [ -n "${VECTORAIZ_VERSION:-}" ]; then
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${VECTORAIZ_VERSION}/docker-compose.customer.yml"
+else
+    LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    if [ -z "$LATEST_TAG" ]; then
+        LATEST_TAG="main"
+    fi
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${LATEST_TAG}/docker-compose.customer.yml"
+fi
 PREFERRED_PORTS=(8080 3000 8888 9000 80)
 
 # --- Colors ---
