@@ -176,7 +176,7 @@ class ProcessingQueue:
         processing = get_processing_service()
         await processing.run_index_phase(dataset_id)
 
-    _CONCURRENCY = 2  # Workers pulling from queue; actual concurrency bounded by _MAX_CONCURRENT semaphore
+    _CONCURRENCY = 1  # Single worker: prevents concurrent embedding OOM spikes
 
     def start(self, wrapper=None) -> List[asyncio.Task]:
         """Start worker tasks (bounded by _MAX_CONCURRENT semaphore).
