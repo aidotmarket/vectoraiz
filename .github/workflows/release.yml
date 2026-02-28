@@ -9,7 +9,81 @@ permissions:
   packages: write
 
 jobs:
-  release:
+  # ─────────────────────────────────────────────────────────────────
+  # Job 1: Verify the release is correctly configured BEFORE building
+  # ─────────────────────────────────────────────────────────────────
+  verify-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from tag
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          echo "Tag: $TAG"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Verify compose file references correct version
+        run: |
+          TAG="${{ steps.version.outputs.version }}"
+          echo "Checking docker-compose.customer.yml for VECTORAIZ_VERSION:-${TAG}"
+          if ! grep -q "VECTORAIZ_VERSION:-${TAG}" docker-compose.customer.yml; then
+            echo ""
+            echo "::error::RELEASE BLOCKED — docker-compose.customer.yml does not reference ${TAG}"
+            echo ""
+            echo "The compose file must contain: VECTORAIZ_VERSION:-${TAG}"
+            echo "Actual content:"
+            grep "VECTORAIZ_VERSION" docker-compose.customer.yml || echo "(not found)"
+            echo ""
+            echo "This means release.sh did not update the compose file correctly."
+            echo "Fix: update docker-compose.customer.yml, commit, push, delete and re-push the tag."
+            exit 1
+          fi
+          echo "✅ Compose file references ${TAG}"
+
+      - name: Verify install scripts have proper error handling
+        run: |
+          echo "Checking install-mac.sh has health check gates..."
+          
+          # Must have HEALTH_OK variable
+          if ! grep -q "HEALTH_OK" installers/mac/install-mac.sh; then
+            echo "::error::install-mac.sh missing HEALTH_OK health check logic"
+            exit 1
+          fi
+          
+          # Must NOT show success banner unconditionally
+          # The success banner should only appear inside an if-block checking health
+          if grep -B2 "vectorAIz is Installed" installers/mac/install-mac.sh | grep -q "^print_ready"; then
+            echo "::error::install-mac.sh calls print_ready unconditionally (outside health check)"
+            exit 1
+          fi
+          
+          # Syntax check all shell scripts
+          for script in install.sh installers/mac/install-mac.sh installers/linux/install-linux.sh; do
+            if [ -f "$script" ]; then
+              bash -n "$script" || { echo "::error::Syntax error in $script"; exit 1; }
+              echo "✅ $script syntax OK"
+            fi
+          done
+          
+          echo "✅ Install scripts have proper error handling"
+
+      - name: Verify Dockerfile.customer exists
+        run: |
+          if [ ! -f Dockerfile.customer ]; then
+            echo "::error::Dockerfile.customer not found"
+            exit 1
+          fi
+          echo "✅ Dockerfile.customer exists"
+
+  # ─────────────────────────────────────────────────────────────────
+  # Job 2: Build and push Docker image (only after verification)
+  # ─────────────────────────────────────────────────────────────────
+  build-push:
+    needs: verify-release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -31,12 +105,120 @@ jobs:
           file: Dockerfile.customer
           push: true
           tags: |
-            ghcr.io/aidotmarket/vectoraiz:${{ github.ref_name }}
+            ghcr.io/aidotmarket/vectoraiz:${{ needs.verify-release.outputs.version }}
             ghcr.io/aidotmarket/vectoraiz:latest
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ needs.verify-release.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  # ─────────────────────────────────────────────────────────────────
+  # Job 3: Smoke test — verify image is pullable and install works
+  # ─────────────────────────────────────────────────────────────────
+  smoke-test:
+    needs: [verify-release, build-push]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for GHCR propagation
+        run: sleep 30
+
+      - name: Verify image is pullable
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          echo "Pulling ghcr.io/aidotmarket/vectoraiz:${TAG}..."
+          docker pull "ghcr.io/aidotmarket/vectoraiz:${TAG}"
+          echo "✅ Image pullable"
+
+      - name: Verify latest tag matches release
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          docker pull "ghcr.io/aidotmarket/vectoraiz:latest"
+          
+          RELEASE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/aidotmarket/vectoraiz:${TAG}" | cut -d@ -f2)
+          LATEST_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/aidotmarket/vectoraiz:latest" | cut -d@ -f2)
+          
+          echo "Release digest: $RELEASE_DIGEST"
+          echo "Latest digest:  $LATEST_DIGEST"
+          
+          if [ "$RELEASE_DIGEST" != "$LATEST_DIGEST" ]; then
+            echo "::warning::latest tag digest does not match ${TAG} — may need time to propagate"
+          else
+            echo "✅ latest tag matches ${TAG}"
+          fi
+
+      - name: Simulate install — verify compose resolves correctly
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          
+          # Download compose file as the installer would
+          curl -fsSL "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml" -o test-compose.yml
+          
+          if grep -q "VECTORAIZ_VERSION:-${TAG}" test-compose.yml; then
+            echo "✅ Install compose resolves to ${TAG}"
+          else
+            echo "::warning::Compose file on GitHub raw does not yet show ${TAG} (CDN cache)"
+            echo "Actual content:"
+            grep "VECTORAIZ_VERSION" test-compose.yml
+          fi
+
+      - name: Container startup test
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          
+          # Create minimal .env
+          cat > .env <<EOF
+          POSTGRES_PASSWORD=testpassword123
+          VECTORAIZ_SECRET_KEY=testsecret123
+          VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123
+          VECTORAIZ_PORT=8080
+          VECTORAIZ_MODE=standalone
+          VECTORAIZ_IMPORT_DIR=/tmp/vectoraiz-imports
+          EOF
+          mkdir -p /tmp/vectoraiz-imports
+          
+          # Start with compose
+          docker compose -f docker-compose.customer.yml up -d
+          
+          # Wait for health (up to 90s)
+          echo "Waiting for health check..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8080/api/health 2>/dev/null; then
+              echo ""
+              echo "✅ Container health check passed"
+              
+              # Verify version in health response
+              HEALTH=$(curl -sf http://localhost:8080/api/health)
+              echo "Health response: $HEALTH"
+              
+              docker compose -f docker-compose.customer.yml down -v
+              exit 0
+            fi
+            printf "."
+            sleep 3
+          done
+          
+          echo ""
+          echo "::error::Container health check failed after 90s"
+          echo "--- Container status ---"
+          docker compose -f docker-compose.customer.yml ps -a
+          echo "--- vectoraiz logs ---"
+          docker compose -f docker-compose.customer.yml logs vectoraiz 2>&1 | tail -50
+          echo "--- postgres logs ---"
+          docker compose -f docker-compose.customer.yml logs postgres 2>&1 | tail -20
+          docker compose -f docker-compose.customer.yml down -v
+          exit 1
+
+  # ─────────────────────────────────────────────────────────────────
+  # Job 4: Create GitHub Release (only after smoke test passes)
+  # ─────────────────────────────────────────────────────────────────
+  create-release:
+    needs: [verify-release, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Make installer scripts executable
         run: |

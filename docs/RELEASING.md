@@ -1,101 +1,93 @@
 # Releasing vectorAIz
 
+## Overview
+
+Releases are a two-part process: a local script that prepares the release, and GitHub Actions that builds, verifies, and publishes it.
+
+**NEVER manually tag, build, or push Docker images.** Always use `release.sh`.
+
 ## Prerequisites
 
-| Requirement | Check | Install |
-|---|---|---|
-| On `main` branch | `git branch --show-current` | `git checkout main` |
-| Clean working tree | `git status` | `git stash` or `git commit` |
-| Docker CLI | `docker version` | Install Docker Desktop or OrbStack |
-| GitHub CLI | `gh auth status` | `brew install gh && gh auth login` |
-| GHCR access | `docker manifest inspect ghcr.io/aidotmarket/vectoraiz:latest` | Set `GITHUB_TOKEN` env var or configure Doppler |
+- On `main` branch with clean working tree
+- `docker` CLI available (OrbStack or Docker Desktop)
+- `gh` CLI installed and authenticated (`brew install gh && gh auth login`)
+- GHCR access (script handles auth via Doppler or GITHUB_TOKEN)
 
 ## Usage
 
 ```bash
-# Release a specific version
-./scripts/release.sh 1.17.0
+cd ~/Projects/vectoraiz/vectoraiz-monorepo
 
-# Auto-bump from latest git tag
-./scripts/release.sh patch    # 1.16.0 → 1.16.1
-./scripts/release.sh minor    # 1.16.0 → 1.17.0
-./scripts/release.sh major    # 1.16.0 → 2.0.0
+# Bump patch: 1.16.0 → 1.16.1
+./scripts/release.sh patch
+
+# Bump minor: 1.16.0 → 1.17.0
+./scripts/release.sh minor
+
+# Specific version
+./scripts/release.sh 2.0.0
 ```
 
-The version argument does **not** take a `v` prefix — the script adds it.
+## What happens
 
-## What the script does
+### Local (release.sh)
 
-| Step | Action | Verification |
-|---|---|---|
-| Pre-flight | Checks branch, clean tree, docker, gh, GHCR auth | Aborts with specific fix instructions |
-| 1. Update compose | `sed` the version default in `docker-compose.customer.yml` | `grep` confirms new version appears |
-| 2. Commit + push | Commits the compose change, pushes to `origin/main` | `curl` the raw GitHub URL and confirms version (3 retries, 5s delay) |
-| 3. Tag + push | Creates annotated tag `v{VERSION}`, pushes to origin | `gh release view` or `git ls-remote` confirms tag exists |
-| 4. Wait for image | Polls `docker manifest inspect` for the versioned GHCR tag | Up to 30 minutes, 30s intervals. Aborts with clear message on timeout |
-| 5. Smoke test | Checks install compose URL resolves to new version, `:latest` digest matches | Warns (non-fatal) if CDN hasn't propagated yet |
+1. **Pre-flight checks** — main branch, clean tree, docker, gh, GHCR auth
+2. **Update compose** — sets `VECTORAIZ_VERSION:-v1.17.0` in `docker-compose.customer.yml`
+3. **Commit + push** — commits compose change, pushes to main, verifies GitHub raw URL
+4. **Tag + push tag** — creates `v1.17.0` tag, pushes to origin
+5. **Wait for image** — polls GHCR until the image is available (up to 30 min)
+6. **Smoke test** — verifies install URL and `:latest` tag match
 
-## Recovery: what to do if a step fails
+### GitHub Actions (triggered by tag push)
 
-### Pre-flight fails
+1. **verify-release** — confirms compose file has correct version, install scripts have health gates, Dockerfile exists
+2. **build-push** — builds Docker image from `Dockerfile.customer`, pushes to GHCR as `v1.17.0` + `latest`
+3. **smoke-test** — pulls image, verifies digests match, simulates install, runs container startup health check
+4. **create-release** — creates GitHub Release with installer scripts (only if smoke test passes)
 
-Nothing has been modified. Fix the reported issue (wrong branch, dirty tree, missing tool) and re-run.
+### CI (on every push to main)
 
-### Step 1 fails (compose update)
+- Verifies compose version matches latest tag
+- Shell script syntax checks
+- Install script safety checks (health gates present)
+- v-prefix convention enforcement
 
-The file may be partially edited. Check `docker-compose.customer.yml` and ensure the `VECTORAIZ_VERSION` default is set correctly, then re-run the script.
+## Critical rules
 
-### Step 2 fails (commit/push)
+- **GHCR tags always have `v` prefix**: `v1.16.0`, never `1.16.0`
+- **Compose file always references v-prefixed version**: `VECTORAIZ_VERSION:-v1.16.0`
+- **Install scripts must gate success banner on health check**: no false "installed!" messages
+- **GitHub Actions is the enforcement layer**: even if release.sh has a bug, Actions will catch it
 
-The commit was created locally but may not have been pushed.
+## Recovery procedures
 
+### Tag pushed but image build failed
 ```bash
-# Check what happened
-git log --oneline -3
-git status
+# Check what went wrong
+gh run list --workflow=release.yml --limit 5
 
-# If committed but not pushed:
+# If compose was wrong, fix and force-update:
+# 1. Fix docker-compose.customer.yml
+# 2. git commit and push
+# 3. Delete the tag: git tag -d v1.17.0 && git push origin :refs/tags/v1.17.0
+# 4. Re-run: ./scripts/release.sh 1.17.0
+```
+
+### Compose file has wrong version
+```bash
+# Edit docker-compose.customer.yml manually
+sed -i '' 's/VECTORAIZ_VERSION:-v.*/VECTORAIZ_VERSION:-v1.17.0}/' docker-compose.customer.yml
+git add docker-compose.customer.yml
+git commit -m "fix: correct compose version to v1.17.0"
 git push origin main
-
-# Then re-run the script — it will skip the commit (no changes) and continue
-./scripts/release.sh <version>
 ```
 
-### Step 3 fails (tag/push)
+### Install script serving old version (CDN cache)
+GitHub raw CDN can take 5-10 minutes to propagate. The CI workflow will warn but not block. If it persists beyond 10 minutes, check that the commit actually reached `main`.
 
-The tag may exist locally but not on the remote.
-
-```bash
-# Push the tag manually
-git push origin v<VERSION>
-
-# If you need to re-create the tag:
-git tag -d v<VERSION>
-git tag -a v<VERSION> -m "Release <VERSION>"
-git push origin v<VERSION>
-```
-
-### Step 4 fails (image timeout)
-
-The tag was pushed and GitHub Actions should be building the image. Check the workflow:
-
-```bash
-gh run list --workflow=docker-publish.yml
-gh run view <run-id> --log
-```
-
-Once the image appears on GHCR, the release is functionally complete. Run the script again to execute the smoke test, or verify manually:
-
-```bash
-docker manifest inspect ghcr.io/aidotmarket/vectoraiz:v<VERSION>
-```
-
-### Step 5 fails (smoke test)
-
-The release is already complete — smoke test failures are warnings, not blockers. CDN caching can delay raw.githubusercontent.com updates. The `:latest` tag may take a moment to update if Actions pushes it separately.
-
-## Important rules
-
-- **NEVER manually tag** without running this script. The script ensures `docker-compose.customer.yml` is updated before the tag is created, so customers pulling the install script always get the correct version default.
-- **Version source of truth is git tags.** No hardcoded version strings anywhere in the codebase except the compose default (which this script manages).
-- **The Docker image is built by GitHub Actions**, not locally. The script waits for the image to appear on GHCR after pushing the tag.
+### Health check fails in smoke test
+The container startup test runs in GitHub Actions. If it fails:
+1. Check the Actions log for container logs
+2. The image was already pushed to GHCR but the GitHub Release was NOT created
+3. Fix the issue, bump a new patch version

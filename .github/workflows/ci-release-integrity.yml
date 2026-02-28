@@ -1,0 +1,92 @@
+name: CI — Release Integrity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docker-compose.customer.yml'
+      - 'installers/**'
+      - 'install.sh'
+      - 'install.ps1'
+      - 'scripts/release.sh'
+      - 'Dockerfile.customer'
+
+jobs:
+  verify-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Need tags for version check
+
+      - name: Check compose version matches latest tag
+        run: |
+          # Get latest release tag
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1)
+          
+          if [ -z "$LATEST_TAG" ]; then
+            echo "No release tags found — skipping version check"
+            exit 0
+          fi
+          
+          echo "Latest tag: $LATEST_TAG"
+          
+          # Check compose file references this tag
+          if grep -q "VECTORAIZ_VERSION:-${LATEST_TAG}" docker-compose.customer.yml; then
+            echo "✅ Compose file references ${LATEST_TAG}"
+          else
+            COMPOSE_VERSION=$(grep -o 'VECTORAIZ_VERSION:-[^}]*' docker-compose.customer.yml | head -1)
+            echo "::warning::Compose file has ${COMPOSE_VERSION} but latest tag is ${LATEST_TAG}"
+            echo "This is OK if a new release is in progress."
+          fi
+
+      - name: Shell script syntax check
+        run: |
+          ERRORS=0
+          for script in install.sh installers/mac/install-mac.sh installers/linux/install-linux.sh scripts/release.sh; do
+            if [ -f "$script" ]; then
+              if bash -n "$script" 2>&1; then
+                echo "✅ $script"
+              else
+                echo "::error::Syntax error in $script"
+                ERRORS=$((ERRORS + 1))
+              fi
+            fi
+          done
+          
+          if [ "$ERRORS" -gt 0 ]; then
+            exit 1
+          fi
+
+      - name: Install script safety checks
+        run: |
+          # Check mac installer has health gate
+          if [ -f installers/mac/install-mac.sh ]; then
+            if ! grep -q "HEALTH_OK" installers/mac/install-mac.sh; then
+              echo "::error::install-mac.sh missing HEALTH_OK check — success banner may show on failure"
+              exit 1
+            fi
+            echo "✅ Mac installer has health gate"
+          fi
+          
+          # Check linux installer has health gate
+          if [ -f installers/linux/install-linux.sh ]; then
+            if ! grep -q "HEALTH_OK" installers/linux/install-linux.sh; then
+              echo "::error::install-linux.sh missing HEALTH_OK check — success banner may show on failure"
+              exit 1
+            fi
+            echo "✅ Linux installer has health gate"
+          fi
+
+      - name: Verify v-prefix convention
+        run: |
+          # Compose file must use v-prefixed version
+          VERSION_REF=$(grep -o 'VECTORAIZ_VERSION:-[^}]*' docker-compose.customer.yml | head -1)
+          if echo "$VERSION_REF" | grep -qE 'VECTORAIZ_VERSION:-v[0-9]'; then
+            echo "✅ Compose uses v-prefixed version: $VERSION_REF"
+          elif echo "$VERSION_REF" | grep -qE 'VECTORAIZ_VERSION:-[0-9]'; then
+            echo "::error::Compose uses non-v-prefixed version: $VERSION_REF — GHCR tags require v prefix"
+            exit 1
+          else
+            echo "⚠ Could not parse version from compose file: $VERSION_REF"
+          fi
