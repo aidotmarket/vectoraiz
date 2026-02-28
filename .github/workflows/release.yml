@@ -95,6 +95,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -111,7 +114,7 @@ jobs:
             VERSION=${{ needs.verify-release.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          platforms: linux/amd64
+          platforms: linux/amd64,linux/arm64
 
   # ─────────────────────────────────────────────────────────────────
   # Job 3: Smoke test — verify image is pullable and install works
@@ -124,6 +127,35 @@ jobs:
 
       - name: Wait for GHCR propagation
         run: sleep 30
+
+      - name: Verify multi-arch manifest (RELEASE GATE)
+        run: |
+          TAG="${{ needs.verify-release.outputs.version }}"
+          echo "Inspecting manifest for ghcr.io/aidotmarket/vectoraiz:${TAG}..."
+
+          MANIFEST=$(docker manifest inspect "ghcr.io/aidotmarket/vectoraiz:${TAG}" 2>&1) || {
+            echo "::error::RELEASE BLOCKED — Cannot inspect manifest for ${TAG}"
+            echo "$MANIFEST"
+            exit 1
+          }
+
+          # Check for amd64
+          if echo "$MANIFEST" | grep -q '"architecture": "amd64"'; then
+            echo "✅ linux/amd64 present"
+          else
+            echo "::error::RELEASE BLOCKED — linux/amd64 manifest MISSING. Image will not run on Intel/AMD machines."
+            exit 1
+          fi
+
+          # Check for arm64
+          if echo "$MANIFEST" | grep -q '"architecture": "arm64"'; then
+            echo "✅ linux/arm64 present"
+          else
+            echo "::error::RELEASE BLOCKED — linux/arm64 manifest MISSING. Image will not run on Apple Silicon Macs."
+            exit 1
+          fi
+
+          echo "✅ Multi-arch manifest verified: amd64 + arm64"
 
       - name: Verify image is pullable
         run: |

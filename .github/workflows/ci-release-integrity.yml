@@ -10,6 +10,7 @@ on:
       - 'install.ps1'
       - 'scripts/release.sh'
       - 'Dockerfile.customer'
+      - '.github/workflows/release.yml'
 
 jobs:
   verify-integrity:
@@ -39,6 +40,38 @@ jobs:
             echo "::warning::Compose file has ${COMPOSE_VERSION} but latest tag is ${LATEST_TAG}"
             echo "This is OK if a new release is in progress."
           fi
+
+      - name: Verify multi-arch build configuration
+        run: |
+          echo "Checking release.yml builds for both amd64 and arm64..."
+
+          PLATFORMS_LINE=$(grep 'platforms:' .github/workflows/release.yml || echo "")
+
+          if [ -z "$PLATFORMS_LINE" ]; then
+            echo "::error::INTEGRITY FAILED — release.yml has no platforms: directive. Images must build for linux/amd64,linux/arm64."
+            exit 1
+          fi
+
+          if ! echo "$PLATFORMS_LINE" | grep -q "linux/amd64"; then
+            echo "::error::INTEGRITY FAILED — release.yml missing linux/amd64 platform."
+            exit 1
+          fi
+          echo "✅ linux/amd64 configured"
+
+          if ! echo "$PLATFORMS_LINE" | grep -q "linux/arm64"; then
+            echo "::error::INTEGRITY FAILED — release.yml missing linux/arm64 platform. Apple Silicon Macs will fail to install."
+            exit 1
+          fi
+          echo "✅ linux/arm64 configured"
+
+          # Verify QEMU is set up (required for cross-platform builds on GH Actions)
+          if ! grep -q "setup-qemu-action" .github/workflows/release.yml; then
+            echo "::error::INTEGRITY FAILED — release.yml missing docker/setup-qemu-action. Cross-arch builds will fail."
+            exit 1
+          fi
+          echo "✅ QEMU setup action present"
+
+          echo "✅ Multi-arch build configuration verified"
 
       - name: Shell script syntax check
         run: |
