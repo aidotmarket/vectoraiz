@@ -179,13 +179,13 @@ step1_update_compose() {
 
   # Perform the substitution (macOS sed vs GNU sed)
   if sed --version 2>/dev/null | grep -q GNU; then
-    sed -i "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-${VERSION}/" "$COMPOSE_FILE"
+    sed -i "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-v${VERSION}/" "$COMPOSE_FILE"
   else
-    sed -i '' "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-${VERSION}/" "$COMPOSE_FILE"
+    sed -i '' "s/VECTORAIZ_VERSION:-[^}]*/VECTORAIZ_VERSION:-v${VERSION}/" "$COMPOSE_FILE"
   fi
 
   # VERIFY: grep the file and confirm
-  if ! grep -q "VECTORAIZ_VERSION:-${VERSION}" "$COMPOSE_FILE"; then
+  if ! grep -q "VECTORAIZ_VERSION:-v${VERSION}" "$COMPOSE_FILE"; then
     die "Failed to update $COMPOSE_FILE — version $VERSION not found after sed." \
         "Manually edit $COMPOSE_FILE and set VECTORAIZ_VERSION default to $VERSION."
   fi
@@ -222,7 +222,7 @@ step2_commit_push() {
     sleep 5
     local content
     content=$(curl -fsSL "$raw_url" 2>/dev/null || echo "")
-    if echo "$content" | grep -q "VECTORAIZ_VERSION:-${VERSION}"; then
+    if echo "$content" | grep -q "VECTORAIZ_VERSION:-v${VERSION}"; then
       pass "GitHub raw content verified (attempt $attempt)"
       return 0
     fi
@@ -313,7 +313,7 @@ step5_smoke_test() {
   info "Checking install script compose URL..."
   local compose_content
   compose_content=$(curl -fsSL "${GITHUB_RAW}/${COMPOSE_FILE}" 2>/dev/null || echo "")
-  if echo "$compose_content" | grep -q "VECTORAIZ_VERSION:-${VERSION}"; then
+  if echo "$compose_content" | grep -q "VECTORAIZ_VERSION:-v${VERSION}"; then
     pass "Install compose resolves to v$VERSION"
   else
     warn "Install compose does not yet show v$VERSION (CDN cache). Customers pulling fresh will get the right version once CDN updates."
