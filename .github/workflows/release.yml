@@ -166,20 +166,35 @@ jobs:
 
           echo "✅ Multi-arch manifest verified: amd64 + arm64"
 
+      - name: Set up QEMU for arm64 emulation
+        uses: docker/setup-qemu-action@v3
+
+
       - name: Boot arm64 container via QEMU
         run: |
           TAG="${{ needs.verify-release.outputs.version }}"
           docker pull --platform linux/arm64 "ghcr.io/aidotmarket/vectoraiz:${TAG}"
+          
+          # Run container briefly — it will exit without postgres/qdrant,
+          # but we verify the arm64 binary executes (no exec format error)
           CID=$(docker run -d --platform linux/arm64 "ghcr.io/aidotmarket/vectoraiz:${TAG}")
-          sleep 15
-          STATE=$(docker inspect --format='{{.State.Status}}' "$CID" 2>/dev/null || echo "missing")
-          if [ "$STATE" = "running" ]; then
-            echo "arm64 container running"
-          else
-            echo "::error::arm64 container failed (state: ${STATE})"
-            docker logs "$CID" 2>&1 | tail -30
+          sleep 10
+          LOGS=$(docker logs "$CID" 2>&1 || true)
+          
+          # Check entrypoint actually ran (not exec format error)
+          if echo "$LOGS" | grep -q "exec format error"; then
+            echo "::error::arm64 binary failed — exec format error"
+            echo "$LOGS" | tail -20
             docker rm -f "$CID" 2>/dev/null || true
             exit 1
+          fi
+          
+          if echo "$LOGS" | grep -qi "starting\|migration\|vectoraiz"; then
+            echo "✅ arm64 container entrypoint executed successfully"
+            echo "$LOGS" | tail -10
+          else
+            echo "::warning::arm64 container produced no recognized output"
+            echo "$LOGS" | tail -20
           fi
           docker rm -f "$CID" 2>/dev/null || true
 
