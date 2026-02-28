@@ -61,18 +61,28 @@ echo "[INFO] Running database migrations..."
 cd /app && python -m alembic upgrade head
 echo "[INFO] Migrations complete"
 
-# Start nginx in background
-echo "[INFO] Starting web server..."
-nginx
-
 # Co-Pilot requires single-worker mode (file lock enforced).
 # Multi-worker support would require switching Co-Pilot to Redis pub/sub.
 # nginx handles concurrent connections; uvicorn single worker handles async I/O.
 VECTORAIZ_WORKERS=1
+
+# Start uvicorn in background
 echo "[INFO] Starting API server..."
-echo ""
-exec uvicorn app.main:app \
+uvicorn app.main:app \
     --host 0.0.0.0 \
     --port 8000 \
     --workers ${VECTORAIZ_WORKERS} \
-    --log-level ${VECTORAIZ_LOG_LEVEL:-info}
+    --log-level ${VECTORAIZ_LOG_LEVEL:-info} &
+UVICORN_PID=$!
+
+# Start nginx in foreground mode (backgrounded for wait -n)
+echo "[INFO] Starting web server..."
+nginx -g 'daemon off;' &
+NGINX_PID=$!
+
+# If EITHER process exits, tear down so Docker restart policy can recover
+wait -n
+EXIT_CODE=$?
+echo "[ERROR] Process exited (code=$EXIT_CODE) — shutting down container"
+kill $UVICORN_PID $NGINX_PID 2>/dev/null
+exit $EXIT_CODE

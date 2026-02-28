@@ -46,12 +46,23 @@ services:
       #   - Docker Desktop (Mac/Win): host.docker.internal
       #   - Linux: add extra_hosts: ["host.docker.internal:host-gateway"]
       #   - Same Docker network: use the service name (e.g., "postgres")
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/api/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
     depends_on:
       postgres:
         condition: service_healthy
       qdrant:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   postgres:
     image: postgres:16-alpine
@@ -67,6 +78,11 @@ services:
       timeout: 3s
       retries: 5
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
 
   qdrant:
     image: qdrant/qdrant:v1.13.2
@@ -78,6 +94,11 @@ services:
       timeout: 5s
       retries: 3
     restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
 
 volumes:
   vectoraiz-data:

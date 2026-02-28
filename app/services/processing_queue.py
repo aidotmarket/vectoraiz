@@ -1,9 +1,10 @@
 """
-Sequential file processing queue.
+Bounded-concurrency file processing queue.
 
-Ensures only ONE dataset processes at a time to prevent CPU starvation
-that blocks the API event loop. All file processing requests are routed
-through this queue instead of running as concurrent background tasks.
+Limits concurrent dataset processing to MAX_CONCURRENT (default 2) to
+prevent CPU/memory starvation that blocks the API event loop. All file
+processing requests are routed through this queue instead of running as
+unbounded concurrent background tasks.
 
 Before this queue, uploading 10 files spawned 10 concurrent processing
 tasks — each running embedding computation via onnxruntime — which
@@ -12,6 +13,7 @@ consumed 1300%+ CPU and starved the event loop for 2-5 minutes.
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -29,10 +31,13 @@ class _QueueItem:
 
 
 class ProcessingQueue:
-    """Singleton queue that processes datasets one at a time."""
+    """Singleton queue that processes datasets with bounded concurrency."""
+
+    _MAX_CONCURRENT = int(os.getenv("VECTORAIZ_MAX_CONCURRENT_PROCESSING", "2"))
 
     def __init__(self):
         self._queue: asyncio.Queue[_QueueItem] = asyncio.Queue()
+        self._semaphore = asyncio.Semaphore(self._MAX_CONCURRENT)
         self._current: Optional[_QueueItem] = None
         self._worker_tasks: List[asyncio.Task] = []
         self._progress: Dict[str, Dict[str, Any]] = {}
@@ -97,31 +102,32 @@ class ProcessingQueue:
         return None
 
     async def worker_loop(self):
-        """Process one dataset at a time, forever."""
-        logger.info("Processing queue worker started")
+        """Pull items from the queue and process with bounded concurrency."""
+        logger.info("Processing queue worker started (max_concurrent=%d)", self._MAX_CONCURRENT)
         while True:
             item = await self._queue.get()
             self._current = item
             self.update_progress(item.dataset_id, "extracting", 0, "Starting…")
-            try:
-                if item.index_only:
-                    logger.info("Indexing dataset %s", item.dataset_id)
-                    self.update_progress(item.dataset_id, "indexing", 0, "Starting indexing…")
-                    await self._run_index(item.dataset_id)
-                else:
-                    logger.info(
-                        "Processing dataset %s (skip_indexing=%s)",
-                        item.dataset_id, item.skip_indexing,
-                    )
-                    await self._run_process(item.dataset_id, item.skip_indexing)
-                logger.info("Completed dataset %s", item.dataset_id)
-            except Exception:
-                logger.exception("Failed dataset %s", item.dataset_id)
-            finally:
-                self.clear_progress(item.dataset_id)
-                self._current = None
-                self._queue.task_done()
-                await asyncio.sleep(0)  # yield to event loop
+            async with self._semaphore:
+                try:
+                    if item.index_only:
+                        logger.info("Indexing dataset %s", item.dataset_id)
+                        self.update_progress(item.dataset_id, "indexing", 0, "Starting indexing…")
+                        await self._run_index(item.dataset_id)
+                    else:
+                        logger.info(
+                            "Processing dataset %s (skip_indexing=%s)",
+                            item.dataset_id, item.skip_indexing,
+                        )
+                        await self._run_process(item.dataset_id, item.skip_indexing)
+                    logger.info("Completed dataset %s", item.dataset_id)
+                except Exception:
+                    logger.exception("Failed dataset %s", item.dataset_id)
+                finally:
+                    self.clear_progress(item.dataset_id)
+                    self._current = None
+                    self._queue.task_done()
+                    await asyncio.sleep(0)  # yield to event loop
 
     # ------------------------------------------------------------------
     # Internal helpers (lazy imports to avoid circular dependencies)
@@ -170,10 +176,10 @@ class ProcessingQueue:
         processing = get_processing_service()
         await processing.run_index_phase(dataset_id)
 
-    _CONCURRENCY = 1 # Single worker: safer under x86 emulation, prevents concurrent embedding spikes
+    _CONCURRENCY = 2  # Workers pulling from queue; actual concurrency bounded by _MAX_CONCURRENT semaphore
 
     def start(self, wrapper=None) -> List[asyncio.Task]:
-        """Start worker tasks (concurrency=1).
+        """Start worker tasks (bounded by _MAX_CONCURRENT semaphore).
 
         Args:
             wrapper: Optional async wrapper(name, coro) for error isolation.
