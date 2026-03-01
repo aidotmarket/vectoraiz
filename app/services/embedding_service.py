@@ -2,12 +2,28 @@
 Embedding service using sentence-transformers.
 Loads model once at startup for efficient inference.
 
-Prevention hardening (BQ-???): constrain native threadpools BEFORE importing
-sentence-transformers/torch/tokenizers. In some environments (notably
-certain container/QEMU builds), post-load initialization of OpenMP/BLAS/
-interop pools can spawn many threads and allocate large per-thread stacks,
-triggering MemoryError shortly AFTER the model reports "loaded".
+CRITICAL: Thread pool limits must be set BEFORE importing torch/numpy/
+sentence_transformers. PyTorch initializes interop/intraop thread pools
+on first import. Under ARM64 emulation (OrbStack/Rosetta2 on Apple Silicon),
+default pool size x 8MB stack per thread exhausts virtual address space,
+causing MemoryError ~2min after model load.
 """
+
+# === THREAD LIMITS — MUST RUN BEFORE ANY TORCH/NUMPY IMPORTS ===
+import os as _os
+_os.environ.setdefault("OMP_NUM_THREADS", "1")
+_os.environ.setdefault("MKL_NUM_THREADS", "1")
+_os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+_os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+_os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+_os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# Lock torch thread pools BEFORE any other code can trigger import
+import torch as _torch  # noqa: E402
+_torch.set_num_threads(1)
+_torch.set_num_interop_threads(1)
+del _torch
+# === END THREAD LIMITS ===
 
 from typing import Optional, List, Dict, Any
 import time
@@ -20,25 +36,6 @@ from app.config import settings
 MODEL_NAME = "all-MiniLM-L6-v2"
 VECTOR_SIZE = 384
 DEFAULT_BATCH_SIZE = 32
-
-
-def _set_thread_env_hard_limits() -> None:
-    """Set env vars that control native thread pools.
-
-    Must run BEFORE importing torch/numpy/sentence_transformers to reliably
-    take effect.
-    """
-    import os
-
-    # OpenMP / BLAS family
-    os.environ.setdefault("OMP_NUM_THREADS", "1")
-    os.environ.setdefault("MKL_NUM_THREADS", "1")
-    os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-    os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
-    os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
-
-    # HuggingFace tokenizers (Rust/Rayon). "false" should disable parallelism.
-    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
 
 class EmbeddingService:
@@ -60,20 +57,7 @@ class EmbeddingService:
         return self._model
 
     def _load_model(self):
-        """Load the sentence-transformers model."""
-        _set_thread_env_hard_limits()
-
-        # Must happen BEFORE SentenceTransformer import — PyTorch initializes
-        # interop/intraop thread pools on first import. Under QEMU emulation,
-        # default pool size × 8MB stack per thread exhausts address space.
-        try:
-            import torch
-            torch.set_num_threads(1)
-            torch.set_num_interop_threads(1)
-        except Exception:
-            pass
-
-        # Import AFTER thread limits are locked in
+        """Load the sentence-transformers model (PyTorch backend, thread-safe)."""
         from sentence_transformers import SentenceTransformer
 
         start_time = time.time()

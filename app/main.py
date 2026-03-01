@@ -4,11 +4,15 @@ from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse
+import faulthandler
 import logging
 import asyncio
 import os
 import sys
 import threading
+
+# Enable faulthandler for native crash tracebacks (all threads)
+faulthandler.enable(file=sys.stderr, all_threads=True)
 
 from app.config import settings
 

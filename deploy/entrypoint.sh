@@ -1,6 +1,16 @@
 #!/bin/bash
 set -e
 
+# Prevent thread-stack exhaustion under ARM64 emulation (OrbStack/Rosetta2)
+ulimit -s 4096 2>/dev/null || true
+
+# Optional memory diagnostics: set VECTORAIZ_MEMORY_DEBUG=1 to enable
+if [ "${VECTORAIZ_MEMORY_DEBUG:-0}" = "1" ]; then
+    export PYTHONFAULTHANDLER=1
+    export MALLOC_TRACE=/tmp/mtrace.log
+    echo "[DEBUG] Memory debug enabled — faulthandler + malloc trace active"
+fi
+
 # Air-gap: prevent HuggingFace Hub from phoning home (model is baked into image)
 export HF_HUB_OFFLINE=1
 export TRANSFORMERS_OFFLINE=1

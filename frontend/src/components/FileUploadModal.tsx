@@ -540,10 +540,21 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </div>
           )}
 
-          {/* File queue */}
+          {/* File queue — sorted: active processing first, then queued, then pending, then done */}
           {hasFiles && (
             <div className={cn("space-y-2 overflow-y-auto", dialogSize ? "flex-1 min-h-[8rem]" : "max-h-64")}>
-              {queue.map((item) => (
+              {[...queue].sort((a, b) => {
+                const priority: Record<FileState, number> = {
+                  uploading: 0,
+                  processing: 1,
+                  pending: 2,
+                  duplicate: 3,
+                  error: 4,
+                  rejected: 5,
+                  complete: 6,
+                };
+                return (priority[a.state] ?? 9) - (priority[b.state] ?? 9);
+              }).map((item) => (
                 <FileRow
                   key={item.id}
                   item={item}

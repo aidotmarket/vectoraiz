@@ -40,9 +40,13 @@ RUN PYTHONPATH=/install/lib/python3.11/site-packages \
     python -c "import nltk; nltk.download('punkt', download_dir='/install/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/install/nltk_data')"
 
 # Pre-download sentence-transformers model for air-gap operation
-RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+# Uninstall onnxruntime so no .onnx artifacts baked into cache (prevents ARM64 MemoryError)
+RUN pip uninstall -y onnxruntime onnxruntime-gpu 2>/dev/null; \
+    pip install --upgrade pip 2>/dev/null; \
+    PYTHONPATH=/install/lib/python3.11/site-packages \
     HF_HOME=/install/hf_cache \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+    SENTENCE_TRANSFORMERS_BACKEND=torch \
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2', backend='torch')"
 
 
 # ---- Stage 3: Runtime ----
