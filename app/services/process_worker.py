@@ -28,6 +28,10 @@ from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+# Use spawn to avoid inheriting the parent's event loop and open file descriptors.
+# Fork inherits the parent's uvicorn event loop state which can cause deadlocks.
+_mp_ctx = multiprocessing.get_context("spawn")
+
 import psutil
 import pyarrow as pa
 
@@ -481,11 +485,11 @@ class ProcessWorkerManager:
 
         self._semaphore.acquire()
 
-        data_queue = multiprocessing.Queue(maxsize=settings.streaming_queue_maxsize)
-        progress_parent, progress_child = multiprocessing.Pipe(duplex=False)
-        control_parent, control_child = multiprocessing.Pipe(duplex=False)
+        data_queue = _mp_ctx.Queue(maxsize=settings.streaming_queue_maxsize)
+        progress_parent, progress_child = _mp_ctx.Pipe(duplex=False)
+        control_parent, control_child = _mp_ctx.Pipe(duplex=False)
 
-        proc = multiprocessing.Process(
+        proc = _mp_ctx.Process(
             target=run_tabular_worker,
             args=(
                 str(filepath),
@@ -528,11 +532,11 @@ class ProcessWorkerManager:
 
         self._semaphore.acquire()
 
-        data_queue = multiprocessing.Queue(maxsize=settings.streaming_queue_maxsize)
-        progress_parent, progress_child = multiprocessing.Pipe(duplex=False)
-        control_parent, control_child = multiprocessing.Pipe(duplex=False)
+        data_queue = _mp_ctx.Queue(maxsize=settings.streaming_queue_maxsize)
+        progress_parent, progress_child = _mp_ctx.Pipe(duplex=False)
+        control_parent, control_child = _mp_ctx.Pipe(duplex=False)
 
-        proc = multiprocessing.Process(
+        proc = _mp_ctx.Process(
             target=run_document_worker,
             args=(
                 str(filepath),
@@ -574,11 +578,11 @@ class ProcessWorkerManager:
 
         self._semaphore.acquire()
 
-        data_queue = multiprocessing.Queue(maxsize=1) # Unused for indexing, but matching handle signature
-        progress_parent, progress_child = multiprocessing.Pipe(duplex=False)
-        control_parent, control_child = multiprocessing.Pipe(duplex=False)
+        data_queue = _mp_ctx.Queue(maxsize=1) # Unused for indexing, but matching handle signature
+        progress_parent, progress_child = _mp_ctx.Pipe(duplex=False)
+        control_parent, control_child = _mp_ctx.Pipe(duplex=False)
 
-        proc = multiprocessing.Process(
+        proc = _mp_ctx.Process(
             target=run_indexing_worker,
             args=(
                 dataset_id,

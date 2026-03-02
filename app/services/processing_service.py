@@ -2,6 +2,7 @@ import logging
 import os
 import uuid
 import asyncio
+import concurrent.futures
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timezone
@@ -9,12 +10,23 @@ from enum import Enum
 import json
 import csv
 
+import psutil
+
 from app.config import settings
 from app.models.dataset import DatasetStatus
 from app.services.duckdb_service import get_duckdb_service
 from app.utils.sanitization import sanitize_filename, sql_quote_literal
 
 _log = logging.getLogger(__name__)
+
+
+def _log_mem(phase: str) -> None:
+    """Log current process RSS at a phase boundary."""
+    try:
+        rss_mb = psutil.Process().memory_info().rss / (1024 * 1024)
+        _log.info("mem[%s] rss=%.1fMB", phase, rss_mb)
+    except Exception:
+        pass
 
 
 # Backward-compat alias — existing code references ProcessingStatus
@@ -503,7 +515,7 @@ class ProcessingService:
             if file_type in (TABULAR_TYPES | DOCUMENT_TYPES):
                 # BQ-VZ-LARGE-FILES: Force all documents and tabular files through streaming subprocess
                 try:
-                    await self._extract_streaming(record)
+                    await asyncio.to_thread(self._extract_streaming, record)
                     record.metadata["processing_mode"] = "streaming"
                 except Exception as streaming_err:
                     # M10: Graceful degradation — fall back to in-memory
@@ -522,7 +534,7 @@ class ProcessingService:
                         )
                         record.metadata["processing_mode"] = "fallback_in_memory"
                         record.metadata["streaming_error"] = str(streaming_err)
-                        await self._extract_in_memory(record, file_type)
+                        await asyncio.to_thread(self._extract_in_memory, record, file_type)
                     else:
                         # Too large for in-memory fallback
                         _log.error(
@@ -537,7 +549,7 @@ class ProcessingService:
             else:
                 # Standard in-memory path (unchanged for small/special files)
                 record.metadata["processing_mode"] = "in_memory"
-                await self._extract_in_memory(record, file_type)
+                await asyncio.to_thread(self._extract_in_memory, record, file_type)
 
             # Cache preview data after extraction
             self._cache_preview(record)
@@ -587,26 +599,29 @@ class ProcessingService:
         self._save_record(record, storage_fn)
         return record
 
-    async def _extract_in_memory(self, record: DatasetRecord, file_type: str) -> None:
+    def _extract_in_memory(self, record: DatasetRecord, file_type: str) -> None:
         """Standard in-memory extraction path (unchanged from original)."""
+        _log_mem("in_memory_start")
         if file_type in TABULAR_TYPES:
-            await self._extract_tabular(record)
+            self._extract_tabular(record)
         elif file_type in DOCUMENT_TYPES:
-            await self._process_document(record)
+            self._process_document(record)
         elif file_type in SPREADSHEET_TYPES:
-            await self._process_spreadsheet(record)
+            self._process_spreadsheet(record)
         elif file_type in TEXT_TYPES:
-            await self._process_text(record)
+            self._process_text(record)
         else:
             raise ValueError(f"Unsupported file type: {file_type}")
+        _log_mem("in_memory_done")
 
-    async def _extract_streaming(self, record: DatasetRecord) -> None:
+    def _extract_streaming(self, record: DatasetRecord) -> None:
         """BQ-VZ-LARGE-FILES: Extract via streaming subprocess.
 
         Routes tabular files through StreamingTabularProcessor and
         document files through StreamingDocumentProcessor, both running
         in isolated subprocesses via ProcessWorkerManager.
         """
+        _log_mem("streaming_start")
         import pyarrow as pa
         import pyarrow.parquet as pq
         from app.services.process_worker import (
@@ -832,6 +847,7 @@ class ProcessingService:
             )
         else:
             raise ValueError(f"Streaming not supported for file type: {file_type}")
+        _log_mem("streaming_done")
 
     def _run_indexing(self, record: DatasetRecord) -> None:
         """Phase 2: chunk → embed → Qdrant via streaming for memory safety.
@@ -984,7 +1000,7 @@ class ProcessingService:
                 session.commit()
             return recovered
 
-    async def _extract_tabular(self, record: DatasetRecord):
+    def _extract_tabular(self, record: DatasetRecord):
         """Extract phase for tabular files (CSV, JSON, Parquet) - convert to Parquet."""
         import logging
         _log = logging.getLogger(__name__)
@@ -1009,17 +1025,20 @@ class ProcessingService:
             (FORMAT PARQUET, COMPRESSION ZSTD)
         """
 
-        def _run_conversion(conn, query):
-            conn.execute(query)
+        def _timed_run(conn, query):
+            """Run a DuckDB query with a thread-based timeout (called from worker thread)."""
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                fut = pool.submit(conn.execute, query)
+                try:
+                    fut.result(timeout=self.EXTRACT_TIMEOUT_S)
+                except concurrent.futures.TimeoutError as exc:
+                    raise TimeoutError(
+                        f"Parquet conversion timed out after {self.EXTRACT_TIMEOUT_S}s"
+                    ) from exc
 
         try:
-            await asyncio.wait_for(
-                asyncio.get_event_loop().run_in_executor(
-                    None, _run_conversion, duckdb.connection, copy_query,
-                ),
-                timeout=self.EXTRACT_TIMEOUT_S,
-            )
-        except asyncio.TimeoutError:
+            _timed_run(duckdb.connection, copy_query)
+        except TimeoutError:
             _log.error(
                 "Parquet conversion timed out for %s (%s, %.0fMB) after %ds",
                 record.id, record.file_type, file_mb, self.EXTRACT_TIMEOUT_S,
@@ -1048,13 +1067,8 @@ class ProcessingService:
                         f"COPY (SELECT * FROM {large_read_func}) "
                         f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
                     )
-                    await asyncio.wait_for(
-                        asyncio.get_event_loop().run_in_executor(
-                            None, _run_conversion, large_conn, large_query,
-                        ),
-                        timeout=self.EXTRACT_TIMEOUT_S,
-                    )
-                except asyncio.TimeoutError:
+                    _timed_run(large_conn, large_query)
+                except TimeoutError:
                     raise ValueError(
                         f"Large file processing timed out ({record.file_type}, {file_mb:.0f}MB). "
                         f"Maximum processing time is {self.EXTRACT_TIMEOUT_S}s."
@@ -1081,7 +1095,7 @@ class ProcessingService:
             _log.exception("Metadata extraction failed for %s", record.id)
             record.metadata = {"extraction_error": {"code": "METADATA_EXTRACTION_FAILED", "type": type(e).__name__}}
 
-    async def _process_document(self, record: DatasetRecord):
+    def _process_document(self, record: DatasetRecord):
         """Process document files (PDF, Word, PowerPoint) using Unstructured."""
         from app.services.document_service import get_document_service
 
@@ -1146,7 +1160,7 @@ class ProcessingService:
             if temp_csv.exists():
                 temp_csv.unlink()
 
-    async def _process_text(self, record: DatasetRecord):
+    def _process_text(self, record: DatasetRecord):
         """Process text files (.txt, .md, .html, .htm) using TextProcessor."""
         from app.services.text_processor import TextProcessor
 
@@ -1197,7 +1211,7 @@ class ProcessingService:
             if temp_csv.exists():
                 temp_csv.unlink()
 
-    async def _process_spreadsheet(self, record: DatasetRecord):
+    def _process_spreadsheet(self, record: DatasetRecord):
         """Process Excel spreadsheets (.xlsx, .xls) via pandas."""
         import pandas as pd
 

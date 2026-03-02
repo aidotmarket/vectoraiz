@@ -111,6 +111,66 @@ def _open_text_with_fallback(filepath: Path):
     return open(filepath, "r", encoding="utf-8", errors="replace")
 
 
+def _align_arrow_table(table: pa.Table, ref_schema: pa.Schema) -> pa.Table:
+    """Cast *table* columns to match *ref_schema*.
+
+    Pandas per-chunk dtype inference can drift (e.g. a column is int64 in
+    the first chunk but object/string in a later chunk that contains "N/A").
+    The ParquetWriter requires a single schema, so every batch must conform
+    to the reference established by the first chunk.
+
+    Strategy per column:
+    1. Same type → keep as-is.
+    2. Safe cast succeeds → use it.
+    3. Numeric target + castable source → coerce via ``pd.to_numeric``
+       (only truly non-numeric values become null; valid numbers survive).
+    4. Everything else → fill with nulls (schema preserved, some data lost).
+    """
+    import pandas as pd
+
+    arrays = []
+    for field in ref_schema:
+        if field.name not in table.column_names:
+            arrays.append(pa.nulls(table.num_rows, type=field.type))
+            continue
+
+        col = table.column(field.name)
+        if col.type == field.type:
+            arrays.append(col)
+            continue
+
+        # Fast path: safe Arrow cast
+        try:
+            arrays.append(col.cast(field.type, safe=False))
+            continue
+        except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError):
+            pass
+
+        # Numeric target: coerce through pandas so only bad values become null
+        if pa.types.is_integer(field.type) or pa.types.is_floating(field.type):
+            try:
+                coerced = pd.to_numeric(col.to_pandas(), errors="coerce")
+                float_arr = pa.array(coerced, from_pandas=True)
+                arrays.append(float_arr.cast(field.type, safe=False))
+                logger.debug(
+                    "Schema drift: column %r coerced %s → %s via pd.to_numeric",
+                    field.name, col.type, field.type,
+                )
+                continue
+            except Exception:
+                pass
+
+        # Last resort: null-fill
+        logger.warning(
+            "Schema drift: column %r type %s cannot cast to %s, "
+            "filling %d values with null",
+            field.name, col.type, field.type, len(col),
+        )
+        arrays.append(pa.nulls(len(col), type=field.type))
+
+    return pa.table(arrays, schema=ref_schema)
+
+
 # ---------------------------------------------------------------------------
 # StreamingTabularProcessor (M2)
 # ---------------------------------------------------------------------------
@@ -149,7 +209,17 @@ class StreamingTabularProcessor:
     # -- CSV / TSV -------------------------------------------------------
 
     def _iter_csv(self) -> Iterator[pa.RecordBatch]:
-        """Chunked CSV/TSV reading via pandas, yielded as Arrow RecordBatch."""
+        """Chunked CSV/TSV reading via pandas, yielded as Arrow RecordBatch.
+
+        Pandas infers dtypes independently per chunk, which can produce
+        inconsistent Arrow schemas (e.g. int64 in chunk 1, string in
+        chunk N when a column has mixed types like "123" and "N/A").
+        The ParquetWriter requires all batches to share one schema, so
+        we anchor on the first chunk's schema and cast subsequent chunks
+        to match — using pandas numeric coercion where possible to
+        preserve values, falling back to null only for truly non-castable
+        entries.
+        """
         import pandas as pd
 
         sep = "\t" if self.file_type == "tsv" else ","
@@ -162,8 +232,13 @@ class StreamingTabularProcessor:
                 low_memory=True,
                 on_bad_lines="warn",
             )
+            ref_schema: Optional[pa.Schema] = None
             for chunk_df in reader:
                 table = pa.Table.from_pandas(chunk_df, preserve_index=False)
+                if ref_schema is None:
+                    ref_schema = table.schema
+                elif table.schema != ref_schema:
+                    table = _align_arrow_table(table, ref_schema)
                 for batch in table.to_batches():
                     yield batch
         finally:
