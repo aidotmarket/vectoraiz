@@ -2,6 +2,7 @@ import duckdb
 import logging
 import os
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 from datetime import datetime
@@ -688,3 +689,23 @@ def get_duckdb_service() -> DuckDBService:
     if _duckdb_service is None:
         _duckdb_service = DuckDBService()
     return _duckdb_service
+
+
+@contextmanager
+def ephemeral_duckdb_service():
+    """Create an isolated DuckDBService with its own connection.
+
+    Used by worker threads that run concurrently (e.g. processing_service)
+    to avoid sharing the singleton connection, which is not thread-safe at
+    the DuckDB C layer and causes segfaults under concurrent access.
+
+    Usage::
+
+        with ephemeral_duckdb_service() as duckdb:
+            duckdb.get_file_metadata(path)
+    """
+    svc = DuckDBService()
+    try:
+        yield svc
+    finally:
+        svc.close()

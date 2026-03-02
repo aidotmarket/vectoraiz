@@ -14,7 +14,7 @@ import os, psutil
 
 from app.config import settings
 from app.models.dataset import DatasetStatus
-from app.services.duckdb_service import get_duckdb_service
+from app.services.duckdb_service import ephemeral_duckdb_service
 from app.utils.sanitization import sanitize_filename, sql_quote_literal
 
 _log = logging.getLogger(__name__)
@@ -436,28 +436,29 @@ class ProcessingService:
             preview_meta["kind"] = "document"
         elif record.processed_path and record.processed_path.exists():
             # For tabular: get sample rows + schema via DuckDB
+            # Use ephemeral connection to avoid conflicts with worker threads.
             try:
-                duckdb = get_duckdb_service()
-                meta = duckdb.get_file_metadata(record.processed_path)
-                preview_meta["row_count_estimate"] = meta.get("row_count", 0)
-                preview_meta["column_count"] = meta.get("column_count", 0)
-                preview_meta["kind"] = "tabular"
+                with ephemeral_duckdb_service() as duckdb:
+                    meta = duckdb.get_file_metadata(record.processed_path)
+                    preview_meta["row_count_estimate"] = meta.get("row_count", 0)
+                    preview_meta["column_count"] = meta.get("column_count", 0)
+                    preview_meta["kind"] = "tabular"
 
-                # Schema preview
-                profiles = duckdb.get_column_profile(record.processed_path)
-                preview_meta["schema"] = [
-                    {"name": p["name"], "type": p.get("type", "UNKNOWN")}
-                    for p in profiles[:50]
-                ]
+                    # Schema preview
+                    profiles = duckdb.get_column_profile(record.processed_path)
+                    preview_meta["schema"] = [
+                        {"name": p["name"], "type": p.get("type", "UNKNOWN")}
+                        for p in profiles[:50]
+                    ]
 
-                # Sample rows for preview
-                sample = duckdb.get_sample_rows(record.processed_path, limit=5)
-                preview_meta["sample_rows"] = sample
+                    # Sample rows for preview
+                    sample = duckdb.get_sample_rows(record.processed_path, limit=5)
+                    preview_meta["sample_rows"] = sample
 
-                # First 500 chars of text representation
-                if sample:
-                    text_repr = json.dumps(sample[:3], default=str)
-                    preview_text = text_repr[:500]
+                    # First 500 chars of text representation
+                    if sample:
+                        text_repr = json.dumps(sample[:3], default=str)
+                        preview_text = text_repr[:500]
             except Exception:
                 pass
 
@@ -710,16 +711,18 @@ class ProcessingService:
             record.processed_path = final_path
 
             # Extract metadata from the final Parquet
+            # Use an ephemeral DuckDB service to avoid sharing the singleton
+            # connection across concurrent worker threads (causes segfaults).
             try:
-                duckdb = get_duckdb_service()
-                record.metadata = duckdb.get_file_metadata(record.processed_path)
-                record.metadata["column_profiles"] = duckdb.get_column_profile(
-                    record.processed_path
-                )
-                record.metadata["sample_rows"] = duckdb.get_sample_rows(
-                    record.processed_path, limit=5
-                )
-                record.metadata["streaming_rows_total"] = rows_total
+                with ephemeral_duckdb_service() as duckdb:
+                    record.metadata = duckdb.get_file_metadata(record.processed_path)
+                    record.metadata["column_profiles"] = duckdb.get_column_profile(
+                        record.processed_path
+                    )
+                    record.metadata["sample_rows"] = duckdb.get_sample_rows(
+                        record.processed_path, limit=5
+                    )
+                    record.metadata["streaming_rows_total"] = rows_total
             except Exception as e:
                 _log.exception("Metadata extraction failed for %s", record.id)
                 record.metadata = {
@@ -833,13 +836,13 @@ class ProcessingService:
             }
 
             try:
-                duckdb = get_duckdb_service()
-                metadata = duckdb.get_file_metadata(record.processed_path)
-                metadata["source_type"] = "document"
-                metadata["original_format"] = file_type
-                metadata["text_blocks"] = text_blocks_count
-                metadata["tables_extracted"] = table_count
-                record.metadata = metadata
+                with ephemeral_duckdb_service() as duckdb:
+                    metadata = duckdb.get_file_metadata(record.processed_path)
+                    metadata["source_type"] = "document"
+                    metadata["original_format"] = file_type
+                    metadata["text_blocks"] = text_blocks_count
+                    metadata["tables_extracted"] = table_count
+                    record.metadata = metadata
             except Exception as e:
                 _log.exception("Metadata extraction failed for %s", record.id)
                 record.metadata = {
@@ -1042,92 +1045,93 @@ class ProcessingService:
         file_size = record.file_size_bytes or 0
         file_mb = file_size / (1024 * 1024)
 
-        duckdb = get_duckdb_service()
+        # Use an ephemeral DuckDB service so each worker thread gets its own
+        # connection — the singleton is not thread-safe at the C layer.
+        with ephemeral_duckdb_service() as duckdb:
+            # Determine output parquet path
+            parquet_filename = f"{record.id}.parquet"
+            record.processed_path = self.processed_dir / parquet_filename
 
-        # Determine output parquet path
-        parquet_filename = f"{record.id}.parquet"
-        record.processed_path = self.processed_dir / parquet_filename
+            # Get the read function for this file type
+            read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
 
-        # Get the read function for this file type
-        read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
+            # Convert to Parquet using streaming COPY
+            safe_out = sql_quote_literal(str(record.processed_path))
+            copy_query = f"""
+                COPY (SELECT * FROM {read_func})
+                TO '{safe_out}'
+                (FORMAT PARQUET, COMPRESSION ZSTD)
+            """
 
-        # Convert to Parquet using streaming COPY
-        safe_out = sql_quote_literal(str(record.processed_path))
-        copy_query = f"""
-            COPY (SELECT * FROM {read_func})
-            TO '{safe_out}'
-            (FORMAT PARQUET, COMPRESSION ZSTD)
-        """
+            def _timed_run(conn, query):
+                """Run a DuckDB query with a thread-based timeout (called from worker thread)."""
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    fut = pool.submit(conn.execute, query)
+                    try:
+                        fut.result(timeout=self.EXTRACT_TIMEOUT_S)
+                    except concurrent.futures.TimeoutError as exc:
+                        raise TimeoutError(
+                            f"Parquet conversion timed out after {self.EXTRACT_TIMEOUT_S}s"
+                        ) from exc
 
-        def _timed_run(conn, query):
-            """Run a DuckDB query with a thread-based timeout (called from worker thread)."""
-            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                fut = pool.submit(conn.execute, query)
-                try:
-                    fut.result(timeout=self.EXTRACT_TIMEOUT_S)
-                except concurrent.futures.TimeoutError as exc:
-                    raise TimeoutError(
-                        f"Parquet conversion timed out after {self.EXTRACT_TIMEOUT_S}s"
-                    ) from exc
-
-        try:
-            _timed_run(duckdb.connection, copy_query)
-        except TimeoutError:
-            _log.error(
-                "Parquet conversion timed out for %s (%s, %.0fMB) after %ds",
-                record.id, record.file_type, file_mb, self.EXTRACT_TIMEOUT_S,
-            )
-            raise ValueError(
-                f"File processing timed out ({record.file_type}, {file_mb:.0f}MB). "
-                f"Files over ~400MB may require more processing time."
-            )
-        except Exception as e:
-            err_msg = str(e)
-            _log.error(
-                "Parquet conversion failed for %s (%s, %d bytes): %s",
-                record.id, record.file_type, file_size, err_msg,
-            )
-            # Retry with a fresh connection and higher memory limit for large files
-            if file_size > 100 * 1024 * 1024:  # >100MB
-                _log.info("Retrying large file %s with dedicated connection", record.id)
-                # Cap at 60% of detected worker memory, never exceed 8GB
-                mem_cap_mb = min(int(settings.process_worker_memory_limit_mb * 0.6), 8192)
-                large_conn = duckdb.create_ephemeral_connection(
-                    memory_limit=f"{mem_cap_mb}MB", threads=4,
+            try:
+                _timed_run(duckdb.connection, copy_query)
+            except TimeoutError:
+                _log.error(
+                    "Parquet conversion timed out for %s (%s, %.0fMB) after %ds",
+                    record.id, record.file_type, file_mb, self.EXTRACT_TIMEOUT_S,
                 )
-                try:
-                    large_read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
-                    large_query = (
-                        f"COPY (SELECT * FROM {large_read_func}) "
-                        f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-                    )
-                    _timed_run(large_conn, large_query)
-                except TimeoutError:
-                    raise ValueError(
-                        f"Large file processing timed out ({record.file_type}, {file_mb:.0f}MB). "
-                        f"Maximum processing time is {self.EXTRACT_TIMEOUT_S}s."
-                    )
-                except Exception as retry_err:
-                    raise ValueError(
-                        f"Large file conversion failed ({record.file_type}, "
-                        f"{file_mb:.0f}MB): {retry_err}"
-                    ) from retry_err
-                finally:
-                    large_conn.close()
-            else:
                 raise ValueError(
-                    f"Parquet conversion failed ({record.file_type}, "
-                    f"{file_mb:.0f}MB): {err_msg}"
-                ) from e
+                    f"File processing timed out ({record.file_type}, {file_mb:.0f}MB). "
+                    f"Files over ~400MB may require more processing time."
+                )
+            except Exception as e:
+                err_msg = str(e)
+                _log.error(
+                    "Parquet conversion failed for %s (%s, %d bytes): %s",
+                    record.id, record.file_type, file_size, err_msg,
+                )
+                # Retry with a fresh connection and higher memory limit for large files
+                if file_size > 100 * 1024 * 1024:  # >100MB
+                    _log.info("Retrying large file %s with dedicated connection", record.id)
+                    # Cap at 60% of detected worker memory, never exceed 8GB
+                    mem_cap_mb = min(int(settings.process_worker_memory_limit_mb * 0.6), 8192)
+                    large_conn = duckdb.create_ephemeral_connection(
+                        memory_limit=f"{mem_cap_mb}MB", threads=4,
+                    )
+                    try:
+                        large_read_func = duckdb.get_read_function(record.file_type, str(record.upload_path))
+                        large_query = (
+                            f"COPY (SELECT * FROM {large_read_func}) "
+                            f"TO '{safe_out}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+                        )
+                        _timed_run(large_conn, large_query)
+                    except TimeoutError:
+                        raise ValueError(
+                            f"Large file processing timed out ({record.file_type}, {file_mb:.0f}MB). "
+                            f"Maximum processing time is {self.EXTRACT_TIMEOUT_S}s."
+                        )
+                    except Exception as retry_err:
+                        raise ValueError(
+                            f"Large file conversion failed ({record.file_type}, "
+                            f"{file_mb:.0f}MB): {retry_err}"
+                        ) from retry_err
+                    finally:
+                        large_conn.close()
+                else:
+                    raise ValueError(
+                        f"Parquet conversion failed ({record.file_type}, "
+                        f"{file_mb:.0f}MB): {err_msg}"
+                    ) from e
 
-        # Extract comprehensive metadata from the processed Parquet file
-        try:
-            record.metadata = duckdb.get_file_metadata(record.processed_path)
-            record.metadata['column_profiles'] = duckdb.get_column_profile(record.processed_path)
-            record.metadata['sample_rows'] = duckdb.get_sample_rows(record.processed_path, limit=5)
-        except Exception as e:
-            _log.exception("Metadata extraction failed for %s", record.id)
-            record.metadata = {"extraction_error": {"code": "METADATA_EXTRACTION_FAILED", "type": type(e).__name__}}
+            # Extract comprehensive metadata from the processed Parquet file
+            try:
+                record.metadata = duckdb.get_file_metadata(record.processed_path)
+                record.metadata['column_profiles'] = duckdb.get_column_profile(record.processed_path)
+                record.metadata['sample_rows'] = duckdb.get_sample_rows(record.processed_path, limit=5)
+            except Exception as e:
+                _log.exception("Metadata extraction failed for %s", record.id)
+                record.metadata = {"extraction_error": {"code": "METADATA_EXTRACTION_FAILED", "type": type(e).__name__}}
 
     def _process_document(self, record: DatasetRecord):
         """Process document files (PDF, Word, PowerPoint) using Unstructured."""
@@ -1170,24 +1174,24 @@ class ProcessingService:
                         table.get("content", "")
                     ])
 
-            # Convert to Parquet
-            duckdb = get_duckdb_service()
-            safe_csv = sql_quote_literal(str(temp_csv))
-            safe_out = sql_quote_literal(str(record.processed_path))
-            copy_query = f"""
-                COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
-                TO '{safe_out}'
-                (FORMAT PARQUET, COMPRESSION ZSTD)
-            """
-            duckdb.connection.execute(copy_query)
+            # Convert to Parquet — ephemeral connection for thread safety
+            with ephemeral_duckdb_service() as duckdb:
+                safe_csv = sql_quote_literal(str(temp_csv))
+                safe_out = sql_quote_literal(str(record.processed_path))
+                copy_query = f"""
+                    COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
+                    TO '{safe_out}'
+                    (FORMAT PARQUET, COMPRESSION ZSTD)
+                """
+                duckdb.connection.execute(copy_query)
 
-            # Extract metadata
-            metadata = duckdb.get_file_metadata(record.processed_path)
-            metadata["source_type"] = "document"
-            metadata["original_format"] = record.file_type
-            metadata["text_blocks"] = len(content["text_content"])
-            metadata["tables_extracted"] = len(content["tables"])
-            record.metadata = metadata
+                # Extract metadata
+                metadata = duckdb.get_file_metadata(record.processed_path)
+                metadata["source_type"] = "document"
+                metadata["original_format"] = record.file_type
+                metadata["text_blocks"] = len(content["text_content"])
+                metadata["tables_extracted"] = len(content["tables"])
+                record.metadata = metadata
 
         finally:
             # Clean up temp file
@@ -1225,21 +1229,21 @@ class ProcessingService:
                 writer.writerow(['block_index', 'block_type', 'content'])
                 writer.writerow([0, 'text', truncated_text])
 
-            duckdb = get_duckdb_service()
-            safe_csv = sql_quote_literal(str(temp_csv))
-            safe_out = sql_quote_literal(str(record.processed_path))
-            copy_query = f"""
-                COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
-                TO '{safe_out}'
-                (FORMAT PARQUET, COMPRESSION ZSTD)
-            """
-            duckdb.connection.execute(copy_query)
+            with ephemeral_duckdb_service() as duckdb:
+                safe_csv = sql_quote_literal(str(temp_csv))
+                safe_out = sql_quote_literal(str(record.processed_path))
+                copy_query = f"""
+                    COPY (SELECT * FROM read_csv_auto('{safe_csv}'))
+                    TO '{safe_out}'
+                    (FORMAT PARQUET, COMPRESSION ZSTD)
+                """
+                duckdb.connection.execute(copy_query)
 
-            metadata = duckdb.get_file_metadata(record.processed_path)
-            metadata["source_type"] = "text"
-            metadata["original_format"] = record.file_type
-            metadata.update(content["metadata"])
-            record.metadata = metadata
+                metadata = duckdb.get_file_metadata(record.processed_path)
+                metadata["source_type"] = "text"
+                metadata["original_format"] = record.file_type
+                metadata.update(content["metadata"])
+                record.metadata = metadata
 
         finally:
             if temp_csv.exists():
@@ -1248,8 +1252,6 @@ class ProcessingService:
     def _process_spreadsheet(self, record: DatasetRecord):
         """Process Excel spreadsheets (.xlsx, .xls) via pandas."""
         import pandas as pd
-
-        duckdb = get_duckdb_service()
 
         parquet_filename = f"{record.id}.parquet"
         record.processed_path = self.processed_dir / parquet_filename
@@ -1269,12 +1271,13 @@ class ProcessingService:
             # Save to Parquet
             df.to_parquet(record.processed_path, compression='zstd', index=False)
 
-            metadata = duckdb.get_file_metadata(record.processed_path)
-            metadata["source_type"] = "spreadsheet"
-            metadata["original_format"] = record.file_type
-            metadata["sheet_names"] = sheet_names
-            metadata["sheets_count"] = len(sheet_names)
-            record.metadata = metadata
+            with ephemeral_duckdb_service() as duckdb:
+                metadata = duckdb.get_file_metadata(record.processed_path)
+                metadata["source_type"] = "spreadsheet"
+                metadata["original_format"] = record.file_type
+                metadata["sheet_names"] = sheet_names
+                metadata["sheets_count"] = len(sheet_names)
+                record.metadata = metadata
 
         except Exception as e:
             raise ValueError(
