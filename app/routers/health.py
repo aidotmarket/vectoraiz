@@ -18,7 +18,7 @@ from qdrant_client import QdrantClient
 from app.config import settings
 from app.core.structured_logging import APP_VERSION, get_uptime_s
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,6 @@ async def health_check():
 # ── Deep health (auth required — exposes infrastructure details) ─────
 @router.get("/health/deep")
 async def deep_health_check(
-    duckdb: DuckDBService = Depends(get_duckdb_service),
     _user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Deep health check with bounded component checks."""
@@ -57,7 +56,7 @@ async def deep_health_check(
 
     checks = [
         ("qdrant", _check_qdrant()),
-        ("duckdb", _check_duckdb(duckdb)),
+        ("duckdb", _check_duckdb()),
         ("llm", _check_llm()),
         ("trust_channel", _check_trust_channel()),
         ("disk", _check_disk()),
@@ -137,11 +136,12 @@ async def _check_qdrant() -> dict:
         }
 
 
-async def _check_duckdb(duckdb: DuckDBService) -> dict:
+async def _check_duckdb() -> dict:
     """Check DuckDB with SELECT 1."""
     start = time.perf_counter()
     try:
-        result = duckdb.connection.execute("SELECT 1").fetchone()
+        with ephemeral_duckdb_service() as duckdb:
+            result = duckdb.connection.execute("SELECT 1").fetchone()
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
 
         if result and result[0] == 1:

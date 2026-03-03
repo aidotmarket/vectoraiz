@@ -13,6 +13,7 @@ import csv
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, PropertyMock
 
@@ -73,8 +74,12 @@ def pipeline_service(pipeline_dir, sample_csv):
         # Eagerly create the connection so the temp dir is created under tmp_path
         _ = duckdb_svc.connection
 
+        @contextmanager
+        def _mock_ephemeral():
+            yield duckdb_svc
+
         svc = PipelineService.__new__(PipelineService)
-        svc.duckdb_service = duckdb_svc
+        svc.duckdb_service = duckdb_svc  # for test access; code uses ephemeral_duckdb_service
         svc.pii_service = MagicMock()
         svc.compliance_service = MagicMock()
         svc.attestation_service = MagicMock()
@@ -93,7 +98,8 @@ def pipeline_service(pipeline_dir, sample_csv):
             return_value={"flags": [], "compliance_score": 100}
         )
 
-        yield svc
+        with patch("app.services.pipeline_service.ephemeral_duckdb_service", side_effect=_mock_ephemeral):
+            yield svc
         duckdb_svc.close()
 
 
@@ -124,15 +130,19 @@ class TestParquetValidation:
     @pytest.mark.asyncio
     async def test_step1_failure_skips_downstream(self, pipeline_service):
         """If analyze_process fails, PII and compliance are SKIPPED."""
-        # Make get_dataset_by_id return a valid dataset, but point to nonexistent file
-        pipeline_service.duckdb_service.get_dataset_by_id = MagicMock(
-            return_value={
-                "filepath": "/nonexistent/file.csv",
-                "file_type": "csv",
-            }
-        )
+        # Patch ephemeral to return a mock that points to nonexistent file
+        mock_duckdb = MagicMock()
+        mock_duckdb.get_dataset_by_id.return_value = {
+            "filepath": "/nonexistent/file.csv",
+            "file_type": "csv",
+        }
 
-        result = await pipeline_service.run_full_pipeline("bad_dataset")
+        @contextmanager
+        def _mock_ephemeral():
+            yield mock_duckdb
+
+        with patch("app.services.pipeline_service.ephemeral_duckdb_service", side_effect=_mock_ephemeral):
+            result = await pipeline_service.run_full_pipeline("bad_dataset")
 
         assert result["status"] == PIPELINE_FAILED
         assert result["steps"]["analyze_process"]["status"] == STEP_FAILED

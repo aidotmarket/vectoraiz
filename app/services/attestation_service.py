@@ -12,7 +12,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 from app.models.attestation_schemas import (
     QualityAttestation,
     ColumnMetrics,
@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 class AttestationService:
     """Service to generate quality attestations from dataset profiles."""
 
-    def __init__(self, duckdb_service: DuckDBService):
-        self.duckdb_service = duckdb_service
+    def __init__(self):
+        pass
 
     async def generate_attestation(self, dataset_id: str) -> QualityAttestation:
         """
@@ -49,7 +49,8 @@ class AttestationService:
             filepath = record.processed_path
         else:
             # Fallback: scan data directory
-            dataset_info = self.duckdb_service.get_dataset_by_id(dataset_id)
+            with ephemeral_duckdb_service() as duckdb:
+                dataset_info = duckdb.get_dataset_by_id(dataset_id)
             if dataset_info:
                 filepath = Path(dataset_info["filepath"])
 
@@ -61,7 +62,8 @@ class AttestationService:
 
         # 2. Get metrics from duckdb_service — gracefully degrade for non-tabular files
         try:
-            metadata = self.duckdb_service.get_enhanced_metadata(filepath)
+            with ephemeral_duckdb_service() as duckdb:
+                metadata = duckdb.get_enhanced_metadata(filepath)
             column_profiles = metadata.get("column_profiles", [])
             row_count = metadata.get("row_count", 0)
             column_count = metadata.get("column_count", 0)
@@ -298,5 +300,4 @@ class AttestationService:
 
 def get_attestation_service() -> AttestationService:
     """Factory function to get an instance of the AttestationService."""
-    duckdb_service = get_duckdb_service()
-    return AttestationService(duckdb_service=duckdb_service)
+    return AttestationService()

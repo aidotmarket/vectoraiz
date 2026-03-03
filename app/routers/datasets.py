@@ -17,7 +17,7 @@ from app.utils.sanitization import validate_path_traversal
 
 from app.config import settings
 from app.models.dataset import DatasetStatus
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 from app.services.processing_service import (
     get_processing_service,
     ProcessingService,
@@ -430,7 +430,6 @@ async def confirm_batch(
 async def get_dataset(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service)
 ):
     """Get metadata for a specific dataset."""
     record = processing.get_dataset(dataset_id)
@@ -438,15 +437,18 @@ async def get_dataset(
         raise VectorAIzError("VAI-UX-001", detail=f"Dataset '{dataset_id}' not found")
 
     response = record.to_dict()
-    
+
     # If ready, include full metadata from DuckDB
     if record.status == ProcessingStatus.READY and record.processed_path:
         try:
-            metadata = await run_sync(duckdb.get_file_metadata, record.processed_path)
+            def _get_metadata():
+                with ephemeral_duckdb_service() as duckdb:
+                    return duckdb.get_file_metadata(record.processed_path)
+            metadata = await run_sync(_get_metadata)
             response["metadata"] = metadata
         except Exception as e:
             response["metadata_error"] = str(e)
-    
+
     return response
 
 
@@ -664,7 +666,6 @@ async def get_dataset_sample(
     limit: int = 10,
     redact_pii: bool = True,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service),
     preview_service: PreviewService = Depends(get_preview_service),
 ):
     """Get sample rows from a dataset. PII columns are masked by default."""
@@ -682,7 +683,10 @@ async def get_dataset_sample(
         raise HTTPException(status_code=500, detail="Processed file not found")
 
     try:
-        sample = await run_sync(duckdb.get_sample_rows, record.processed_path, limit)
+        def _get_sample():
+            with ephemeral_duckdb_service() as duckdb:
+                return duckdb.get_sample_rows(record.processed_path, limit)
+        sample = await run_sync(_get_sample)
 
         if redact_pii and sample:
             pii_columns = preview_service.detect_pii_columns(dataset_id, sample)
@@ -711,24 +715,26 @@ def _redact_pii_rows(rows: list, pii_columns: set) -> list:
 async def get_dataset_statistics(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service)
 ):
     """Get column statistics for a dataset."""
     record = processing.get_dataset(dataset_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
+
     if record.status != ProcessingStatus.READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
         )
-    
+
     if not record.processed_path or not record.processed_path.exists():
         raise HTTPException(status_code=500, detail="Processed file not found")
-    
+
     try:
-        stats = await run_sync(duckdb.get_column_statistics, record.processed_path)
+        def _get_statistics():
+            with ephemeral_duckdb_service() as duckdb:
+                return duckdb.get_column_statistics(record.processed_path)
+        stats = await run_sync(_get_statistics)
         return {
             "dataset_id": dataset_id,
             "statistics": stats
@@ -741,7 +747,6 @@ async def get_dataset_statistics(
 async def get_dataset_profile(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service)
 ):
     """
     Get detailed column profiles including null analysis, uniqueness, and semantic types.
@@ -749,18 +754,21 @@ async def get_dataset_profile(
     record = processing.get_dataset(dataset_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
+
     if record.status != ProcessingStatus.READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
         )
-    
+
     if not record.processed_path or not record.processed_path.exists():
         raise HTTPException(status_code=500, detail="Processed file not found")
-    
+
     try:
-        profiles = await run_sync(duckdb.get_column_profile, record.processed_path)
+        def _get_profile():
+            with ephemeral_duckdb_service() as duckdb:
+                return duckdb.get_column_profile(record.processed_path)
+        profiles = await run_sync(_get_profile)
         return {
             "dataset_id": dataset_id,
             "column_profiles": profiles,
@@ -858,7 +866,6 @@ async def generate_listing_metadata(
 async def get_dataset_searchability(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service)
 ):
     """
     Get searchability score indicating how well the dataset can be semantically searched.
@@ -866,18 +873,21 @@ async def get_dataset_searchability(
     record = processing.get_dataset(dataset_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
+
     if record.status != ProcessingStatus.READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
         )
-    
+
     if not record.processed_path or not record.processed_path.exists():
         raise HTTPException(status_code=500, detail="Processed file not found")
-    
+
     try:
-        searchability = await run_sync(duckdb.calculate_searchability_score, record.processed_path)
+        def _get_searchability():
+            with ephemeral_duckdb_service() as duckdb:
+                return duckdb.calculate_searchability_score(record.processed_path)
+        searchability = await run_sync(_get_searchability)
         return {
             "dataset_id": dataset_id,
             **searchability
@@ -890,7 +900,6 @@ async def get_dataset_searchability(
 async def get_dataset_full_metadata(
     dataset_id: str,
     processing: ProcessingService = Depends(get_processing_service),
-    duckdb: DuckDBService = Depends(get_duckdb_service)
 ):
     """
     Get comprehensive metadata including basic info, column profiles, and searchability.
@@ -899,18 +908,21 @@ async def get_dataset_full_metadata(
     record = processing.get_dataset(dataset_id)
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
-    
+
     if record.status != ProcessingStatus.READY:
         raise HTTPException(
             status_code=400,
             detail=f"Dataset not ready. Current status: {record.status.value}"
         )
-    
+
     if not record.processed_path or not record.processed_path.exists():
         raise HTTPException(status_code=500, detail="Processed file not found")
-    
+
     try:
-        full_metadata = await run_sync(duckdb.get_enhanced_metadata, record.processed_path)
+        def _get_full_metadata():
+            with ephemeral_duckdb_service() as duckdb:
+                return duckdb.get_enhanced_metadata(record.processed_path)
+        full_metadata = await run_sync(_get_full_metadata)
         return {
             "dataset_id": dataset_id,
             "original_filename": record.original_filename,

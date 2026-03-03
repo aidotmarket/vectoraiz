@@ -13,7 +13,7 @@ from pathlib import Path
 import duckdb
 
 from app.config import settings
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 from app.services.processing_service import get_processing_service, ProcessingService, ProcessingStatus
 from app.utils.sanitization import sql_quote_literal
 
@@ -81,7 +81,6 @@ class SQLService:
     """
 
     def __init__(self):
-        self.duckdb: DuckDBService = get_duckdb_service()
         self.processing: ProcessingService = get_processing_service()
         self.processed_dir = Path(settings.processed_directory)
 
@@ -159,7 +158,8 @@ class SQLService:
             raise ValueError(f"Dataset '{dataset_id}' file not found")
 
         # Get column info
-        metadata = self.duckdb.get_file_metadata(record.processed_path)
+        with ephemeral_duckdb_service() as duckdb_svc:
+            metadata = duckdb_svc.get_file_metadata(record.processed_path)
 
         return {
             "table_name": self.get_dataset_table_name(dataset_id),
@@ -269,51 +269,52 @@ class SQLService:
         wrapped_query = self._wrap_with_pagination(clean_query, limit, offset)
 
         # Execute on ephemeral connection
-        conn = self.duckdb.create_ephemeral_connection()
-        try:
+        with ephemeral_duckdb_service() as duckdb_svc:
+            conn = duckdb_svc.create_ephemeral_connection()
+            try:
 
-            # Create views for each dataset
-            self._create_views(conn, datasets)
+                # Create views for each dataset
+                self._create_views(conn, datasets)
 
-            # Execute the user query
-            result = conn.execute(wrapped_query)
-            rows = result.fetchall()
+                # Execute the user query
+                result = conn.execute(wrapped_query)
+                rows = result.fetchall()
 
-            # Get column names
-            columns = [desc[0] for desc in result.description]
+                # Get column names
+                columns = [desc[0] for desc in result.description]
 
-            # Convert to list of dicts
-            data = [dict(zip(columns, row)) for row in rows]
+                # Convert to list of dicts
+                data = [dict(zip(columns, row)) for row in rows]
 
-            # Serialize values
-            data = self._serialize_results(data)
+                # Serialize values
+                data = self._serialize_results(data)
 
-            end_time = datetime.utcnow()
-            duration_ms = (end_time - start_time).total_seconds() * 1000
+                end_time = datetime.utcnow()
+                duration_ms = (end_time - start_time).total_seconds() * 1000
 
-            return {
-                "query": query,
-                "columns": columns,
-                "data": data,
-                "row_count": len(data),
-                "limit": limit,
-                "offset": offset,
-                "duration_ms": round(duration_ms, 2),
-                "truncated": len(data) == limit,
-            }
+                return {
+                    "query": query,
+                    "columns": columns,
+                    "data": data,
+                    "row_count": len(data),
+                    "limit": limit,
+                    "offset": offset,
+                    "duration_ms": round(duration_ms, 2),
+                    "truncated": len(data) == limit,
+                }
 
-        except duckdb.InvalidInputException as e:
-            error_msg = str(e)
-            if str(self.processed_dir) in error_msg:
-                error_msg = error_msg.replace(str(self.processed_dir), "[data]")
-            raise ValueError(f"Query execution failed: {error_msg}")
-        except duckdb.Error as e:
-            error_msg = str(e)
-            if str(self.processed_dir) in error_msg:
-                error_msg = error_msg.replace(str(self.processed_dir), "[data]")
-            raise ValueError(f"Query execution failed: {error_msg}")
-        finally:
-            conn.close()
+            except duckdb.InvalidInputException as e:
+                error_msg = str(e)
+                if str(self.processed_dir) in error_msg:
+                    error_msg = error_msg.replace(str(self.processed_dir), "[data]")
+                raise ValueError(f"Query execution failed: {error_msg}")
+            except duckdb.Error as e:
+                error_msg = str(e)
+                if str(self.processed_dir) in error_msg:
+                    error_msg = error_msg.replace(str(self.processed_dir), "[data]")
+                raise ValueError(f"Query execution failed: {error_msg}")
+            finally:
+                conn.close()
 
     def _serialize_results(self, data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Serialize query results to JSON-compatible format."""

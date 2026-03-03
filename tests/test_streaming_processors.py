@@ -539,8 +539,7 @@ class TestIndexStreaming:
 
         # Mock the dependencies
         with patch("app.services.indexing_service.get_embedding_service"), \
-             patch("app.services.indexing_service.get_qdrant_service"), \
-             patch("app.services.indexing_service.get_duckdb_service"):
+             patch("app.services.indexing_service.get_qdrant_service"):
             service = IndexingService()
 
             row = {
@@ -562,8 +561,7 @@ class TestIndexStreaming:
         from app.services.indexing_service import IndexingService
 
         with patch("app.services.indexing_service.get_embedding_service") as mock_embed, \
-             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant, \
-             patch("app.services.indexing_service.get_duckdb_service"):
+             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant:
 
             mock_embed_svc = MagicMock()
             mock_embed_svc.embed_texts.return_value = [[0.1] * 384]  # dummy embeddings
@@ -783,8 +781,7 @@ class TestPointIDsAsQdrantIDs:
         from app.services.indexing_service import IndexingService
 
         with patch("app.services.indexing_service.get_embedding_service") as mock_embed, \
-             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant, \
-             patch("app.services.indexing_service.get_duckdb_service"):
+             patch("app.services.indexing_service.get_qdrant_service") as mock_qdrant:
 
             mock_embed_svc = MagicMock()
             mock_embed_svc.embed_texts.return_value = [[0.1] * 384, [0.2] * 384]

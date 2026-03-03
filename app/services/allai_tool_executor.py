@@ -373,9 +373,9 @@ class AllAIToolExecutor:
                 llm_summary=f"Dataset '{dataset_id}' not available for preview.",
             )
 
-        from app.services.duckdb_service import get_duckdb_service
-        duckdb_svc = get_duckdb_service()
-        rows = duckdb_svc.get_sample_rows(record.processed_path, limit=limit)
+        from app.services.duckdb_service import ephemeral_duckdb_service
+        with ephemeral_duckdb_service() as duckdb_svc:
+            rows = duckdb_svc.get_sample_rows(record.processed_path, limit=limit)
 
         columns = list(rows[0].keys()) if rows else []
 
@@ -529,9 +529,9 @@ class AllAIToolExecutor:
 
         # Check DuckDB
         try:
-            from app.services.duckdb_service import get_duckdb_service
-            duckdb_svc = get_duckdb_service()
-            duckdb_svc.connection.execute("SELECT 1")
+            from app.services.duckdb_service import ephemeral_duckdb_service
+            with ephemeral_duckdb_service() as duckdb_svc:
+                duckdb_svc.connection.execute("SELECT 1")
             status["duckdb"] = "healthy"
         except Exception as e:
             status["duckdb"] = f"error: {str(e)[:100]}"
@@ -573,7 +573,7 @@ class AllAIToolExecutor:
     async def _handle_get_dataset_statistics(self, tool_input: dict) -> ToolResult:
         """Get statistical profile of a dataset."""
         from app.services.processing_service import get_processing_service
-        from app.services.duckdb_service import get_duckdb_service
+        from app.services.duckdb_service import ephemeral_duckdb_service
 
         dataset_id = tool_input["dataset_id"]
         proc_svc = get_processing_service()
@@ -585,9 +585,9 @@ class AllAIToolExecutor:
                 llm_summary=f"Dataset '{dataset_id}' not available for statistics.",
             )
 
-        duckdb_svc = get_duckdb_service()
         try:
-            stats = duckdb_svc.get_column_statistics(record.processed_path)
+            with ephemeral_duckdb_service() as duckdb_svc:
+                stats = duckdb_svc.get_column_statistics(record.processed_path)
         except Exception as e:
             return ToolResult(
                 frontend_data={"error": f"Statistics failed: {str(e)}"},

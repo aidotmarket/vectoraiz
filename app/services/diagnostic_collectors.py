@@ -87,10 +87,10 @@ class HealthCollector(BaseCollector):
 
     async def collect(self) -> dict:
         from app.routers.health import deep_health_check
-        from app.services.duckdb_service import get_duckdb_service
+        from app.services.duckdb_service import ephemeral_duckdb_service
 
-        duckdb = get_duckdb_service()
-        return await deep_health_check(duckdb)
+        with ephemeral_duckdb_service() as duckdb:
+            return await deep_health_check(duckdb)
 
 
 class ConfigCollector(BaseCollector):

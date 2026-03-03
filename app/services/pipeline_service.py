@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from app.config import settings
-from app.services.duckdb_service import get_duckdb_service
+from app.services.duckdb_service import ephemeral_duckdb_service
 from app.services.pii_service import get_pii_service
 from app.services.compliance_service import get_compliance_service
 from app.services.attestation_service import get_attestation_service
@@ -109,7 +109,6 @@ class PipelineService:
     """Orchestrates the multi-step data processing pipeline."""
 
     def __init__(self):
-        self.duckdb_service = get_duckdb_service()
         self.pii_service = get_pii_service()
         self.compliance_service = get_compliance_service()
         self.attestation_service = get_attestation_service()
@@ -253,17 +252,18 @@ class PipelineService:
 
         Raises on failure so the caller can mark the step as failed.
         """
-        file_type = self.duckdb_service.detect_file_type(filepath)
-        if not file_type:
-            raise ValueError(f"Unsupported file type: {filepath.suffix}")
+        with ephemeral_duckdb_service() as duckdb:
+            file_type = duckdb.detect_file_type(filepath)
+            if not file_type:
+                raise ValueError(f"Unsupported file type: {filepath.suffix}")
 
-        read_func = self.duckdb_service.get_read_function(file_type, str(filepath))
-        escaped_output = sql_quote_literal(str(output_path))
+            read_func = duckdb.get_read_function(file_type, str(filepath))
+            escaped_output = sql_quote_literal(str(output_path))
 
-        self.duckdb_service.connection.execute(
-            f"COPY (SELECT * FROM {read_func}) "
-            f"TO '{escaped_output}' (FORMAT PARQUET, COMPRESSION ZSTD)"
-        )
+            duckdb.connection.execute(
+                f"COPY (SELECT * FROM {read_func}) "
+                f"TO '{escaped_output}' (FORMAT PARQUET, COMPRESSION ZSTD)"
+            )
 
     @staticmethod
     def _validate_parquet(path: Path) -> None:
@@ -297,7 +297,8 @@ class PipelineService:
         dataset_dir.mkdir(parents=True, exist_ok=True)
 
         # Resolve dataset filepath
-        dataset_info = self.duckdb_service.get_dataset_by_id(dataset_id)
+        with ephemeral_duckdb_service() as duckdb:
+            dataset_info = duckdb.get_dataset_by_id(dataset_id)
         if not dataset_info:
             self._update_status(dataset_id, PIPELINE_FAILED, f"Dataset '{dataset_id}' not found.")
             for step in FULL_PIPELINE_STEPS:
@@ -311,7 +312,8 @@ class PipelineService:
         self._set_step_status(dataset_id, "analyze_process", STEP_RUNNING)
         try:
             self._update_status(dataset_id, PIPELINE_RUNNING, "Step 1/3: Analyzing and processing dataset...")
-            metadata = self.duckdb_service.get_enhanced_metadata(filepath)
+            with ephemeral_duckdb_service() as duckdb:
+                metadata = duckdb.get_enhanced_metadata(filepath)
 
             # Save analysis output
             _atomic_write_json(dataset_dir / "analysis.json", metadata)
@@ -465,7 +467,8 @@ class PipelineService:
         self._init_pipeline_state(dataset_id, EXTENDED_PIPELINE_STEPS)
         self._update_status(dataset_id, PIPELINE_RUNNING, "Pipeline started.")
 
-        dataset_info = self.duckdb_service.get_dataset_by_id(dataset_id)
+        with ephemeral_duckdb_service() as duckdb:
+            dataset_info = duckdb.get_dataset_by_id(dataset_id)
         if not dataset_info:
             self._update_status(dataset_id, PIPELINE_FAILED, f"Dataset with id '{dataset_id}' not found.")
             return
@@ -477,7 +480,8 @@ class PipelineService:
         self._set_step_status(dataset_id, "duckdb_analysis", STEP_RUNNING)
         try:
             self._update_status(dataset_id, PIPELINE_RUNNING, "Step 1/5: Analyzing dataset with DuckDB...")
-            metadata = self.duckdb_service.get_enhanced_metadata(filepath)
+            with ephemeral_duckdb_service() as duckdb:
+                metadata = duckdb.get_enhanced_metadata(filepath)
             _atomic_write_json(dataset_dir / "duckdb_analysis.json", metadata)
             self._set_step_status(dataset_id, "duckdb_analysis", STEP_SUCCESS)
         except Exception as e:

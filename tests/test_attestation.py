@@ -58,15 +58,20 @@ SAMPLE_METADATA = {
 }
 
 
-def _make_service(metadata: dict = None, dataset_found: bool = True) -> AttestationService:
-    """Create an AttestationService with a mocked DuckDBService."""
+def _make_mock_duckdb(metadata: dict = None, dataset_found: bool = True) -> MagicMock:
+    """Create a mock DuckDBService for patching ephemeral_duckdb_service."""
     mock_duckdb = MagicMock()
     if dataset_found:
         mock_duckdb.get_dataset_by_id.return_value = {"filepath": "/tmp/test.csv"}
     else:
         mock_duckdb.get_dataset_by_id.return_value = None
     mock_duckdb.get_enhanced_metadata.return_value = metadata or SAMPLE_METADATA
-    return AttestationService(duckdb_service=mock_duckdb)
+    return mock_duckdb
+
+
+def _make_service(metadata: dict = None, dataset_found: bool = True) -> AttestationService:
+    """Create an AttestationService (no longer takes duckdb_service)."""
+    return AttestationService()
 
 
 # ---- Schema Tests ----
@@ -142,24 +147,29 @@ class TestAttestationService:
         output_dir = tmp_path / "processed" / "test-dataset"
         output_dir.mkdir(parents=True)
 
-        service = _make_service()
-        service.duckdb_service.get_dataset_by_id.return_value = {
+        mock_duckdb = _make_mock_duckdb()
+        mock_duckdb.get_dataset_by_id.return_value = {
             "filepath": str(data_file),
         }
 
-        with patch.object(service, "_load_pii_risk", return_value=PIIRiskAssessment()):
-            with patch.object(service, "_load_compliance_status", return_value=ComplianceStatus()):
-                # Redirect the attestation.json write to tmp_path
-                real_path = Path
+        service = _make_service()
 
-                def patched_path(p):
-                    s = str(p)
-                    if s.startswith("/data/processed/"):
-                        return real_path(str(tmp_path / "processed" / s.split("/data/processed/")[1]))
-                    return real_path(s)
+        with patch("app.services.attestation_service.ephemeral_duckdb_service") as mock_ctx:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=mock_duckdb)
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with patch.object(service, "_load_pii_risk", return_value=PIIRiskAssessment()):
+                with patch.object(service, "_load_compliance_status", return_value=ComplianceStatus()):
+                    # Redirect the attestation.json write to tmp_path
+                    real_path = Path
 
-                with patch("app.services.attestation_service.Path", side_effect=patched_path):
-                    att = await service.generate_attestation("test-dataset")
+                    def patched_path(p):
+                        s = str(p)
+                        if s.startswith("/data/processed/"):
+                            return real_path(str(tmp_path / "processed" / s.split("/data/processed/")[1]))
+                        return real_path(s)
+
+                    with patch("app.services.attestation_service.Path", side_effect=patched_path):
+                        att = await service.generate_attestation("test-dataset")
 
         assert att.data_hash  # SHA-256 of data file
         assert att.attestation_hash  # AC5: integrity hash
@@ -176,9 +186,13 @@ class TestAttestationService:
 
     @pytest.mark.asyncio
     async def test_dataset_not_found_raises(self):
+        mock_duckdb = _make_mock_duckdb(dataset_found=False)
         service = _make_service(dataset_found=False)
-        with pytest.raises(ValueError, match="not found"):
-            await service.generate_attestation("nonexistent")
+        with patch("app.services.attestation_service.ephemeral_duckdb_service") as mock_ctx:
+            mock_ctx.return_value.__enter__ = MagicMock(return_value=mock_duckdb)
+            mock_ctx.return_value.__exit__ = MagicMock(return_value=False)
+            with pytest.raises(ValueError, match="not found"):
+                await service.generate_attestation("nonexistent")
 
     def test_quality_grade_A(self):
         service = _make_service()

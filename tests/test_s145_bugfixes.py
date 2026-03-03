@@ -349,7 +349,7 @@ class TestLargeCSVProcessing:
         mock_conn = MagicMock()
         mock_conn.execute = MagicMock()  # succeeds on retry
 
-        with patch("app.services.processing_service.get_duckdb_service") as mock_duckdb:
+        with patch("app.services.processing_service.ephemeral_duckdb_service") as mock_ctx:
             duckdb_inst = MagicMock()
             duckdb_inst.connection.execute.side_effect = Exception("out of memory")
             duckdb_inst.get_read_function.return_value = "read_csv_auto('/tmp/big.csv')"
@@ -357,7 +357,7 @@ class TestLargeCSVProcessing:
             duckdb_inst.get_file_metadata.return_value = {"row_count": 1, "column_count": 2}
             duckdb_inst.get_column_profile.return_value = []
             duckdb_inst.get_sample_rows.return_value = []
-            mock_duckdb.return_value = duckdb_inst
+            mock_ctx.return_value.__enter__.return_value = duckdb_inst
 
             await service._extract_tabular(record)
             duckdb_inst.create_ephemeral_connection.assert_called_once_with(
@@ -378,11 +378,11 @@ class TestLargeCSVProcessing:
         upload_path.write_text("id,value\n1,test\n")
         record.upload_path = upload_path
 
-        with patch("app.services.processing_service.get_duckdb_service") as mock_duckdb:
+        with patch("app.services.processing_service.ephemeral_duckdb_service") as mock_ctx:
             duckdb_inst = MagicMock()
             duckdb_inst.connection.execute.side_effect = Exception("memory error")
             duckdb_inst.get_read_function.return_value = "read_csv_auto('/tmp/x.csv')"
-            mock_duckdb.return_value = duckdb_inst
+            mock_ctx.return_value.__enter__.return_value = duckdb_inst
 
             with pytest.raises(ValueError, match=r"Parquet conversion failed.*csv.*50MB"):
                 await service._extract_tabular(record)

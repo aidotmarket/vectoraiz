@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 
 logger = logging.getLogger(__name__)
 from app.models.listing_metadata_schemas import ListingMetadata, ColumnSummary
@@ -86,8 +86,8 @@ class ListingMetadataService:
     Generates marketplace-ready listing metadata from vectorAIz processing results.
     """
 
-    def __init__(self, duckdb_service: DuckDBService):
-        self.duckdb_service = duckdb_service
+    def __init__(self):
+        pass
 
     async def generate_listing_metadata(self, dataset_id: str) -> ListingMetadata:
         """
@@ -105,7 +105,8 @@ class ListingMetadataService:
         if record and record.processed_path and record.processed_path.exists():
             filepath = record.processed_path
         else:
-            dataset_info = self.duckdb_service.get_dataset_by_id(dataset_id)
+            with ephemeral_duckdb_service() as duckdb:
+                dataset_info = duckdb.get_dataset_by_id(dataset_id)
             if dataset_info:
                 filepath = Path(dataset_info["filepath"])
 
@@ -114,7 +115,8 @@ class ListingMetadataService:
 
         # Get metrics from DuckDB — gracefully degrade for non-tabular files
         try:
-            metadata = self.duckdb_service.get_enhanced_metadata(filepath)
+            with ephemeral_duckdb_service() as duckdb:
+                metadata = duckdb.get_enhanced_metadata(filepath)
         except Exception as e:
             logger.warning("DuckDB metadata unavailable for listing: %s", e)
             metadata = {
@@ -342,5 +344,4 @@ class ListingMetadataService:
 
 def get_listing_metadata_service() -> ListingMetadataService:
     """Factory function to get ListingMetadataService instance."""
-    duckdb_service = get_duckdb_service()
-    return ListingMetadataService(duckdb_service=duckdb_service)
+    return ListingMetadataService()

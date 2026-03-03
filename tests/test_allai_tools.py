@@ -391,7 +391,7 @@ class TestToolExecutor:
 
         # Mock the backend services at the source module level
         with patch("app.services.processing_service.get_processing_service") as mock_ps, \
-             patch("app.services.duckdb_service.get_duckdb_service") as mock_duckdb:
+             patch("app.services.duckdb_service.ephemeral_duckdb_service") as mock_duckdb_ctx:
 
             mock_record = MagicMock()
             mock_record.original_filename = "test.csv"
@@ -406,7 +406,7 @@ class TestToolExecutor:
                 {"name": "Alice", "age": 30},
                 {"name": "Bob", "age": 25},
             ]
-            mock_duckdb.return_value = mock_duckdb_svc
+            mock_duckdb_ctx.return_value.__enter__.return_value = mock_duckdb_svc
 
             result = await executor.execute("preview_rows", {"dataset_id": "abc123"})
 

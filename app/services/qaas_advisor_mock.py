@@ -1,5 +1,5 @@
 from typing import List, Dict, Any
-from app.services.duckdb_service import get_duckdb_service
+from app.services.duckdb_service import ephemeral_duckdb_service
 
 class QaaSAdvisorTools:
     """
@@ -10,15 +10,15 @@ class QaaSAdvisorTools:
         """
         Analyze a dataset for QaaS risks (PII, value density).
         """
-        duck = get_duckdb_service()
-        metadata = duck.get_enhanced_metadata(dataset_id)
-        
+        with ephemeral_duckdb_service() as duck:
+            metadata = duck.get_enhanced_metadata(dataset_id)
+
         # Logic to identify PII columns based on semantic_type
         pii_columns = [
-            col['name'] for col in metadata['column_profiles'] 
+            col['name'] for col in metadata['column_profiles']
             if col['semantic_type'] in ('email', 'phone', 'id')
         ]
-        
+
         return {
             "dataset_id": dataset_id,
             "row_count": metadata['row_count'],

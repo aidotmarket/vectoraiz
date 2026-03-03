@@ -14,7 +14,7 @@ import logging
 from app.config import settings
 from app.services.embedding_service import get_embedding_service, EmbeddingService
 from app.services.qdrant_service import get_qdrant_service, QdrantService
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,6 @@ class IndexingService:
     def __init__(self):
         self.embedding_service: EmbeddingService = get_embedding_service()
         self.qdrant_service: QdrantService = get_qdrant_service()
-        self.duckdb_service: DuckDBService = get_duckdb_service()
     
     def index_dataset(
         self,
@@ -65,7 +64,8 @@ class IndexingService:
         )
         
         # Get dataset metadata to identify text columns
-        metadata = self.duckdb_service.get_file_metadata(filepath)
+        with ephemeral_duckdb_service() as duckdb:
+            metadata = duckdb.get_file_metadata(filepath)
         
         # Auto-detect text columns if not specified
         if text_columns is None:
@@ -155,7 +155,8 @@ class IndexingService:
         Auto-detect columns suitable for text search.
         Prefers text/varchar columns with reasonable content.
         """
-        profiles = self.duckdb_service.get_column_profile(filepath)
+        with ephemeral_duckdb_service() as duckdb:
+            profiles = duckdb.get_column_profile(filepath)
         
         text_columns = []
         for profile in profiles:
@@ -175,15 +176,16 @@ class IndexingService:
     
     def _extract_rows(self, filepath: Path, limit: int) -> List[Dict[str, Any]]:
         """Extract rows from dataset for indexing."""
-        file_type = self.duckdb_service.detect_file_type(filepath)
-        read_func = self.duckdb_service.get_read_function(file_type, str(filepath))
-        
-        query = f"SELECT * FROM {read_func} LIMIT {limit}"
-        result = self.duckdb_service.connection.execute(query).fetchall()
-        
-        # Get column names
-        schema = self.duckdb_service.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
-        column_names = [row[0] for row in schema]
+        with ephemeral_duckdb_service() as duckdb:
+            file_type = duckdb.detect_file_type(filepath)
+            read_func = duckdb.get_read_function(file_type, str(filepath))
+
+            query = f"SELECT * FROM {read_func} LIMIT {limit}"
+            result = duckdb.connection.execute(query).fetchall()
+
+            # Get column names
+            schema = duckdb.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
+            column_names = [row[0] for row in schema]
         
         # Convert to list of dicts
         rows = []

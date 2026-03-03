@@ -23,7 +23,7 @@ from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
 
 from app.config import settings
-from app.services.duckdb_service import get_duckdb_service, DuckDBService
+from app.services.duckdb_service import ephemeral_duckdb_service
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,6 @@ class PIIService:
     
     def __init__(self):
         self._analyzer: Optional[AnalyzerEngine] = None
-        self.duckdb: DuckDBService = get_duckdb_service()
         self._config_dir = Path(settings.data_directory) / "pii_configs"
         self._config_dir.mkdir(parents=True, exist_ok=True)
     
@@ -331,23 +330,24 @@ class PIIService:
         start_time = datetime.utcnow()
         entities = entities or DEFAULT_ENTITIES
         
-        # Get dataset metadata
-        file_type = self.duckdb.detect_file_type(filepath)
-        if file_type is None:
-            raise ValueError(f"Unsupported file type: {filepath.suffix}")
-        read_func = self.duckdb.get_read_function(file_type, str(filepath))
-        
-        # Get column names
-        schema = self.duckdb.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
-        columns = [row[0] for row in schema]
-        
-        # Get total row count
-        count_result = self.duckdb.connection.execute(f"SELECT COUNT(*) FROM {read_func}").fetchone()
-        total_rows = count_result[0] if count_result else 0
-        
-        # Sample rows for scanning
-        sample_query = f"SELECT * FROM {read_func} USING SAMPLE {min(sample_size, total_rows)}"
-        sample_rows = self.duckdb.connection.execute(sample_query).fetchall()
+        # Get dataset metadata using ephemeral connection (thread-safe)
+        with ephemeral_duckdb_service() as duckdb:
+            file_type = duckdb.detect_file_type(filepath)
+            if file_type is None:
+                raise ValueError(f"Unsupported file type: {filepath.suffix}")
+            read_func = duckdb.get_read_function(file_type, str(filepath))
+
+            # Get column names
+            schema = duckdb.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
+            columns = [row[0] for row in schema]
+
+            # Get total row count
+            count_result = duckdb.connection.execute(f"SELECT COUNT(*) FROM {read_func}").fetchone()
+            total_rows = count_result[0] if count_result else 0
+
+            # Sample rows for scanning
+            sample_query = f"SELECT * FROM {read_func} USING SAMPLE {min(sample_size, total_rows)}"
+            sample_rows = duckdb.connection.execute(sample_query).fetchall()
         
         # Initialize results for each column
         column_results: Dict[str, PIIResult] = {col: PIIResult(col) for col in columns}
@@ -425,14 +425,15 @@ class PIIService:
         # 1. Scan the original dataset
         before_scan = self.scan_dataset(filepath, sample_size)
 
-        # 2. Read the full dataset into rows
-        file_type = self.duckdb.detect_file_type(filepath)
-        if file_type is None:
-            raise ValueError(f"Unsupported file type: {filepath.suffix}")
-        read_func = self.duckdb.get_read_function(file_type, str(filepath))
-        rows = self.duckdb.connection.execute(f"SELECT * FROM {read_func}").fetchall()
-        schema = self.duckdb.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
-        columns = [row[0] for row in schema]
+        # 2. Read the full dataset into rows using ephemeral connection (thread-safe)
+        with ephemeral_duckdb_service() as duckdb:
+            file_type = duckdb.detect_file_type(filepath)
+            if file_type is None:
+                raise ValueError(f"Unsupported file type: {filepath.suffix}")
+            read_func = duckdb.get_read_function(file_type, str(filepath))
+            rows = duckdb.connection.execute(f"SELECT * FROM {read_func}").fetchall()
+            schema = duckdb.connection.execute(f"DESCRIBE SELECT * FROM {read_func}").fetchall()
+            columns = [row[0] for row in schema]
 
         # 3. Determine the anonymization operator
         if strategy == "mask":
@@ -474,7 +475,8 @@ class PIIService:
         # 5. Write the scrubbed data to a new Parquet file
         original_filepath = Path(filepath)
         scrubbed_filepath = original_filepath.with_name(original_filepath.stem + "_scrubbed" + original_filepath.suffix)
-        self.duckdb.write_parquet(scrubbed_filepath, scrubbed_rows, columns)
+        with ephemeral_duckdb_service() as duckdb:
+            duckdb.write_parquet(scrubbed_filepath, scrubbed_rows, columns)
 
         # 6. Scan the scrubbed dataset
         after_scan = self.scan_dataset(scrubbed_filepath, sample_size)

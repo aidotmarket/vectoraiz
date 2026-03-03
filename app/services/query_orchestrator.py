@@ -209,14 +209,14 @@ class QueryOrchestrator:
             meta = _json.loads(record.metadata_json) if record.metadata_json else {}
 
             # Get detailed column info from DuckDB
-            from app.services.duckdb_service import get_duckdb_service
-            duckdb_svc = get_duckdb_service()
+            from app.services.duckdb_service import ephemeral_duckdb_service
             processed_path = Path(record.processed_path) if record.processed_path else None
 
             columns = []
             if processed_path and processed_path.exists():
                 try:
-                    profiles = duckdb_svc.get_column_profile(processed_path, max_rows=100)
+                    with ephemeral_duckdb_service() as duckdb_svc:
+                        profiles = duckdb_svc.get_column_profile(processed_path, max_rows=100)
                     for p in profiles:
                         columns.append(ColumnInfo(
                             name=p["name"],
@@ -404,12 +404,12 @@ class QueryOrchestrator:
             wrapped_sql = f"SELECT * FROM ({clean_sql}) AS __ext_q LIMIT {max_rows}"
 
             # Execute on ephemeral connection with tighter limits (M30)
-            from app.services.duckdb_service import get_duckdb_service
-            duckdb_svc = get_duckdb_service()
-            conn = duckdb_svc.create_ephemeral_connection(
-                memory_limit=f"{memory_mb}MB",
-                threads=2,
-            )
+            from app.services.duckdb_service import ephemeral_duckdb_service
+            with ephemeral_duckdb_service() as duckdb_svc:
+                conn = duckdb_svc.create_ephemeral_connection(
+                    memory_limit=f"{memory_mb}MB",
+                    threads=2,
+                )
 
             try:
                 # Create views for queryable datasets
