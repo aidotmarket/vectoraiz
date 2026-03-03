@@ -302,6 +302,9 @@ class IndexingService:
                     )
                     texts_buf = []
                     payloads_buf = []
+                    # Release memory pages to OS — prevents RSS ratchet on large datasets
+                    from app.services.process_worker import _release_memory
+                    _release_memory()
                     if progress_callback:
                         progress_callback(total_indexed)
 
@@ -312,6 +315,9 @@ class IndexingService:
             total_indexed += self._flush_index_batch(
                 collection_name, texts_buf, payloads_buf,
             )
+            # Release memory after final flush
+            from app.services.process_worker import _release_memory
+            _release_memory()
             if progress_callback:
                 progress_callback(total_indexed)
 

@@ -39,6 +39,24 @@ import pyarrow as pa
 logger = logging.getLogger(__name__)
 
 
+def _release_memory():
+    """Force Python to return freed memory pages to OS.
+
+    CPython's allocator holds freed pages indefinitely, causing RSS to
+    ratchet upward during long-running loops (e.g. indexing millions of rows).
+    gc.collect() frees unreachable objects, then malloc_trim() returns
+    the freed pages to the kernel.
+    """
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except (OSError, AttributeError):
+        pass  # Non-glibc platform (e.g. macOS) — gc.collect() alone still helps
+
+
 def log_mem_state(phase: str):
     try:
         process = psutil.Process(os.getpid())
@@ -456,6 +474,7 @@ def run_indexing_worker(
             if rows_done - _rows_logged[0] >= 5000:
                 log_mem_state(f"indexing_rows_{rows_done}")
                 _rows_logged[0] = rows_done
+                _release_memory()  # Periodic OS page release
 
             pct = min((rows_done / max(total_rows, 1)) * 100, 99) if total_rows else 50
             _safe_progress_send(progress_conn, {
