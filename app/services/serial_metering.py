@@ -128,8 +128,17 @@ class SerialMeteringStrategy:
     ) -> MeterDecision:
         state = self._store.state
 
-        # UNPROVISIONED: block everything
+        # UNPROVISIONED: allow setup offline, block data
         if state.state == UNPROVISIONED:
+            if category == "setup":
+                self._queue.append({
+                    "category": category,
+                    "cost_usd": str(estimated_cost),
+                    "request_id": request_id,
+                    "description": "unprovisioned-offline",
+                    "timestamp": time.time(),
+                })
+                return MeterDecision(allowed=True, category=category, offline=True)
             raise UnprovisionedException()
 
         # PROVISIONED: allow setup offline, block data

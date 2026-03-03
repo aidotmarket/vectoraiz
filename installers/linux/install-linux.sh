@@ -328,7 +328,7 @@ URL=$(make_url "$PORT")
 # ─── Step 6a: Connected mode prompt ──────────────────────────────
 VECTORAIZ_MODE="standalone"
 if [ ! -f "$INSTALL_DIR/.env" ]; then
-    if [ ! -t 0 ] && [ ! -e /dev/tty ]; then
+    if [ ! -t 0 ] && ! (exec </dev/tty) 2>/dev/null; then
         # Non-interactive mode (e.g. CI / piped input without TTY)
         if [ -n "${VECTORAIZ_MODE:-}" ]; then
             success "Using VECTORAIZ_MODE=${VECTORAIZ_MODE} from environment"
@@ -474,7 +474,7 @@ if [ -d "$HOME/Desktop" ]; then
 fi
 
 # ─── Step 12: Offer systemd service ──────────────────────────────
-if command -v systemctl &>/dev/null; then
+if command -v systemctl &>/dev/null && { [ -t 0 ] || (exec </dev/tty) 2>/dev/null; }; then
     echo ""
     echo -e "  ${CYAN}${BOLD}─── Auto-start on boot ────────────────────${NC}"
     echo ""

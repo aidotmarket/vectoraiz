@@ -53,15 +53,22 @@ def mock_queue(tmp_path):
 
 class TestUnprovisionedState:
     @pytest.mark.asyncio
-    async def test_blocks_all_operations(self, mock_store, mock_client, mock_queue):
+    async def test_allows_setup_offline(self, mock_store, mock_client, mock_queue):
+        mock_store.state.state = UNPROVISIONED
+        strategy = SerialMeteringStrategy(mock_store, mock_client, mock_queue)
+
+        decision = await strategy.check_and_meter("setup", Decimal("0.01"), "req_1")
+        assert decision.allowed is True
+        assert decision.offline is True
+        assert mock_queue.count() == 1
+
+    @pytest.mark.asyncio
+    async def test_blocks_data(self, mock_store, mock_client, mock_queue):
         mock_store.state.state = UNPROVISIONED
         strategy = SerialMeteringStrategy(mock_store, mock_client, mock_queue)
 
         with pytest.raises(UnprovisionedException):
-            await strategy.check_and_meter("setup", Decimal("0.01"), "req_1")
-
-        with pytest.raises(UnprovisionedException):
-            await strategy.check_and_meter("data", Decimal("0.03"), "req_2")
+            await strategy.check_and_meter("data", Decimal("0.03"), "req_1")
 
 
 class TestProvisionedState:
