@@ -5,7 +5,7 @@ State Management Models
 SQLModel classes for local state persistence:
 - Session: Conversation containers
 - Message: Individual chat messages
-- UserPreferences: Per-user LLM settings + Allie personality
+- UserPreferences: Per-user Allie personality settings
 
 Phase: 3.W.1
 Created: 2026-01-25
@@ -46,7 +46,7 @@ class TimestampMixin(SQLModel):
 
 class UserPreferences(TimestampMixin, table=True):
     """
-    Per-user LLM + Allie personality preferences.
+    Per-user Allie personality preferences.
     Keyed by user_id (unique). Created on first access.
     """
     __tablename__ = "user_preferences"
@@ -56,19 +56,8 @@ class UserPreferences(TimestampMixin, table=True):
     # Per-user key — each user gets their own row
     user_id: str = Field(index=True, unique=True)
 
-    # LLM Provider Settings
-    llm_provider: str = Field(default="gemini")  # gemini, openai
-    llm_model: str = Field(default="gemini-1.5-flash")
-    temperature: float = Field(default=0.2)
-    max_tokens: int = Field(default=1024)
-
     # Custom system prompt (overrides default RAG prompt)
     system_prompt_override: Optional[str] = Field(default=None, nullable=True)
-
-    # API Keys (stored locally, never sent to ai.market)
-    # Note: In production, consider encryption at rest
-    gemini_api_key: Optional[str] = Field(default=None, nullable=True)
-    openai_api_key: Optional[str] = Field(default=None, nullable=True)
 
     # BQ-128 Phase 2: Allie personality preferences
     tone_mode: str = Field(default="friendly")  # professional | friendly | surfer
@@ -243,28 +232,16 @@ class NudgeDismissal(SQLModel, table=True):
 
 class UserPreferencesUpdate(SQLModel):
     """Request model for updating preferences."""
-    llm_provider: Optional[str] = None
-    llm_model: Optional[str] = None
-    temperature: Optional[float] = None
-    max_tokens: Optional[int] = None
     system_prompt_override: Optional[str] = None
-    gemini_api_key: Optional[str] = None
-    openai_api_key: Optional[str] = None
     tone_mode: Optional[str] = None
     quiet_mode: Optional[bool] = None
 
 
 class UserPreferencesRead(SQLModel):
-    """Response model for preferences (masks API keys)."""
+    """Response model for preferences."""
     id: int
     user_id: str
-    llm_provider: str
-    llm_model: str
-    temperature: float
-    max_tokens: int
     system_prompt_override: Optional[str]
-    gemini_api_key_set: bool = False
-    openai_api_key_set: bool = False
     tone_mode: str = "friendly"
     quiet_mode: bool = False
     has_seen_intro: bool = False

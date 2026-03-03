@@ -24,7 +24,6 @@ const pageTitles: Record<string, string> = {
   "/search": "Search",
   "/sql": "SQL Query",
   "/settings": "Settings",
-  "/deploy-ai": "Deploy AI",
   "/data-types": "Data Types",
   "/ai-market": "ai.market",
 };

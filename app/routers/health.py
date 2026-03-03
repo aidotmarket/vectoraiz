@@ -160,16 +160,12 @@ async def _check_duckdb() -> dict:
 
 
 async def _check_llm() -> dict:
-    """Check LLM provider configuration."""
+    """Check Allie LLM provider configuration."""
     try:
-        from app.services.llm_service import get_llm_service
+        from app.services.allie_provider import get_allie_provider
 
-        llm = get_llm_service()
-        info = llm.get_model_info()
-        if info.get("api_key_set"):
-            return {"status": "ok", "detail_safe": f"Provider: {info.get('provider', '?')}"}
-        else:
-            return {"status": "down", "detail_safe": "API key not configured"}
+        provider = get_allie_provider()
+        return {"status": "ok", "detail_safe": f"Provider: {type(provider).__name__}"}
     except Exception as e:
         return {"status": "down", "detail_safe": f"LLM check failed: {type(e).__name__}"}
 

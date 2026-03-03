@@ -10,7 +10,6 @@ import {
   DollarSign,
   Monitor,
   Globe,
-  Bot,
   FileStack,
   Store,
 } from "lucide-react";
@@ -35,7 +34,6 @@ const topNavItems: NavItem[] = [
 ];
 
 const bottomNavItems: NavItem[] = [
-  { path: "/deploy-ai", label: "Deploy AI", icon: Bot },
   { path: "/data-types", label: "Data Types", icon: FileStack },
   { path: "/ai-market", label: "ai.market", icon: Store },
 ];

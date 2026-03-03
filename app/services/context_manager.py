@@ -16,7 +16,7 @@ from uuid import UUID
 
 from app.models.state import Message, MessageRole
 from app.services.session_service import SessionService
-from app.services.llm_service import LLMService, get_llm_service
+from app.services.allie_provider import BaseAllieProvider, get_allie_provider
 
 logger = logging.getLogger(__name__)
 
@@ -73,29 +73,27 @@ class ContextWindowManager:
     """
 
     def __init__(
-        self, 
+        self,
         session_service: SessionService,
-        llm_service: Optional[LLMService] = None,
         config: Optional[ContextConfig] = None
     ):
         """
         Initialize context manager.
-        
+
         Args:
             session_service: Service for message retrieval
-            llm_service: Service for summarization (optional, lazy-loaded)
             config: Context window configuration
         """
         self.session_service = session_service
-        self._llm_service = llm_service
+        self._allie_provider: Optional[BaseAllieProvider] = None
         self.config = config or ContextConfig()
 
     @property
-    def llm_service(self) -> LLMService:
-        """Lazy-load LLM service."""
-        if self._llm_service is None:
-            self._llm_service = get_llm_service()
-        return self._llm_service
+    def allie_provider(self) -> BaseAllieProvider:
+        """Lazy-load Allie provider."""
+        if self._allie_provider is None:
+            self._allie_provider = get_allie_provider()
+        return self._allie_provider
 
     def estimate_tokens(self, text: str) -> int:
         """
@@ -333,30 +331,8 @@ Conversation:
 
 Summary:"""
 
-        try:
-            # Use synchronous wrapper (asyncio.run would be needed in truly sync code)
-            # For now, return a placeholder - actual implementation depends on FastAPI context
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # We're in an async context - can't use run
-                    # Return a simple fallback
-                    return f"(Older context from {len(messages)} messages was summarized for brevity)"
-                else:
-                    return loop.run_until_complete(
-                        self.llm_service.generate(
-                            prompt=prompt,
-                            system_prompt="You are a helpful assistant that summarizes conversations concisely.",
-                            max_tokens=200,
-                            temperature=0.3
-                        )
-                    )
-            except RuntimeError:
-                return f"(Older context from {len(messages)} messages was summarized for brevity)"
-        except Exception as e:
-            logger.error(f"Failed to summarize messages: {e}")
-            return f"(Older context from {len(messages)} messages was truncated)"
+        # Always return a placeholder in sync context (use summarize_messages_async for real summaries)
+        return f"(Older context from {len(messages)} messages was summarized for brevity)"
 
     async def summarize_messages_async(self, messages: List[Message]) -> Optional[str]:
         """
@@ -390,13 +366,11 @@ Conversation:
 Summary:"""
 
         try:
-            summary = await self.llm_service.generate(
-                prompt=prompt,
-                system_prompt="You are a helpful assistant that summarizes conversations concisely.",
-                max_tokens=200,
-                temperature=0.3
-            )
-            return summary.strip()
+            parts: list[str] = []
+            async for chunk in self.allie_provider.stream(message=prompt):
+                if chunk.text:
+                    parts.append(chunk.text)
+            return "".join(parts).strip()
         except Exception as e:
             logger.error(f"Failed to summarize messages: {e}")
             return f"(Older context from {len(messages)} messages was truncated)"

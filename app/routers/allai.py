@@ -17,7 +17,6 @@ import logging
 from app.config import settings
 from app.core.errors import VectorAIzError
 from app.services.rag_service import get_rag_service, RAGService
-from app.services.llm_service import get_llm_service
 from app.models.rag import RAGRequest, RAGResponse
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.services.serial_metering import metered, MeterDecision
@@ -189,28 +188,6 @@ async def list_templates(
     return {
         "templates": rag_service.prompt_registry.list_templates(),
         "default": "rag_qa"
-    }
-
-
-@router.get("/settings")
-async def get_llm_settings(
-    user: AuthenticatedUser = Depends(get_current_user),
-):
-    """
-    Get current LLM provider settings.
-    
-    Returns the configured provider (gemini/openai) and model,
-    but NOT the API key for security.
-    
-    **Requires:** X-API-Key header
-    """
-    llm_service = get_llm_service()
-    info = llm_service.get_model_info()
-    
-    return {
-        "provider": info.get("provider"),
-        "model": info.get("model"),
-        "api_key_configured": info.get("api_key_set", False),
     }
 
 

@@ -703,8 +703,7 @@ const SettingsPage = () => {
             <p className="text-xs text-muted-foreground">
               For additional format support, see{" "}
               <a href="/data-types" className="text-primary hover:underline">Data Types</a>.
-              To configure your LLM provider, see{" "}
-              <a href="/deploy-ai" className="text-primary hover:underline">Deploy AI</a>.
+              External LLMs connect to vectorAIz via MCP or REST.
             </p>
           </div>
         </CardContent>

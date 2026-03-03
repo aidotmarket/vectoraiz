@@ -19,7 +19,6 @@ import SearchPage from "./pages/SearchPage";
 import SqlQuery from "./pages/SqlQuery";
 import DatabasePage from "./pages/DatabasePage";
 import SettingsPage from "./pages/SettingsPage";
-import DeployAIPage from "./pages/DeployAIPage";
 import DataTypesPage from "./pages/DataTypesPage";
 import AiMarketPage from "./pages/AiMarketPage";
 import SetupPage from "./pages/SetupPage";
@@ -93,7 +92,6 @@ const App = () => (
                     <Route path="/sql" element={<SqlQuery />} />
                     <Route path="/databases" element={<DatabasePage />} />
                     <Route path="/settings" element={<SettingsPage />} />
-                    <Route path="/deploy-ai" element={<DeployAIPage />} />
                     <Route path="/data-types" element={<DataTypesPage />} />
                     <Route path="/ai-market" element={<AiMarketPage />} />
                   </Route>

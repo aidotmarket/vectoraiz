@@ -18,7 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.prompts.website_chat import WEBSITE_CHAT_SYSTEM_PROMPT
-from app.services.llm_service import LLMService
+from app.services.allie_provider import get_allie_provider
 
 logger = logging.getLogger(__name__)
 
@@ -143,14 +143,15 @@ async def website_chat(request: WebsiteChatRequest, http_request: Request):
     prompt = "\n\n".join(prompt_parts)
 
     try:
-        llm = LLMService(provider_override="anthropic")
-        reply = await llm.generate(
-            prompt=prompt,
-            system_prompt=WEBSITE_CHAT_SYSTEM_PROMPT,
-            temperature=0.5,
-            max_tokens=512,
-        )
-        reply = reply.strip()
+        provider = get_allie_provider()
+        parts = []
+        async for chunk in provider.stream(
+            message=prompt,
+            context=WEBSITE_CHAT_SYSTEM_PROMPT,
+        ):
+            if chunk.text:
+                parts.append(chunk.text)
+        reply = "".join(parts).strip()
     except Exception as e:
         logger.error("Website chat LLM error: %s", e, exc_info=True)
         raise HTTPException(

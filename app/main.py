@@ -17,7 +17,7 @@ faulthandler.enable(file=sys.stderr, all_threads=True)
 from app.config import settings
 
 # BQ-127: Stock routers — always imported regardless of mode
-from app.routers import health, datasets, search, sql, vectors, pii, docs, llm_admin, diagnostics, imports
+from app.routers import health, datasets, search, sql, vectors, pii, docs, diagnostics, imports
 from app.routers import auth as auth_router_module
 from app.auth.api_key_auth import get_current_user
 from app.core.database import init_db, close_db
@@ -551,12 +551,6 @@ def create_app() -> FastAPI:
         pii.router,
         prefix="/api/pii",
         tags=["pii"],
-        dependencies=protected_route_dependency,
-    )
-    app.include_router(
-        llm_admin.router,
-        prefix="/api/admin/llm",
-        tags=["LLM Admin"],
         dependencies=protected_route_dependency,
     )
 

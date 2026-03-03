@@ -28,12 +28,6 @@ export default function EmptyState({ isStandalone, allieAvailable }: EmptyStateP
         >
           Learn More <ExternalLink className="h-3 w-3" />
         </a>
-        <div className="bg-muted/50 rounded-lg px-4 py-3 max-w-[280px]">
-          <p className="text-xs text-muted-foreground leading-relaxed">
-            <span className="font-medium text-foreground">Tip:</span> You can still query your data
-            using your own LLM key. Set it up in Deploy AI.
-          </p>
-        </div>
       </div>
     );
   }

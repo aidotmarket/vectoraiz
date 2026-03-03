@@ -273,53 +273,6 @@ export interface DatasetPreviewResponse {
   error_message?: string;
 }
 
-// BQ-107: LLM Admin types
-export interface LLMModelInfo {
-  id: string;
-  name: string;
-  context: number;
-  tier: string;
-}
-
-export interface LLMProviderInfo {
-  id: string;
-  name: string;
-  models: LLMModelInfo[];
-  key_prefix: string;
-  docs_url: string;
-}
-
-export interface LLMProvidersResponse {
-  providers: LLMProviderInfo[];
-}
-
-export interface LLMSettingsResponse {
-  provider: string;
-  model: string;
-  display_name?: string;
-  key_hint?: string;
-  is_active: boolean;
-  last_tested_at?: string;
-  last_test_ok?: boolean;
-  total_requests: number;
-  total_tokens: number;
-}
-
-export interface LLMSettingsListResponse {
-  configured: boolean;
-  active_provider?: string;
-  providers: LLMSettingsResponse[];
-}
-
-export interface LLMTestResponse {
-  ok: boolean;
-  provider: string;
-  model?: string;
-  latency_ms?: number;
-  message: string;
-  error_code?: string;
-}
-
 // BQ-108: Batch upload types
 export interface BatchItemAccepted {
   client_file_index: number;
@@ -768,31 +721,4 @@ export const importApi = {
     }),
 };
 
-// BQ-107: LLM Admin API
-export const llmAdminApi = {
-  getProviders: () =>
-    apiFetch<LLMProvidersResponse>('/api/admin/llm/providers'),
 
-  getSettings: () =>
-    apiFetch<LLMSettingsListResponse>('/api/admin/llm/settings'),
-
-  putSettings: (provider: string, apiKey: string, model: string) =>
-    apiFetch<LLMSettingsResponse>('/api/admin/llm/settings', {
-      method: 'PUT',
-      body: JSON.stringify({ provider, api_key: apiKey, model, set_active: true }),
-    }),
-
-  deleteSettings: (provider: string) =>
-    apiFetch<{ message: string }>(`/api/admin/llm/settings/${provider}`, {
-      method: 'DELETE',
-    }),
-
-  testConnection: (provider: string) =>
-    apiFetch<LLMTestResponse>('/api/admin/llm/test', {
-      method: 'POST',
-      body: JSON.stringify({ provider }),
-    }),
-
-  getStatus: () =>
-    apiFetch<{ configured: boolean; active_provider?: string; status: string }>('/api/admin/llm/status'),
-};

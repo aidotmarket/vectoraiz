@@ -155,16 +155,6 @@ class Settings(BaseSettings):
     # Public URL for this vectorAIz instance (used in OpenAPI specs for Custom GPT Actions)
     public_url: str = "https://vectoraiz-backend-production.up.railway.app"
 
-    # LLM Settings (BYO-Key)
-    llm_provider: Literal["gemini", "openai", "anthropic"] = "gemini"
-    llm_model: str = "gemini-1.5-flash"  # Default model
-    llm_temperature: float = 0.2  # Lower for factual RAG responses
-    llm_max_tokens: int = 1024
-    gemini_api_key: Optional[str] = None
-    google_genai_use_gca: bool = False  # AG-002: Vertex AI support
-    openai_api_key: Optional[str] = None
-    anthropic_api_key: Optional[str] = None
-    
     # BQ-MCP-RAG: External LLM Connectivity (§4.5)
     connectivity_enabled: bool = False          # Off by default — customer must opt in
     connectivity_bind_host: str = "127.0.0.1"  # Loopback only by default

@@ -36,7 +36,6 @@ from app.services.batch_service import get_batch_service, BatchService
 from app.services.preview_service import get_preview_service, PreviewService
 from app.schemas.batch import ConfirmRequest, BatchConfirmResponse
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
-from app.services.llm_providers.base import LLMProviderError
 from app.services.serial_metering import metered, MeterDecision
 
 logger = logging.getLogger(__name__)
@@ -800,8 +799,6 @@ async def generate_dataset_attestation(
     try:
         attestation = await attestation_service.generate_attestation(dataset_id)
         return attestation
-    except LLMProviderError:
-        raise HTTPException(status_code=503, detail="LLM provider not configured")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:
@@ -854,8 +851,6 @@ async def generate_listing_metadata(
     try:
         metadata = await listing_service.generate_listing_metadata(dataset_id)
         return metadata
-    except LLMProviderError:
-        raise HTTPException(status_code=503, detail="LLM provider not configured")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception as e:

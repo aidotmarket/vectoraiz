@@ -36,10 +36,9 @@ from sqlmodel import Session as DBSession
 
 from app.core.async_utils import run_sync
 from app.services.search_service import get_search_service, SearchService
-from app.services.llm_service import get_llm_service, LLMService
+from app.services.allie_provider import get_allie_provider, BaseAllieProvider, AllieDisabledError
 from app.services.prompt_registry import get_prompt_registry, PromptRegistry
 from app.services.citation_parser import get_citation_parser, CitationParser
-from app.services.llm_providers.base import LLMProviderError
 from app.services.session_service import SessionService
 from app.services.context_manager import ContextWindowManager, ContextConfig
 from app.models.rag import (
@@ -65,16 +64,16 @@ class RAGService:
     def __init__(self, db: Optional[DBSession] = None):
         """
         Initialize RAG service.
-        
+
         Args:
             db: Optional database session for stateful operations.
                 If not provided, only stateless queries are available.
         """
         self.search_service: SearchService = get_search_service()
-        self.llm_service: LLMService = get_llm_service()
+        self._allie: BaseAllieProvider = get_allie_provider()
         self.prompt_registry: PromptRegistry = get_prompt_registry()
         self.citation_parser: CitationParser = get_citation_parser()
-        
+
         # Stateful components (initialized lazily if db provided)
         self._db = db
         self._session_service: Optional[SessionService] = None
@@ -95,7 +94,6 @@ class RAGService:
         if self._context_manager is None:
             self._context_manager = ContextWindowManager(
                 session_service=self.session_service,
-                llm_service=self.llm_service
             )
         return self._context_manager
 
@@ -192,17 +190,15 @@ class RAGService:
 
         # === STEP 3: GENERATION ===
         t2 = time.perf_counter()
-        
+
         try:
-            raw_response = await self.llm_service.generate(
-                prompt=prompt,
-                **llm_kwargs
-            )
-        except LLMProviderError as e:
-            logger.error(f"LLM generation failed: {e}")
-            raise RuntimeError(f"LLM generation failed: {str(e)}")
+            parts: List[str] = []
+            async for chunk in self._allie.stream(message=prompt):
+                if chunk.text:
+                    parts.append(chunk.text)
+            raw_response = "".join(parts)
         except Exception as e:
-            logger.error(f"Unexpected LLM error: {e}")
+            logger.error(f"LLM generation failed: {e}")
             raise RuntimeError(f"LLM generation failed: {str(e)}")
             
         t3 = time.perf_counter()
@@ -221,7 +217,7 @@ class RAGService:
         parsed_response.generation_time_ms = generation_time_ms
         parsed_response.total_time_ms = (t3 - t0) * 1000
         parsed_response.template_used = "setup_guide" if is_setup else template
-        parsed_response.model_used = self.llm_service.get_model_info().get("model", "unknown")
+        parsed_response.model_used = type(self._allie).__name__
         parsed_response.chunks_retrieved = len(source_chunks)
 
         logger.info(
@@ -336,13 +332,14 @@ class RAGService:
         
         # === STEP 5: GENERATION ===
         t2 = time.perf_counter()
-        
+
         try:
-            raw_response = await self.llm_service.generate(
-                prompt=prompt,
-                **llm_kwargs
-            )
-        except LLMProviderError as e:
+            parts_: List[str] = []
+            async for chunk in self._allie.stream(message=prompt):
+                if chunk.text:
+                    parts_.append(chunk.text)
+            raw_response = "".join(parts_)
+        except Exception as e:
             logger.error(f"LLM generation failed: {e}")
             raise RuntimeError(f"LLM generation failed: {str(e)}")
         
@@ -378,9 +375,9 @@ class RAGService:
         parsed_response.generation_time_ms = generation_time_ms
         parsed_response.total_time_ms = (t3 - t0) * 1000
         parsed_response.template_used = template
-        parsed_response.model_used = self.llm_service.get_model_info().get("model", "unknown")
+        parsed_response.model_used = type(self._allie).__name__
         parsed_response.chunks_retrieved = len(source_chunks)
-        
+
         # Add session info to response
         parsed_response.session_id = str(session_id)
         parsed_response.message_id = str(assistant_message.id)
@@ -455,9 +452,10 @@ class RAGService:
         # Stream and collect response — persist even on disconnect (partial)
         full_response = []
         try:
-            async for chunk in self.llm_service.generate_stream(prompt=prompt, **llm_kwargs):
-                full_response.append(chunk)
-                yield chunk
+            async for chunk in self._allie.stream(message=prompt):
+                if chunk.text:
+                    full_response.append(chunk.text)
+                    yield chunk.text
         finally:
             response_text = "".join(full_response)
             if response_text:
@@ -616,12 +614,10 @@ OpenAPI Spec URL (for Custom GPT Actions):
 
         # Streaming Generation — collect full response for citation parsing
         full_response: List[str] = []
-        async for chunk in self.llm_service.generate_stream(
-            prompt=prompt,
-            **llm_kwargs
-        ):
-            full_response.append(chunk)
-            yield chunk
+        async for chunk in self._allie.stream(message=prompt):
+            if chunk.text:
+                full_response.append(chunk.text)
+                yield chunk.text
 
         # Final event: parsed citations
         response_text = "".join(full_response)
@@ -670,11 +666,11 @@ OpenAPI Spec URL (for Custom GPT Actions):
         return chunks
 
     def get_status(self) -> Dict[str, Any]:
-        """Get service status including LLM model info."""
+        """Get service status including LLM provider info."""
         status = {
             "service": "RAGService",
             "status": "healthy",
-            "llm": self.llm_service.get_model_info(),
+            "llm": {"provider": type(self._allie).__name__},
             "templates": self.prompt_registry.list_templates(),
             "stateful_enabled": self._db is not None,
         }
