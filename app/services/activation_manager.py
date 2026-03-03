@@ -60,8 +60,15 @@ class ActivationManager:
         state = self._store.state
 
         if state.state == UNPROVISIONED:
-            logger.info("Serial: UNPROVISIONED — waiting for serial to be provided")
-            return
+            # If serial + bootstrap_token exist (e.g. loaded from env vars)
+            # but state wasn't set correctly, auto-transition to PROVISIONED.
+            if state.serial and state.bootstrap_token:
+                logger.info("Serial: UNPROVISIONED but serial+bootstrap_token present — transitioning to PROVISIONED")
+                self._store.state.state = PROVISIONED
+                self._store.save()
+            else:
+                logger.info("Serial: UNPROVISIONED — waiting for serial to be provided")
+                return
 
         if state.state == MIGRATED:
             logger.info("Serial: MIGRATED — using BQ-073 ledger metering")

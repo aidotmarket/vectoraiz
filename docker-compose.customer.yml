@@ -43,6 +43,9 @@ services:
       # Allie / ai.market integration (set by start.sh when API key provided)
       - VECTORAIZ_AI_MARKET_URL=${VECTORAIZ_AI_MARKET_URL:-}
       - VECTORAIZ_ALLIE_PROVIDER=${VECTORAIZ_ALLIE_PROVIDER:-}
+      # Serial auto-activation (env var fallback — normally provisioned via serial.json in /data volume)
+      - VECTORAIZ_SERIAL=${VECTORAIZ_SERIAL:-}
+      - VECTORAIZ_BOOTSTRAP_TOKEN=${VECTORAIZ_BOOTSTRAP_TOKEN:-}
       - VECTORAIZ_INTERNAL_API_KEY=${VECTORAIZ_INTERNAL_API_KEY:-}
       # BQ-VZ-DB-CONNECT: Max rows per database extraction (default 5M)
       - DB_EXTRACT_MAX_ROWS=${DB_EXTRACT_MAX_ROWS:-5000000}

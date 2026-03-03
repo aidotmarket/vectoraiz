@@ -59,6 +59,19 @@ class SerialStore:
 
     def _load(self) -> None:
         if not self._path.exists():
+            # Env var fallback: if VECTORAIZ_SERIAL + VECTORAIZ_BOOTSTRAP_TOKEN
+            # are set (e.g. via .env / compose), create serial.json from them.
+            env_serial = os.environ.get("VECTORAIZ_SERIAL", "").strip()
+            env_bootstrap = os.environ.get("VECTORAIZ_BOOTSTRAP_TOKEN", "").strip()
+            if env_serial and env_bootstrap:
+                logger.info("No serial.json found — creating from env vars VECTORAIZ_SERIAL / VECTORAIZ_BOOTSTRAP_TOKEN")
+                self._state = SerialState(
+                    serial=env_serial,
+                    bootstrap_token=env_bootstrap,
+                    state=PROVISIONED,
+                )
+                self.save()
+                return
             logger.info("No serial.json found at %s — starting unprovisioned", self._path)
             return
         try:

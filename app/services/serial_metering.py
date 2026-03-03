@@ -84,7 +84,7 @@ class ActivationRequiredException(Exception):
 class UnprovisionedException(Exception):
     """Raised when no serial is provisioned."""
 
-    def __init__(self, message: str = "Enter serial to continue"):
+    def __init__(self, message: str = "allAI is not yet activated. Please reinstall in connected mode or contact support."):
         super().__init__(message)
 
 

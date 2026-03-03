@@ -388,6 +388,41 @@ else
     success "Using existing .env (port updated to ${PORT})"
 fi
 
+# ─── Step 7b: Provision serial for connected mode ─────────────────
+if grep -q "^VECTORAIZ_MODE=connected" "$INSTALL_DIR/.env" 2>/dev/null; then
+    info "Provisioning serial for allAI..."
+
+    # Determine Docker volume name (compose project = directory basename)
+    COMPOSE_PROJECT=$(basename "$INSTALL_DIR")
+    SERIAL_VOLUME="${COMPOSE_PROJECT}_vectoraiz-data"
+    docker volume create "$SERIAL_VOLUME" >/dev/null 2>&1 || true
+
+    # Check if serial.json already exists (upgrade path — do NOT overwrite)
+    EXISTING_SERIAL=$(docker run --rm -v "${SERIAL_VOLUME}:/data" alpine cat /data/serial.json 2>/dev/null || echo "")
+
+    if [ -n "$EXISTING_SERIAL" ]; then
+        success "Existing serial found — preserving (upgrade path)"
+    else
+        SERIAL_RESPONSE=$(curl -s --max-time 10 -X POST "https://api.ai.market/api/v1/serials/generate" \
+            -H "Content-Type: application/json" -d '{}' 2>/dev/null || echo "")
+
+        if [ -n "$SERIAL_RESPONSE" ]; then
+            SERIAL_VAL=$(echo "$SERIAL_RESPONSE" | grep -o '"serial" *: *"[^"]*"' | head -1 | sed 's/.*: *"\([^"]*\)"/\1/')
+            BOOTSTRAP_VAL=$(echo "$SERIAL_RESPONSE" | grep -o '"bootstrap_token" *: *"[^"]*"' | head -1 | sed 's/.*: *"\([^"]*\)"/\1/')
+
+            if [ -n "$SERIAL_VAL" ] && [ -n "$BOOTSTRAP_VAL" ]; then
+                printf '{"serial": "%s", "bootstrap_token": "%s", "state": "provisioned"}' "$SERIAL_VAL" "$BOOTSTRAP_VAL" | \
+                    docker run --rm -i -v "${SERIAL_VOLUME}:/data" alpine sh -c 'cat > /data/serial.json && chmod 600 /data/serial.json'
+                success "Serial provisioned: ${SERIAL_VAL}"
+            else
+                warn "Failed to parse serial response — allAI may require reinstall"
+            fi
+        else
+            warn "Could not reach serial API — allAI may require reinstall"
+        fi
+    fi
+fi
+
 # ─── Step 8: Pull images ─────────────────────────────────────────
 info "Pulling Docker images (this may take a few minutes)..."
 echo ""
