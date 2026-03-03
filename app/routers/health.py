@@ -245,7 +245,7 @@ async def system_info():
         "mode": settings.mode,
         "version": APP_VERSION,
         "features": {
-            "allai": settings.allai_enabled,
+            "allai": settings.allai_enabled and settings.mode != "standalone",
             "marketplace": settings.marketplace_enabled,
             "earnings": settings.marketplace_enabled,
             "local_auth": True,
@@ -268,7 +268,7 @@ async def system_mode():
         "mode": settings.mode,
         "features": {
             "marketplace": settings.marketplace_enabled,
-            "allai": settings.allai_enabled,
+            "allai": settings.allai_enabled and settings.mode != "standalone",
             "earnings": settings.marketplace_enabled,
         },
     }

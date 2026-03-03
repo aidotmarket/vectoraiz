@@ -667,7 +667,7 @@ async def websocket_copilot(websocket: WebSocket):
         nudge_manager.set_quiet_mode(session_id, True)
 
     # BQ-128: Allie availability check
-    allie_available = settings.allai_enabled or not is_local_only()
+    allie_available = settings.allai_enabled and not is_local_only()
     standalone = is_local_only()
 
     # Send CONNECTED message with balance info + allie flags (BQ-128 Task 1.6)
@@ -686,15 +686,8 @@ async def websocket_copilot(websocket: WebSocket):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         })
 
-        # If balance is zero at connect time, send balance gate warning
-        # BUT: skip in connected mode — ai.market handles billing at proxy level
-        if allie_available and is_local_only():
-            balance_check = metering_service.check_balance(total_balance)
-            if not balance_check.allowed:
-                await safe_send_json(
-                    websocket,
-                    _balance_gate_message(total_balance, balance_check.reason or "insufficient_balance"),
-                )
+        # Balance gating: In standalone mode allAI is off (no credits apply).
+        # In connected mode ai.market proxy handles billing — no local gate needed.
     except WebSocketSendError:
         logger.error(f"Failed to send CONNECTED message: session={session_id}")
         manager.disconnect(session_id)
