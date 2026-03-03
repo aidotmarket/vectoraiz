@@ -312,7 +312,10 @@ step5_create_release() {
   info "Creating GitHub Release for v$VERSION..."
 
   if gh release view "v$VERSION" &>/dev/null; then
-    pass "GitHub Release v$VERSION already exists"
+    pass "GitHub Release v$VERSION already exists (created by CI)"
+    # Force --latest in case CI created releases out of order
+    gh release edit "v$VERSION" --latest 2>/dev/null || true
+    pass "Marked v$VERSION as latest"
     return 0
   fi
 
