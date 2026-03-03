@@ -186,6 +186,7 @@ class Settings(BaseSettings):
     db_extract_max_rows: int = 5_000_000  # Max rows per extraction (M3)
 
     # BQ-VZ-SERIAL-CLIENT: Serial activation & metering
+    serial: Optional[str] = None  # Device serial number for X-Serial header
     aimarket_url: str = _DEFAULT_AI_MARKET_URL  # ai-market serial authority base URL
     app_version: str = os.environ.get("VECTORAIZ_VERSION", "dev")
     serial_data_dir: str = "/data"  # Directory for serial.json + pending_usage.jsonl

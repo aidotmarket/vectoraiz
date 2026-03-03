@@ -118,7 +118,18 @@ class ActivationManager:
         if result.success and result.install_token:
             self._store.transition_to_active(result.install_token)
             self._store.update_app_version(settings.app_version)
-            logger.info("Serial activated successfully")
+            # Auto-configure allAI copilot with activation credentials
+            try:
+                from app.services.allie_provider import write_allie_config, reset_provider
+                write_allie_config(
+                    serial_number=state.serial,
+                    install_token=result.install_token,
+                    ai_market_url=settings.aimarket_url,
+                )
+                reset_provider()
+                logger.info("Serial activated successfully — allAI copilot configured")
+            except Exception:
+                logger.warning("Serial activated but failed to write allAI config", exc_info=True)
         else:
             logger.warning("Activation failed: %s (status=%d)", result.error, result.status_code)
             if result.status_code == 401:
@@ -138,7 +149,18 @@ class ActivationManager:
         if result.success and result.install_token:
             self._store.state.install_token = result.install_token
             self._store.save()
-            logger.info("Token refreshed successfully")
+            # Update allAI config with refreshed token
+            try:
+                from app.services.allie_provider import write_allie_config, reset_provider
+                write_allie_config(
+                    serial_number=state.serial,
+                    install_token=result.install_token,
+                    ai_market_url=settings.aimarket_url,
+                )
+                reset_provider()
+                logger.info("Token refreshed successfully — allAI copilot updated")
+            except Exception:
+                logger.warning("Token refreshed but failed to write allAI config", exc_info=True)
         elif result.status_code == 401:
             logger.warning("Refresh returned 401 — falling back to PROVISIONED")
             self._store.state.state = PROVISIONED

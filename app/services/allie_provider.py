@@ -24,6 +24,7 @@ import asyncio
 import json
 import os
 import logging
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from typing import AsyncIterator, Optional
@@ -152,12 +153,19 @@ class AiMarketAllieProvider(BaseAllieProvider):
     def supports_vision(self) -> bool:
         return True
 
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        serial: Optional[str] = None,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+    ):
         from app.config import settings
-        self.base_url = settings.ai_market_url.rstrip("/")
-        self.api_key = settings.internal_api_key
+        self.base_url = (base_url or settings.ai_market_url).rstrip("/")
+        self.api_key = api_key or settings.internal_api_key
         if not self.api_key:
-            raise ValueError("VECTORAIZ_INTERNAL_API_KEY required for AiMarketAllieProvider")
+            raise ValueError("API key required for AiMarketAllieProvider")
+        self.serial = serial or settings.serial
         self.timeout = httpx.Timeout(130, connect=10)  # slightly over 120s server timeout
 
     async def stream(
@@ -189,6 +197,8 @@ class AiMarketAllieProvider(BaseAllieProvider):
             "X-API-Key": self.api_key,
             "Accept": "text/event-stream",
         }
+        if self.serial:
+            headers["X-Serial"] = self.serial
         body = {
             "messages": messages,
             "request_id": request_id,
@@ -256,18 +266,97 @@ class AiMarketAllieProvider(BaseAllieProvider):
 
 _provider_instance: Optional[BaseAllieProvider] = None
 
+ALLIE_CONFIG_FILENAME = "allie_config.json"
+
+
+def _allie_config_path() -> str:
+    """Path to the allie credentials config file."""
+    from app.config import settings
+    return os.path.join(settings.serial_data_dir, ALLIE_CONFIG_FILENAME)
+
+
+def write_allie_config(serial_number: str, install_token: str, ai_market_url: str) -> None:
+    """Persist allAI credentials after serial activation or token refresh.
+
+    Uses atomic write (tmp → fsync → rename) with chmod 600.
+    """
+    path = _allie_config_path()
+    data = {
+        "serial_number": serial_number,
+        "install_token": install_token,
+        "ai_market_url": ai_market_url,
+        "provider": "aimarket",
+    }
+    dir_path = os.path.dirname(path)
+    os.makedirs(dir_path, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dir_path, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.rename(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    logger.info(
+        "Wrote allie config: provider=aimarket, serial=%s...",
+        serial_number[:16] if serial_number else "?",
+    )
+
+
+def read_allie_config() -> Optional[dict]:
+    """Read allie config from disk. Returns None if missing or invalid."""
+    path = _allie_config_path()
+    try:
+        with open(path) as f:
+            data = json.load(f)
+        if (
+            data.get("provider") == "aimarket"
+            and data.get("install_token")
+            and data.get("serial_number")
+        ):
+            return data
+        return None
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return None
+
 
 def get_allie_provider() -> BaseAllieProvider:
-    """Get the configured Allie LLM provider (singleton)."""
+    """Get the configured Allie LLM provider (singleton).
+
+    Resolution order:
+    1. VECTORAIZ_ALLIE_PROVIDER env var (explicit override)
+    2. /data/allie_config.json from serial activation
+    3. MockProvider fallback
+    """
     global _provider_instance
     if _provider_instance is None:
-        provider_type = os.environ.get("VECTORAIZ_ALLIE_PROVIDER", "mock")
-        if provider_type == "mock":
-            _provider_instance = MockAllieProvider()
-            logger.info("Allie provider: MockAllieProvider")
-        elif provider_type == "aimarket":
+        provider_type = os.environ.get("VECTORAIZ_ALLIE_PROVIDER", "").strip()
+
+        if provider_type == "aimarket":
             _provider_instance = AiMarketAllieProvider()
-            logger.info("Allie provider: AiMarketAllieProvider → %s", _provider_instance.base_url)
+            logger.info("Allie provider: AiMarketAllieProvider (env) → %s", _provider_instance.base_url)
+        elif provider_type == "mock":
+            _provider_instance = MockAllieProvider()
+            logger.info("Allie provider: MockAllieProvider (env)")
+        elif not provider_type:
+            # No explicit env var — check config file written by serial activation
+            config = read_allie_config()
+            if config:
+                _provider_instance = AiMarketAllieProvider(
+                    serial=config["serial_number"],
+                    api_key=config["install_token"],
+                    base_url=config.get("ai_market_url"),
+                )
+                logger.info("Allie provider: AiMarketAllieProvider (config) → %s", _provider_instance.base_url)
+            else:
+                _provider_instance = MockAllieProvider()
+                logger.info("Allie provider: MockAllieProvider (default)")
         else:
             logger.warning("Unknown ALLIE_PROVIDER=%s, falling back to mock", provider_type)
             _provider_instance = MockAllieProvider()
@@ -275,6 +364,6 @@ def get_allie_provider() -> BaseAllieProvider:
 
 
 def reset_provider() -> None:
-    """Reset provider singleton (for testing)."""
+    """Reset provider singleton so next get_allie_provider() re-evaluates config."""
     global _provider_instance
     _provider_instance = None
