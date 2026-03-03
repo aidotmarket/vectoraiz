@@ -562,6 +562,7 @@ class ProcessWorkerManager:
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
             semaphore=self._semaphore,
+            manager=self,
         )
 
     def submit_document(
@@ -608,6 +609,7 @@ class ProcessWorkerManager:
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
             semaphore=self._semaphore,
+            manager=self,
         )
 
     def submit_indexing(
@@ -653,6 +655,7 @@ class ProcessWorkerManager:
             grace_period_s=settings.process_worker_grace_period_s,
             memory_monitor=mem_monitor,
             semaphore=self._semaphore,
+            manager=self,
         )
 
     def shutdown(self, wait: bool = True) -> None:
@@ -681,6 +684,7 @@ class WorkerHandle:
         grace_period_s: int = 60,
         memory_monitor: Optional[MemoryMonitor] = None,
         semaphore: Optional[threading.Semaphore] = None,
+        manager: Optional["ProcessWorkerManager"] = None,
     ):
         self.future = future
         self.data_queue = data_queue
@@ -691,6 +695,7 @@ class WorkerHandle:
         self._start_time = time.monotonic()
         self._memory_monitor = memory_monitor
         self._semaphore = semaphore
+        self._manager = manager
 
     def _worker_pid(self) -> Optional[int]:
         """Return the worker PID if available."""
@@ -701,10 +706,16 @@ class WorkerHandle:
         return getattr(self.future, "is_alive", lambda: False)()
 
     def _cleanup(self) -> None:
-        """Stop the memory monitor and release the concurrency semaphore."""
+        """Stop the memory monitor, release the concurrency semaphore, and remove from active list."""
         if self._memory_monitor is not None:
             self._memory_monitor.stop()
             self._memory_monitor = None
+        if self._manager is not None:
+            try:
+                self._manager._active_processes.remove(self.future)
+            except ValueError:
+                pass
+            self._manager = None
         if self._semaphore is not None:
             self._semaphore.release()
             self._semaphore = None

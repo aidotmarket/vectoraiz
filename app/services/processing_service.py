@@ -887,6 +887,7 @@ class ProcessingService:
             record.metadata["index_status"] = {"status": "deferred", "reason": "low_memory"}
             return
 
+        handle = None
         try:
             from app.services.process_worker import get_worker_manager
             from app.services.processing_queue import get_processing_queue
@@ -958,6 +959,9 @@ class ProcessingService:
         except Exception as e:
             _log.error("Indexing failed for dataset %s: %s", record.id, e, exc_info=True)
             record.metadata["index_status"] = {"status": "error", "error": str(e)}
+        finally:
+            if handle is not None:
+                handle._cleanup()
 
         # PII scan
         try:

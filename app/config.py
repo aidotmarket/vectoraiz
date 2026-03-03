@@ -173,7 +173,7 @@ class Settings(BaseSettings):
     large_file_threshold_mb: int = 50             # Files above this use streaming path
     fallback_max_size_mb: int = 200              # Max file size (MB) for in-memory fallback on streaming failure
     process_worker_memory_limit_mb: int = _DETECTED_WORKER_MEM  # Per-worker memory cap (auto-detected)
-    process_worker_timeout_s: int = 1800         # 30 min per file default
+    process_worker_timeout_s: int = 300          # 5 min per file (indexing path doubles to 10 min)
     process_worker_grace_period_s: int = 60      # Seconds for checkpoint flush after SIGTERM
     process_worker_max_concurrent: int = _DETECTED_CPU_WORKERS  # Max parallel workers (auto-detected)
     duckdb_memory_limit_mb: int = _DETECTED_DUCKDB_MEM  # DuckDB in-memory budget (auto-detected)

@@ -335,10 +335,28 @@ async def lifespan(app: FastAPI):
     _processing_queue = get_processing_queue()
     processing_queue_tasks = _processing_queue.start(wrapper=_safe_background_task)
 
+    # RC#22-F3: Re-queue files with status='uploaded' so crash-recovered records get processed
+    try:
+        from app.models.dataset import DatasetRecord as DBDatasetRecord
+        from sqlmodel import select
+        from app.core.database import get_engine
+        from sqlmodel import Session
+
+        with Session(get_engine()) as _session:
+            _uploaded = _session.exec(
+                select(DBDatasetRecord).where(DBDatasetRecord.status == "uploaded")
+            ).all()
+            for _rec in _uploaded:
+                await _processing_queue.submit(_rec.id)
+            if _uploaded:
+                logger.info("Re-queued %d uploaded records for processing", len(_uploaded))
+    except Exception as e:
+        logger.error("Failed to re-queue uploaded records: %s", e)
+
     # Preload embedding model to avoid MemoryError during first indexing
     from app.services.embedding_service import get_embedding_service
     try:
-        _emb_info = get_embedding_service().preload()
+        _emb_info = await asyncio.to_thread(get_embedding_service().preload)
         logger.info("Embedding model preloaded: %s", _emb_info)
     except Exception as e:
         logger.error("Embedding model preload failed (will retry on first use): %s", e)
