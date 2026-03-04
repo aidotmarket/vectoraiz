@@ -443,6 +443,7 @@ def create_app() -> FastAPI:
     """Create and configure the FastAPI application."""
     
     app = FastAPI(
+        redirect_slashes=False,
         title=API_TITLE,
         description=API_DESCRIPTION,
         version=API_VERSION,
