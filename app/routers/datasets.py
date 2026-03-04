@@ -34,6 +34,7 @@ from app.services.pipeline_service import PipelineService, get_pipeline_service
 from app.services.marketplace_push_service import MarketplacePushService, get_marketplace_push_service, MarketplacePushError
 from app.services.batch_service import get_batch_service, BatchService
 from app.services.preview_service import get_preview_service, PreviewService
+from app.services.notification_service import get_notification_service
 from app.schemas.batch import ConfirmRequest, BatchConfirmResponse
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.services.serial_metering import metered, MeterDecision
@@ -315,10 +316,30 @@ async def batch_upload(
 
     bid = batch_id or f"bch_{uuid.uuid4().hex[:12]}"
     skip_indexing = mode != "process"
+    notifications = get_notification_service()
 
     items: List[dict] = list(rejected_items)  # start with rejected
 
-    # Save accepted files and create records
+    # Log notifications for pre-validation rejections
+    for rj in rejected_items:
+        try:
+            notifications.create(
+                type="error",
+                category="upload",
+                title=f"Upload failed: {rj.get('original_filename', 'unknown')}",
+                message=f"Rejected: {rj.get('error', 'validation failed')}",
+                metadata_json=json.dumps({
+                    "filename": rj.get("original_filename"),
+                    "error_code": rj.get("error_code"),
+                    "error": rj.get("error"),
+                }),
+                batch_id=bid,
+                source="upload",
+            )
+        except Exception:
+            logger.warning("Failed to create rejection notification for %s", rj.get("original_filename"))
+
+    # Save accepted files and create records — per-file fault tolerance
     for idx in accepted_indices:
         f = files[idx]
         fname = filenames[idx]
@@ -326,16 +347,16 @@ async def batch_upload(
         file_type = ext[1:] if ext else "unknown"
         rel_path = path_list[idx] if path_list else fname
 
-        record = batch_service.create_dataset_record(
-            filename=fname,
-            file_type=file_type,
-            file_size=sizes[idx],
-            batch_id=bid,
-            relative_path=rel_path,
-        )
-
-        # Stream file to disk
         try:
+            record = batch_service.create_dataset_record(
+                filename=fname,
+                file_type=file_type,
+                file_size=sizes[idx],
+                batch_id=bid,
+                relative_path=rel_path,
+            )
+
+            # Stream file to disk
             bytes_written = 0
             async with aiofiles.open(record.upload_path, "wb") as out_file:
                 await f.seek(0)
@@ -348,8 +369,37 @@ async def batch_upload(
             storage_fn = record.upload_path.name
             processing._save_record(record, storage_fn)
 
+            # Queue background extraction (sequential — one file at a time)
+            from app.services.processing_queue import get_processing_queue
+            await get_processing_queue().submit(record.id, skip_indexing=skip_indexing)
+
+            items.append({
+                "client_file_index": idx,
+                "original_filename": fname,
+                "relative_path": rel_path,
+                "size_bytes": record.file_size_bytes,
+                "status": "accepted",
+                "dataset_id": record.id,
+                "preview_url": f"/api/datasets/{record.id}/preview",
+                "status_url": f"/api/datasets/{record.id}/status",
+            })
+
+            notifications.create(
+                type="success",
+                category="upload",
+                title=f"Uploaded: {fname}",
+                message=f"File uploaded successfully ({record.file_size_bytes} bytes)",
+                batch_id=bid,
+                source="upload",
+            )
+
         except Exception as e:
-            processing.delete_dataset(record.id)
+            logger.error("Batch file %d (%s) failed: %s", idx, fname, e, exc_info=True)
+            # Clean up partial record if it was created
+            try:
+                processing.delete_dataset(record.id)
+            except Exception:
+                pass
             items.append({
                 "client_file_index": idx,
                 "original_filename": fname,
@@ -357,28 +407,61 @@ async def batch_upload(
                 "error_code": "save_failed",
                 "error": str(e),
             })
+            notifications.create(
+                type="error",
+                category="upload",
+                title=f"Upload failed: {fname}",
+                message=f"Error: {str(e)}",
+                metadata_json=json.dumps({
+                    "filename": fname,
+                    "error_code": "save_failed",
+                    "error": str(e),
+                }),
+                batch_id=bid,
+                source="upload",
+            )
             continue
-
-        # Queue background extraction (sequential — one file at a time)
-        from app.services.processing_queue import get_processing_queue
-        await get_processing_queue().submit(record.id, skip_indexing=skip_indexing)
-
-        items.append({
-            "client_file_index": idx,
-            "original_filename": fname,
-            "relative_path": rel_path,
-            "size_bytes": record.file_size_bytes,
-            "status": "accepted",
-            "dataset_id": record.id,
-            "preview_url": f"/api/datasets/{record.id}/preview",
-            "status_url": f"/api/datasets/{record.id}/status",
-        })
 
     # Sort items by client_file_index for consistent ordering
     items.sort(key=lambda x: x.get("client_file_index", 0))
 
     accepted_count = sum(1 for i in items if i.get("status") == "accepted")
     rejected_count = sum(1 for i in items if i.get("status") == "rejected")
+    total_count = len(items)
+    failed_filenames = [i["original_filename"] for i in items if i.get("status") == "rejected"]
+
+    # Summary notification
+    if rejected_count == 0:
+        summary_type = "info"
+        summary_title = "Upload complete"
+    elif accepted_count == 0:
+        summary_type = "error"
+        summary_title = "Upload failed"
+    else:
+        summary_type = "warning"
+        summary_title = "Upload partially complete"
+
+    summary_msg = f"{accepted_count} of {total_count} files uploaded successfully."
+    if rejected_count > 0:
+        summary_msg += f" {rejected_count} failed."
+
+    try:
+        notifications.create(
+            type=summary_type,
+            category="upload",
+            title=summary_title,
+            message=summary_msg,
+            metadata_json=json.dumps({
+                "accepted": accepted_count,
+                "rejected": rejected_count,
+                "total": total_count,
+                "failed_filenames": failed_filenames,
+            }),
+            batch_id=bid,
+            source="upload",
+        )
+    except Exception:
+        logger.warning("Failed to create batch summary notification for %s", bid)
 
     return JSONResponse(
         status_code=202,

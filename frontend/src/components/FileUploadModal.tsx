@@ -442,7 +442,9 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     setQueue((prev) => prev.filter((f) => f.state !== "duplicate"));
   };
 
-  // When all files are done, show summary toast and auto-close
+  const hasFailures = hasFiles && queue.some((f) => f.state === "error" || f.state === "rejected");
+
+  // When all files are done, show summary toast and auto-close ONLY if no failures
   useEffect(() => {
     if (allDone && queue.length > 0) {
       const ok = queue.filter((f) => f.state === "complete").length;
@@ -454,19 +456,22 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
       if (fail > 0) parts.push(`${fail} failed`);
       if (skipped > 0) parts.push(`${skipped} skipped`);
 
-      if (ok > 0) {
-        toast.success(parts.join(", "));
-      } else if (fail > 0) {
-        toast.error(parts.join(", "));
-      } else if (skipped > 0) {
-        toast.warning(parts.join(", "));
-      }
-
-      const timer = setTimeout(() => {
+      if (fail > 0 || skipped > 0) {
+        // Don't auto-close — keep modal open so user can review failures
+        if (ok > 0) {
+          toast.warning(parts.join(", "));
+        } else {
+          toast.error(parts.join(", "));
+        }
         if (ok > 0) onSuccess?.();
-        handleClose();
-      }, 1800);
-      return () => clearTimeout(timer);
+      } else {
+        toast.success(parts.join(", "));
+        const timer = setTimeout(() => {
+          onSuccess?.();
+          handleClose();
+        }, 1800);
+        return () => clearTimeout(timer);
+      }
     }
   }, [allDone]);
 
@@ -660,8 +665,15 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
           {/* Batch summary when all done */}
           {allDone && queue.length > 1 && (
-            <div className="px-3 py-3 rounded-lg border border-border bg-secondary/30">
-              <p className="text-sm font-medium text-foreground mb-1">Batch complete</p>
+            <div className={cn(
+              "px-3 py-3 rounded-lg border",
+              hasFailures ? "border-destructive/30 bg-destructive/5" : "border-border bg-secondary/30"
+            )}>
+              <p className="text-sm font-medium text-foreground mb-1">
+                {hasFailures
+                  ? `${queue.filter((f) => f.state === "complete").length} of ${queue.length} files uploaded`
+                  : "Batch complete"}
+              </p>
               <div className="flex gap-4 text-xs text-muted-foreground">
                 {queue.filter((f) => f.state === "complete").length > 0 && (
                   <span className="flex items-center gap-1">
@@ -682,6 +694,11 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                   </span>
                 )}
               </div>
+              {hasFailures && (
+                <p className="text-xs text-muted-foreground mt-2">
+                  See <span className="text-foreground font-medium">Notifications</span> for error details
+                </p>
+              )}
             </div>
           )}
 
@@ -750,6 +767,11 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
           {!allDone && hasDuplicates && !hasPending && (
             <Button variant="ghost" onClick={handleClose} disabled={isUploading}>
               Done
+            </Button>
+          )}
+          {allDone && (
+            <Button variant={hasFailures ? "secondary" : "ghost"} onClick={handleClose}>
+              Close
             </Button>
           )}
         </DialogFooter>
