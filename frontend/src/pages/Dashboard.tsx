@@ -1,22 +1,19 @@
-import { useState } from "react";
 import { Database, Rows3, HardDrive, Upload, Code, Clock, TrendingUp, DollarSign, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { useToast } from "@/hooks/use-toast";
-import FileUploadModal from "@/components/FileUploadModal";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useDatasets } from "@/hooks/useApi";
 import { useNavigate } from "react-router-dom";
 import { useMode } from "@/contexts/ModeContext";
+import { useUpload } from "@/contexts/UploadContext";
 
 const Dashboard = () => {
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
-  const { toast } = useToast();
   const navigate = useNavigate();
   const { getPublishedCount, getTotalEarnings } = useMarketplace();
   const { data: datasetsData, loading: datasetsLoading } = useDatasets();
   const { hasFeature } = useMode();
+  const { openModal } = useUpload();
 
   const publishedCount = getPublishedCount();
   const totalEarnings = getTotalEarnings();
@@ -36,13 +33,6 @@ const Dashboard = () => {
       { label: "Marketplace Earnings", value: `$${totalEarnings.toLocaleString()}`, icon: DollarSign, loading: false, link: "/datasets" },
     ] : []),
   ];
-
-  const handleUploadSuccess = () => {
-    toast({
-      title: "Dataset uploaded successfully",
-      description: "Your file has been processed and is ready to use.",
-    });
-  };
 
   return (
     <div className="space-y-8">
@@ -79,7 +69,7 @@ const Dashboard = () => {
       <div className="space-y-4">
         <h3 className="text-lg font-semibold text-foreground">Quick Actions</h3>
         <div className="flex flex-wrap gap-3">
-          <Button className="gap-2" onClick={() => setUploadModalOpen(true)}>
+          <Button className="gap-2" onClick={openModal}>
             <Upload className="w-4 h-4" />
             Upload Dataset
           </Button>
@@ -107,13 +97,6 @@ const Dashboard = () => {
           </CardContent>
         </Card>
       </div>
-
-      {/* Upload Modal */}
-      <FileUploadModal
-        open={uploadModalOpen}
-        onOpenChange={setUploadModalOpen}
-        onSuccess={handleUploadSuccess}
-      />
     </div>
   );
 };

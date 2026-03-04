@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { useDropzone } from "react-dropzone";
 import {
   Dialog,
@@ -26,32 +26,9 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useDatasetStatus } from "@/hooks/useApi";
-import { datasetsApi, DuplicateFileError, importApi } from "@/lib/api";
-import { toast } from "sonner";
 import { LocalImportBrowser } from "@/components/LocalImportBrowser";
-
-type FileState = "pending" | "uploading" | "processing" | "complete" | "error" | "duplicate" | "rejected";
-
-interface QueuedFile {
-  id: string;
-  file: File;
-  relativePath: string | null;
-  state: FileState;
-  progress: number;
-  datasetId: string | null;
-  error: string | null;
-  existingDatasetId: string | null;
-  /** Backend queue position — reported by FileRow via onMetadataUpdate */
-  queuePosition: number | null;
-  /** Processing phase: queued | extracting | indexing | null */
-  processingPhase: string | null;
-}
-
-interface FileUploadModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onSuccess?: () => void;
-}
+import { useUpload, type QueuedFile, type FileState } from "@/contexts/UploadContext";
+import { useState } from "react";
 
 const getFileIcon = (fileName: string) => {
   const ext = fileName.split(".").pop()?.toLowerCase();
@@ -109,11 +86,6 @@ const ACCEPT_MAP = {
   "application/vnd.ms-works": [".wps"],
   "application/wordperfect": [".wpd"],
 };
-
-// Max limits (match backend)
-const MAX_FILES = Infinity; // No artificial limit — local app, customers resources
-const LARGE_BATCH_WARNING_BYTES = 50 * 1024 * 1024 * 1024; // 50GB — show confirmation above this
-const JUNK_FILES = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep', '.gitignore', 'desktop.ini']);
 
 /** Tracks processing status for a single dataset after upload */
 function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
@@ -214,17 +186,38 @@ function FileRow({ item, onRemove, onStatusChange, onMetadataUpdate }: {
   );
 }
 
-const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps) => {
-  const [queue, setQueue] = useState<QueuedFile[]>([]);
-  const [isUploading, setIsUploading] = useState(false);
+const FileUploadModal = () => {
+  const {
+    queue,
+    addFiles,
+    removeFile,
+    handleStatusChange,
+    handleMetadataUpdate,
+    isUploading,
+    handleUploadAll,
+    handleUploadDuplicates,
+    handleSkipDuplicates,
+    isModalOpen,
+    closeModal,
+    isImporting,
+    setIsImporting,
+    showLocalImport,
+    setShowLocalImport,
+    hasImportFiles,
+    showLargeWarning,
+    setShowLargeWarning,
+    hasFiles,
+    hasPending,
+    hasDuplicates,
+    isProcessing,
+    allDone,
+    hasFailures,
+    onSuccess,
+  } = useUpload();
 
-  const [showLargeWarning, setShowLargeWarning] = useState(false);
   const folderInputRef = useRef<HTMLInputElement>(null);
-  const [isImporting, setIsImporting] = useState(false);
-  const [showLocalImport, setShowLocalImport] = useState(false);
-  const [hasImportFiles, setHasImportFiles] = useState<boolean | null>(null);
 
-  // Resizable dialog state
+  // Resizable dialog state (local — pure presentation concern)
   const [dialogSize, setDialogSize] = useState<{ width: number; height: number } | null>(null);
   const resizeRef = useRef<{ startX: number; startY: number; startW: number; startH: number } | null>(null);
 
@@ -250,59 +243,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     window.addEventListener("mouseup", onMouseUp);
   }, []);
 
-  // Check if server has importable files
-  useEffect(() => {
-    if (!open) return;
-    let cancelled = false;
-    importApi.browse("", 1, 0).then((res) => {
-      if (!cancelled) setHasImportFiles(res.entries.length > 0);
-    }).catch(() => {
-      if (!cancelled) setHasImportFiles(false);
-    });
-    return () => { cancelled = true; };
-  }, [open]);
-
-  const hasFiles = queue.length > 0;
-  const hasPending = queue.some((f) => f.state === "pending");
-  const hasDuplicates = queue.some((f) => f.state === "duplicate");
-  const isProcessing = queue.some((f) => f.state === "processing");
-  const allDone = hasFiles && queue.every((f) => f.state === "complete" || f.state === "error" || f.state === "rejected");
-
-  /** Add files from drop or file picker */
-  const addFiles = useCallback((files: File[], relativePaths?: (string | undefined)[]) => {
-    setQueue((prev) => {
-      const currentSize = prev.reduce((sum, f) => sum + f.file.size, 0);
-      const newItems: QueuedFile[] = [];
-
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        const relPath = relativePaths?.[i] ?? null;
-
-        // Skip OS junk files
-        if (JUNK_FILES.has(file.name)) continue;
-
-
-
-        newItems.push({
-          id: `${file.name}-${file.size}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-          file,
-          relativePath: relPath,
-          state: "pending",
-          progress: 0,
-          datasetId: null,
-          error: null,
-          existingDatasetId: null,
-          queuePosition: null,
-          processingPhase: null,
-        });
-      }
-
-      return [...prev, ...newItems];
-    });
-  }, []);
-
   const onDrop = useCallback((acceptedFiles: File[]) => {
-    // Extract webkitRelativePath if available (folder drops)
     const paths = acceptedFiles.map((f) => {
       const wrp = (f as any).webkitRelativePath;
       return wrp || undefined;
@@ -317,7 +258,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     multiple: true,
   });
 
-  /** Handle folder selection via hidden input */
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
@@ -329,188 +269,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
       paths.push((f as any).webkitRelativePath || f.name);
     }
     addFiles(files, paths);
-    // Reset input so same folder can be re-selected
     e.target.value = "";
-  };
-
-  const removeFile = (id: string) => {
-    setQueue((prev) => prev.filter((f) => f.id !== id));
-  };
-
-  const updateFile = (id: string, updates: Partial<QueuedFile>) => {
-    setQueue((prev) => prev.map((f) => (f.id === id ? { ...f, ...updates } : f)));
-  };
-
-  const handleStatusChange = (id: string, state: FileState, error?: string) => {
-    updateFile(id, { state, error: error ?? null });
-  };
-
-  /** Called by FileRow when processing phase/queuePosition changes */
-  const handleMetadataUpdate = useCallback((id: string, phase: string | null, queuePosition: number | null) => {
-    setQueue((prev) => prev.map((f) =>
-      f.id === id ? { ...f, processingPhase: phase, queuePosition } : f
-    ));
-  }, []);
-
-  /** Current batch ID — set when uploads start */
-  const batchIdRef = useRef<string | null>(null);
-
-  /** Upload a single file via the single-file endpoint with real progress */
-  const uploadOne = async (item: QueuedFile, allowDuplicate: boolean) => {
-    updateFile(item.id, { state: "uploading", progress: 0 });
-
-    try {
-      const result = await datasetsApi.uploadWithProgress(item.file, {
-        allowDuplicate,
-        batchId: batchIdRef.current ?? undefined,
-        onProgress: (pct) => updateFile(item.id, { progress: pct }),
-      });
-      updateFile(item.id, {
-        state: "processing",
-        progress: 100,
-        datasetId: result.dataset_id,
-      });
-      return "ok";
-    } catch (e) {
-      if (e instanceof DuplicateFileError) {
-        updateFile(item.id, {
-          state: "duplicate",
-          progress: 0,
-          existingDatasetId: e.existingDataset.id,
-          error: null,
-        });
-        return "duplicate";
-      }
-      updateFile(item.id, {
-        state: "error",
-        error: e instanceof Error ? e.message : "Upload failed",
-      });
-      return "error";
-    }
-  };
-
-  const concurrentUploads = (() => {
-    const stored = localStorage.getItem('vectoraiz_concurrent_uploads');
-    if (stored && stored !== 'auto') {
-      const n = parseInt(stored, 10);
-      if (n >= 1 && n <= 6) return n;
-    }
-    const rec = localStorage.getItem('vectoraiz_recommended_concurrent');
-    const n = parseInt(rec || '', 10);
-    return n >= 1 && n <= 6 ? n : 3;
-  })();
-
-  async function runWithConcurrency<T>(
-    items: T[],
-    fn: (item: T) => Promise<unknown>,
-    concurrency: number,
-  ): Promise<void> {
-    const queue = [...items];
-    const workers = Array.from({ length: Math.min(concurrency, queue.length) }, async () => {
-      while (queue.length > 0) {
-        const item = queue.shift()!;
-        await fn(item);
-      }
-    });
-    await Promise.all(workers);
-  }
-
-  /** Send a summary notification after all uploads in a batch finish */
-  const sendBatchSummary = useCallback(async () => {
-    const bid = batchIdRef.current;
-    if (!bid) return;
-    const ok = queue.filter((f) => f.state === "complete" || f.state === "processing").length;
-    const fail = queue.filter((f) => f.state === "error" || f.state === "rejected").length;
-    if (ok + fail < 2) return; // No summary for single-file uploads
-    const failedNames = queue
-      .filter((f) => f.state === "error" || f.state === "rejected")
-      .map((f) => f.file.name);
-    try {
-      await datasetsApi.uploadBatchSummary(bid, ok, fail, failedNames);
-    } catch {
-      // Best-effort — don't block the UI
-    }
-  }, [queue]);
-
-  /** Upload all pending files — up to 3 concurrent uploads */
-  const handleUploadAll = async () => {
-    const pending = queue.filter((f) => f.state === "pending");
-    const totalPendingSize = pending.reduce((sum, f) => sum + f.file.size, 0);
-
-    // Show confirmation for very large batches
-    if (totalPendingSize > LARGE_BATCH_WARNING_BYTES && !showLargeWarning) {
-      setShowLargeWarning(true);
-      return;
-    }
-    setShowLargeWarning(false);
-    setIsUploading(true);
-
-    // Generate batch ID for this upload session
-    batchIdRef.current = `upl_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-
-    await runWithConcurrency(pending, (item) => uploadOne(item, false), concurrentUploads);
-
-    setIsUploading(false);
-  };
-
-  /** Force upload duplicate files (single-file endpoint) */
-  const handleUploadDuplicates = async () => {
-    setIsUploading(true);
-    const dupes = queue.filter((f) => f.state === "duplicate");
-    await runWithConcurrency(dupes, (item) => uploadOne(item, true), concurrentUploads);
-    setIsUploading(false);
-  };
-
-  /** Skip all duplicates (remove from queue) */
-  const handleSkipDuplicates = () => {
-    setQueue((prev) => prev.filter((f) => f.state !== "duplicate"));
-  };
-
-  const hasFailures = hasFiles && queue.some((f) => f.state === "error" || f.state === "rejected");
-
-  // When all files are done, show summary toast and auto-close ONLY if no failures
-  useEffect(() => {
-    if (allDone && queue.length > 0) {
-      const ok = queue.filter((f) => f.state === "complete").length;
-      const fail = queue.filter((f) => f.state === "error").length;
-      const skipped = queue.filter((f) => f.state === "rejected").length;
-
-      // Create summary notification (best-effort, don't block UI)
-      sendBatchSummary();
-
-      const parts: string[] = [];
-      if (ok > 0) parts.push(`${ok} succeeded`);
-      if (fail > 0) parts.push(`${fail} failed`);
-      if (skipped > 0) parts.push(`${skipped} skipped`);
-
-      if (fail > 0 || skipped > 0) {
-        // Don't auto-close — keep modal open so user can review failures
-        if (ok > 0) {
-          toast.warning(parts.join(", "));
-        } else {
-          toast.error(parts.join(", "));
-        }
-        if (ok > 0) onSuccess?.();
-      } else {
-        toast.success(parts.join(", "));
-        const timer = setTimeout(() => {
-          onSuccess?.();
-          handleClose();
-        }, 1800);
-        return () => clearTimeout(timer);
-      }
-    }
-  }, [allDone]);
-
-  const handleClose = () => {
-    if (isUploading || isImporting) return;
-    if (isProcessing) {
-      toast.info("Processing continues in the background. Check the Datasets page for progress.");
-      onSuccess?.();
-    }
-    setQueue([]);
-    setShowLocalImport(false);
-    onOpenChange(false);
   };
 
   const pendingCount = queue.filter((f) => f.state === "pending").length;
@@ -529,7 +288,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   const sortedQueue = [...queue].sort((a, b) => {
     const statePriority: Record<FileState, number> = {
       uploading: 0,
-      processing: 10,  // sub-sorted below
+      processing: 10,
       pending: 20,
       duplicate: 30,
       error: 40,
@@ -540,7 +299,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
     let pa = statePriority[a.state] ?? 99;
     let pb = statePriority[b.state] ?? 99;
 
-    // Sub-sort within processing: active (extracting/indexing) before queued
     if (a.state === "processing") {
       pa = a.processingPhase === "queued" ? 12 : 10;
     }
@@ -550,7 +308,6 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
 
     if (pa !== pb) return pa - pb;
 
-    // Within same priority, sort by queuePosition (lower = sooner to process)
     if (a.queuePosition != null && b.queuePosition != null) {
       return a.queuePosition - b.queuePosition;
     }
@@ -561,7 +318,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
   });
 
   return (
-    <Dialog open={open} onOpenChange={handleClose}>
+    <Dialog open={isModalOpen} onOpenChange={() => closeModal()}>
       <DialogContent
         className="sm:max-w-lg bg-card border-border overflow-hidden flex flex-col"
         style={dialogSize ? { width: dialogSize.width, height: dialogSize.height, maxWidth: '90vw', maxHeight: '90vh' } : undefined}
@@ -761,7 +518,7 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
                   <LocalImportBrowser
                     onImportingChange={setIsImporting}
                     onSuccess={onSuccess}
-                    onClose={handleClose}
+                    onClose={closeModal}
                   />
                 </div>
               )}
@@ -774,8 +531,8 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
         <DialogFooter>
           {!allDone && !hasDuplicates && (
             <>
-              <Button variant="ghost" onClick={handleClose} disabled={isUploading}>
-                {isProcessing ? "Close" : "Cancel"}
+              <Button variant="ghost" onClick={closeModal}>
+                {isUploading || isProcessing ? "Minimize" : "Cancel"}
               </Button>
               <Button
                 onClick={handleUploadAll}
@@ -792,12 +549,12 @@ const FileUploadModal = ({ open, onOpenChange, onSuccess }: FileUploadModalProps
             </>
           )}
           {!allDone && hasDuplicates && !hasPending && (
-            <Button variant="ghost" onClick={handleClose} disabled={isUploading}>
+            <Button variant="ghost" onClick={closeModal}>
               Done
             </Button>
           )}
           {allDone && (
-            <Button variant={hasFailures ? "secondary" : "ghost"} onClick={handleClose}>
+            <Button variant={hasFailures ? "secondary" : "ghost"} onClick={closeModal}>
               Close
             </Button>
           )}

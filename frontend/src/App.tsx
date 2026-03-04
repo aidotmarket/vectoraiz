@@ -6,6 +6,7 @@ import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider, useAuth } from "./contexts/AuthContext";
 import { ModeProvider, useMode } from "./contexts/ModeContext";
 import { MarketplaceProvider } from "./contexts/MarketplaceContext";
+import { UploadProvider } from "./contexts/UploadContext";
 import { CoPilotProvider } from "./contexts/CoPilotContext";
 import ErrorBoundary from "./components/ErrorBoundary";
 import MainLayout from "./components/layout/MainLayout";
@@ -77,9 +78,11 @@ const App = () => (
                     element={
                       <RequireAuth>
                         <MarketplaceProvider>
-                          <ChatPanel />
-                          <CoPilotFab />
-                          <MainLayout />
+                          <UploadProvider>
+                            <ChatPanel />
+                            <CoPilotFab />
+                            <MainLayout />
+                          </UploadProvider>
                         </MarketplaceProvider>
                       </RequireAuth>
                     }

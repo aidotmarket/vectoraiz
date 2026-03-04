@@ -7,36 +7,28 @@ import CommandPalette from "@/components/CommandPalette";
 import KeyboardShortcutsModal from "@/components/KeyboardShortcutsModal";
 import FileUploadModal from "@/components/FileUploadModal";
 import useKeyboardShortcuts from "@/hooks/useKeyboardShortcuts";
-import { useToast } from "@/hooks/use-toast";
+import { useUpload } from "@/contexts/UploadContext";
 import VersionBadge from "@/components/VersionBadge";
 
 const MainLayout = () => {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [helpModalOpen, setHelpModalOpen] = useState(false);
-  const { toast } = useToast();
+  const { openModal } = useUpload();
 
   useKeyboardShortcuts({
     onCommandPalette: () => setCommandPaletteOpen(true),
-    onUploadModal: () => setUploadModalOpen(true),
+    onUploadModal: openModal,
     onHelpModal: () => setHelpModalOpen(true),
   });
 
-  const handleUploadSuccess = () => {
-    toast({
-      title: "Dataset uploaded successfully",
-      description: "Your file has been processed and is ready to use.",
-    });
-  };
-
   return (
     <div className="min-h-screen bg-background">
-      <Sidebar 
-        collapsed={sidebarCollapsed} 
-        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} 
+      <Sidebar
+        collapsed={sidebarCollapsed}
+        onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
       />
-      
+
       <div
         className={cn(
           "sidebar-transition",
@@ -53,17 +45,13 @@ const MainLayout = () => {
       <CommandPalette
         open={commandPaletteOpen}
         onOpenChange={setCommandPaletteOpen}
-        onOpenUpload={() => setUploadModalOpen(true)}
+        onOpenUpload={openModal}
       />
       <KeyboardShortcutsModal
         open={helpModalOpen}
         onOpenChange={setHelpModalOpen}
       />
-      <FileUploadModal
-        open={uploadModalOpen}
-        onOpenChange={setUploadModalOpen}
-        onSuccess={handleUploadSuccess}
-      />
+      <FileUploadModal />
       <VersionBadge />
     </div>
   );

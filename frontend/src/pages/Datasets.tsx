@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Database,
@@ -36,7 +36,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
-import FileUploadModal from "@/components/FileUploadModal";
+import { useUpload } from "@/contexts/UploadContext";
 import DatasetsSkeleton from "@/components/skeletons/DatasetsSkeleton";
 import { type Dataset } from "@/data/mockDatasets";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
@@ -109,7 +109,7 @@ const Datasets = () => {
   const { isPublished, getPublishedData } = useMarketplace();
   const { hasFeature } = useMode();
   const showMarketplace = hasFeature("marketplace");
-  const [uploadModalOpen, setUploadModalOpen] = useState(false);
+  const { openModal, setOnSuccess } = useUpload();
   const [searchQuery, setSearchQuery] = useState("");
   const [sortField, setSortField] = useState<SortField>("date");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -127,13 +127,16 @@ const Datasets = () => {
     return [];
   }, [apiData]);
 
-  const handleUploadSuccess = () => {
-    toast({
-      title: "Dataset uploaded successfully",
-      description: "Your file has been processed and is ready to use.",
+  // Register refetch as the upload success callback while this page is mounted
+  useEffect(() => {
+    setOnSuccess(() => {
+      toast({
+        title: "Dataset uploaded successfully",
+        description: "Your file has been processed and is ready to use.",
+      });
+      refetch();
     });
-    refetch(); // Refresh the datasets list
-  };
+  }, [setOnSuccess, refetch]);
 
   const handleDatasetClick = (dataset: Dataset) => {
     navigate(`/datasets/${dataset.id}`);
@@ -205,7 +208,7 @@ const Datasets = () => {
             <RefreshCw className="w-4 h-4" />
             Refresh
           </Button>
-          <Button className="gap-2" onClick={() => setUploadModalOpen(true)}>
+          <Button className="gap-2" onClick={() => openModal()}>
             <Upload className="w-4 h-4" />
             Upload
           </Button>
@@ -245,7 +248,7 @@ const Datasets = () => {
               <Button
                 variant="secondary"
                 className="gap-2 mt-2"
-                onClick={() => setUploadModalOpen(true)}
+                onClick={() => openModal()}
               >
                 <Upload className="w-4 h-4" />
                 Upload your first file
@@ -519,11 +522,6 @@ const Datasets = () => {
         </>
       )}
 
-      <FileUploadModal
-        open={uploadModalOpen}
-        onOpenChange={setUploadModalOpen}
-        onSuccess={handleUploadSuccess}
-      />
     </div>
   );
 };
