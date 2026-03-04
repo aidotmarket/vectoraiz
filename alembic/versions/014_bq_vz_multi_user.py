@@ -28,7 +28,7 @@ def upgrade() -> None:
             nullable=False,
             server_default="user",
         ),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(), nullable=False, server_default=sa.func.now()),
         sa.Column("last_login_at", sa.DateTime(), nullable=True),
     )
