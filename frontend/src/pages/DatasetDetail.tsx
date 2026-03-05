@@ -476,9 +476,9 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <Rows3 className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">Total Rows</p>
-                    <p className="text-lg font-semibold text-foreground">
+                    <p className="text-sm font-semibold text-foreground truncate">
                       {formatNumber(dataset.rows)}
                     </p>
                   </div>
@@ -492,12 +492,12 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <Columns3 className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">
                       Total Columns
                     </p>
-                    <p className="text-lg font-semibold text-foreground">
-                      {dataset.columns}
+                    <p className="text-sm font-semibold text-foreground truncate">
+                      {formatNumber(dataset.columns)}
                     </p>
                   </div>
                 </div>
@@ -510,9 +510,9 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <HardDrive className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">File Size</p>
-                    <p className="text-lg font-semibold text-foreground">
+                    <p className="text-sm font-semibold text-foreground truncate">
                       {dataset.size}
                     </p>
                   </div>
@@ -526,9 +526,9 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <Calendar className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">Created</p>
-                    <p className="text-lg font-semibold text-foreground">
+                    <p className="text-sm font-semibold text-foreground truncate">
                       {formatDate(dataset.createdAt)}
                     </p>
                   </div>
@@ -542,9 +542,9 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <Clock className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">Modified</p>
-                    <p className="text-lg font-semibold text-foreground">
+                    <p className="text-sm font-semibold text-foreground truncate">
                       {formatDate(dataset.modifiedAt)}
                     </p>
                   </div>
@@ -558,9 +558,9 @@ const DatasetDetail = () => {
                   <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
                     <FileType className="w-5 h-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="min-w-0">
                     <p className="text-xs text-muted-foreground">File Type</p>
-                    <p className="text-lg font-semibold text-foreground uppercase">
+                    <p className="text-sm font-semibold text-foreground uppercase truncate">
                       {dataset.type}
                     </p>
                   </div>

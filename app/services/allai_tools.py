@@ -75,7 +75,10 @@ ALLAI_TOOLS = [
         "name": "run_sql_query",
         "description": (
             "Execute a READ-ONLY SQL query via DuckDB. "
-            "Tables are named dataset_{dataset_id}. "
+            "Table names MUST use the format: dataset_{dataset_id} (e.g. dataset_d8510af8). "
+            "NEVER quote the table name or omit the 'dataset_' prefix. "
+            "Wrong: FROM 'd8510af8' or FROM d8510af8. "
+            "Right: FROM dataset_d8510af8. "
             "Results are shown as an inline table — do NOT repeat raw data as text. "
             "Only SELECT queries are allowed. "
             "IMPORTANT: Always call this tool to run queries. Never write SQL as a "
@@ -87,7 +90,7 @@ ALLAI_TOOLS = [
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "SQL SELECT query. Tables: dataset_{dataset_id}",
+                    "description": "SQL SELECT query. Table names use format: dataset_{dataset_id} (e.g. FROM dataset_d8510af8). Always include the dataset_ prefix.",
                 },
                 "limit": {
                     "type": "integer",
