@@ -113,3 +113,41 @@ class TestRawFileGet:
         """Requesting a nonexistent file ID returns 404."""
         resp = client.get("/api/raw/files/00000000-0000-0000-0000-000000000000")
         assert resp.status_code == 404
+
+
+class TestRawFileList:
+    """Test GET /api/raw/files — list all files."""
+
+    def test_list_empty(self, client):
+        """Empty list returns empty array."""
+        resp = client.get("/api/raw/files")
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    def test_list_after_registration(self, client, sample_csv, sample_json):
+        """Registered files appear in the list."""
+        client.post("/api/raw/files", json={"file_path": sample_csv})
+        client.post("/api/raw/files", json={"file_path": sample_json})
+        resp = client.get("/api/raw/files")
+        assert resp.status_code == 200
+        assert len(resp.json()) >= 2
+
+
+class TestRawFileDelete:
+    """Test DELETE /api/raw/files/{id} — delete file and metadata."""
+
+    def test_delete_registered_file(self, client, sample_csv):
+        """Deleting a registered file returns 204 and removes it."""
+        reg = client.post("/api/raw/files", json={"file_path": sample_csv})
+        file_id = reg.json()["id"]
+
+        resp = client.delete(f"/api/raw/files/{file_id}")
+        assert resp.status_code == 204
+
+        resp = client.get(f"/api/raw/files/{file_id}")
+        assert resp.status_code == 404
+
+    def test_delete_nonexistent_file(self, client):
+        """Deleting a nonexistent file returns 404."""
+        resp = client.delete("/api/raw/files/00000000-0000-0000-0000-000000000000")
+        assert resp.status_code == 404

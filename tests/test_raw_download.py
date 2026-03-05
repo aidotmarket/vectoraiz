@@ -12,6 +12,7 @@ import base64
 import hashlib
 import hmac
 import json
+import os
 import time
 import uuid
 
@@ -21,7 +22,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.routers.raw_listings import router as raw_listings_router
+from app.routers.raw_listings import router as raw_listings_router, download_router
 from app.services.entitlement_service import _derive_shared_secret
 
 
@@ -58,6 +59,7 @@ def _set_secret(monkeypatch):
 def app():
     _app = FastAPI()
     _app.include_router(raw_listings_router, prefix="/api/raw")
+    _app.include_router(download_router, prefix="/api/raw")
     return _app
 
 
@@ -137,4 +139,76 @@ class TestRawDownload:
         """Download without Authorization header returns 401."""
         file_id = registered_file["id"]
         resp = client.get(f"/api/raw/download/{file_id}")
+        assert resp.status_code == 401
+
+    def test_expired_token(self, client, registered_file):
+        """Download with expired token returns 401."""
+        file_id = registered_file["id"]
+        content_hash = registered_file["content_hash"]
+
+        payload = _entitlement_payload(content_hash)
+        payload["expires_at"] = time.time() - 10  # Already expired
+        token = _make_token(payload)
+
+        resp = client.get(
+            f"/api/raw/download/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 401
+        assert "expired" in resp.json()["detail"].lower()
+
+    def test_replayed_nonce(self, client, registered_file):
+        """Using the same nonce twice returns 401 on the second attempt."""
+        file_id = registered_file["id"]
+        content_hash = registered_file["content_hash"]
+
+        payload = _entitlement_payload(content_hash)
+        token = _make_token(payload)
+
+        # First request succeeds
+        resp1 = client.get(
+            f"/api/raw/download/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp1.status_code == 200
+
+        # Same token (same nonce) fails
+        resp2 = client.get(
+            f"/api/raw/download/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp2.status_code == 401
+        assert "replay" in resp2.json()["detail"].lower()
+
+    def test_file_missing_from_disk(self, client, registered_file, sample_file):
+        """Download when file has been deleted from disk returns 404."""
+        file_id = registered_file["id"]
+        content_hash = registered_file["content_hash"]
+
+        # Delete the actual file from disk
+        os.remove(sample_file)
+
+        payload = _entitlement_payload(content_hash)
+        token = _make_token(payload)
+
+        resp = client.get(
+            f"/api/raw/download/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert resp.status_code == 404
+        assert "missing" in resp.json()["detail"].lower()
+
+    def test_wrong_secret_signature(self, client, registered_file):
+        """Token signed with wrong secret is rejected."""
+        file_id = registered_file["id"]
+        content_hash = registered_file["content_hash"]
+
+        payload = _entitlement_payload(content_hash)
+        wrong_secret = b"wrong-secret-key-not-the-real-one-padding"
+        token = _make_token(payload, secret=wrong_secret)
+
+        resp = client.get(
+            f"/api/raw/download/{file_id}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
         assert resp.status_code == 401

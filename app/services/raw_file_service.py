@@ -16,7 +16,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from sqlmodel import select
 
@@ -119,6 +119,42 @@ class RawFileService:
             raise FileNotFoundError(f"File missing from disk: {raw_file.file_path}")
 
         return raw_file
+
+    def list_files(self) -> List[RawFile]:
+        """Return all registered raw files, newest first."""
+        with _get_db_session() as session:
+            return list(
+                session.exec(
+                    select(RawFile).order_by(RawFile.created_at.desc())
+                ).all()
+            )
+
+    def delete_file(self, file_id: str) -> bool:
+        """
+        Delete a raw file record and optionally the file on disk.
+
+        Returns True if deleted, False if not found.
+        """
+        with _get_db_session() as session:
+            raw_file = session.exec(
+                select(RawFile).where(RawFile.id == file_id)
+            ).first()
+            if raw_file is None:
+                return False
+
+            file_path = raw_file.file_path
+            session.delete(raw_file)
+            session.commit()
+
+            # Remove from disk if it exists
+            if Path(file_path).is_file():
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    logger.warning("Could not remove file %s from disk: %s", file_path, e)
+
+            logger.info("Deleted raw file %s (%s)", file_id, file_path)
+            return True
 
     def generate_metadata(self, file_id: str) -> dict:
         """

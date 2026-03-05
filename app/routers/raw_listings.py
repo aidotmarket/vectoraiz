@@ -7,18 +7,15 @@ and entitlement-gated file download.
 
 Phase: BQ-VZ-RAW-LISTINGS
 Created: 2026-03-03
+Updated: 2026-03-05 — Refactored to use RawListingService, added list/delete files
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
-from sqlmodel import select, func
 
-from app.models.raw_file import RawFile
-from app.models.raw_listing import RawListing
 from app.schemas.raw_listings import (
     MetadataResponse,
     RawFileRegisterRequest,
@@ -29,16 +26,45 @@ from app.schemas.raw_listings import (
     RawListingUpdateRequest,
 )
 from app.services.raw_file_service import RawFileService, get_raw_file_service
+from app.services.raw_listing_service import RawListingService, get_raw_listing_service
 from app.services.entitlement_service import EntitlementService, get_entitlement_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# Separate router for download — registered without admin auth in main.py
+download_router = APIRouter()
 
-def _get_db_session():
-    from app.core.database import get_session_context
-    return get_session_context()
+
+def _file_response(raw_file) -> RawFileResponse:
+    return RawFileResponse(
+        id=raw_file.id,
+        filename=raw_file.filename,
+        file_path=raw_file.file_path,
+        file_size_bytes=raw_file.file_size_bytes,
+        content_hash=raw_file.content_hash,
+        mime_type=raw_file.mime_type,
+        created_at=raw_file.created_at,
+        updated_at=raw_file.updated_at,
+    )
+
+
+def _listing_response(listing) -> RawListingResponse:
+    return RawListingResponse(
+        id=listing.id,
+        raw_file_id=listing.raw_file_id,
+        marketplace_listing_id=listing.marketplace_listing_id,
+        title=listing.title,
+        description=listing.description,
+        tags=listing.tags or [],
+        auto_metadata=listing.auto_metadata,
+        price_cents=listing.price_cents,
+        status=listing.status,
+        published_at=listing.published_at,
+        created_at=listing.created_at,
+        updated_at=listing.updated_at,
+    )
 
 
 # --- Raw File Endpoints ---
@@ -58,16 +84,19 @@ async def register_raw_file(
         raw_file = svc.register_file(req.file_path)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
-    return RawFileResponse(
-        id=raw_file.id,
-        filename=raw_file.filename,
-        file_path=raw_file.file_path,
-        file_size_bytes=raw_file.file_size_bytes,
-        content_hash=raw_file.content_hash,
-        mime_type=raw_file.mime_type,
-        created_at=raw_file.created_at,
-        updated_at=raw_file.updated_at,
-    )
+    return _file_response(raw_file)
+
+
+@router.get(
+    "/files",
+    response_model=List[RawFileResponse],
+    summary="List all registered raw files",
+)
+async def list_raw_files(
+    svc: RawFileService = Depends(get_raw_file_service),
+):
+    files = svc.list_files()
+    return [_file_response(f) for f in files]
 
 
 @router.get(
@@ -82,16 +111,20 @@ async def get_raw_file(
     raw_file = svc.get_file(file_id)
     if raw_file is None:
         raise HTTPException(status_code=404, detail="Raw file not found")
-    return RawFileResponse(
-        id=raw_file.id,
-        filename=raw_file.filename,
-        file_path=raw_file.file_path,
-        file_size_bytes=raw_file.file_size_bytes,
-        content_hash=raw_file.content_hash,
-        mime_type=raw_file.mime_type,
-        created_at=raw_file.created_at,
-        updated_at=raw_file.updated_at,
-    )
+    return _file_response(raw_file)
+
+
+@router.delete(
+    "/files/{file_id}",
+    status_code=204,
+    summary="Delete a raw file and its metadata",
+)
+async def delete_raw_file(
+    file_id: str,
+    svc: RawFileService = Depends(get_raw_file_service),
+):
+    if not svc.delete_file(file_id):
+        raise HTTPException(status_code=404, detail="Raw file not found")
 
 
 @router.post(
@@ -121,42 +154,15 @@ async def list_raw_listings(
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     status: Optional[str] = Query(default=None, description="Filter by status"),
+    svc: RawListingService = Depends(get_raw_listing_service),
 ):
-    with _get_db_session() as session:
-        query = select(RawListing)
-        count_query = select(func.count()).select_from(RawListing)
-
-        if status:
-            query = query.where(RawListing.status == status)
-            count_query = count_query.where(RawListing.status == status)
-
-        total = session.exec(count_query).one()
-        listings = session.exec(
-            query.order_by(RawListing.created_at.desc()).offset(offset).limit(limit)
-        ).all()
-
-        return RawListingListResponse(
-            listings=[
-                RawListingResponse(
-                    id=l.id,
-                    raw_file_id=l.raw_file_id,
-                    marketplace_listing_id=l.marketplace_listing_id,
-                    title=l.title,
-                    description=l.description,
-                    tags=l.tags or [],
-                    auto_metadata=l.auto_metadata,
-                    price_cents=l.price_cents,
-                    status=l.status,
-                    published_at=l.published_at,
-                    created_at=l.created_at,
-                    updated_at=l.updated_at,
-                )
-                for l in listings
-            ],
-            total=total,
-            limit=limit,
-            offset=offset,
-        )
+    listings, total = svc.list_listings(status_filter=status, limit=limit, offset=offset)
+    return RawListingListResponse(
+        listings=[_listing_response(l) for l in listings],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.post(
@@ -168,42 +174,19 @@ async def list_raw_listings(
 async def create_raw_listing(
     req: RawListingCreateRequest,
     file_svc: RawFileService = Depends(get_raw_file_service),
+    listing_svc: RawListingService = Depends(get_raw_listing_service),
 ):
-    # Verify raw file exists
-    raw_file = file_svc.get_file(req.raw_file_id)
-    if raw_file is None:
+    if file_svc.get_file(req.raw_file_id) is None:
         raise HTTPException(status_code=404, detail="Raw file not found")
 
-    import uuid
-    listing = RawListing(
-        id=str(uuid.uuid4()),
+    listing = listing_svc.create_listing(
         raw_file_id=req.raw_file_id,
         title=req.title,
         description=req.description,
         tags=req.tags,
         price_cents=req.price_cents,
-        status="draft",
     )
-
-    with _get_db_session() as session:
-        session.add(listing)
-        session.commit()
-        session.refresh(listing)
-
-        return RawListingResponse(
-            id=listing.id,
-            raw_file_id=listing.raw_file_id,
-            marketplace_listing_id=listing.marketplace_listing_id,
-            title=listing.title,
-            description=listing.description,
-            tags=listing.tags or [],
-            auto_metadata=listing.auto_metadata,
-            price_cents=listing.price_cents,
-            status=listing.status,
-            published_at=listing.published_at,
-            created_at=listing.created_at,
-            updated_at=listing.updated_at,
-        )
+    return _listing_response(listing)
 
 
 @router.put(
@@ -214,131 +197,59 @@ async def create_raw_listing(
 async def update_raw_listing(
     listing_id: str,
     req: RawListingUpdateRequest,
+    svc: RawListingService = Depends(get_raw_listing_service),
 ):
-    with _get_db_session() as session:
-        listing = session.exec(
-            select(RawListing).where(RawListing.id == listing_id)
-        ).first()
-        if listing is None:
-            raise HTTPException(status_code=404, detail="Listing not found")
-
-        if req.title is not None:
-            listing.title = req.title
-        if req.description is not None:
-            listing.description = req.description
-        if req.tags is not None:
-            listing.tags = req.tags
-        if req.price_cents is not None:
-            listing.price_cents = req.price_cents
-
-        listing.updated_at = datetime.now(timezone.utc)
-        session.add(listing)
-        session.commit()
-        session.refresh(listing)
-
-        return RawListingResponse(
-            id=listing.id,
-            raw_file_id=listing.raw_file_id,
-            marketplace_listing_id=listing.marketplace_listing_id,
-            title=listing.title,
-            description=listing.description,
-            tags=listing.tags or [],
-            auto_metadata=listing.auto_metadata,
-            price_cents=listing.price_cents,
-            status=listing.status,
-            published_at=listing.published_at,
-            created_at=listing.created_at,
-            updated_at=listing.updated_at,
-        )
+    listing = svc.update_listing(
+        listing_id=listing_id,
+        title=req.title,
+        description=req.description,
+        tags=req.tags,
+        price_cents=req.price_cents,
+    )
+    if listing is None:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    return _listing_response(listing)
 
 
 @router.post(
     "/listings/{listing_id}/publish",
     response_model=RawListingResponse,
-    summary="Publish listing (status → listed)",
+    summary="Publish listing (status -> listed)",
 )
-async def publish_raw_listing(listing_id: str):
-    with _get_db_session() as session:
-        listing = session.exec(
-            select(RawListing).where(RawListing.id == listing_id)
-        ).first()
-        if listing is None:
-            raise HTTPException(status_code=404, detail="Listing not found")
-
-        if listing.status == "listed":
-            raise HTTPException(status_code=409, detail="Listing is already published")
-
-        if listing.status == "delisted":
-            raise HTTPException(status_code=409, detail="Cannot publish a delisted listing")
-
-        listing.status = "listed"
-        listing.published_at = datetime.now(timezone.utc)
-        listing.updated_at = datetime.now(timezone.utc)
-        session.add(listing)
-        session.commit()
-        session.refresh(listing)
-
-        logger.info("Published raw listing %s", listing_id)
-
-        return RawListingResponse(
-            id=listing.id,
-            raw_file_id=listing.raw_file_id,
-            marketplace_listing_id=listing.marketplace_listing_id,
-            title=listing.title,
-            description=listing.description,
-            tags=listing.tags or [],
-            auto_metadata=listing.auto_metadata,
-            price_cents=listing.price_cents,
-            status=listing.status,
-            published_at=listing.published_at,
-            created_at=listing.created_at,
-            updated_at=listing.updated_at,
-        )
+async def publish_raw_listing(
+    listing_id: str,
+    svc: RawListingService = Depends(get_raw_listing_service),
+):
+    try:
+        listing = svc.publish_listing(listing_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _listing_response(listing)
 
 
 @router.post(
     "/listings/{listing_id}/delist",
     response_model=RawListingResponse,
-    summary="Delist a listing (status → delisted)",
+    summary="Delist a listing (status -> delisted)",
 )
-async def delist_raw_listing(listing_id: str):
-    with _get_db_session() as session:
-        listing = session.exec(
-            select(RawListing).where(RawListing.id == listing_id)
-        ).first()
-        if listing is None:
-            raise HTTPException(status_code=404, detail="Listing not found")
-
-        if listing.status != "listed":
-            raise HTTPException(status_code=409, detail="Only listed listings can be delisted")
-
-        listing.status = "delisted"
-        listing.updated_at = datetime.now(timezone.utc)
-        session.add(listing)
-        session.commit()
-        session.refresh(listing)
-
-        logger.info("Delisted raw listing %s", listing_id)
-
-        return RawListingResponse(
-            id=listing.id,
-            raw_file_id=listing.raw_file_id,
-            marketplace_listing_id=listing.marketplace_listing_id,
-            title=listing.title,
-            description=listing.description,
-            tags=listing.tags or [],
-            auto_metadata=listing.auto_metadata,
-            price_cents=listing.price_cents,
-            status=listing.status,
-            published_at=listing.published_at,
-            created_at=listing.created_at,
-            updated_at=listing.updated_at,
-        )
+async def delist_raw_listing(
+    listing_id: str,
+    svc: RawListingService = Depends(get_raw_listing_service),
+):
+    try:
+        listing = svc.delist_listing(listing_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Listing not found")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    return _listing_response(listing)
 
 
-# --- Download Endpoint (Entitlement-gated) ---
+# --- Download Endpoint (Entitlement-gated, no admin auth) ---
 
-@router.get(
+@download_router.get(
     "/download/{file_id}",
     summary="Download raw file (entitlement required)",
     description="Validates entitlement token, verifies file hash, and streams the file.",
@@ -349,7 +260,6 @@ async def download_raw_file(
     file_svc: RawFileService = Depends(get_raw_file_service),
     ent_svc: EntitlementService = Depends(get_entitlement_service),
 ):
-    # Validate entitlement from Authorization header
     auth_header = request.headers.get("Authorization", "")
     try:
         payload = ent_svc.validate_entitlement(auth_header)
@@ -358,7 +268,6 @@ async def download_raw_file(
 
     expected_hash = payload.get("file_hash", "")
 
-    # Verify hash and get file
     try:
         raw_file = file_svc.serve_file(file_id, expected_hash)
     except FileNotFoundError as e:

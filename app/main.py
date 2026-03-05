@@ -704,12 +704,18 @@ def create_app() -> FastAPI:
     )
 
     # ADMIN ONLY — raw file listings for marketplace
-    from app.routers.raw_listings import router as raw_listings_router
+    from app.routers.raw_listings import router as raw_listings_router, download_router as raw_download_router
     app.include_router(
         raw_listings_router,
         prefix="/api/raw",
         tags=["raw-listings"],
         dependencies=admin_route_dependency,
+    )
+    # PUBLIC — download endpoint uses entitlement token auth (not admin)
+    app.include_router(
+        raw_download_router,
+        prefix="/api/raw",
+        tags=["raw-listings"],
     )
 
     # BQ-MCP-RAG: External LLM Connectivity — conditionally mount
