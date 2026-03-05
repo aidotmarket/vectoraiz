@@ -407,7 +407,7 @@ const SearchPage = () => {
               </div>
 
               <div className="space-y-3">
-                {Object.entries(selectedRecord.row_data).map(([key, value]) => (
+                {Object.entries(selectedRecord.row_data || {}).map(([key, value]) => (
                   <div key={key} className="flex flex-col gap-1 p-3 bg-secondary rounded-lg">
                     <span className="text-xs text-muted-foreground font-medium">{key}</span>
                     <span className="text-sm text-foreground">{String(value)}</span>

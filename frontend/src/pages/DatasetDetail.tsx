@@ -432,13 +432,30 @@ const DatasetDetail = () => {
         </Card>
       )}
 
+      {/* Processing status message */}
+      {dataset.status === "processing" && (
+        <Card className="border-primary/50 bg-primary/5">
+          <CardContent className="py-6">
+            <div className="flex items-center gap-3">
+              <Loader2 className="w-8 h-8 text-primary animate-spin" />
+              <div>
+                <h3 className="text-base font-semibold text-foreground">Processing Dataset</h3>
+                <p className="text-sm text-muted-foreground mt-1">
+                  This dataset is still being processed. Data will be available once processing completes.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Preview UI for preview_ready status */}
       {dataset.status === "preview_ready" && (
         <DatasetPreview datasetId={dataset.id} />
       )}
 
       {/* Tabs — only shown when dataset is fully ready */}
-      {dataset.status !== "preview_ready" && (
+      {dataset.status === "ready" && (
       <Tabs defaultValue="overview" className="space-y-6">
         <TabsList className="bg-secondary">
           <TabsTrigger value="overview">Overview</TabsTrigger>
