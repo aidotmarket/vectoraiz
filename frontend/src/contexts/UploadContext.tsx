@@ -125,6 +125,35 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   const allDone = hasFiles && queue.every((f) => f.state === "complete" || f.state === "error" || f.state === "rejected");
   const hasFailures = hasFiles && queue.some((f) => f.state === "error" || f.state === "rejected");
 
+  // ----- Poll processing status (runs even when modal is closed) -----
+  const processingIds = queue.filter((f) => f.state === "processing" && f.datasetId).map((f) => f.id).join(",");
+
+  useEffect(() => {
+    if (!processingIds) return;
+
+    const interval = setInterval(async () => {
+      const items = queue.filter((f) => f.state === "processing" && f.datasetId);
+      for (const item of items) {
+        if (!item.datasetId) continue;
+        try {
+          const res = await datasetsApi.getStatus(item.datasetId);
+          if (res.status === "ready" || res.status === "preview_ready") {
+            handleStatusChange(item.id, "complete");
+          } else if (res.status === "error") {
+            handleStatusChange(item.id, "error", res.error || "Processing failed");
+          }
+          if (res.phase !== undefined || res.queue_position !== undefined) {
+            handleMetadataUpdate(item.id, res.phase ?? null, res.queue_position ?? null);
+          }
+        } catch {
+          // Ignore polling errors — will retry next interval
+        }
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [processingIds]);
+
   // ----- Check for server import files when modal opens -----
   useEffect(() => {
     if (!isModalOpen) return;
