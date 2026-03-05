@@ -1,0 +1,35 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest *)",
+      "Bash(cd frontend && npm *)",
+      "Bash(cat *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(ls *)",
+      "Bash(git log *)",
+      "Bash(git diff *)",
+      "Bash(git status *)",
+      "Bash(git show *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Edit(app/**)",
+      "Edit(frontend/src/**)",
+      "Edit(tests/**)",
+      "Edit(CLAUDE.md)"
+    ],
+    "deny": [
+      "Bash(scripts/release.sh *)",
+      "Bash(rm -rf *)",
+      "Bash(gh *)",
+      "Edit(.github/**)",
+      "Edit(scripts/release.sh)",
+      "Edit(.env)"
+    ]
+  },
+  "includeGitInstructions": false
+}
