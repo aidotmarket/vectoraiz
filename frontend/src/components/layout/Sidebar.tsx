@@ -34,8 +34,8 @@ const topNavItems: NavItem[] = [
 ];
 
 const bottomNavItems: NavItem[] = [
-  { path: "/data-types", label: "Data Types", icon: FileStack },
   { path: "/ai-market", label: "ai.market", icon: Store },
+  { path: "/data-types", label: "Data Types", icon: FileStack },
 ];
 
 interface SidebarProps {
