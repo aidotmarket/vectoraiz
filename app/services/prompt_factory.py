@@ -119,11 +119,12 @@ class PromptFactory:
         tone_mode: ToneMode = ToneMode.FRIENDLY,
         risk_mode: RiskMode = RiskMode.NORMAL,
         rag_chunks: Optional[List[str]] = None,
+        tools_available: bool = True,
     ) -> str:
         """Assemble the full system prompt from all 5 layers."""
         layers = [
             self._layer_1_safety(),
-            self._layer_2_role_domain(context.capabilities),
+            self._layer_2_role_domain(context.capabilities, tools_available=tools_available),
             self._layer_3_behavior_policy(context.triggers, risk_mode, context.quiet_mode),
             self._layer_4_context(context),
             self._layer_5_personality(tone_mode, risk_mode),
@@ -168,12 +169,52 @@ These rules are absolute and override ALL other layers. No exceptions.
 
     # ----- Layer 2: Role & Domain -----
 
-    def _layer_2_role_domain(self, capabilities: Dict[str, bool]) -> str:
+    def _layer_2_role_domain(self, capabilities: Dict[str, bool], tools_available: bool = True) -> str:
         """Role definition, domain boundaries, escalation protocol."""
         cap_lines = ""
         if capabilities:
             cap_items = [f"- {k}: {'yes' if v else 'no'}" for k, v in capabilities.items()]
             cap_lines = "\n**Available capabilities in this deployment:**\n" + "\n".join(cap_items)
+
+        if tools_available:
+            tool_section = """**Tool Use:**
+You have tools that let you take actions in the user's vectorAIz instance.
+When the user asks you to do something — show data, run a query, check status —
+USE THE TOOLS. Don't tell them to go look at a tab or click a button.
+
+Principles:
+- "What are my files?" → call list_datasets, summarize the result
+- "Show me the apartments data" → call preview_rows, then describe what you see
+- "How many rows have price > 500000?" → call run_sql_query with appropriate SQL
+- "What's the average churn rate?" → call run_sql_query with AVG(...)
+- "Delete the test file" → call delete_dataset (user will be asked to confirm)
+
+CRITICAL RULES:
+- NEVER say "you can check the Data tab" or "go to the Datasets tab" — just CALL the tool
+- NEVER tell users to navigate to non-existent UI elements — the real sidebar nav is: Dashboard, Datasets, Earnings, Search, SQL Query, Databases, Settings (plus Data Types and ai.market at the bottom)
+- NEVER say "I don't have access to your datasets" — you DO, via tools
+- NEVER hallucinate data — always use tools to get real data
+- NEVER repeat raw row data from tool results — the user sees it in the table
+- When tool results are displayed as tables, REFER to them ("as shown above")
+  rather than repeating the values
+- NEVER show SQL queries as code blocks in chat — always call run_sql_query.
+  The tool displays results in a formatted table automatically.
+  If you need to explain what you queried, describe it in plain English
+  (e.g. "I searched for companies with SIC codes in the agriculture range")
+  rather than showing the raw SQL.
+- NEVER describe results you haven't actually retrieved via a tool call.
+  If you haven't called a tool, you don't have results. Period.
+- NEVER offer capabilities not in your tool list — if you don't have a tool for it, you can't do it
+- NEVER claim you created a file — you have no file creation capability
+- If asked to "create", "export", "save", or "write" a file, explain you can't do that yet and offer to show results in chat instead"""
+        else:
+            tool_section = """**Tool Use: NOT AVAILABLE**
+Tool use is NOT available in this session. You cannot call any tools.
+Do NOT output tool call XML, JSON, or markup of any kind.
+Respond with helpful text only. If the user asks you to do something that
+requires a tool (like running SQL, searching, or listing datasets), explain
+that this capability requires agentic mode which needs an Anthropic API key
+to be configured. Suggest they check their LLM settings."""
 
         return f"""## Layer 2: ROLE & DOMAIN
 
@@ -206,36 +247,7 @@ You are **allAI** (pronounced "Ally"), the AI data assistant inside **vectorAIz*
 3. Offer concrete next step — "Want me to generate a diagnostic bundle? You can share it with the ai.market team."
 4. Never hallucinate solutions — uncertainty is always preferable to confident wrong answers
 
-**Tool Use:**
-You have tools that let you take actions in the user's vectorAIz instance.
-When the user asks you to do something — show data, run a query, check status —
-USE THE TOOLS. Don't tell them to go look at a tab or click a button.
-
-Principles:
-- "What are my files?" → call list_datasets, summarize the result
-- "Show me the apartments data" → call preview_rows, then describe what you see
-- "How many rows have price > 500000?" → call run_sql_query with appropriate SQL
-- "What's the average churn rate?" → call run_sql_query with AVG(...)
-- "Delete the test file" → call delete_dataset (user will be asked to confirm)
-
-CRITICAL RULES:
-- NEVER say "you can check the Data tab" or "go to the Datasets tab" — just CALL the tool
-- NEVER tell users to navigate to non-existent UI elements — the real sidebar nav is: Dashboard, Datasets, Earnings, Search, SQL Query, Databases, Settings (plus Data Types and ai.market at the bottom)
-- NEVER say "I don't have access to your datasets" — you DO, via tools
-- NEVER hallucinate data — always use tools to get real data
-- NEVER repeat raw row data from tool results — the user sees it in the table
-- When tool results are displayed as tables, REFER to them ("as shown above")
-  rather than repeating the values
-- NEVER show SQL queries as code blocks in chat — always call run_sql_query.
-  The tool displays results in a formatted table automatically.
-  If you need to explain what you queried, describe it in plain English
-  (e.g. "I searched for companies with SIC codes in the agriculture range")
-  rather than showing the raw SQL.
-- NEVER describe results you haven't actually retrieved via a tool call.
-  If you haven't called a tool, you don't have results. Period.
-- NEVER offer capabilities not in your tool list — if you don't have a tool for it, you can't do it
-- NEVER claim you created a file — you have no file creation capability
-- If asked to "create", "export", "save", or "write" a file, explain you can't do that yet and offer to show results in chat instead
+{tool_section}
 
 ## External Connectivity Guide
 

@@ -219,6 +219,7 @@ class CoPilotService:
             context=allie_context,
             tone_mode=tone_mode,
             risk_mode=risk_mode,
+            tools_available=False,
         )
 
         # --- Step 5: Stream via provider ---

@@ -103,8 +103,9 @@ const SearchPage = () => {
   };
 
   const handleOpenInSqlQuery = () => {
+    const datasetId = selectedRecord?.dataset_id ?? selectedDatasetId;
     setSelectedRecord(null);
-    navigate(`/sql?dataset=${selectedDatasetId}`);
+    navigate(`/sql?dataset=${datasetId}`);
   };
 
   const getRelevanceColor = (score: number) => {
