@@ -327,6 +327,45 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     setQueue((prev) => prev.filter((f) => f.state !== "duplicate"));
   }, []);
 
+  // ----- poll processing items even when modal is closed -----
+  const processingKey = queue
+    .filter((f) => f.state === "processing" && f.datasetId)
+    .map((f) => f.datasetId)
+    .join(",");
+
+  useEffect(() => {
+    if (!processingKey) return;
+
+    const interval = setInterval(async () => {
+      const processingItems = queue.filter((f) => f.state === "processing" && f.datasetId);
+      for (const item of processingItems) {
+        if (!item.datasetId) continue;
+        try {
+          const data = await datasetsApi.getStatus(item.datasetId);
+          if (data.status === "ready" || data.status === "preview_ready") {
+            handleStatusChange(item.id, "complete");
+          } else if (data.status === "error") {
+            handleStatusChange(item.id, "error", data.error || "Processing failed");
+          }
+          // Update phase/queuePosition metadata for the indicator
+          const raw = data as Record<string, unknown>;
+          if (raw.phase !== undefined || raw.queue_position !== undefined) {
+            handleMetadataUpdate(
+              item.id,
+              (raw.phase as string) ?? null,
+              (raw.queue_position as number) ?? null,
+            );
+          }
+        } catch {
+          // Ignore network errors, retry next interval
+        }
+      }
+    }, 3000);
+
+    return () => clearInterval(interval);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [processingKey]);
+
   // ----- allDone effect: summary toast + auto-clear -----
   useEffect(() => {
     if (!allDone || queue.length === 0) return;
