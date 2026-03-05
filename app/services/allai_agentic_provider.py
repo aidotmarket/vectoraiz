@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from app.services.allie_provider import AllieDisabledError, AllieUsage
+from app.services.allie_provider import AllieDisabledError, AllieUsage, read_allie_config
 from app.services.allai_tool_executor import AllAIToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -154,16 +154,24 @@ class AgenticAllieProvider:
         """Call ai.market proxy for tool-enabled agentic LLM request."""
         from app.config import settings
 
-        base_url = settings.ai_market_url.rstrip("/")
-        api_key = settings.internal_api_key
+        config = read_allie_config()
+        if config:
+            api_key = config["install_token"]
+            serial = config.get("serial_number", "")
+            base_url = config.get("ai_market_url", "").rstrip("/") or settings.ai_market_url.rstrip("/")
+        else:
+            api_key = settings.internal_api_key
+            serial = settings.serial or ""
+            base_url = settings.ai_market_url.rstrip("/")
+
         if not api_key:
-            raise ValueError("VECTORAIZ_INTERNAL_API_KEY required for ai.market proxy")
+            raise ValueError("No API key available — check serial activation or VECTORAIZ_INTERNAL_API_KEY")
 
         url = f"{base_url}/api/v1/allie/chat/agentic"
         headers = {
             "Content-Type": "application/json",
             "X-API-Key": api_key,
-            "X-Serial": settings.serial or "",
+            "X-Serial": serial,
         }
         body = {
             "messages": messages,
