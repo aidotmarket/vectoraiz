@@ -654,7 +654,7 @@ async def get_dataset_status(
         "status": status_val,
         "original_filename": record.original_filename,
         "batch_id": record.batch_id,
-        "error_message": record.error if status_val == DatasetStatus.ERROR.value else None,
+        "error": record.error if status_val == DatasetStatus.ERROR.value else None,
     }
 
     # Show queue position for datasets waiting to be processed
