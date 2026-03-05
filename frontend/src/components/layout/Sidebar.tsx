@@ -26,7 +26,6 @@ interface NavItem {
 const topNavItems: NavItem[] = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/datasets", label: "Datasets", icon: Database },
-  { path: "/earnings", label: "Earnings", icon: DollarSign, feature: "marketplace" },
   { path: "/search", label: "Search", icon: Search },
   { path: "/sql", label: "SQL Query", icon: Code },
   { path: "/databases", label: "Databases", icon: Database },
@@ -35,6 +34,7 @@ const topNavItems: NavItem[] = [
 
 const bottomNavItems: NavItem[] = [
   { path: "/ai-market", label: "ai.market", icon: Store },
+  { path: "/earnings", label: "Earnings", icon: DollarSign, feature: "marketplace" },
   { path: "/data-types", label: "Data Types", icon: FileStack },
 ];
 
@@ -48,6 +48,10 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
   const { hasFeature, isStandalone } = useMode();
 
   const navItems = topNavItems.filter(
+    (item) => !item.feature || hasFeature(item.feature)
+  );
+
+  const bottomItems = bottomNavItems.filter(
     (item) => !item.feature || hasFeature(item.feature)
   );
 
@@ -103,7 +107,7 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
         {/* Bottom nav items with separator */}
         <div className="border-t border-sidebar-border pt-2 space-y-1">
           <ul className="space-y-1">
-            {bottomNavItems.map(renderNavItem)}
+            {bottomItems.map(renderNavItem)}
           </ul>
         </div>
 
