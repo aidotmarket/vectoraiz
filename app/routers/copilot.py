@@ -63,7 +63,9 @@ from app.services.serial_metering import (
 from app.services.serial_store import get_serial_store, MIGRATED
 from app.services.allie_provider import AllieDisabledError
 from app.services.nudge_manager import nudge_manager, NudgeMessage
-from app.services.confirmation_service import confirmation_service
+from app.services.approval_token_service import approval_token_service
+from app.services.audit_logger import audit_logger
+from app.services.event_bus import VZEvent, event_bus
 from app.services.chat_attachment_service import (
     ALLOWED_MIME_TYPES,
     MAX_ATTACHMENTS_PER_MESSAGE,
@@ -1315,7 +1317,7 @@ async def websocket_copilot(websocket: WebSocket):
                 await manager.set_inflight(session_id, task)
 
             elif msg_type == "CONFIRM_ACTION":
-                # BQ-ALLAI-B: User confirmed a destructive action
+                # BQ-VZ-CP2: User approved a mutation via ApprovalTokenService
                 confirm_id = data.get("confirm_id", "")
                 if not confirm_id:
                     await safe_send_json(websocket, {
@@ -1324,48 +1326,50 @@ async def websocket_copilot(websocket: WebSocket):
                     })
                     continue
 
-                pending = confirmation_service.validate_and_execute(
-                    token=confirm_id,
+                approval_result = approval_token_service.validate_and_consume(
+                    token_id=confirm_id,
                     user_id=user.user_id,
+                    session_id=session_id,
                 )
 
-                if not pending:
+                if not approval_result.success:
                     await safe_send_json(websocket, {
                         "type": "CONFIRM_RESULT",
                         "confirm_id": confirm_id,
                         "success": False,
-                        "message": "Confirmation expired or invalid",
+                        "message": f"Approval failed: {approval_result.reason}",
                     })
+                    await event_bus.emit(session_id, VZEvent(
+                        event_type="approval_result",
+                        session_id=session_id,
+                        data={"token_id": confirm_id, "success": False, "reason": approval_result.reason},
+                    ))
                     continue
 
-                # Execute the destructive action
+                # Execute via AllAIToolExecutor with full audit + redaction
                 try:
-                    if pending.tool_name == "delete_dataset":
-                        from app.services.processing_service import get_processing_service
-                        svc = get_processing_service()
-                        dataset_id = pending.tool_input.get("dataset_id", "")
-                        success = svc.delete_dataset(dataset_id)
-                        if success:
-                            await safe_send_json(websocket, {
-                                "type": "CONFIRM_RESULT",
-                                "confirm_id": confirm_id,
-                                "success": True,
-                                "message": f"Dataset '{pending.details.get('filename', dataset_id)}' deleted successfully",
-                            })
-                        else:
-                            await safe_send_json(websocket, {
-                                "type": "CONFIRM_RESULT",
-                                "confirm_id": confirm_id,
-                                "success": False,
-                                "message": f"Failed to delete dataset '{dataset_id}'",
-                            })
-                    else:
-                        await safe_send_json(websocket, {
-                            "type": "CONFIRM_RESULT",
-                            "confirm_id": confirm_id,
-                            "success": False,
-                            "message": f"Unknown destructive tool: {pending.tool_name}",
-                        })
+                    from app.services.allai_tool_executor import AllAIToolExecutor
+                    executor = AllAIToolExecutor(
+                        user=session_user,
+                        send_ws=lambda msg: safe_send_json(websocket, msg),
+                        session_id=session_id,
+                    )
+                    exec_result = await executor.execute_approved(
+                        tool_name=approval_result.tool_name,
+                        tool_input=approval_result.tool_input,
+                        approval_token_id=confirm_id,
+                    )
+                    await safe_send_json(websocket, {
+                        "type": "CONFIRM_RESULT",
+                        "confirm_id": confirm_id,
+                        "success": True,
+                        "message": exec_result.llm_summary[:300],
+                    })
+                    await event_bus.emit(session_id, VZEvent(
+                        event_type="approval_result",
+                        session_id=session_id,
+                        data={"token_id": confirm_id, "success": True, "tool_name": approval_result.tool_name},
+                    ))
                 except Exception as e:
                     logger.error("CONFIRM_ACTION execution failed: %s", e)
                     await safe_send_json(websocket, {
@@ -1374,6 +1378,11 @@ async def websocket_copilot(websocket: WebSocket):
                         "success": False,
                         "message": f"Execution failed: {str(e)[:200]}",
                     })
+                    await event_bus.emit(session_id, VZEvent(
+                        event_type="approval_result",
+                        session_id=session_id,
+                        data={"token_id": confirm_id, "success": False, "reason": "execution_error"},
+                    ))
 
             elif msg_type == "NUDGE_DISMISS":
                 # BQ-128 Phase 3: User dismissed a nudge
@@ -1439,6 +1448,49 @@ async def websocket_copilot(websocket: WebSocket):
         await manager.disconnect(session_id)
         nudge_manager.cleanup_session(session_id)
         logger.info(f"Co-Pilot WS cleaned up: session={session_id}")
+
+
+# ---------------------------------------------------------------------------
+# SSE endpoint: GET /api/copilot/events/stream
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/events/stream",
+    summary="SSE event stream for approval requests and tool execution events",
+)
+async def events_stream(
+    session_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Server-Sent Events stream for a session. Multi-tab safe."""
+    import asyncio
+    from starlette.responses import StreamingResponse
+
+    queue = event_bus.subscribe(session_id)
+
+    async def _generate():
+        try:
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                    yield event.to_sse()
+                except asyncio.TimeoutError:
+                    # Keepalive ping
+                    yield ": keepalive\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            event_bus.unsubscribe(session_id, queue)
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -19,9 +19,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.sql_sandbox import SQLSandbox
-from app.services.confirmation_service import (
-    CONFIRMATION_TTL_SECONDS,
-    ConfirmationService,
+from app.services.approval_token_service import (
+    RISK_TTL,
+    ApprovalTokenService,
 )
 from app.services.allai_tool_result import ToolResult
 from app.services.allai_tool_executor import (
@@ -185,87 +185,81 @@ class TestSQLSandbox:
 # =====================================================================
 
 class TestConfirmationService:
-    """[COUNCIL] Server-enforced confirmation tokens."""
+    """[COUNCIL] Server-enforced approval tokens (migrated from ConfirmationService)."""
 
     def test_request_confirmation(self):
-        svc = ConfirmationService()
-        token = svc.request_confirmation(
+        svc = ApprovalTokenService()
+        token = svc.create_token(
             user_id="user_1",
+            session_id="session_1",
             tool_name="delete_dataset",
             tool_input={"dataset_id": "abc123"},
-            session_id="session_1",
             description="Delete dataset 'test.csv'",
         )
         assert token
-        assert len(token) == 36  # UUID format
+        assert len(token.id) == 36  # UUID format
 
     def test_validate_and_execute_success(self):
-        svc = ConfirmationService()
-        token = svc.request_confirmation(
+        svc = ApprovalTokenService()
+        token = svc.create_token(
             user_id="user_1",
+            session_id="session_1",
             tool_name="delete_dataset",
             tool_input={"dataset_id": "abc123"},
-            session_id="session_1",
         )
-        result = svc.validate_and_execute(token, "user_1")
-        assert result is not None
+        result = svc.validate_and_consume(token.id, "user_1", "session_1")
+        assert result.success is True
         assert result.tool_name == "delete_dataset"
         assert result.tool_input == {"dataset_id": "abc123"}
 
     def test_single_use_token(self):
-        svc = ConfirmationService()
-        token = svc.request_confirmation(
+        svc = ApprovalTokenService()
+        token = svc.create_token(
             user_id="user_1",
+            session_id="session_1",
             tool_name="delete_dataset",
             tool_input={"dataset_id": "abc123"},
-            session_id="session_1",
         )
-        # First use succeeds
-        result1 = svc.validate_and_execute(token, "user_1")
-        assert result1 is not None
+        result1 = svc.validate_and_consume(token.id, "user_1", "session_1")
+        assert result1.success is True
 
-        # Second use fails (single-use)
-        result2 = svc.validate_and_execute(token, "user_1")
-        assert result2 is None
+        result2 = svc.validate_and_consume(token.id, "user_1", "session_1")
+        assert result2.success is False
 
     def test_wrong_user_rejected(self):
-        """[COUNCIL] Wrong user can't use another user's confirmation token."""
-        svc = ConfirmationService()
-        token = svc.request_confirmation(
+        """[COUNCIL] Wrong user can't use another user's approval token."""
+        svc = ApprovalTokenService()
+        token = svc.create_token(
             user_id="user_1",
+            session_id="session_1",
             tool_name="delete_dataset",
             tool_input={"dataset_id": "abc123"},
-            session_id="session_1",
         )
-        # Different user tries to validate
-        result = svc.validate_and_execute(token, "user_ATTACKER")
-        assert result is None
+        result = svc.validate_and_consume(token.id, "user_ATTACKER", "session_1")
+        assert result.success is False
 
-        # Original user should ALSO be unable (token not consumed but user mismatch
-        # doesn't consume — verify token still works for correct user)
-        result = svc.validate_and_execute(token, "user_1")
-        assert result is not None
+        # Original user can still use it (wrong_user doesn't consume)
+        result = svc.validate_and_consume(token.id, "user_1", "session_1")
+        assert result.success is True
 
     def test_expired_token_rejected(self):
         """[COUNCIL] Expired tokens are rejected."""
-        svc = ConfirmationService()
-        token = svc.request_confirmation(
+        svc = ApprovalTokenService()
+        token = svc.create_token(
             user_id="user_1",
+            session_id="session_1",
             tool_name="delete_dataset",
             tool_input={"dataset_id": "abc123"},
-            session_id="session_1",
         )
+        token.expires_at = time.time() - 1
 
-        # Manually expire the token
-        svc._pending[token].created_at = time.time() - CONFIRMATION_TTL_SECONDS - 1
-
-        result = svc.validate_and_execute(token, "user_1")
-        assert result is None
+        result = svc.validate_and_consume(token.id, "user_1", "session_1")
+        assert result.success is False
 
     def test_nonexistent_token_rejected(self):
-        svc = ConfirmationService()
-        result = svc.validate_and_execute("nonexistent-token", "user_1")
-        assert result is None
+        svc = ApprovalTokenService()
+        result = svc.validate_and_consume("nonexistent-token", "user_1", "session_1")
+        assert result.success is False
 
 
 # =====================================================================
@@ -425,7 +419,7 @@ class TestToolExecutor:
         executor._authorize = lambda n, i: (True, "")
 
         result = await executor.execute("nonexistent_tool", {})
-        assert "Unknown tool" in result.llm_summary
+        assert "denied" in result.llm_summary.lower()
 
 
 # =====================================================================

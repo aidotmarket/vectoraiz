@@ -2,28 +2,39 @@
 allAI Tool Executor — Runs tools on behalf of the user.
 
 [COUNCIL] Security model:
-- Per-tool authorization check (user owns the resource)
+- Capability-based authorization (default-deny for unmapped tools)
+- 3-category tool classification: READ_ONLY, AUTO_APPROVE, MUTATION
+- Mutation tools require user approval via ApprovalTokenService
 - Per-resource validation (dataset belongs to user)
 - SQL goes through SQLSandbox AST validation THEN existing sql_service
-- Destructive tools route through ConfirmationService (not executed directly)
 - Tool results split into frontend_data + llm_summary (two-track)
+- Output redaction on llm_summary and error strings
+- Audit logging for every tool call (including denials)
 - Max 5 calls per message, 10s per call timeout
 
 PHASE: BQ-ALLAI-B2 — Tool Execution Engine
-CREATED: 2026-02-16
+UPDATED: 2026-03-05 — BQ-VZ-CONTROL-PLANE Step 2 (Security Foundation)
 """
 
 import asyncio
 import logging
+import time as time_mod
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from app.auth.api_key_auth import AuthenticatedUser
 from app.services.allai_tool_result import ToolResult
-from app.services.confirmation_service import (
-    CONFIRMATION_TTL_SECONDS,
-    DESTRUCTIVE_TOOLS,
-    confirmation_service,
+from app.services.approval_token_service import (
+    ALL_CLASSIFIED_TOOLS,
+    AUTO_APPROVE_TOOLS,
+    MUTATION_TOOLS,
+    READ_ONLY_TOOLS,
+    RISK_TTL,
+    approval_token_service,
+    check_capabilities,
 )
+from app.services.audit_logger import audit_logger
+from app.services.event_bus import VZEvent, event_bus
+from app.utils.output_redaction import redact_for_llm
 
 logger = logging.getLogger(__name__)
 
@@ -68,8 +79,10 @@ class AllAIToolExecutor:
         self.call_count = 0
 
     async def execute(self, tool_name: str, tool_input: dict) -> ToolResult:
-        """Execute a tool call. Returns ToolResult with frontend_data + llm_summary."""
+        """Execute a tool call with full security pipeline.
 
+        Flow: rate limit → capability check → classification → route
+        """
         self.call_count += 1
         if self.call_count > MAX_TOOL_CALLS_PER_MESSAGE:
             return ToolResult(
@@ -77,19 +90,61 @@ class AllAIToolExecutor:
                 llm_summary="Tool call limit reached (5 per message). Ask the user to send another message to continue.",
             )
 
-        # [COUNCIL] Authorization check
+        start_time = time_mod.time()
+
+        # Step 1: Capability check (default-deny for unmapped tools)
+        cap_error = check_capabilities(self.user, tool_name)
+        if cap_error:
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="denied_capability", error_category="capability_denied",
+            )
+            return ToolResult(
+                frontend_data={"error": cap_error},
+                llm_summary=f"Authorization failed: {cap_error}",
+            )
+
+        # Step 2: Classification check (also default-deny)
+        if tool_name not in ALL_CLASSIFIED_TOOLS:
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="denied_unclassified", error_category="unclassified_tool",
+            )
+            return ToolResult(
+                frontend_data={"error": f"Tool '{tool_name}' is not classified — denied"},
+                llm_summary=f"Tool '{tool_name}' is not classified and was denied.",
+            )
+
+        # Step 3: Per-resource authorization
         auth_ok, auth_err = self._authorize(tool_name, tool_input)
         if not auth_ok:
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="denied_authorization", error_category="auth_failed",
+            )
             return ToolResult(
                 frontend_data={"error": f"Not authorized: {auth_err}"},
                 llm_summary=f"Authorization failed: {auth_err}",
             )
 
-        # [COUNCIL] Destructive tools → ConfirmationService
-        if tool_name in DESTRUCTIVE_TOOLS:
-            return await self._handle_destructive(tool_name, tool_input)
+        # Step 4: Route by classification
+        if tool_name in MUTATION_TOOLS:
+            return await self._request_approval(tool_name, tool_input)
 
-        # Send TOOL_STATUS to frontend
+        # READ_ONLY or AUTO_APPROVE → execute immediately
+        return await self._execute_and_audit(tool_name, tool_input, start_time)
+
+    async def _execute_and_audit(
+        self, tool_name: str, tool_input: dict,
+        start_time: float = 0.0, approval_token_id: str = None,
+    ) -> ToolResult:
+        """Execute a tool, apply redaction, emit events, and log audit."""
+        if not start_time:
+            start_time = time_mod.time()
+
         await self.send_ws({
             "type": "TOOL_STATUS",
             "tool_name": tool_name,
@@ -102,24 +157,35 @@ class AllAIToolExecutor:
                 timeout=TOOL_TIMEOUT_S,
             )
 
-            # Send TOOL_RESULT to frontend (rich data)
+            # Redact llm_summary before it enters LLM context
+            result.llm_summary = redact_for_llm(result.llm_summary)
+
             await self.send_ws({
                 "type": "TOOL_RESULT",
                 "tool_name": tool_name,
                 "data": result.frontend_data,
             })
-
-            # Send done status
             await self.send_ws({
                 "type": "TOOL_STATUS",
                 "tool_name": tool_name,
                 "status": "done",
             })
 
-            logger.info(
-                "allAI tool: user=%s tool=%s → success",
-                self.user.user_id, tool_name,
+            duration_ms = int((time_mod.time() - start_time) * 1000)
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="success", duration_ms=duration_ms,
+                approval_token_id=approval_token_id,
             )
+
+            await event_bus.emit(self.session_id, VZEvent(
+                event_type="tool_executed",
+                session_id=self.session_id,
+                data={"tool_name": tool_name, "outcome": "success", "duration_ms": duration_ms},
+            ))
+
+            logger.info("allAI tool: user=%s tool=%s → success", self.user.user_id, tool_name)
             return result
 
         except asyncio.TimeoutError:
@@ -128,6 +194,12 @@ class AllAIToolExecutor:
                 "tool_name": tool_name,
                 "status": "error",
             })
+            duration_ms = int((time_mod.time() - start_time) * 1000)
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="error", duration_ms=duration_ms, error_category="timeout",
+            )
             return ToolResult(
                 frontend_data={"error": f"Tool timed out after {TOOL_TIMEOUT_S}s"},
                 llm_summary=f"Tool {tool_name} timed out. Suggest the user try again.",
@@ -142,10 +214,25 @@ class AllAIToolExecutor:
                 "tool_name": tool_name,
                 "status": "error",
             })
-            return ToolResult(
-                frontend_data={"error": str(e)},
-                llm_summary=f"Tool {tool_name} failed: {str(e)[:200]}",
+            duration_ms = int((time_mod.time() - start_time) * 1000)
+            safe_cat = _safe_error_category(e)
+            await audit_logger.log(
+                session_id=self.session_id, user_id=self.user.user_id,
+                tool_name=tool_name, tool_input=tool_input,
+                outcome="error", duration_ms=duration_ms, error_category=safe_cat,
             )
+            return ToolResult(
+                frontend_data={"error": safe_cat},
+                llm_summary=redact_for_llm(f"Tool {tool_name} failed: {safe_cat}"),
+            )
+
+    async def execute_approved(
+        self, tool_name: str, tool_input: dict, approval_token_id: str = None,
+    ) -> ToolResult:
+        """Execute a tool after approval validation. Called by copilot.py."""
+        return await self._execute_and_audit(
+            tool_name, tool_input, approval_token_id=approval_token_id,
+        )
 
     # ------------------------------------------------------------------
     # Authorization
@@ -172,35 +259,58 @@ class AllAIToolExecutor:
             return False
 
     # ------------------------------------------------------------------
-    # Destructive action gate
+    # Mutation approval gate
     # ------------------------------------------------------------------
 
-    async def _handle_destructive(self, tool_name: str, tool_input: dict) -> ToolResult:
-        """[COUNCIL] Route destructive actions through confirmation service."""
+    async def _request_approval(self, tool_name: str, tool_input: dict) -> ToolResult:
+        """Route mutation tools through ApprovalTokenService."""
         details = await self._get_resource_details(tool_name, tool_input)
         description = details.get("description", f"Confirm {tool_name}")
 
-        token = confirmation_service.request_confirmation(
+        mutation_info = MUTATION_TOOLS.get(tool_name, {})
+        risk_level = mutation_info.get("risk", "medium")
+        ttl = RISK_TTL.get(risk_level, 60)
+
+        token = approval_token_service.create_token(
             user_id=self.user.user_id,
+            session_id=self.session_id,
             tool_name=tool_name,
             tool_input=tool_input,
-            session_id=self.session_id,
             description=description,
-            details=details,
         )
 
-        # Send CONFIRM_REQUEST to frontend
+        # Send CONFIRM_REQUEST to frontend (backward-compatible)
         await self.send_ws({
             "type": "CONFIRM_REQUEST",
-            "confirm_id": token,
+            "confirm_id": token.id,
             "tool_name": tool_name,
             "description": description,
             "details": details,
-            "expires_in_seconds": CONFIRMATION_TTL_SECONDS,
+            "risk_level": risk_level,
+            "expires_in_seconds": ttl,
         })
 
+        # Emit SSE event for multi-tab support
+        await event_bus.emit(self.session_id, VZEvent(
+            event_type="approval_request",
+            session_id=self.session_id,
+            data={
+                "token_id": token.id,
+                "tool_name": tool_name,
+                "description": description,
+                "risk_level": risk_level,
+                "expires_in_seconds": ttl,
+            },
+        ))
+
+        await audit_logger.log(
+            session_id=self.session_id, user_id=self.user.user_id,
+            tool_name=tool_name, tool_input=tool_input,
+            outcome="approval_requested", approval_token_id=token.id,
+        )
+
         return ToolResult(
-            frontend_data={"status": "confirmation_requested", "confirm_id": token},
+            frontend_data={"status": "confirmation_requested", "confirm_id": token.id},
             llm_summary=(
                 f"A confirmation prompt has been shown to the user for: {description}. "
                 "Wait for the user to confirm or cancel. Do NOT proceed until they respond."
