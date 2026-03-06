@@ -384,6 +384,8 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
         // Map error codes to user-friendly messages
         if (errorCode === "ALLIE_DISABLED") {
           errorContent = "allAI requires an ai.market connection.";
+        } else if (errorCode === "TIMEOUT") {
+          errorContent = "The request timed out — try a simpler query or smaller dataset.";
         } else if (errorCode === "RATE_LIMITED") {
           errorContent = "Daily token budget reached. Resets tomorrow.";
         }

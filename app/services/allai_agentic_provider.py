@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
-from app.services.allie_provider import AllieDisabledError, AllieUsage, read_allie_config
+from app.services.allie_provider import AllieDisabledError, AllieTimeoutError, AllieUsage, read_allie_config
 from app.services.allai_tool_executor import AllAIToolExecutor
 
 logger = logging.getLogger(__name__)
@@ -138,8 +138,16 @@ class AgenticAllieProvider:
         """
         try:
             return await self._call_proxy(messages, system_prompt, tools)
-        except AllieDisabledError:
+        except (AllieDisabledError, AllieTimeoutError):
             raise
+        except httpx.TimeoutException as e:
+            raise AllieTimeoutError(
+                "Request timed out — the query may be too complex. Try a simpler question."
+            ) from e
+        except (httpx.ConnectError, httpx.RemoteProtocolError) as e:
+            raise AllieDisabledError(
+                f"ai.market connection failed: {str(e)[:200]}"
+            ) from e
         except Exception as e:
             raise AllieDisabledError(
                 f"ai.market agentic call failed: {str(e)[:200]}"
@@ -181,7 +189,7 @@ class AgenticAllieProvider:
             "request_id": f"agentic_{uuid.uuid4().hex[:12]}",
         }
 
-        timeout = httpx.Timeout(120, connect=10)
+        timeout = httpx.Timeout(300, connect=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(url, json=body, headers=headers)
 

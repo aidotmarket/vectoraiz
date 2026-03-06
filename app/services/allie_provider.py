@@ -56,6 +56,10 @@ class AllieDisabledError(Exception):
     """Raised when Allie is called in standalone mode."""
 
 
+class AllieTimeoutError(Exception):
+    """Raised when an Allie LLM call times out (distinct from connection errors)."""
+
+
 class InsufficientBalanceError(Exception):
     """Raised when user's balance is insufficient for Allie."""
 
@@ -166,7 +170,7 @@ class AiMarketAllieProvider(BaseAllieProvider):
         if not self.api_key:
             raise ValueError("API key required for AiMarketAllieProvider")
         self.serial = serial or settings.serial
-        self.timeout = httpx.Timeout(130, connect=10)  # slightly over 120s server timeout
+        self.timeout = httpx.Timeout(180, connect=10)  # generous timeout for streaming responses
 
     async def stream(
         self, message: str, context: Optional[str] = None, attachments: Optional[list] = None,
@@ -206,62 +210,67 @@ class AiMarketAllieProvider(BaseAllieProvider):
 
         model = ""
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            async with client.stream("POST", url, json=body, headers=headers) as response:
-                if response.status_code == 401:
-                    raise AllieDisabledError("ai.market authentication failed (invalid API key)")
-                elif response.status_code == 402:
-                    raise InsufficientBalanceError("Insufficient balance on ai.market")
-                elif response.status_code == 403:
-                    raise AllieDisabledError("API key missing allie:chat scope")
-                elif response.status_code == 429:
-                    raise RateLimitExceededError()
-                elif response.status_code != 200:
-                    text = ""
-                    async for chunk in response.aiter_text():
-                        text += chunk
-                    raise AllieDisabledError(f"ai.market error ({response.status_code}): {text[:200]}")
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                async with client.stream("POST", url, json=body, headers=headers) as response:
+                    if response.status_code == 401:
+                        raise AllieDisabledError("ai.market authentication failed (invalid API key)")
+                    elif response.status_code == 402:
+                        raise InsufficientBalanceError("Insufficient balance on ai.market")
+                    elif response.status_code == 403:
+                        raise AllieDisabledError("API key missing allie:chat scope")
+                    elif response.status_code == 429:
+                        raise RateLimitExceededError()
+                    elif response.status_code != 200:
+                        text = ""
+                        async for chunk in response.aiter_text():
+                            text += chunk
+                        raise AllieDisabledError(f"ai.market error ({response.status_code}): {text[:200]}")
 
-                event_type = ""
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line:
-                        event_type = ""
-                        continue
-                    if line.startswith("event: "):
-                        event_type = line[7:]
-                        continue
-                    if not line.startswith("data: "):
-                        continue
+                    event_type = ""
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            event_type = ""
+                            continue
+                        if line.startswith("event: "):
+                            event_type = line[7:]
+                            continue
+                        if not line.startswith("data: "):
+                            continue
 
-                    try:
-                        data = json.loads(line[6:])
-                    except json.JSONDecodeError:
-                        continue
+                        try:
+                            data = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
 
-                    if event_type == "start":
-                        model = data.get("model", "unknown")
-                    elif event_type == "delta":
-                        yield AllieStreamChunk(text=data.get("text", ""))
-                    elif event_type == "done":
-                        usage_data = data.get("usage", {})
-                        yield AllieStreamChunk(
-                            text="",
-                            done=True,
-                            usage=AllieUsage(
-                                input_tokens=usage_data.get("input_tokens", 0),
-                                output_tokens=usage_data.get("output_tokens", 0),
-                                cost_cents=data.get("cost_cents", 0),
-                                provider=self.PROVIDER,
-                                model=model,
-                            ),
-                        )
-                    elif event_type == "error":
-                        error_msg = data.get("message", "Unknown ai.market error")
-                        if data.get("retryable"):
-                            raise AllieDisabledError(f"ai.market error (retryable): {error_msg}")
-                        else:
-                            raise AllieDisabledError(f"ai.market error: {error_msg}")
+                        if event_type == "start":
+                            model = data.get("model", "unknown")
+                        elif event_type == "delta":
+                            yield AllieStreamChunk(text=data.get("text", ""))
+                        elif event_type == "done":
+                            usage_data = data.get("usage", {})
+                            yield AllieStreamChunk(
+                                text="",
+                                done=True,
+                                usage=AllieUsage(
+                                    input_tokens=usage_data.get("input_tokens", 0),
+                                    output_tokens=usage_data.get("output_tokens", 0),
+                                    cost_cents=data.get("cost_cents", 0),
+                                    provider=self.PROVIDER,
+                                    model=model,
+                                ),
+                            )
+                        elif event_type == "error":
+                            error_msg = data.get("message", "Unknown ai.market error")
+                            if data.get("retryable"):
+                                raise AllieDisabledError(f"ai.market error (retryable): {error_msg}")
+                            else:
+                                raise AllieDisabledError(f"ai.market error: {error_msg}")
+        except httpx.TimeoutException as e:
+            raise AllieTimeoutError(
+                "Request timed out — the query may be too complex. Try a simpler question."
+            ) from e
 
 
 _provider_instance: Optional[BaseAllieProvider] = None

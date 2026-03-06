@@ -61,7 +61,7 @@ from app.services.serial_metering import (
     classify_copilot_category,
 )
 from app.services.serial_store import get_serial_store, MIGRATED
-from app.services.allie_provider import AllieDisabledError
+from app.services.allie_provider import AllieDisabledError, AllieTimeoutError
 from app.services.nudge_manager import nudge_manager, NudgeMessage
 from app.services.approval_token_service import approval_token_service
 from app.services.audit_logger import audit_logger
@@ -863,7 +863,7 @@ async def websocket_copilot(websocket: WebSocket):
                         attachments=attachments,
                         chat_history=chat_history,
                     )
-                except (AllieDisabledError, asyncio.CancelledError):
+                except (AllieDisabledError, AllieTimeoutError, asyncio.CancelledError):
                     raise
                 except Exception as agentic_err:
                     logger.warning(
@@ -954,6 +954,16 @@ async def websocket_copilot(websocket: WebSocket):
             except WebSocketSendError:
                 pass
             raise  # re-raise so task shows as cancelled
+
+        except AllieTimeoutError as e:
+            try:
+                await safe_send_json(ws, {
+                    "type": "ERROR",
+                    "message": str(e),
+                    "code": "TIMEOUT",
+                })
+            except WebSocketSendError:
+                pass
 
         except AllieDisabledError as e:
             try:
