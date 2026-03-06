@@ -1221,6 +1221,62 @@ class ProcessingService:
             if temp_csv.exists():
                 temp_csv.unlink()
 
+    @staticmethod
+    def _chunk_text(text: str, target_size: int = 800, overlap: int = 100) -> list[str]:
+        """Split text into chunks for better search and RAG.
+
+        Strategy: split on paragraph boundaries (double newlines), then merge
+        small paragraphs and split oversized ones to target ~target_size chars
+        with ~overlap char overlap between consecutive chunks.
+        """
+        if len(text) < 1000:
+            return [text] if text.strip() else []
+
+        # Split into paragraphs
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        if not paragraphs:
+            return [text] if text.strip() else []
+
+        chunks: list[str] = []
+        current = ""
+
+        for para in paragraphs:
+            # If adding this paragraph exceeds target, flush current chunk
+            if current and len(current) + len(para) + 2 > target_size:
+                chunks.append(current)
+                # Start next chunk with overlap from end of current
+                if overlap > 0 and len(current) > overlap:
+                    current = current[-overlap:] + "\n\n" + para
+                else:
+                    current = para
+            else:
+                current = current + "\n\n" + para if current else para
+
+        if current.strip():
+            chunks.append(current)
+
+        # Split any remaining oversized chunks (single giant paragraphs)
+        final: list[str] = []
+        for chunk in chunks:
+            if len(chunk) <= target_size * 2:
+                final.append(chunk)
+            else:
+                # Force-split on sentence boundaries or fixed positions
+                pos = 0
+                while pos < len(chunk):
+                    end = min(pos + target_size, len(chunk))
+                    if end < len(chunk):
+                        # Try to break at sentence boundary
+                        for sep in ('. ', '.\n', '! ', '? ', '\n'):
+                            brk = chunk.rfind(sep, pos + target_size // 2, end + 200)
+                            if brk != -1:
+                                end = brk + len(sep)
+                                break
+                    final.append(chunk[pos:end].strip())
+                    pos = end - overlap if end < len(chunk) else end
+
+        return [c for c in final if c.strip()]
+
     def _process_text(self, record: DatasetRecord):
         """Process text files (.txt, .md, .html, .htm) using TextProcessor."""
         from app.services.text_processor import TextProcessor
@@ -1228,17 +1284,13 @@ class ProcessingService:
         processor = TextProcessor()
         content = processor.process(record.upload_path)
 
-        # For large text files (>1MB), truncate stored text but keep full metadata
-        MAX_TEXT_BYTES = 1 * 1024 * 1024  # 1MB
         full_text = content["text_content"]
-        if len(full_text.encode("utf-8", errors="replace")) > MAX_TEXT_BYTES:
-            truncated_text = full_text[:MAX_TEXT_BYTES]
-            content["metadata"]["truncated"] = True
-            content["metadata"]["original_char_count"] = content["metadata"]["char_count"]
-        else:
-            truncated_text = full_text
-
         record.document_content = content
+
+        # Chunk text into blocks for better search and RAG
+        chunks = self._chunk_text(full_text)
+        if not chunks:
+            chunks = [full_text or ""]
 
         # Convert to a searchable Parquet file
         parquet_filename = f"{record.id}.parquet"
@@ -1250,7 +1302,8 @@ class ProcessingService:
             with open(temp_csv, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
                 writer.writerow(['block_index', 'block_type', 'content'])
-                writer.writerow([0, 'text', truncated_text])
+                for i, chunk in enumerate(chunks):
+                    writer.writerow([i, 'text', chunk])
 
             with ephemeral_duckdb_service() as duckdb:
                 safe_csv = sql_quote_literal(str(temp_csv))
@@ -1265,6 +1318,7 @@ class ProcessingService:
                 metadata = duckdb.get_file_metadata(record.processed_path)
                 metadata["source_type"] = "text"
                 metadata["original_format"] = record.file_type
+                metadata["text_blocks"] = len(chunks)
                 metadata.update(content["metadata"])
                 record.metadata = metadata
 
