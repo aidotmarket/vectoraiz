@@ -23,6 +23,10 @@ import DatabasePage from "./pages/DatabasePage";
 import SettingsPage from "./pages/SettingsPage";
 import DataTypesPage from "./pages/DataTypesPage";
 import AiMarketPage from "./pages/AiMarketPage";
+import DataRequestsPage from "./pages/DataRequestsPage";
+import CreateDataRequestPage from "./pages/CreateDataRequestPage";
+import DataRequestDetailPage from "./pages/DataRequestDetailPage";
+import DashboardRequestsPage from "./pages/DashboardRequestsPage";
 import SetupPage from "./pages/SetupPage";
 import LoginPage from "./pages/LoginPage";
 import NotFound from "./pages/NotFound";
@@ -99,6 +103,10 @@ const App = () => (
                     <Route path="/settings" element={<SettingsPage />} />
                     <Route path="/data-types" element={<DataTypesPage />} />
                     <Route path="/ai-market" element={<AiMarketPage />} />
+                    <Route path="/data-requests" element={<DataRequestsPage />} />
+                    <Route path="/data-requests/new" element={<CreateDataRequestPage />} />
+                    <Route path="/data-requests/:slug" element={<DataRequestDetailPage />} />
+                    <Route path="/my-requests" element={<DashboardRequestsPage />} />
                   </Route>
 
                   <Route path="*" element={<NotFound />} />
