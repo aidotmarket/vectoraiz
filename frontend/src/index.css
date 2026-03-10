@@ -4,47 +4,47 @@
 
 @layer base {
   :root {
-    --background: 240 27% 14%;
-    --foreground: 210 40% 98%;
+    --background: 0 0% 100%;
+    --foreground: 220 13% 7%;
 
-    --card: 221 46% 17%;
-    --card-foreground: 210 40% 98%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 13% 7%;
 
-    --popover: 221 46% 17%;
-    --popover-foreground: 210 40% 98%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 13% 7%;
 
-    --primary: 199 89% 48%;
-    --primary-foreground: 222 47% 11%;
+    --primary: 221 83% 53%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 221 39% 24%;
-    --secondary-foreground: 210 40% 98%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 13% 7%;
 
-    --muted: 221 39% 20%;
-    --muted-foreground: 215 20% 65%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
 
-    --accent: 199 89% 48%;
-    --accent-foreground: 222 47% 11%;
+    --accent: 221 83% 53%;
+    --accent-foreground: 0 0% 100%;
 
     --destructive: 0 84% 60%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 221 39% 26%;
-    --input: 221 39% 26%;
-    --ring: 199 89% 48%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 221 83% 53%;
 
     --radius: 0.5rem;
 
-    --sidebar-background: 240 30% 12%;
-    --sidebar-foreground: 215 20% 65%;
-    --sidebar-primary: 199 89% 48%;
-    --sidebar-primary-foreground: 222 47% 11%;
-    --sidebar-accent: 221 39% 20%;
-    --sidebar-accent-foreground: 210 40% 98%;
-    --sidebar-border: 221 39% 22%;
-    --sidebar-ring: 199 89% 48%;
+    --sidebar-background: 210 20% 98%;
+    --sidebar-foreground: 220 9% 46%;
+    --sidebar-primary: 221 83% 53%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 214 95% 93%;
+    --sidebar-accent-foreground: 220 13% 7%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-ring: 221 83% 53%;
 
-    /* Custom Haven tokens */
-    --haven-glow: 199 89% 48%;
+    /* Custom tokens */
+    --haven-glow: 221 83% 53%;
     --haven-success: 142 76% 36%;
     --haven-warning: 38 92% 50%;
   }
@@ -65,11 +65,11 @@
   .sidebar-transition {
     @apply transition-all duration-300 ease-in-out;
   }
-  
+
   .card-hover {
     @apply transition-all duration-200 hover:border-primary/30 hover:shadow-lg hover:shadow-primary/5;
   }
-  
+
   .glow-primary {
     box-shadow: 0 0 20px hsl(var(--primary) / 0.15);
   }
@@ -83,11 +83,11 @@
   background: transparent;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.1);
   border-radius: 4px;
 }
 .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.2);
 }
 
 /* Streaming cursor blink */

@@ -27,7 +27,7 @@ export default memo(function ChatMessage({ message, onDismissNudge, onConfirmAct
   if (isSystem) {
     return (
       <div className="flex justify-center">
-        <span className="text-[11px] text-white/25 px-3 py-1">
+        <span className="text-[11px] text-muted-foreground/50 px-3 py-1">
           {message.content}
         </span>
       </div>
@@ -49,8 +49,8 @@ export default memo(function ChatMessage({ message, onDismissNudge, onConfirmAct
     <div className="space-y-1">
       {/* Tool activity indicator */}
       {message.toolStatus && (
-        <div className="text-xs text-cyan-400/50 flex items-center gap-1.5">
-          <span className="inline-block w-1.5 h-1.5 rounded-full bg-cyan-400/50 animate-pulse" />
+        <div className="text-xs text-primary/50 flex items-center gap-1.5">
+          <span className="inline-block w-1.5 h-1.5 rounded-full bg-primary/50 animate-pulse" />
           {message.toolStatus}
         </div>
       )}
@@ -74,8 +74,8 @@ export default memo(function ChatMessage({ message, onDismissNudge, onConfirmAct
         <div className={cn(
           "my-2 rounded-lg border px-3 py-2 text-xs",
           message.confirmResult.success
-            ? "border-green-500/20 bg-green-500/5 text-green-300"
-            : "border-red-500/20 bg-red-500/5 text-red-300"
+            ? "border-green-500/20 bg-green-500/5 text-green-700"
+            : "border-red-500/20 bg-red-500/5 text-red-700"
         )}>
           {message.confirmResult.message}
         </div>
@@ -83,14 +83,14 @@ export default memo(function ChatMessage({ message, onDismissNudge, onConfirmAct
 
       {/* LLM text content */}
       {message.content && (
-        <div className="text-sm text-white/90 leading-relaxed">
+        <div className="text-sm text-foreground/90 leading-relaxed">
           <MarkdownContent content={message.content} isStreaming={message.isStreaming} />
         </div>
       )}
 
       {/* Streaming cursor when no content yet and no tool activity */}
       {!message.content && message.isStreaming && !message.toolStatus && !message.toolResults?.length && (
-        <div className="text-sm text-white/90 leading-relaxed">
+        <div className="text-sm text-foreground/90 leading-relaxed">
           <StreamingCursor />
         </div>
       )}
@@ -114,12 +114,12 @@ function MarkdownContent({ content, isStreaming }: { content: string; isStreamin
         rehypePlugins={[rehypeHighlight]}
         components={{
           a: ({ children, href, ...props }) => (
-            <a href={href} target="_blank" rel="noopener noreferrer" className="text-cyan-400/90 underline underline-offset-2 decoration-cyan-400/30 hover:decoration-cyan-400/60" {...props}>
+            <a href={href} target="_blank" rel="noopener noreferrer" className="text-primary/90 underline underline-offset-2 decoration-primary/30 hover:decoration-primary/60" {...props}>
               {children}
             </a>
           ),
           pre: ({ children, ...props }) => (
-            <pre className="bg-white/[0.04] rounded-lg p-3 my-2 overflow-x-auto text-xs border border-white/[0.06]" {...props}>
+            <pre className="bg-gray-900 text-gray-100 rounded-lg p-3 my-2 overflow-x-auto text-xs border border-gray-800" {...props}>
               {children}
             </pre>
           ),
@@ -127,7 +127,7 @@ function MarkdownContent({ content, isStreaming }: { content: string; isStreamin
             const isBlock = className?.startsWith("language-") || className?.startsWith("hljs");
             if (isBlock) return <code className={className} {...props}>{children}</code>;
             return (
-              <code className="bg-white/[0.06] rounded px-1.5 py-0.5 text-xs font-mono text-cyan-300/80" {...props}>
+              <code className="bg-primary/10 rounded px-1.5 py-0.5 text-xs font-mono text-primary/80" {...props}>
                 {children}
               </code>
             );
@@ -138,16 +138,16 @@ function MarkdownContent({ content, isStreaming }: { content: string; isStreamin
             </div>
           ),
           th: ({ children, ...props }) => (
-            <th className="border border-white/10 px-2 py-1 bg-white/[0.04] text-left font-medium text-white/60" {...props}>{children}</th>
+            <th className="border border-border px-2 py-1 bg-muted text-left font-medium text-muted-foreground" {...props}>{children}</th>
           ),
           td: ({ children, ...props }) => (
-            <td className="border border-white/10 px-2 py-1 text-white/70" {...props}>{children}</td>
+            <td className="border border-border px-2 py-1 text-foreground/70" {...props}>{children}</td>
           ),
           ul: ({ children, ...props }) => (
-            <ul className="list-disc pl-4 my-1.5 space-y-1 marker:text-white/20" {...props}>{children}</ul>
+            <ul className="list-disc pl-4 my-1.5 space-y-1 marker:text-foreground/20" {...props}>{children}</ul>
           ),
           ol: ({ children, ...props }) => (
-            <ol className="list-decimal pl-4 my-1.5 space-y-1 marker:text-white/20" {...props}>{children}</ol>
+            <ol className="list-decimal pl-4 my-1.5 space-y-1 marker:text-foreground/20" {...props}>{children}</ol>
           ),
           p: ({ children, ...props }) => (
             <p className="my-1.5 first:mt-0 last:mb-0 leading-relaxed" {...props}>{children}</p>
@@ -164,7 +164,7 @@ function MarkdownContent({ content, isStreaming }: { content: string; isStreamin
 function StreamingCursor() {
   return (
     <span
-      className="inline-block w-1.5 h-4 bg-cyan-400/50 ml-0.5 align-text-bottom animate-blink rounded-sm"
+      className="inline-block w-1.5 h-4 bg-primary/50 ml-0.5 align-text-bottom animate-blink rounded-sm"
       aria-label="allAI is typing"
     />
   );
@@ -177,13 +177,13 @@ function MessageMeta({ usage }: { usage: NonNullable<ChatMessageType["usage"]> }
     <div className="flex items-center justify-end gap-1 mt-1">
       <button
         onClick={() => setFeedback(feedback === "up" ? null : "up")}
-        className={cn("p-0.5 rounded transition-colors", feedback === "up" ? "text-cyan-400/70" : "text-white/15 hover:text-white/30")}
+        className={cn("p-0.5 rounded transition-colors", feedback === "up" ? "text-primary/70" : "text-foreground/15 hover:text-foreground/30")}
       >
         <ThumbsUp className="h-3 w-3" />
       </button>
       <button
         onClick={() => setFeedback(feedback === "down" ? null : "down")}
-        className={cn("p-0.5 rounded transition-colors", feedback === "down" ? "text-red-400/70" : "text-white/15 hover:text-white/30")}
+        className={cn("p-0.5 rounded transition-colors", feedback === "down" ? "text-red-500/70" : "text-foreground/15 hover:text-foreground/30")}
       >
         <ThumbsDown className="h-3 w-3" />
       </button>

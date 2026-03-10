@@ -10,11 +10,11 @@ import { Star, Download, Trash2, FileText, FileSpreadsheet, FileCode, FileType, 
 import { artifactsApi, type ApiArtifact } from "@/lib/api";
 
 const FORMAT_BADGES: Record<string, { label: string; className: string; icon: React.ComponentType<{ className?: string }> }> = {
-  txt: { label: "TXT", className: "bg-blue-500/10 text-blue-400", icon: FileText },
-  csv: { label: "CSV", className: "bg-green-500/10 text-green-400", icon: FileSpreadsheet },
-  json: { label: "JSON", className: "bg-yellow-500/10 text-yellow-400", icon: FileCode },
-  md: { label: "MD", className: "bg-purple-500/10 text-purple-400", icon: FileText },
-  html: { label: "HTML", className: "bg-orange-500/10 text-orange-400", icon: Globe },
+  txt: { label: "TXT", className: "bg-blue-500/10 text-blue-600", icon: FileText },
+  csv: { label: "CSV", className: "bg-green-500/10 text-green-600", icon: FileSpreadsheet },
+  json: { label: "JSON", className: "bg-yellow-500/10 text-yellow-600", icon: FileCode },
+  md: { label: "MD", className: "bg-purple-500/10 text-purple-600", icon: FileText },
+  html: { label: "HTML", className: "bg-orange-500/10 text-orange-600", icon: Globe },
 };
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -82,7 +82,6 @@ export default function ArtifactsPage() {
   const handleDownload = (id: string) => {
     const url = artifactsApi.downloadUrl(id);
     const apiKey = localStorage.getItem("vectoraiz_api_key");
-    // Use a hidden form to send the API key header via fetch+blob
     fetch(url, { headers: apiKey ? { "X-API-Key": apiKey } : {} })
       .then((r) => r.blob())
       .then((blob) => {
@@ -118,7 +117,7 @@ export default function ArtifactsPage() {
   if (error) {
     return (
       <div className="p-6">
-        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-red-400 text-sm">
+        <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-4 text-red-600 text-sm">
           {error}
         </div>
       </div>
@@ -132,17 +131,17 @@ export default function ArtifactsPage() {
       </div>
 
       {artifacts.length === 0 ? (
-        <div className="rounded-lg border border-white/10 bg-white/[0.02] p-12 text-center">
-          <FileText className="w-12 h-12 text-white/20 mx-auto mb-4" />
-          <p className="text-white/50 text-sm">
+        <div className="rounded-lg border border-border bg-muted/30 p-12 text-center">
+          <FileText className="w-12 h-12 text-muted-foreground/30 mx-auto mb-4" />
+          <p className="text-muted-foreground text-sm">
             No artifacts yet. Ask allAI to create an export, extract, or report from your data.
           </p>
         </div>
       ) : (
-        <div className="rounded-lg border border-white/10 overflow-hidden">
+        <div className="rounded-lg border border-border overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-white/[0.04] text-white/50 text-xs">
+              <tr className="bg-muted text-muted-foreground text-xs">
                 <th className="px-4 py-2.5 text-left font-medium">Filename</th>
                 <th className="px-4 py-2.5 text-left font-medium">Format</th>
                 <th className="px-4 py-2.5 text-left font-medium">Size</th>
@@ -156,11 +155,11 @@ export default function ArtifactsPage() {
               {artifacts.map((a) => {
                 const badge = FORMAT_BADGES[a.format] || FORMAT_BADGES.txt;
                 return (
-                  <tr key={a.id} className="border-t border-white/5 hover:bg-white/[0.02] transition-colors">
+                  <tr key={a.id} className="border-t border-border hover:bg-muted/30 transition-colors">
                     <td className="px-4 py-2.5">
                       <button
                         onClick={() => handlePreview(a)}
-                        className="text-white/80 hover:text-primary truncate max-w-[300px] block text-left"
+                        className="text-foreground/80 hover:text-primary truncate max-w-[300px] block text-left"
                         title={a.description || a.filename}
                       >
                         {a.filename}
@@ -171,16 +170,16 @@ export default function ArtifactsPage() {
                         {badge.label}
                       </span>
                     </td>
-                    <td className="px-4 py-2.5 text-white/50 text-xs">{formatSize(a.size_bytes)}</td>
-                    <td className="px-4 py-2.5 text-white/50 text-xs">{formatRelativeTime(a.created_at)}</td>
-                    <td className="px-4 py-2.5 text-white/50 text-xs">{SOURCE_LABELS[a.source] || a.source}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground text-xs">{formatSize(a.size_bytes)}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground text-xs">{formatRelativeTime(a.created_at)}</td>
+                    <td className="px-4 py-2.5 text-muted-foreground text-xs">{SOURCE_LABELS[a.source] || a.source}</td>
                     <td className="px-4 py-2.5 text-center">
                       <button
                         onClick={() => handleStar(a.id, !a.starred)}
                         className="hover:scale-110 transition-transform"
                       >
                         <Star
-                          className={`w-4 h-4 ${a.starred ? "text-yellow-400 fill-yellow-400" : "text-white/20 hover:text-white/40"}`}
+                          className={`w-4 h-4 ${a.starred ? "text-yellow-500 fill-yellow-500" : "text-muted-foreground/30 hover:text-muted-foreground/50"}`}
                         />
                       </button>
                     </td>
@@ -188,21 +187,21 @@ export default function ArtifactsPage() {
                       <div className="flex items-center justify-end gap-1">
                         <button
                           onClick={() => handlePreview(a)}
-                          className="p-1.5 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors"
+                          className="p-1.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-foreground transition-colors"
                           title="Preview"
                         >
                           <Eye className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => handleDownload(a.id)}
-                          className="p-1.5 rounded hover:bg-white/10 text-white/40 hover:text-white/70 transition-colors"
+                          className="p-1.5 rounded hover:bg-muted text-muted-foreground/60 hover:text-foreground transition-colors"
                           title="Download"
                         >
                           <Download className="w-3.5 h-3.5" />
                         </button>
                         <button
                           onClick={() => handleDelete(a.id)}
-                          className="p-1.5 rounded hover:bg-red-500/10 text-white/40 hover:text-red-400 transition-colors"
+                          className="p-1.5 rounded hover:bg-red-500/10 text-muted-foreground/60 hover:text-red-500 transition-colors"
                           title="Delete"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
@@ -219,26 +218,26 @@ export default function ArtifactsPage() {
 
       {/* Preview Panel */}
       {preview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="bg-card border border-white/10 rounded-lg w-[90vw] max-w-4xl max-h-[80vh] flex flex-col">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-white/10">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop-blur-sm">
+          <div className="bg-card border border-border rounded-lg w-[90vw] max-w-4xl max-h-[80vh] flex flex-col shadow-xl">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
               <div className="flex items-center gap-3 min-w-0">
-                <span className="text-sm font-medium text-white/80 truncate">{preview.artifact.filename}</span>
+                <span className="text-sm font-medium text-foreground/80 truncate">{preview.artifact.filename}</span>
                 <span className={`px-2 py-0.5 rounded text-[10px] font-medium ${FORMAT_BADGES[preview.artifact.format]?.className || ""}`}>
                   {preview.artifact.format.toUpperCase()}
                 </span>
-                <span className="text-xs text-white/40">{formatSize(preview.artifact.size_bytes)}</span>
+                <span className="text-xs text-muted-foreground">{formatSize(preview.artifact.size_bytes)}</span>
               </div>
               <div className="flex items-center gap-2">
                 <button
                   onClick={() => handleDownload(preview.artifact.id)}
-                  className="p-1.5 rounded hover:bg-white/10 text-white/50 hover:text-white/80"
+                  className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
                   <Download className="w-4 h-4" />
                 </button>
                 <button
                   onClick={() => setPreview(null)}
-                  className="p-1.5 rounded hover:bg-white/10 text-white/50 hover:text-white/80"
+                  className="p-1.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -260,7 +259,7 @@ function PreviewContent({ format, content }: { format: string; content: string }
   }
   if (format === "json") {
     return (
-      <pre className="text-xs text-white/70 font-mono whitespace-pre-wrap">
+      <pre className="text-xs text-foreground/70 font-mono whitespace-pre-wrap">
         {(() => {
           try {
             return JSON.stringify(JSON.parse(content), null, 2);
@@ -283,13 +282,13 @@ function PreviewContent({ format, content }: { format: string; content: string }
   }
   // txt, md — plain text
   return (
-    <pre className="text-xs text-white/70 whitespace-pre-wrap">{content}</pre>
+    <pre className="text-xs text-foreground/70 whitespace-pre-wrap">{content}</pre>
   );
 }
 
 function CsvPreview({ content }: { content: string }) {
   const lines = content.split("\n").filter((l) => l.trim());
-  if (lines.length === 0) return <div className="text-white/40 text-xs italic">Empty CSV</div>;
+  if (lines.length === 0) return <div className="text-muted-foreground text-xs italic">Empty CSV</div>;
 
   const parseRow = (line: string) => {
     const result: string[] = [];
@@ -313,12 +312,12 @@ function CsvPreview({ content }: { content: string }) {
   const rows = lines.slice(1, 101).map(parseRow);
 
   return (
-    <div className="overflow-x-auto rounded border border-white/10">
+    <div className="overflow-x-auto rounded border border-border">
       <table className="min-w-full text-xs">
         <thead>
-          <tr className="bg-white/[0.04]">
+          <tr className="bg-muted">
             {headers.map((h, i) => (
-              <th key={i} className="px-2 py-1.5 text-left font-medium text-white/50 border-b border-white/10 whitespace-nowrap">
+              <th key={i} className="px-2 py-1.5 text-left font-medium text-muted-foreground border-b border-border whitespace-nowrap">
                 {h}
               </th>
             ))}
@@ -326,9 +325,9 @@ function CsvPreview({ content }: { content: string }) {
         </thead>
         <tbody>
           {rows.map((row, i) => (
-            <tr key={i} className={i % 2 === 0 ? "" : "bg-white/[0.02]"}>
+            <tr key={i} className={i % 2 === 0 ? "" : "bg-muted/30"}>
               {row.map((cell, j) => (
-                <td key={j} className="px-2 py-1 text-white/70 border-b border-white/5 whitespace-nowrap max-w-[200px] truncate">
+                <td key={j} className="px-2 py-1 text-foreground/70 border-b border-border/50 whitespace-nowrap max-w-[200px] truncate">
                   {cell}
                 </td>
               ))}
@@ -337,7 +336,7 @@ function CsvPreview({ content }: { content: string }) {
         </tbody>
       </table>
       {lines.length > 101 && (
-        <div className="px-3 py-1 text-[10px] text-white/25 bg-white/[0.03]">
+        <div className="px-3 py-1 text-[10px] text-muted-foreground/60 bg-muted/30">
           Showing first 100 rows of {lines.length - 1}
         </div>
       )}

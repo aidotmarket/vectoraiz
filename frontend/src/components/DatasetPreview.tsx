@@ -34,16 +34,16 @@ import {
 import { toast } from "@/hooks/use-toast";
 
 const DataTypeColors: Record<string, string> = {
-  string: "bg-blue-500/20 text-blue-400 border-blue-500/30",
-  integer: "bg-green-500/20 text-green-400 border-green-500/30",
-  int: "bg-green-500/20 text-green-400 border-green-500/30",
-  float: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  double: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  number: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  date: "bg-purple-500/20 text-purple-400 border-purple-500/30",
-  datetime: "bg-purple-500/20 text-purple-400 border-purple-500/30",
-  boolean: "bg-pink-500/20 text-pink-400 border-pink-500/30",
-  bool: "bg-pink-500/20 text-pink-400 border-pink-500/30",
+  string: "bg-blue-500/10 text-blue-700 border-blue-500/20",
+  integer: "bg-green-500/10 text-green-700 border-green-500/20",
+  int: "bg-green-500/10 text-green-700 border-green-500/20",
+  float: "bg-yellow-500/10 text-yellow-700 border-yellow-500/20",
+  double: "bg-yellow-500/10 text-yellow-700 border-yellow-500/20",
+  number: "bg-yellow-500/10 text-yellow-700 border-yellow-500/20",
+  date: "bg-purple-500/10 text-purple-700 border-purple-500/20",
+  datetime: "bg-purple-500/10 text-purple-700 border-purple-500/20",
+  boolean: "bg-pink-500/10 text-pink-700 border-pink-500/20",
+  bool: "bg-pink-500/10 text-pink-700 border-pink-500/20",
 };
 
 function getTypeColor(type: string): string {

@@ -10,15 +10,15 @@ export default function CoPilotFab() {
   return (
     <button
       onClick={toggle}
-      className="fixed bottom-5 right-5 z-40 h-12 w-12 rounded-full flex items-center justify-center shadow-lg transition-all hover:scale-105 active:scale-95 border border-white/[0.1]"
+      className="fixed bottom-5 right-5 z-40 h-12 w-12 rounded-full flex items-center justify-center shadow-lg transition-all hover:scale-105 active:scale-95 border border-border"
       style={{
-        background: "rgba(12, 17, 30, 0.7)",
+        background: "rgba(255, 255, 255, 0.9)",
         backdropFilter: "blur(16px)",
         WebkitBackdropFilter: "blur(16px)",
       }}
       title="Open allAI"
     >
-      <MessageCircle className="h-5 w-5 text-cyan-400/70" />
+      <MessageCircle className="h-5 w-5 text-primary/70" />
     </button>
   );
 }
