@@ -214,3 +214,27 @@ class SerialClient:
             )
         error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
         return RefreshResult(success=False, error=error, status_code=status_code)
+
+    async def credits_checkout(self, serial: str, install_token: str) -> dict:
+        """POST /api/v1/serials/{serial}/credits/checkout"""
+        status_code, data = await self._request(
+            "POST",
+            f"/api/v1/serials/{serial}/credits/checkout",
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
+    async def credits_usage(self, serial: str, install_token: str) -> dict:
+        """GET /api/v1/serials/{serial}/credits/usage"""
+        status_code, data = await self._request(
+            "GET",
+            f"/api/v1/serials/{serial}/credits/usage",
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}

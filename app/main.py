@@ -643,6 +643,17 @@ def create_app() -> FastAPI:
         )
         logger.info("allAI router mounted (allai_enabled=True)")
 
+    # ADMIN + USER — allAI credits (balance + purchase)
+    if settings.allai_enabled:
+        from app.routers import allai_credits
+
+        app.include_router(
+            allai_credits.router,
+            prefix="/api/allai",
+            tags=["allai"],
+            dependencies=any_user_dependency,
+        )
+
     # CONNECTED MODE — billing/marketplace
     if settings.mode == "connected":
         from app.routers import billing, integrations, webhooks
