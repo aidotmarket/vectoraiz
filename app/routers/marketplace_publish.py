@@ -65,7 +65,7 @@ class MarketplacePublishResponse(BaseModel):
 def _jcs_hash(body: dict) -> str:
     """RFC 8785 JCS-style canonical hash (sorted keys, compact separators)."""
     canonical = json.dumps(
-        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        body, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()
 
@@ -112,11 +112,16 @@ async def publish_to_marketplace(
     crypto = _get_crypto()
     ed_priv, _ed_pub, _x_priv, _x_pub = crypto.get_or_create_keypairs()
 
-    # 2. Resolve seller_id and device_id
+    # 2. Resolve install_id (iss) and seller_id (sub)
     store = get_serial_store()
-    device_id = _get_device_id()
-    # seller_id = install_token if activated, else device_id
-    seller_id = store.state.install_token or device_id
+    device_id = _get_device_id()  # deterministic device hash = install_id
+    cached = store.state.last_status_cache or {}
+    seller_id = cached.get("gateway_user_id")
+    if not seller_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Seller identity not available — ensure this VZ instance has completed activation and status sync with ai.market",
+        )
 
     # 3. Build payload for ai.market
     payload = body.model_dump(exclude_none=True)
