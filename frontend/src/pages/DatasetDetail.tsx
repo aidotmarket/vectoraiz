@@ -46,7 +46,7 @@ import {
   type DatasetSampleResponse,
   type DatasetStatisticsResponse,
 } from "@/lib/api";
-import { type ColumnSchema, type Dataset } from "@/data/mockDatasets";
+import { type ColumnSchema, type Dataset } from "@/types/mockDatasets";
 import { toast } from "@/hooks/use-toast";
 import PublishModal from "@/components/PublishModal";
 import DatasetPreview from "@/components/DatasetPreview";

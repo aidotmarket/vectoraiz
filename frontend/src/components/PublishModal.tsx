@@ -28,9 +28,9 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import { type Dataset } from "@/data/mockDatasets";
-import { useMarketplace } from "@/contexts/MarketplaceContext";
-import { piiApi, type PIIScanResponse } from "@/lib/api";
+import { type Dataset } from "@/types/mockDatasets";
+import { piiApi, getApiUrl, type PIIScanResponse } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "@/hooks/use-toast";
 
 interface PublishModalProps {
@@ -50,7 +50,7 @@ interface PIIWarning {
 const suggestedTags = ["sales", "ecommerce", "transactions", "customers", "orders", "revenue"];
 
 const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: PublishModalProps) => {
-  const { publishDataset } = useMarketplace();
+  const { apiKey } = useAuth();
   const [step, setStep] = useState(1);
   const [excludedColumns, setExcludedColumns] = useState<string[]>([]);
   const [privacyConfirmed, setPrivacyConfirmed] = useState(false);
@@ -75,6 +75,8 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
   // Publishing state
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishSuccess, setPublishSuccess] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [marketplaceUrl, setMarketplaceUrl] = useState<string | null>(null);
 
   // Fetch PII scan when modal opens
   useEffect(() => {
@@ -153,22 +155,48 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
   const searchabilityScore = Math.min(100, 50 + tags.length * 8 + (description.length > 200 ? 20 : 10));
 
   const priceNum = parseFloat(price) || 0;
-  const platformFee = priceNum * 0.2;
-  const youReceive = priceNum * 0.8;
+  const platformFee = priceNum * 0.15;
+  const youReceive = priceNum * 0.85;
 
-  const handlePublish = () => {
+  const handlePublish = async () => {
     setIsPublishing(true);
-    setTimeout(() => {
-      // Save to marketplace context (and localStorage)
-      publishDataset(dataset.id, {
-        price: parseFloat(price) || 450,
+    setPublishError(null);
+    try {
+      const payload = {
         title,
         description,
         tags,
+        pricing_type: "one_time" as const,
+        price_cents: Math.round(parseFloat(price) * 100),
+        row_count: dataset.rows || null,
+        column_names: null,
+        file_format: null,
+        file_size_bytes: null,
+        vz_dataset_id: dataset.id,
+      };
+
+      const res = await fetch(`${getApiUrl()}/api/marketplace/publish`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey || "",
+        },
+        body: JSON.stringify(payload),
       });
+
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({ detail: "Publish failed" }));
+        throw new Error(error.detail || error.error || `HTTP ${res.status}`);
+      }
+
+      const result = await res.json();
+      setMarketplaceUrl(result.marketplace_url || null);
       setIsPublishing(false);
       setPublishSuccess(true);
-    }, 2000);
+    } catch (err) {
+      setPublishError(err instanceof Error ? err.message : "Unknown error");
+      setIsPublishing(false);
+    }
   };
 
   const handleClose = () => {
@@ -182,6 +210,8 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
       setExcludedColumns([]);
       setPrivacyConfirmed(false);
       setPublishSuccess(false);
+      setPublishError(null);
+      setMarketplaceUrl(null);
     }, 300);
   };
 
@@ -531,13 +561,13 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                     <Label className="text-sm mb-3 block">Revenue Split</Label>
                     <div className="grid grid-cols-2 gap-4 text-center">
                       <div className="p-3 bg-[hsl(var(--haven-success))]/10 rounded-lg">
-                        <p className="text-xs text-muted-foreground mb-1">You Receive (80%)</p>
+                        <p className="text-xs text-muted-foreground mb-1">You Receive (85%)</p>
                         <p className="text-xl font-bold text-[hsl(var(--haven-success))]">
                           ${youReceive.toFixed(2)}
                         </p>
                       </div>
                       <div className="p-3 bg-secondary/50 rounded-lg">
-                        <p className="text-xs text-muted-foreground mb-1">Platform Fee (20%)</p>
+                        <p className="text-xs text-muted-foreground mb-1">Platform Fee (15%)</p>
                         <p className="text-xl font-bold text-muted-foreground">
                           ${platformFee.toFixed(2)}
                         </p>
@@ -550,9 +580,14 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                   <Button variant="outline" onClick={() => setStep(2)}>
                     Back
                   </Button>
-                  <Button onClick={handlePublish} className="gap-2">
-                    Publish to Marketplace
-                  </Button>
+                  <div className="flex flex-col items-end">
+                    <Button onClick={handlePublish} className="gap-2">
+                      Publish to Marketplace
+                    </Button>
+                    {publishError && (
+                      <p className="text-sm text-destructive mt-2">{publishError}</p>
+                    )}
+                  </div>
                 </div>
               </>
             )}
@@ -575,7 +610,12 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
               Your dataset is now live on the marketplace
             </p>
             <div className="flex flex-col gap-2 items-center">
-              <Button variant="outline" className="gap-2">
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={() => marketplaceUrl && window.open(marketplaceUrl, "_blank")}
+                disabled={!marketplaceUrl}
+              >
                 <ExternalLink className="w-4 h-4" />
                 View on Marketplace
               </Button>

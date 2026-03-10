@@ -744,6 +744,15 @@ def create_app() -> FastAPI:
         tags=["raw-listings"],
     )
 
+    # ADMIN ONLY — marketplace publish proxy (VZ -> ai.market)
+    from app.routers.marketplace_publish import router as marketplace_publish_router
+    app.include_router(
+        marketplace_publish_router,
+        prefix="/api",
+        tags=["marketplace"],
+        dependencies=admin_route_dependency,
+    )
+
     # BQ-MCP-RAG: External LLM Connectivity — conditionally mount
     if settings.connectivity_enabled:
         from app.routers.ext import router as ext_router

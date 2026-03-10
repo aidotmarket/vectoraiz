@@ -38,7 +38,7 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { useUpload } from "@/contexts/UploadContext";
 import DatasetsSkeleton from "@/components/skeletons/DatasetsSkeleton";
-import { type Dataset } from "@/data/mockDatasets";
+import { type Dataset } from "@/types/mockDatasets";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useMode } from "@/contexts/ModeContext";
 import { cn } from "@/lib/utils";
