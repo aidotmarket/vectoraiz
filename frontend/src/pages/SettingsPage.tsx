@@ -1114,7 +1114,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
           {/* About footer */}
           <div className="pt-3 border-t border-border space-y-3">
             <p className="text-sm text-muted-foreground">
-              vectorAIz{versionInfo?.current ? ` v${versionInfo.current}` : ""}
+              vectorAIz{versionInfo?.current ? ` ${versionInfo.current.replace(/^v/, '')}` : ""}
             </p>
             <div className="flex flex-wrap gap-4">
               <a
