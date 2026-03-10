@@ -36,8 +36,8 @@ const topNavItems: NavItem[] = [
 ];
 
 const bottomNavItems: NavItem[] = [
-  { path: "/data-requests", label: "I Need Data", icon: HandHelping },
   { path: "/ai-market", label: "ai.market", icon: Store },
+  { path: "/data-requests", label: "I Need Data", icon: HandHelping },
   { path: "/earnings", label: "Earnings", icon: DollarSign, feature: "marketplace" },
   { path: "/data-types", label: "Data Types", icon: FileStack },
 ];

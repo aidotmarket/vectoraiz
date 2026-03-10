@@ -251,6 +251,7 @@ async def system_info():
             "memory_gb": mem_gb,
             "recommended_concurrent_uploads": recommended_concurrent,
         },
+        "marketplace_api_url": settings.ai_market_url if settings.mode != "standalone" else None,
     }
 
 

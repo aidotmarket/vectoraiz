@@ -68,6 +68,18 @@ export interface ResponseCreate {
   timeline?: string;
 }
 
+// ── Marketplace URL ─────────────────────────────────────────────────────
+
+let _marketplaceApiUrl: string | null = null;
+
+export function setMarketplaceApiUrl(url: string | null) {
+  _marketplaceApiUrl = url;
+}
+
+function getBaseUrl(): string {
+  return _marketplaceApiUrl || getApiUrl();
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 function getStoredApiKey(): string | null {
@@ -78,7 +90,7 @@ function getStoredApiKey(): string | null {
 }
 
 async function marketFetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const url = `${getApiUrl()}${endpoint}`;
+  const url = `${getBaseUrl()}${endpoint}`;
   const apiKey = getStoredApiKey();
 
   const headers: Record<string, string> = {

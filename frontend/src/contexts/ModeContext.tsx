@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { getApiUrl } from "@/lib/api";
+import { setMarketplaceApiUrl } from "@/lib/data-requests-api";
 
 type Mode = "standalone" | "connected";
 
@@ -39,6 +40,7 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
           setMode(data.mode ?? "standalone");
           setVersion(data.version ?? "0.0.0");
           setFeatures({ ...DEFAULT_FEATURES, ...data.features });
+          setMarketplaceApiUrl(data.marketplace_api_url || null);
         }
       } catch {
         // Offline — keep defaults

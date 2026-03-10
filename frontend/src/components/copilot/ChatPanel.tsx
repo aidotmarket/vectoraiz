@@ -16,11 +16,11 @@ interface WindowState {
 }
 
 function getDefaultState(): WindowState {
-  const width = 480;
-  const height = 420;
+  const width = 400;
+  const height = 320;
   return {
-    x: Math.max(0, (window.innerWidth - width) / 2),
-    y: Math.max(0, window.innerHeight - height - 40),
+    x: window.innerWidth - width - 24,
+    y: window.innerHeight - height - 24,
     width,
     height,
   };
@@ -168,7 +168,7 @@ export default function ChatPanel() {
           visible ? "opacity-100" : "opacity-0"
         }`}
         style={{
-          background: "rgba(255, 255, 255, 0.85)",
+          background: "rgba(247, 244, 255, 0.88)",
           backdropFilter: "blur(24px)",
           WebkitBackdropFilter: "blur(24px)",
         }}
@@ -204,7 +204,7 @@ export default function ChatPanel() {
       <div
         className="relative flex flex-col h-full rounded-2xl overflow-hidden border border-border shadow-[0_8px_40px_rgba(0,0,0,0.12)]"
         style={{
-          background: "rgba(255, 255, 255, 0.92)",
+          background: "rgba(247, 244, 255, 0.90)",
           backdropFilter: "blur(28px) saturate(150%)",
           WebkitBackdropFilter: "blur(28px) saturate(150%)",
         }}
