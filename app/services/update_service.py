@@ -32,8 +32,8 @@ CACHE_TTL_S = 6 * 60 * 60  # 6 hours
 GHCR_IMAGE = "aidotmarket/vectoraiz"
 GHCR_REGISTRY = "ghcr.io"
 
-# Semver-like tag pattern: digits.digits.digits (optionally with pre-release)
-_SEMVER_RE = re.compile(r"^(\d+\.\d+\.\d+)$")
+# Semver-like tag pattern: optional v prefix, digits.digits.digits, optional -rc.N
+_SEMVER_RE = re.compile(r"^v?(\d+\.\d+\.\d+)(?:-rc\.(\d+))?$")
 
 
 def _get_current_version() -> str:
@@ -43,10 +43,20 @@ def _get_current_version() -> str:
 
 
 def _parse_semver(tag: str) -> tuple[int, ...] | None:
+    """Parse a version tag into a sortable tuple.
+
+    Stable versions sort higher than RC of the same base:
+      1.20.34        → (1, 20, 34, 1, 0)   (stable flag=1)
+      1.20.34-rc.3   → (1, 20, 34, 0, 3)   (rc flag=0, rc_num=3)
+    """
     m = _SEMVER_RE.match(tag)
     if not m:
         return None
-    return tuple(int(p) for p in m.group(1).split("."))
+    base = tuple(int(p) for p in m.group(1).split("."))
+    rc = m.group(2)
+    if rc is not None:
+        return base + (0, int(rc))  # RC: sorts below stable
+    return base + (1, 0)  # Stable: sorts above any RC
 
 
 # ---------------------------------------------------------------------------
