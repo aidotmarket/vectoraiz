@@ -83,7 +83,11 @@ ALLAI_TOOLS = [
             "Only SELECT queries are allowed. "
             "IMPORTANT: Always call this tool to run queries. Never write SQL as a "
             "code block in your response — call this tool and the results will "
-            "display automatically in a formatted table."
+            "display automatically in a formatted table. "
+            "CRITICAL: Before writing SQL, check the column names from the dataset context. "
+            "Document datasets have columns: block_index, block_type, page_number, content "
+            "(NOT 'text'). Never guess column names — always use the exact names from the "
+            "dataset schema provided in the Active Dataset Detail context."
         ),
         "input_schema": {
             "type": "object",

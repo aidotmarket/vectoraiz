@@ -432,6 +432,17 @@ Never tell a user that the Data Request Board is for requesting access to existi
             parts.append(f"""
 **Active Dataset Detail:**
 {_format_dict(ds)}""")
+            ds_id = ds.get("dataset_id") or ds.get("id", "")
+            column_names = ds.get("column_names") or ds.get("columns")
+            if column_names:
+                if isinstance(column_names, list):
+                    col_str = ", ".join(column_names)
+                else:
+                    col_str = str(column_names)
+                parts.append(f"""
+**SQL Column Reference (use these EXACT names in queries):**
+- Table: dataset_{ds_id}
+- Columns: {col_str}""")
 
         parts.append(f"""
 **System State:**
