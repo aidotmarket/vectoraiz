@@ -59,6 +59,19 @@
     @apply bg-background text-foreground antialiased;
     font-family: 'Inter', system-ui, -apple-system, sans-serif;
   }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(hsl(var(--foreground)) 1px, transparent 1px),
+      linear-gradient(90deg, hsl(var(--foreground)) 1px, transparent 1px);
+    background-size: 60px 60px;
+    opacity: 0.03;
+    pointer-events: none;
+    z-index: 0;
+  }
 }
 
 @layer utilities {
