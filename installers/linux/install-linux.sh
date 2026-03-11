@@ -388,6 +388,17 @@ else
     success "Using existing .env (port updated to ${PORT})"
 fi
 
+# Persist version override to .env (ensures RC versions survive restart)
+if [ -n "${VECTORAIZ_VERSION:-}" ]; then
+    if grep -q "^VECTORAIZ_VERSION=" "$INSTALL_DIR/.env" 2>/dev/null; then
+        sed -i "s/^VECTORAIZ_VERSION=.*/VECTORAIZ_VERSION=${VECTORAIZ_VERSION}/" "$INSTALL_DIR/.env"
+    else
+        echo "" >> "$INSTALL_DIR/.env"
+        echo "# Docker image version (set by installer)" >> "$INSTALL_DIR/.env"
+        echo "VECTORAIZ_VERSION=${VECTORAIZ_VERSION}" >> "$INSTALL_DIR/.env"
+    fi
+fi
+
 # ─── Step 7b: Provision serial for connected mode ─────────────────
 if grep -q "^VECTORAIZ_MODE=connected" "$INSTALL_DIR/.env" 2>/dev/null; then
     info "Provisioning serial for allAI..."

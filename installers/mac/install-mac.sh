@@ -281,9 +281,13 @@ else
     fail "Failed to download compose file from GitHub.\n  Check your internet connection and try again."
 fi
 
-# Parse default version from compose file (e.g. ghcr.io/…:${VECTORAIZ_VERSION:-1.8.1})
-VECTORAIZ_APP_VERSION=$(sed -n 's/.*VECTORAIZ_VERSION:-\([^}]*\)}.*/\1/p' "$INSTALL_DIR/$COMPOSE_FILE" | head -1)
-VECTORAIZ_APP_VERSION="${VECTORAIZ_APP_VERSION:-latest}"
+# Parse version: prefer VECTORAIZ_VERSION env var (set by RC wrapper), else fall back to compose default
+if [ -n "${VECTORAIZ_VERSION:-}" ]; then
+    VECTORAIZ_APP_VERSION="$VECTORAIZ_VERSION"
+else
+    VECTORAIZ_APP_VERSION=$(sed -n 's/.*VECTORAIZ_VERSION:-\([^}]*\)}.*/\1/p' "$INSTALL_DIR/$COMPOSE_FILE" | head -1)
+    VECTORAIZ_APP_VERSION="${VECTORAIZ_APP_VERSION:-latest}"
+fi
 info "vectorAIz version: ${BOLD}${VECTORAIZ_APP_VERSION}${NC}"
 
 # ─── Step 4: Find available port ─────────────────────────────────
@@ -383,6 +387,17 @@ else
         echo "VECTORAIZ_PORT=${PORT}" >> "$INSTALL_DIR/.env"
     fi
     success "Using existing .env (port updated to ${PORT})"
+fi
+
+# Persist version override to .env (ensures RC versions survive restart)
+if [ -n "${VECTORAIZ_VERSION:-}" ]; then
+    if grep -q "^VECTORAIZ_VERSION=" "$INSTALL_DIR/.env" 2>/dev/null; then
+        sed -i.bak "s/^VECTORAIZ_VERSION=.*/VECTORAIZ_VERSION=${VECTORAIZ_VERSION}/" "$INSTALL_DIR/.env" && rm -f "$INSTALL_DIR/.env.bak"
+    else
+        echo "" >> "$INSTALL_DIR/.env"
+        echo "# Docker image version (set by installer)" >> "$INSTALL_DIR/.env"
+        echo "VECTORAIZ_VERSION=${VECTORAIZ_VERSION}" >> "$INSTALL_DIR/.env"
+    fi
 fi
 
 # Create local import directory (mounted read-only into the container)
