@@ -230,6 +230,8 @@ async def _check_memory() -> dict:
 @router.get("/system/info")
 async def system_info():
     """Public endpoint (no auth) returning system mode, feature flags, and system capabilities."""
+    from app.core.channel_config import CHANNEL
+
     mem = psutil.virtual_memory()
     cores = os.cpu_count() or 4
     mem_gb = round(mem.total / (1024**3), 1)
@@ -240,6 +242,7 @@ async def system_info():
     return {
         "mode": settings.mode,
         "version": APP_VERSION,
+        "channel": CHANNEL.value,
         "features": {
             "allai": settings.allai_enabled and settings.mode != "standalone",
             "marketplace": settings.marketplace_enabled,

@@ -132,6 +132,13 @@ class PromptFactory:
 
         prompt = self.LAYER_SEPARATOR.join(layers)
 
+        # Append channel context (BQ-VZ-CHANNEL — presentation hint for allAI focus)
+        from app.core.channel_config import CHANNEL
+        from app.prompts.channel_prompts import get_system_context
+        prompt += self.LAYER_SEPARATOR + (
+            "## Channel Context\n\n" + get_system_context(CHANNEL)
+        )
+
         # Append RAG chunks if provided (XAI mandate: label as untrusted)
         if rag_chunks:
             prompt += self.LAYER_SEPARATOR + self._format_rag_chunks(rag_chunks)

@@ -52,6 +52,7 @@ import PublishModal from "@/components/PublishModal";
 import DatasetPreview from "@/components/DatasetPreview";
 import { useMarketplace } from "@/contexts/MarketplaceContext";
 import { useMode } from "@/contexts/ModeContext";
+import { useChannel } from "@/hooks/useChannel";
 
 const getFileIcon = (type: Dataset["type"]) => {
   switch (type) {
@@ -128,6 +129,7 @@ const DatasetDetail = () => {
   const navigate = useNavigate();
   const { isPublished, getPublishedData, unpublishDataset } = useMarketplace();
   const { hasFeature } = useMode();
+  const channel = useChannel();
   const [currentPage, setCurrentPage] = useState(1);
   const [publishModalOpen, setPublishModalOpen] = useState(false);
   const rowsPerPage = 10;
@@ -397,13 +399,13 @@ const DatasetDetail = () => {
             </Button>
             {hasFeature("marketplace") && dataset.status === "ready" && !datasetIsPublished && (
               <Button
-                variant="default"
+                variant={channel === "marketplace" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPublishModalOpen(true)}
-                className="gap-2"
+                className={`gap-2${channel === "marketplace" ? " ring-2 ring-primary/30" : ""}`}
               >
                 <Upload className="w-4 h-4" />
-                Publish
+                {channel === "marketplace" ? "Publish to ai.market" : "Publish"}
               </Button>
             )}
             <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={handleDelete} disabled={isDeleting}>

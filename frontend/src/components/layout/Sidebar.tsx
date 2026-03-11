@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useMode } from "@/contexts/ModeContext";
+import { useChannel } from "@/hooks/useChannel";
 
 interface NavItem {
   path: string;
@@ -25,7 +26,8 @@ interface NavItem {
   feature?: "marketplace";
 }
 
-const topNavItems: NavItem[] = [
+// All nav items — both channels contain identical items, just reordered (CH-C2)
+const ALL_NAV_ITEMS: NavItem[] = [
   { path: "/", label: "Dashboard", icon: LayoutDashboard },
   { path: "/datasets", label: "Datasets", icon: Database },
   { path: "/search", label: "Search", icon: Search },
@@ -33,14 +35,40 @@ const topNavItems: NavItem[] = [
   { path: "/artifacts", label: "Artifacts", icon: FileOutput },
   { path: "/databases", label: "Databases", icon: Database },
   { path: "/settings", label: "Settings", icon: Settings },
-];
-
-const bottomNavItems: NavItem[] = [
   { path: "/ai-market", label: "ai.market", icon: Store },
   { path: "/data-requests", label: "I Need Data", icon: HandHelping },
   { path: "/earnings", label: "Earnings", icon: DollarSign, feature: "marketplace" },
   { path: "/data-types", label: "Data Types", icon: FileStack },
 ];
+
+// direct channel: data-focused items first, marketplace items at bottom
+const NAV_ORDER_DIRECT = [
+  "/", "/datasets", "/search", "/sql", "/artifacts", "/databases", "/settings",
+  "/ai-market", "/data-requests", "/earnings", "/data-types",
+];
+
+// marketplace channel: marketplace items promoted to top, then data items
+const NAV_ORDER_MARKETPLACE = [
+  "/ai-market", "/data-requests", "/",
+  "/datasets", "/search", "/sql", "/artifacts", "/databases",
+  "/earnings", "/data-types", "/settings",
+];
+
+// Separator index: items after this index go in the bottom section
+const SEPARATOR_INDEX_DIRECT = 7;    // after Settings
+const SEPARATOR_INDEX_MARKETPLACE = 2; // after Dashboard
+
+function getOrderedItems(channel: "direct" | "marketplace"): { top: NavItem[]; bottom: NavItem[] } {
+  const order = channel === "marketplace" ? NAV_ORDER_MARKETPLACE : NAV_ORDER_DIRECT;
+  const sepIdx = channel === "marketplace" ? SEPARATOR_INDEX_MARKETPLACE : SEPARATOR_INDEX_DIRECT;
+  const itemMap = new Map(ALL_NAV_ITEMS.map((item) => [item.path, item]));
+
+  const ordered = order.map((path) => itemMap.get(path)).filter(Boolean) as NavItem[];
+  return {
+    top: ordered.slice(0, sepIdx),
+    bottom: ordered.slice(sepIdx),
+  };
+}
 
 interface SidebarProps {
   collapsed: boolean;
@@ -50,14 +78,15 @@ interface SidebarProps {
 const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
   const location = useLocation();
   const { hasFeature, isStandalone } = useMode();
+  const channel = useChannel();
 
-  const navItems = topNavItems.filter(
-    (item) => !item.feature || hasFeature(item.feature)
-  );
+  const { top, bottom } = getOrderedItems(channel);
 
-  const bottomItems = bottomNavItems.filter(
-    (item) => !item.feature || hasFeature(item.feature)
-  );
+  const filterByFeature = (items: NavItem[]) =>
+    items.filter((item) => !item.feature || hasFeature(item.feature));
+
+  const navItems = filterByFeature(top);
+  const bottomItems = filterByFeature(bottom);
 
   const renderNavItem = (item: NavItem) => {
     const isActive = location.pathname === item.path;

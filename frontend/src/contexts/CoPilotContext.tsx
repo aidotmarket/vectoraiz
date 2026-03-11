@@ -78,7 +78,7 @@ const TONE_MODE_KEY = "vectoraiz_tone_mode";
 
 export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const { apiKey, isAuthenticated } = useAuth();
-  const { isStandalone } = useMode();
+  const { isStandalone, channel } = useMode();
 
   const [isOpen, setIsOpen] = useState(false);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -310,7 +310,9 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
               return [{
                 id: `welcome_${Date.now()}`,
                 role: "assistant" as const,
-                content: "I'm allAI — your AI data assistant. I can walk you through any of the functions of vectorAIz or help you with data ingestion. Let me know what you need!",
+                content: channel === "marketplace"
+                  ? "Hi! I'm your marketplace copilot. I'll help you get your data listed on ai.market — from upload to publishing. Ready to start?"
+                  : "Hi! I'm your data copilot. I can help you process, explore, and query your data. What would you like to work on?",
                 createdAt: new Date().toISOString(),
               }];
             }

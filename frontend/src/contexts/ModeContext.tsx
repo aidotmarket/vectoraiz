@@ -3,6 +3,7 @@ import { getApiUrl } from "@/lib/api";
 import { setMarketplaceApiUrl } from "@/lib/data-requests-api";
 
 type Mode = "standalone" | "connected";
+type Channel = "direct" | "marketplace";
 
 interface Features {
   allai: boolean;
@@ -13,6 +14,7 @@ interface Features {
 
 interface ModeContextType {
   mode: Mode;
+  channel: Channel;
   version: string;
   features: Features;
   isStandalone: boolean;
@@ -27,6 +29,7 @@ const ModeContext = createContext<ModeContextType | undefined>(undefined);
 
 export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [mode, setMode] = useState<Mode>("standalone");
+  const [channel, setChannel] = useState<Channel>("direct");
   const [version, setVersion] = useState("0.0.0");
   const [features, setFeatures] = useState<Features>(DEFAULT_FEATURES);
   const [isLoading, setIsLoading] = useState(true);
@@ -38,6 +41,7 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (res.ok) {
           const data = await res.json();
           setMode(data.mode ?? "standalone");
+          setChannel(data.channel === "marketplace" ? "marketplace" : "direct");
           setVersion(data.version ?? "0.0.0");
           setFeatures({ ...DEFAULT_FEATURES, ...data.features });
           setMarketplaceApiUrl(data.marketplace_api_url || null);
@@ -57,6 +61,7 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
     <ModeContext.Provider
       value={{
         mode,
+        channel,
         version,
         features,
         isStandalone: mode === "standalone",

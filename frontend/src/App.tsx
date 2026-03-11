@@ -12,6 +12,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import MainLayout from "./components/layout/MainLayout";
 import ChatPanel from "./components/copilot/ChatPanel";
 import CoPilotFab from "./components/copilot/CoPilotFab";
+import { useChannel } from "./hooks/useChannel";
 import Dashboard from "./pages/Dashboard";
 import Datasets from "./pages/Datasets";
 import DatasetDetail from "./pages/DatasetDetail";
@@ -63,6 +64,12 @@ const RequireFeature = ({ feature, children }: { feature: "marketplace" | "allai
   return <>{children}</>;
 };
 
+/** Channel-aware landing page: marketplace → /ai-market, direct → /datasets */
+const ChannelLanding = () => {
+  const channel = useChannel();
+  return <Navigate to={channel === "marketplace" ? "/ai-market" : "/datasets"} replace />;
+};
+
 const App = () => (
   <ErrorBoundary>
     <QueryClientProvider client={queryClient}>
@@ -92,7 +99,7 @@ const App = () => (
                       </RequireAuth>
                     }
                   >
-                    <Route path="/" element={<Dashboard />} />
+                    <Route path="/" element={<ChannelLanding />} />
                     <Route path="/datasets" element={<Datasets />} />
                     <Route path="/datasets/:id" element={<DatasetDetail />} />
                     <Route path="/earnings" element={<EarningsPage />} />
