@@ -556,6 +556,17 @@ def create_app() -> FastAPI:
     app.include_router(health.router, prefix="/api", tags=["health"])
     app.include_router(diagnostics.router, prefix="/api", tags=["diagnostics"])
     app.include_router(docs.router, prefix="/api/docs", tags=["documentation"])
+
+    # PUBLIC — Portal (BQ-VZ-SHARED-SEARCH) — own trust zone, own auth (M2)
+    from app.routers.portal import router as portal_router, admin_router as portal_admin_router
+    app.include_router(portal_router, prefix="/api/portal", tags=["portal"])
+    # ADMIN ONLY — Portal management
+    app.include_router(
+        portal_admin_router,
+        prefix="/api",
+        tags=["portal-admin"],
+        dependencies=admin_route_dependency,
+    )
     app.include_router(
         auth_router_module.router,
         prefix="/api/auth",

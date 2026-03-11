@@ -1089,6 +1089,9 @@ client = QdrantClient(host="localhost", port=6333)`}
         </Card>
       )}
 
+      {/* Section: Shared Search Portal (BQ-VZ-SHARED-SEARCH) */}
+      <PortalSettingsSection />
+
       {/* Section 6: Software Updates & About */}
       <Card className="bg-card border-border">
         <CardHeader>
@@ -1259,6 +1262,290 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
         </div>
       </div>
     </div>
+  );
+};
+
+/**
+ * BQ-VZ-SHARED-SEARCH: Portal Settings Section
+ * Inline component for admin portal configuration.
+ */
+const PortalSettingsSection = () => {
+  const [portalEnabled, setPortalEnabled] = useState(false);
+  const [portalTier, setPortalTier] = useState<"open" | "code">("open");
+  const [portalBaseUrl, setPortalBaseUrl] = useState("");
+  const [portalAccessCode, setPortalAccessCode] = useState("");
+  const [portalLoading, setPortalLoading] = useState(true);
+  const [portalSaving, setPortalSaving] = useState(false);
+  const [portalSessionCount, setPortalSessionCount] = useState(0);
+  const [portalDatasets, setPortalDatasets] = useState<Array<{
+    id: string;
+    name: string;
+    visible: boolean;
+  }>>([]);
+  const [portalError, setPortalError] = useState<string | null>(null);
+
+  const apiUrl = getApiUrl();
+
+  // Load portal config + datasets on mount
+  useEffect(() => {
+    const loadPortalConfig = async () => {
+      try {
+        const res = await fetch(`${apiUrl}/api/settings/portal`, {
+          credentials: "include",
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setPortalEnabled(data.enabled);
+          setPortalTier(data.tier === "code" ? "code" : "open");
+          setPortalBaseUrl(data.base_url || "");
+          setPortalSessionCount(data.active_session_count || 0);
+        }
+
+        // Load datasets to show visibility toggles
+        const dsRes = await fetch(`${apiUrl}/api/datasets`, {
+          credentials: "include",
+        });
+        if (dsRes.ok) {
+          const dsData = await dsRes.json();
+          const datasets = (dsData.datasets || dsData || []).map((ds: { id: string; original_filename?: string; filename?: string }) => ({
+            id: ds.id,
+            name: ds.original_filename || ds.filename || ds.id,
+            visible: false,
+          }));
+
+          // Overlay portal visibility from config
+          const portalRes = await fetch(`${apiUrl}/api/settings/portal`, {
+            credentials: "include",
+          });
+          if (portalRes.ok) {
+            const portalData = await portalRes.json();
+            const portalDs = portalData.datasets || {};
+            datasets.forEach((ds: { id: string; visible: boolean }) => {
+              const cfg = portalDs[ds.id];
+              if (cfg) ds.visible = cfg.portal_visible;
+            });
+          }
+          setPortalDatasets(datasets);
+        }
+      } catch {
+        setPortalError("Failed to load portal settings");
+      } finally {
+        setPortalLoading(false);
+      }
+    };
+    loadPortalConfig();
+  }, [apiUrl]);
+
+  const savePortalSettings = async () => {
+    setPortalSaving(true);
+    setPortalError(null);
+    try {
+      const body: Record<string, unknown> = {
+        enabled: portalEnabled,
+        tier: portalTier,
+        base_url: portalBaseUrl,
+      };
+      if (portalAccessCode) body.access_code = portalAccessCode;
+
+      const res = await fetch(`${apiUrl}/api/settings/portal`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.detail || "Failed to save portal settings");
+      }
+      setPortalAccessCode("");
+      toast({ title: "Portal settings saved" });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Save failed";
+      setPortalError(msg);
+      toast({ title: "Error", description: msg, variant: "destructive" });
+    } finally {
+      setPortalSaving(false);
+    }
+  };
+
+  const toggleDatasetVisibility = async (datasetId: string, visible: boolean) => {
+    try {
+      await fetch(`${apiUrl}/api/settings/portal/datasets/${datasetId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ portal_visible: visible }),
+      });
+      setPortalDatasets((prev) =>
+        prev.map((ds) => (ds.id === datasetId ? { ...ds, visible } : ds))
+      );
+    } catch {
+      toast({ title: "Failed to update dataset visibility", variant: "destructive" });
+    }
+  };
+
+  const revokeAllSessions = async () => {
+    try {
+      await fetch(`${apiUrl}/api/settings/portal/revoke-sessions`, {
+        method: "POST",
+        credentials: "include",
+      });
+      setPortalSessionCount(0);
+      toast({ title: "All portal sessions revoked" });
+    } catch {
+      toast({ title: "Failed to revoke sessions", variant: "destructive" });
+    }
+  };
+
+  const codeStrength = (code: string): "weak" | "medium" | "strong" | "" => {
+    if (!code) return "";
+    if (code.length < 6 || /^\d+$/.test(code)) return "weak";
+    if (code.length < 10) return "medium";
+    return "strong";
+  };
+
+  const strength = codeStrength(portalAccessCode);
+  const shareUrl = portalBaseUrl ? `${portalBaseUrl}/portal` : "";
+
+  if (portalLoading) return null;
+
+  return (
+    <Card className="bg-card border-border">
+      <CardHeader>
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
+            <ExternalLink className="w-5 h-5 text-primary" />
+          </div>
+          <div>
+            <CardTitle className="text-foreground">Shared Search Portal</CardTitle>
+            <CardDescription>Let others search your datasets via a shareable link</CardDescription>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {/* Enable toggle */}
+        <div className="flex items-center justify-between">
+          <Label htmlFor="portal-enabled">Enable Portal</Label>
+          <Switch
+            id="portal-enabled"
+            checked={portalEnabled}
+            onCheckedChange={setPortalEnabled}
+          />
+        </div>
+
+        {/* Tier selector */}
+        <div className="space-y-1.5">
+          <Label>Access Tier</Label>
+          <Select value={portalTier} onValueChange={(v) => setPortalTier(v as "open" | "code")}>
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="open">Open (no authentication)</SelectItem>
+              <SelectItem value="code">Shared Access Code</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+
+        {/* Access code (only for code tier) */}
+        {portalTier === "code" && (
+          <div className="space-y-1.5">
+            <Label>Access Code</Label>
+            <Input
+              type="password"
+              placeholder="Enter new access code (min 6 chars, alphanumeric)"
+              value={portalAccessCode}
+              onChange={(e) => setPortalAccessCode(e.target.value)}
+            />
+            {strength && (
+              <p className={`text-xs ${
+                strength === "weak" ? "text-destructive" :
+                strength === "medium" ? "text-yellow-500" : "text-green-500"
+              }`}>
+                Strength: {strength}
+                {strength === "weak" && " — must be 6+ alphanumeric chars, not purely numeric"}
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Base URL */}
+        <div className="space-y-1.5">
+          <Label>Portal Base URL</Label>
+          <Input
+            placeholder="https://your-server.example.com"
+            value={portalBaseUrl}
+            onChange={(e) => setPortalBaseUrl(e.target.value)}
+          />
+          <p className="text-xs text-muted-foreground">
+            Required. The external URL where your VZ instance is reachable.
+          </p>
+        </div>
+
+        {/* Shareable URL */}
+        {shareUrl && (
+          <div className="space-y-1.5">
+            <Label>Shareable Link</Label>
+            <div className="flex gap-2">
+              <Input value={shareUrl} readOnly className="font-mono text-sm" />
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => {
+                  navigator.clipboard.writeText(shareUrl);
+                  toast({ title: "Copied to clipboard" });
+                }}
+              >
+                <Copy className="w-4 h-4" />
+              </Button>
+            </div>
+          </div>
+        )}
+
+        {/* Per-dataset visibility */}
+        {portalDatasets.length > 0 && (
+          <div className="space-y-2">
+            <Label>Dataset Visibility</Label>
+            <div className="space-y-2 p-3 border border-border rounded-md">
+              {portalDatasets.map((ds) => (
+                <div key={ds.id} className="flex items-center justify-between">
+                  <span className="text-sm text-foreground truncate max-w-[250px]">{ds.name}</span>
+                  <Switch
+                    checked={ds.visible}
+                    onCheckedChange={(v) => toggleDatasetVisibility(ds.id, v)}
+                  />
+                </div>
+              ))}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Only visible datasets can be searched on the portal. Default: none visible.
+            </p>
+          </div>
+        )}
+
+        {/* Active sessions */}
+        {portalEnabled && portalSessionCount > 0 && (
+          <div className="flex items-center justify-between p-3 bg-secondary/50 rounded-lg">
+            <span className="text-sm text-foreground">
+              {portalSessionCount} active session{portalSessionCount !== 1 ? "s" : ""}
+            </span>
+            <Button variant="outline" size="sm" onClick={revokeAllSessions}>
+              Revoke All
+            </Button>
+          </div>
+        )}
+
+        {/* Error */}
+        {portalError && (
+          <p className="text-sm text-destructive">{portalError}</p>
+        )}
+
+        {/* Save button */}
+        <Button onClick={savePortalSettings} disabled={portalSaving} className="w-full">
+          {portalSaving ? "Saving..." : "Save Portal Settings"}
+        </Button>
+      </CardContent>
+    </Card>
   );
 };
 

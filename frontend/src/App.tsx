@@ -31,6 +31,11 @@ import DashboardRequestsPage from "./pages/DashboardRequestsPage";
 import SetupPage from "./pages/SetupPage";
 import LoginPage from "./pages/LoginPage";
 import NotFound from "./pages/NotFound";
+import PortalLayout from "./pages/portal/PortalLayout";
+import PortalGate from "./pages/portal/PortalGate";
+import PortalAuth from "./pages/portal/PortalAuth";
+import PortalSearch from "./pages/portal/PortalSearch";
+import PortalDatasets from "./pages/portal/PortalDatasets";
 
 const queryClient = new QueryClient();
 
@@ -84,6 +89,15 @@ const App = () => (
                   {/* Public routes — outside MainLayout */}
                   <Route path="/setup" element={<SetupPage />} />
                   <Route path="/login" element={<LoginPage />} />
+
+                  {/* Portal routes — own layout, own auth (BQ-VZ-SHARED-SEARCH) */}
+                  <Route path="/portal" element={<PortalLayout />}>
+                    <Route path="auth" element={<PortalAuth />} />
+                    <Route element={<PortalGate />}>
+                      <Route index element={<PortalSearch />} />
+                      <Route path="datasets" element={<PortalDatasets />} />
+                    </Route>
+                  </Route>
 
                   {/* Protected routes — inside MainLayout */}
                   <Route
