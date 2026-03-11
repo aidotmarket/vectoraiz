@@ -205,7 +205,7 @@ async def lifespan(app: FastAPI):
 
     # BQ-116: File lock to prevent multiple processes
     import fcntl
-    _lock_path = "/var/tmp/vectoraiz_copilot.lock"
+    _lock_path = os.environ.get("VECTORAIZ_LOCK_PATH", "/var/tmp/vectoraiz_copilot.lock")
     _lock_file = open(_lock_path, "w")
     try:
         fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)

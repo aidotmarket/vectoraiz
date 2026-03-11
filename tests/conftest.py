@@ -15,6 +15,8 @@ os.environ["ENVIRONMENT"] = "development"
 # Set temp data directories so tests don't need /data (read-only on macOS)
 _test_data_dir = tempfile.mkdtemp(prefix="vectoraiz_test_")
 os.environ.setdefault("VECTORAIZ_DATA_DIRECTORY", _test_data_dir)
+# Use per-run lock file so concurrent test runs don't conflict (BQ-116)
+os.environ["VECTORAIZ_LOCK_PATH"] = os.path.join(_test_data_dir, "copilot.lock")
 os.environ.setdefault("VECTORAIZ_UPLOAD_DIRECTORY", os.path.join(_test_data_dir, "uploads"))
 os.environ.setdefault("VECTORAIZ_PROCESSED_DIRECTORY", os.path.join(_test_data_dir, "processed"))
 os.environ.setdefault("DATABASE_URL", f"sqlite:///{_test_data_dir}/test.db")
