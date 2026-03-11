@@ -94,7 +94,10 @@ commit_tag_push() {
   git tag -a "v${ver}" -m "Release v${ver}"
   pass "Tagged v${ver}"
 
-  git push origin main "v${ver}"
+  # Push main (may already be pushed by post-commit hook — that's OK)
+  git push origin main 2>/dev/null || true
+  # Push tag (this must succeed)
+  git push origin "v${ver}" || die "Failed to push tag v${ver}"
   pass "Pushed commit + tag"
 }
 
