@@ -62,10 +62,6 @@ def code_portal_with_token(client):
     return auth_resp.json()["token"]
 
 
-# ---------------------------------------------------------------------------
-# Portal JWT rejected on admin routes (auth must be enabled)
-# ---------------------------------------------------------------------------
-
 def test_portal_jwt_rejected_on_admin_settings(client, code_portal_with_token, monkeypatch):
     """Portal JWT cannot access admin /settings/portal when auth is enabled."""
     monkeypatch.setattr("app.auth.api_key_auth._is_auth_enabled", lambda: True)
@@ -73,7 +69,6 @@ def test_portal_jwt_rejected_on_admin_settings(client, code_portal_with_token, m
         "/api/settings/portal",
         headers={"Authorization": f"Bearer {code_portal_with_token}"},
     )
-    # Admin routes use X-API-Key or admin JWT cookie — portal bearer should fail
     assert resp.status_code in (401, 403, 422)
 
 
@@ -84,14 +79,8 @@ def test_portal_jwt_rejected_on_admin_datasets(client, code_portal_with_token, m
         "/api/datasets",
         headers={"Authorization": f"Bearer {code_portal_with_token}"},
     )
-    # Portal JWT does not satisfy admin auth — should not get 200
-    assert resp.status_code != 200
-    assert resp.status_code in (401, 403, 404, 422)
+    assert resp.status_code in (401, 403, 422)
 
-
-# ---------------------------------------------------------------------------
-# Admin JWT / API key rejected on portal routes (code tier)
-# ---------------------------------------------------------------------------
 
 def test_admin_apikey_rejected_on_portal_datasets(client):
     """Admin X-API-Key cannot access portal endpoints (code tier requires portal JWT)."""
@@ -111,13 +100,8 @@ def test_admin_apikey_rejected_on_portal_datasets(client):
         "/api/portal/datasets",
         headers={"X-API-Key": "test"},
     )
-    # Portal expects Bearer portal JWT, not X-API-Key
     assert resp.status_code == 401
 
-
-# ---------------------------------------------------------------------------
-# Portal JWT signing key is separate from admin
-# ---------------------------------------------------------------------------
 
 def test_portal_jwt_uses_different_signing_key():
     """Portal JWT secret is stored separately from admin JWT secret."""
@@ -168,11 +152,10 @@ def test_forged_jwt_with_wrong_issuer_rejected(client):
     )
     save_portal_config(config)
 
-    # Create a JWT with wrong issuer
     now = datetime.now(timezone.utc)
     fake_token = pyjwt.encode(
         {
-            "iss": "vectoraiz-admin",  # wrong issuer
+            "iss": "vectoraiz-admin",
             "aud": "portal",
             "sub": "fake-session",
             "tier": "code",
