@@ -54,6 +54,7 @@ cd frontend && npm run dev
 - **API routes:** `/api/v1/` prefix for all endpoints, `/api/copilot/` for allAI
 - **Frontend API calls:** centralized in `frontend/src/api/` — one file per domain
 - **Error handling:** FastAPI HTTPException for API errors, never raw exceptions
+- **Simplicity First:** Prefer simple code. Don't abstract until a pattern repeats. Fewer files, fewer layers, fewer indirections. If a feature can be 50 lines instead of 200 with a new service/factory/registry, write the 50 lines.
 
 ## Key Architectural Rules
 1. **Data never leaves the customer's machine.** VZ is non-custodial. No telemetry, no cloud storage.
