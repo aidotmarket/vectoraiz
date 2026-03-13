@@ -167,9 +167,7 @@ class DatabaseConnector:
         if connection.db_type == "postgresql":
             @event.listens_for(engine, "connect")
             def _pg_readonly(dbapi_conn, connection_record):
-                cursor = dbapi_conn.cursor()
-                cursor.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY")
-                cursor.close()
+                dbapi_conn.set_session(readonly=True, autocommit=False)
         elif connection.db_type == "mysql":
             @event.listens_for(engine, "connect")
             def _mysql_readonly(dbapi_conn, connection_record):
