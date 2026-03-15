@@ -387,9 +387,23 @@ def _run_extraction_pipeline(
 
     for spec in extractions:
         dataset_id = spec["dataset_id"]
+        table_name = spec.get("table") or spec.get("custom_sql", "custom_query")
         try:
             # Mandate M1: write raw parquet to {data_directory}/{dataset_id}.parquet
             output_path = Path(settings.data_directory) / f"{dataset_id}.parquet"
+
+            # Bug 2: Set extracting status with table context before extraction
+            with get_session_context() as session:
+                rec = session.get(DBDatasetRecord, dataset_id)
+                if rec:
+                    rec.status = DatasetStatus.EXTRACTING.value
+                    existing_meta = json.loads(rec.metadata_json) if rec.metadata_json else {}
+                    existing_meta.update({"phase": "extracting", "table": table_name})
+                    rec.metadata_json = json.dumps(existing_meta, default=str)
+                    rec.updated_at = datetime.now(timezone.utc)
+                    session.add(rec)
+                    session.commit()
+
             connector.extract_table(
                 connection=conn,
                 table_name=spec.get("table", ""),
@@ -399,12 +413,15 @@ def _run_extraction_pipeline(
                 row_limit=spec.get("row_limit"),
             )
 
-            # Update dataset status
+            # Bug 2: Update status to processing after extraction completes
             with get_session_context() as session:
                 rec = session.get(DBDatasetRecord, dataset_id)
                 if rec:
-                    rec.status = DatasetStatus.EXTRACTING.value
+                    rec.status = DatasetStatus.INDEXING.value
                     rec.file_size_bytes = output_path.stat().st_size if output_path.exists() else 0
+                    existing_meta = json.loads(rec.metadata_json) if rec.metadata_json else {}
+                    existing_meta.update({"phase": "processing", "table": table_name})
+                    rec.metadata_json = json.dumps(existing_meta, default=str)
                     rec.updated_at = datetime.now(timezone.utc)
                     session.add(rec)
                     session.commit()
@@ -416,14 +433,26 @@ def _run_extraction_pipeline(
             finally:
                 loop.close()
 
-            # Mark ready
+            # Bug 1: Query DuckDB for metadata before marking ready
+            processed_path = Path(settings.processed_directory) / dataset_id / "processed.parquet"
+            file_metadata = {}
+            try:
+                from app.services.duckdb_service import ephemeral_duckdb_service
+                with ephemeral_duckdb_service() as duckdb:
+                    file_metadata = duckdb.get_file_metadata(processed_path)
+            except Exception as meta_err:
+                logger.warning("Could not get DuckDB metadata for %s: %s", dataset_id, meta_err)
+
+            # Mark ready with metadata
             with get_session_context() as session:
                 rec = session.get(DBDatasetRecord, dataset_id)
                 if rec:
                     rec.status = DatasetStatus.READY.value
-                    rec.processed_path = str(
-                        Path(settings.processed_directory) / dataset_id / "processed.parquet"
-                    )
+                    rec.processed_path = str(processed_path)
+                    existing_meta = json.loads(rec.metadata_json) if rec.metadata_json else {}
+                    existing_meta.update(file_metadata)
+                    existing_meta["phase"] = "ready"
+                    rec.metadata_json = json.dumps(existing_meta, default=str)
                     rec.updated_at = datetime.now(timezone.utc)
                     session.add(rec)
                     session.commit()

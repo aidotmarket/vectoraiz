@@ -412,6 +412,18 @@ class ProcessingService:
         else:
             _do()
 
+    def _enrich_metadata_from_duckdb(self, record: DatasetRecord) -> None:
+        """Populate record.metadata with row_count, column_count, size_bytes from DuckDB."""
+        if not record.processed_path:
+            return
+        try:
+            from app.services.duckdb_service import ephemeral_duckdb_service
+            with ephemeral_duckdb_service() as duckdb:
+                file_metadata = duckdb.get_file_metadata(Path(record.processed_path))
+            record.metadata.update(file_metadata)
+        except Exception as e:
+            _log.warning("Could not enrich DuckDB metadata for %s: %s", record.id, e)
+
     def _cache_preview(self, record: DatasetRecord) -> None:
         """Populate preview_text and preview_metadata after extraction."""
         preview_text = None
@@ -602,6 +614,8 @@ class ProcessingService:
             )
             record.status = DatasetStatus.READY
             record.updated_at = datetime.now(timezone.utc)
+            # Bug 1: Populate metadata with DuckDB file stats at write time
+            self._enrich_metadata_from_duckdb(record)
         except Exception as e:
             record.status = DatasetStatus.ERROR
             err_detail = str(e).split("\n")[0].strip()[:200]
@@ -1010,6 +1024,8 @@ class ProcessingService:
                 record.status = DatasetStatus.CANCELLED
             else:
                 record.status = DatasetStatus.READY
+                # Bug 1: Populate metadata with DuckDB file stats at write time
+                self._enrich_metadata_from_duckdb(record)
             record.updated_at = datetime.now(timezone.utc)
         except Exception as e:
             record.status = DatasetStatus.ERROR
