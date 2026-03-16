@@ -99,7 +99,7 @@ def _validate_dataset_id(dataset_id: str) -> str:
         )
 
 
-def _try_meter(tool_name: str) -> None:
+def _try_meter(tool_name: str, bucket: str = "setup") -> None:
     """Best-effort metering for MCP tool calls (connected mode only)."""
     try:
         from app.config import settings
@@ -125,7 +125,7 @@ def _try_meter(tool_name: str) -> None:
         ts_ms = int(time.time() * 1000)
         request_id = f"vz:{serial_short}:{endpoint_hash}:{ts_ms}"
         asyncio.get_event_loop().create_task(
-            strategy.check_and_meter("setup", DEFAULT_SETUP_COST, request_id)
+            strategy.check_and_meter(bucket, DEFAULT_SETUP_COST, request_id)
         )
     except Exception:
         pass  # Metering is best-effort; never block tool execution
@@ -168,7 +168,7 @@ async def vectoraiz_get_schema(dataset_id: str) -> str:
 async def vectoraiz_search(query: str, dataset_id: str = "", top_k: int = 5) -> str:
     """Semantic vector search across indexed documents and data chunks. Use natural language queries. Optionally limit to a specific dataset."""
     try:
-        _try_meter("search_vectors")
+        _try_meter("search_vectors", bucket="data")
         token = _validate_token()
         # Validate dataset_id if provided
         validated_id = None
@@ -193,7 +193,7 @@ async def vectoraiz_search(query: str, dataset_id: str = "", top_k: int = 5) -> 
 async def vectoraiz_sql(sql: str, dataset_id: str = "") -> str:
     """Execute a read-only SQL SELECT query against structured data. Tables are named dataset_{id}. Only SELECT queries are allowed. Use vectoraiz_get_schema to discover column names first."""
     try:
-        _try_meter("execute_sql")
+        _try_meter("execute_sql", bucket="data")
         token = _validate_token()
         # Validate dataset_id if provided
         validated_id = None
@@ -217,7 +217,7 @@ async def vectoraiz_sql(sql: str, dataset_id: str = "") -> str:
 async def vectoraiz_profile_dataset(dataset_id: str) -> str:
     """Profile a dataset: get row count, column count, column types, null rates, and 5 sample rows. Use dataset IDs from vectoraiz_list_datasets."""
     try:
-        _try_meter("profile_dataset")
+        _try_meter("profile_dataset", bucket="data")
         token = _validate_token()
         dataset_id = _validate_dataset_id(dataset_id)
         orch = _get_orchestrator()
@@ -234,7 +234,7 @@ async def vectoraiz_profile_dataset(dataset_id: str) -> str:
 async def vectoraiz_get_pii_report(dataset_id: str) -> str:
     """Get cached PII (Personally Identifiable Information) scan results for a dataset. Returns the PII report from the last pipeline run. Does not trigger a new scan."""
     try:
-        _try_meter("get_pii_report")
+        _try_meter("get_pii_report", bucket="data")
         token = _validate_token()
         dataset_id = _validate_dataset_id(dataset_id)
         orch = _get_orchestrator()
