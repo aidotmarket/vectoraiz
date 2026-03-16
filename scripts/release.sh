@@ -101,6 +101,7 @@ commit_tag_push() {
   pass "Pushed commit + tag"
 }
 
+# NOTE: Retained for potential future use (e.g., fresh builds). Currently unused by promote.
 wait_for_image() {
   local tag="$1" max=600 interval=15 elapsed=0
   header "Waiting for $IMAGE:${tag}"
@@ -200,8 +201,14 @@ cmd_promote() {
   update_compose "$ver"
   commit_tag_push "$ver" "chore: release v${ver}" false
 
-  # Poll for image
-  wait_for_image "v${ver}"
+  # Retag: copy multi-arch manifest from RC → stable (instant, no rebuild)
+  header "Retagging $IMAGE:${rc_tag} → $IMAGE:v${ver}"
+  "$DOCKER" buildx imagetools create \
+    --tag "$IMAGE:v${ver}" \
+    "$IMAGE:${rc_tag}" \
+    || die "Failed to retag $IMAGE:${rc_tag} → v${ver}" \
+           "Verify RC image exists: $DOCKER manifest inspect $IMAGE:${rc_tag}"
+  pass "Multi-arch retag complete"
 
   # Smoke: pull the image
   info "Pulling image..."
