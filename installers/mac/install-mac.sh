@@ -188,8 +188,8 @@ elif [ -d "/Applications/Docker.app" ] || [ -d "/Applications/OrbStack.app" ]; t
     fi
     info "Waiting for Docker to start..."
     DOCKER_WAIT=0
-    DOCKER_MAX=120
-    while ! docker info &>/dev/null 2>&1; do
+    DOCKER_MAX=240
+    while ! docker version --format '{{.Server.Version}}' &>/dev/null 2>&1; do
         if [ $DOCKER_WAIT -ge $DOCKER_MAX ]; then
             fail "Docker did not start within ${DOCKER_MAX}s. Please start Docker Desktop manually and re-run this installer."
         fi
@@ -214,8 +214,8 @@ else
 
         info "Waiting for Docker to start (this may take a minute on first launch)..."
         DOCKER_WAIT=0
-        DOCKER_MAX=180
-        while ! docker info &>/dev/null 2>&1; do
+        DOCKER_MAX=300
+        while ! docker version --format '{{.Server.Version}}' &>/dev/null 2>&1; do
             if [ $DOCKER_WAIT -ge $DOCKER_MAX ]; then
                 fail "Docker did not start within ${DOCKER_MAX}s.\n  Please open Docker Desktop from your Applications folder and re-run this installer."
             fi
