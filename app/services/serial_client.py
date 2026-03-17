@@ -235,6 +235,50 @@ class SerialClient:
         error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
         return {"success": False, "error": error, "status_code": status_code}
 
+    async def get_account(self, serial: str, install_token: str) -> dict:
+        """GET /api/v1/serials/{serial}/account"""
+        status_code, data = await self._request(
+            "GET",
+            f"/api/v1/serials/{serial}/account",
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
+    async def send_magic_link(self, serial: str, install_token: str, email: str) -> dict:
+        """POST /api/v1/auth/magic-link"""
+        import os
+        frontend_port = os.environ.get("VECTORAIZ_FRONTEND_PORT", "8080")
+        return_url = os.environ.get("VECTORAIZ_RETURN_URL", f"http://localhost:{frontend_port}")
+        status_code, data = await self._request(
+            "POST",
+            "/api/v1/auth/magic-link",
+            json={"email": email, "serial": serial},
+            headers={
+                "Authorization": f"Bearer {install_token}",
+                "X-VZ-Return-URL": return_url,
+            },
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
+    async def verify_magic_link(self, serial: str, install_token: str, token: str) -> dict:
+        """POST /api/v1/auth/verify-magic-link"""
+        status_code, data = await self._request(
+            "POST",
+            "/api/v1/auth/verify-magic-link",
+            json={"token": token, "serial": serial},
+            headers={"Authorization": f"Bearer {install_token}"},
+        )
+        if status_code == 200 and data:
+            return {"success": True, **data}
+        error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
+        return {"success": False, "error": error, "status_code": status_code}
+
     async def credits_usage(self, serial: str, install_token: str) -> dict:
         """GET /api/v1/serials/{serial}/credits/usage"""
         status_code, data = await self._request(

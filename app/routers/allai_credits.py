@@ -38,6 +38,14 @@ class PurchaseRequest(BaseModel):
     amount_usd: float = 25.0
 
 
+class MagicLinkRequest(BaseModel):
+    email: str
+
+
+class VerifyMagicLinkRequest(BaseModel):
+    token: str
+
+
 def _read_auto_reload() -> dict:
     try:
         with open(AUTO_RELOAD_PATH) as f:
@@ -79,6 +87,44 @@ async def get_credits(user: AuthenticatedUser = Depends(get_current_user)):
         raise HTTPException(
             status_code=result.get("status_code", 502),
             detail=result.get("error", "Failed to fetch credits"),
+        )
+    return result
+
+
+@router.get("/account")
+async def get_account(user: AuthenticatedUser = Depends(get_current_user)):
+    """Return account info for this serial (has_account, balance, etc.)."""
+    serial, install_token = _require_serial()
+    client = SerialClient()
+    result = await client.get_account(serial, install_token)
+    return result
+
+
+@router.post("/auth/magic-link")
+async def send_magic_link(
+    body: MagicLinkRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Send a magic link email for balance recovery."""
+    serial, install_token = _require_serial()
+    client = SerialClient()
+    result = await client.send_magic_link(serial, install_token, body.email)
+    return result
+
+
+@router.post("/auth/verify-magic-link")
+async def verify_magic_link(
+    body: VerifyMagicLinkRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Verify a magic link token and link the serial to the account."""
+    serial, install_token = _require_serial()
+    client = SerialClient()
+    result = await client.verify_magic_link(serial, install_token, body.token)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 400),
+            detail=result.get("error", "Magic link verification failed"),
         )
     return result
 

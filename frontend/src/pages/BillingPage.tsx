@@ -6,6 +6,9 @@ import {
   ChevronDown,
   CreditCard,
   AlertTriangle,
+  KeyRound,
+  Mail,
+  CheckCircle2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -59,6 +62,18 @@ const BillingPage = () => {
 
   // Auto-reload pending
   const [pendingReload, setPendingReload] = useState<{ pending: boolean; checkout_url?: string } | null>(null);
+
+  // Account / recovery state
+  const [accountInfo, setAccountInfo] = useState<{
+    has_account: boolean;
+    email_masked?: string;
+    balance_cents?: number;
+  } | null>(null);
+  const [showRecoveryForm, setShowRecoveryForm] = useState(false);
+  const [recoveryEmail, setRecoveryEmail] = useState("");
+  const [recoverySending, setRecoverySending] = useState(false);
+  const [recoveryEmailSent, setRecoveryEmailSent] = useState(false);
+  const [verifyingMagicLink, setVerifyingMagicLink] = useState(false);
 
   // Usage history
   const [showUsageHistory, setShowUsageHistory] = useState(false);
@@ -150,6 +165,77 @@ const BillingPage = () => {
     }
   }, [apiKey]);
 
+  const fetchAccount = useCallback(async () => {
+    try {
+      if (!apiKey) return;
+      const res = await fetch(`${getApiUrl()}/api/allai/account`, {
+        headers: { "X-API-Key": apiKey },
+      });
+      if (res.ok) {
+        setAccountInfo(await res.json());
+      }
+    } catch {
+      // Silently fail — account check is optional
+    }
+  }, [apiKey]);
+
+  const handleSendMagicLink = async () => {
+    if (!apiKey || !recoveryEmail.trim()) return;
+    setRecoverySending(true);
+    try {
+      const res = await fetch(`${getApiUrl()}/api/allai/auth/magic-link`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ email: recoveryEmail.trim() }),
+      });
+      if (res.ok) {
+        setRecoveryEmailSent(true);
+      } else {
+        const err = await res.json().catch(() => ({ detail: "Failed to send magic link" }));
+        toast({ title: "Error", description: err.detail, variant: "destructive" });
+      }
+    } catch {
+      toast({ title: "Error", description: "Failed to send magic link", variant: "destructive" });
+    } finally {
+      setRecoverySending(false);
+    }
+  };
+
+  const handleVerifyMagicLink = useCallback(async (token: string) => {
+    if (!apiKey) return;
+    setVerifyingMagicLink(true);
+    try {
+      const res = await fetch(`${getApiUrl()}/api/allai/auth/verify-magic-link`, {
+        method: "POST",
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ token }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const balanceStr = data.balance_cents != null
+          ? `$${(data.balance_cents / 100).toFixed(2)} available.`
+          : "";
+        toast({ title: `Balance restored! ${balanceStr}` });
+        fetchCredits();
+        fetchAccount();
+      } else {
+        toast({
+          title: "Error",
+          description: "Magic link expired or already used. Please try again.",
+          variant: "destructive",
+        });
+      }
+    } catch {
+      toast({
+        title: "Error",
+        description: "Magic link expired or already used. Please try again.",
+        variant: "destructive",
+      });
+    } finally {
+      setVerifyingMagicLink(false);
+    }
+  }, [apiKey, fetchCredits, fetchAccount]);
+
   const handlePurchase = async (amountUsd: number) => {
     setPurchasing(true);
     try {
@@ -185,6 +271,15 @@ const BillingPage = () => {
     fetchCredits();
     fetchAutoReload();
     fetchPendingReload();
+    fetchAccount();
+
+    // Handle magic link token callback
+    const magicLinkToken = searchParams.get("magic_link_token");
+    if (magicLinkToken) {
+      handleVerifyMagicLink(magicLinkToken);
+      searchParams.delete("magic_link_token");
+      setSearchParams(searchParams, { replace: true });
+    }
 
     // Handle Stripe redirect params
     if (searchParams.get("credits") === "success") {
@@ -203,7 +298,7 @@ const BillingPage = () => {
       searchParams.delete("credits");
       setSearchParams(searchParams, { replace: true });
     }
-  }, [fetchCredits, fetchAutoReload, fetchPendingReload, searchParams, setSearchParams]);
+  }, [fetchCredits, fetchAutoReload, fetchPendingReload, fetchAccount, handleVerifyMagicLink, searchParams, setSearchParams]);
 
   const formatTimeAgo = (dateStr: string) => {
     const diff = Date.now() - new Date(dateStr).getTime();
@@ -242,6 +337,80 @@ const BillingPage = () => {
             <p className="text-xs text-yellow-300/70">Click here to reload your credits.</p>
           </div>
           <ExternalLink className="w-4 h-4 text-yellow-500 shrink-0" />
+        </div>
+      )}
+
+      {/* Recovery Banner */}
+      {accountInfo?.has_account === false && (!credits || credits.balance_usd === 0) && !verifyingMagicLink && (
+        <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-4 py-3">
+          {!showRecoveryForm && !recoveryEmailSent ? (
+            <button
+              onClick={() => setShowRecoveryForm(true)}
+              className="flex items-center gap-3 w-full text-left hover:opacity-90 transition-opacity"
+            >
+              <KeyRound className="w-5 h-5 text-indigo-400 shrink-0" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-indigo-200">
+                  Already purchased credits? <span className="font-semibold">Recover your balance</span>
+                </p>
+                <p className="text-xs text-indigo-300/70">
+                  If you reinstalled vectorAIz, sign in to restore your credit balance.
+                </p>
+              </div>
+            </button>
+          ) : recoveryEmailSent ? (
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="w-5 h-5 text-indigo-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-indigo-200">Check your email</p>
+                <p className="text-xs text-indigo-300/70 mt-1">
+                  We sent a sign-in link to {recoveryEmail}. Click the link in your email to restore your balance. The link expires in 15 minutes.
+                </p>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <Mail className="w-5 h-5 text-indigo-400 shrink-0" />
+                <p className="text-sm font-medium text-indigo-200">Enter your email to recover your balance</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <Input
+                  type="email"
+                  placeholder="you@example.com"
+                  value={recoveryEmail}
+                  onChange={(e) => setRecoveryEmail(e.target.value)}
+                  className="flex-1"
+                  onKeyDown={(e) => { if (e.key === "Enter") handleSendMagicLink(); }}
+                />
+                <Button
+                  size="sm"
+                  disabled={recoverySending || !recoveryEmail.trim()}
+                  onClick={handleSendMagicLink}
+                >
+                  {recoverySending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Send magic link"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setShowRecoveryForm(false);
+                    setRecoveryEmail("");
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Verifying magic link spinner */}
+      {verifyingMagicLink && (
+        <div className="flex items-center gap-2 text-indigo-300 text-sm px-1">
+          <Loader2 className="w-4 h-4 animate-spin" />
+          Verifying magic link...
         </div>
       )}
 
