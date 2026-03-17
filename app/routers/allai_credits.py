@@ -97,6 +97,11 @@ async def get_account(user: AuthenticatedUser = Depends(get_current_user)):
     serial, install_token = _require_serial()
     client = SerialClient()
     result = await client.get_account(serial, install_token)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 502),
+            detail=result.get("error", "Failed to fetch account info"),
+        )
     return result
 
 
@@ -109,6 +114,11 @@ async def send_magic_link(
     serial, install_token = _require_serial()
     client = SerialClient()
     result = await client.send_magic_link(serial, install_token, body.email)
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=result.get("status_code", 502),
+            detail=result.get("error", "Failed to send magic link"),
+        )
     return result
 
 
