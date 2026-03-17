@@ -215,7 +215,7 @@ class SerialClient:
         error = data.get("detail", str(data)) if data else f"HTTP {status_code}"
         return RefreshResult(success=False, error=error, status_code=status_code)
 
-    async def credits_checkout(self, serial: str, install_token: str) -> dict:
+    async def credits_checkout(self, serial: str, install_token: str, amount_usd: float = 25.0) -> dict:
         """POST /api/v1/serials/{serial}/credits/checkout"""
         import os
         port = os.environ.get("PORT", "8100")
@@ -223,6 +223,7 @@ class SerialClient:
         status_code, data = await self._request(
             "POST",
             f"/api/v1/serials/{serial}/credits/checkout",
+            json={"amount_usd": amount_usd},
             headers={
                 "Authorization": f"Bearer {install_token}",
                 "Origin": origin,

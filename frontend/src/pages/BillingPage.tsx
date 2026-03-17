@@ -43,6 +43,9 @@ const BillingPage = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [purchasing, setPurchasing] = useState(false);
+  const [showPurchaseForm, setShowPurchaseForm] = useState(false);
+  const [purchaseAmount, setPurchaseAmount] = useState("25");
+  const [purchaseError, setPurchaseError] = useState<string | null>(null);
 
   // Auto-reload state
   const [autoReload, setAutoReload] = useState<AutoReloadConfig>({
@@ -147,13 +150,14 @@ const BillingPage = () => {
     }
   }, [apiKey]);
 
-  const handlePurchase = async () => {
+  const handlePurchase = async (amountUsd: number) => {
     setPurchasing(true);
     try {
       if (!apiKey) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/purchase`, {
         method: "POST",
-        headers: { "X-API-Key": apiKey },
+        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ amount_usd: amountUsd }),
       });
       if (res.ok) {
         const data = await res.json();
@@ -173,6 +177,7 @@ const BillingPage = () => {
       toast({ title: "Error", description: "Failed to initiate purchase", variant: "destructive" });
     } finally {
       setPurchasing(false);
+      setShowPurchaseForm(false);
     }
   };
 
@@ -292,22 +297,66 @@ const BillingPage = () => {
               </div>
             </div>
             <Button
-              onClick={handlePurchase}
+              onClick={() => setShowPurchaseForm(!showPurchaseForm)}
               disabled={purchasing || !!error}
             >
-              {purchasing ? (
-                <>
-                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
-                  Opening checkout...
-                </>
-              ) : (
-                <>
-                  <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
-                  Buy Credits ($25)
-                </>
-              )}
+              <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
+              Buy Credits
             </Button>
           </div>
+          {showPurchaseForm && (
+            <div className="space-y-3 pt-4 border-t border-border">
+              <p className="text-sm text-muted-foreground">Credits are sold in units of $25</p>
+              <div className="space-y-2">
+                <Label htmlFor="purchase-amount" className="text-foreground">Amount (USD)</Label>
+                <div className="flex items-center gap-2">
+                  <span className="text-muted-foreground">$</span>
+                  <Input
+                    id="purchase-amount"
+                    type="number"
+                    min="25"
+                    step="25"
+                    value={purchaseAmount}
+                    onChange={(e) => {
+                      setPurchaseAmount(e.target.value);
+                      setPurchaseError(null);
+                    }}
+                    className="w-32"
+                  />
+                </div>
+                {purchaseError && (
+                  <p className="text-sm text-destructive">{purchaseError}</p>
+                )}
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  disabled={purchasing}
+                  onClick={() => {
+                    const amt = parseFloat(purchaseAmount);
+                    if (isNaN(amt) || amt <= 0 || amt % 25 !== 0) {
+                      setPurchaseError("Amount must be a positive multiple of $25");
+                      return;
+                    }
+                    handlePurchase(amt);
+                  }}
+                >
+                  {purchasing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : "Purchase"}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setShowPurchaseForm(false);
+                    setPurchaseError(null);
+                    setPurchaseAmount("25");
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
         </CardContent>
       </Card>
 

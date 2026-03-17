@@ -34,6 +34,10 @@ class AutoReloadBody(BaseModel):
     reload_amount_usd: float = 25.0
 
 
+class PurchaseRequest(BaseModel):
+    amount_usd: float = 25.0
+
+
 def _read_auto_reload() -> dict:
     try:
         with open(AUTO_RELOAD_PATH) as f:
@@ -80,11 +84,14 @@ async def get_credits(user: AuthenticatedUser = Depends(get_current_user)):
 
 
 @router.post("/credits/purchase")
-async def purchase_credits(user: AuthenticatedUser = Depends(get_current_user)):
+async def purchase_credits(
+    body: PurchaseRequest = PurchaseRequest(),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
     """Create a Stripe Checkout session and return the checkout URL."""
     serial, install_token = _require_serial()
     client = SerialClient()
-    result = await client.credits_checkout(serial, install_token)
+    result = await client.credits_checkout(serial, install_token, amount_usd=body.amount_usd)
     if not result.get("success"):
         raise HTTPException(
             status_code=result.get("status_code", 502),
