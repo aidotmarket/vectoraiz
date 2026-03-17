@@ -17,6 +17,7 @@ from app.auth.api_key_auth import get_current_user, AuthenticatedUser
 from app.config import settings
 from app.services.serial_client import SerialClient
 from app.services.serial_store import get_serial_store, ACTIVE, DEGRADED
+from app.services.auto_reload_service import _read_pending as read_pending_reload
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,15 @@ async def purchase_credits(user: AuthenticatedUser = Depends(get_current_user)):
             detail=result.get("error", "Failed to create checkout session"),
         )
     return result
+
+
+@router.get("/credits/auto-reload/pending")
+async def get_auto_reload_pending(user: AuthenticatedUser = Depends(get_current_user)):
+    """Get pending auto-reload checkout session, if any."""
+    pending = read_pending_reload()
+    if not pending or not pending.get("checkout_url"):
+        return {"pending": False}
+    return {"pending": True, **pending}
 
 
 @router.get("/credits/auto-reload")

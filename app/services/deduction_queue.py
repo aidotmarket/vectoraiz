@@ -41,6 +41,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.config import settings
 from app.core.database import get_engine
+from app.services.auto_reload_service import check_auto_reload
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,11 @@ class DeductionQueue:
                         "Deduction completed: id=%d key=%s elapsed=%.2fs",
                         ded_id, idempotency_key, elapsed,
                     )
+                    # Auto-reload check after successful deduction
+                    try:
+                        await check_auto_reload()
+                    except Exception:
+                        logger.debug("Auto-reload check failed (non-fatal)", exc_info=True)
                 elif not retryable:
                     # Permanent failure — failed_terminal
                     reason = f"HTTP {status_code}" if status_code else "permanent_error"

@@ -5,6 +5,7 @@ import {
   ExternalLink,
   ChevronDown,
   CreditCard,
+  AlertTriangle,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -52,6 +53,9 @@ const BillingPage = () => {
   const [autoReloadLoading, setAutoReloadLoading] = useState(false);
   const [editingAutoReload, setEditingAutoReload] = useState(false);
   const [editThreshold, setEditThreshold] = useState("5");
+
+  // Auto-reload pending
+  const [pendingReload, setPendingReload] = useState<{ pending: boolean; checkout_url?: string } | null>(null);
 
   // Usage history
   const [showUsageHistory, setShowUsageHistory] = useState(false);
@@ -128,6 +132,21 @@ const BillingPage = () => {
     }
   };
 
+  const fetchPendingReload = useCallback(async () => {
+    try {
+      if (!apiKey) return;
+      const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload/pending`, {
+        headers: { "X-API-Key": apiKey },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPendingReload(data);
+      }
+    } catch {
+      // Silently fail
+    }
+  }, [apiKey]);
+
   const handlePurchase = async () => {
     setPurchasing(true);
     try {
@@ -160,6 +179,7 @@ const BillingPage = () => {
   useEffect(() => {
     fetchCredits();
     fetchAutoReload();
+    fetchPendingReload();
 
     // Handle Stripe redirect params
     if (searchParams.get("credits") === "success") {
@@ -171,7 +191,7 @@ const BillingPage = () => {
       searchParams.delete("credits");
       setSearchParams(searchParams, { replace: true });
     }
-  }, [fetchCredits, fetchAutoReload, searchParams, setSearchParams]);
+  }, [fetchCredits, fetchAutoReload, fetchPendingReload, searchParams, setSearchParams]);
 
   const formatTimeAgo = (dateStr: string) => {
     const diff = Date.now() - new Date(dateStr).getTime();
@@ -197,6 +217,21 @@ const BillingPage = () => {
         <h1 className="text-2xl font-semibold text-foreground">Billing</h1>
         <p className="text-muted-foreground">Manage your allAI credits and payment settings</p>
       </div>
+
+      {/* Low Balance Banner */}
+      {pendingReload?.pending && pendingReload.checkout_url && (
+        <div
+          className="flex items-center gap-3 rounded-lg border border-yellow-500/30 bg-yellow-500/10 px-4 py-3 cursor-pointer hover:bg-yellow-500/15 transition-colors"
+          onClick={() => window.open(pendingReload.checkout_url, "_blank")}
+        >
+          <AlertTriangle className="w-5 h-5 text-yellow-500 shrink-0" />
+          <div className="flex-1">
+            <p className="text-sm font-medium text-yellow-200">Your allAI credit balance is low.</p>
+            <p className="text-xs text-yellow-300/70">Click here to reload your credits.</p>
+          </div>
+          <ExternalLink className="w-4 h-4 text-yellow-500 shrink-0" />
+        </div>
+      )}
 
       {/* Balance Card */}
       <Card className="bg-gradient-to-br from-zinc-900 to-zinc-800 border-zinc-700">
