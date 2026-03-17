@@ -45,19 +45,19 @@ const ALL_NAV_ITEMS: NavItem[] = [
 
 // direct channel: data-focused items first, marketplace items at bottom
 const NAV_ORDER_DIRECT = [
-  "/", "/datasets", "/search", "/sql", "/artifacts", "/databases", "/settings", "/billing",
-  "/ai-market", "/data-requests", "/earnings", "/data-types",
+  "/", "/datasets", "/search", "/sql", "/artifacts", "/databases", "/settings",
+  "/ai-market", "/data-requests", "/earnings", "/billing", "/data-types",
 ];
 
 // marketplace channel: marketplace items promoted to top, then data items
 const NAV_ORDER_MARKETPLACE = [
   "/ai-market", "/data-requests", "/",
   "/datasets", "/search", "/sql", "/artifacts", "/databases",
-  "/earnings", "/data-types", "/settings", "/billing",
+  "/earnings", "/billing", "/data-types", "/settings",
 ];
 
 // Separator index: items after this index go in the bottom section
-const SEPARATOR_INDEX_DIRECT = 8;    // after Billing
+const SEPARATOR_INDEX_DIRECT = 7;    // after Settings
 const SEPARATOR_INDEX_MARKETPLACE = 2; // after Dashboard
 
 function getOrderedItems(channel: "direct" | "marketplace"): { top: NavItem[]; bottom: NavItem[] } {
