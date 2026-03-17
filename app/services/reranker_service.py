@@ -8,6 +8,7 @@ Includes circuit breaker: if reranking exceeds timeout, returns un-reranked resu
 import logging
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Optional, List, Dict, Any, Tuple
 
 from app.config import settings
@@ -92,7 +93,24 @@ class RerankerService:
                 pairs.append((query, text))
 
             start = time.time()
-            scores = self.model.predict(pairs)
+            timeout_sec = timeout_ms / 1000.0
+
+            # Run predict() in a thread with hard timeout
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self.model.predict, pairs)
+                try:
+                    scores = future.result(timeout=timeout_sec)
+                except FuturesTimeoutError:
+                    logger.warning(
+                        "Reranker hard timeout after %dms — returning un-reranked results",
+                        timeout_ms,
+                    )
+                    self._consecutive_timeouts += 1
+                    if self._consecutive_timeouts >= self._circuit_threshold:
+                        self._circuit_open = True
+                        logger.error("Reranker circuit breaker OPENED after %d consecutive timeouts", self._circuit_threshold)
+                    return documents[:top_k]
+
             elapsed_ms = (time.time() - start) * 1000
 
             if elapsed_ms > timeout_ms:

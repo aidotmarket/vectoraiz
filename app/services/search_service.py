@@ -64,6 +64,7 @@ class SearchService:
         dataset_id: Optional[str] = None,
         limit: int = 10,
         min_score: Optional[float] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Perform hybrid search with graceful degradation.
@@ -125,6 +126,7 @@ class SearchService:
                     dense_vector=query_vector,
                     sparse_vector=sparse_vector,
                     limit=fetch_limit,
+                    filter_conditions=filters,
                 )
 
                 ds_id = collection_name.replace("dataset_", "")
@@ -178,6 +180,12 @@ class SearchService:
         # Sort by score before reranking
         all_results.sort(key=lambda x: x["score"], reverse=True)
 
+        # Cap candidates to reranker_top_k BEFORE passing to reranker
+        # This ensures the cross-encoder never processes more than top_k pairs
+        # regardless of how many collections were searched.
+        if self.reranker and len(all_results) > settings.reranker_top_k:
+            all_results = all_results[:settings.reranker_top_k]
+
         # Stage 5: Cross-encoder reranking (if enabled)
         if self.reranker and len(all_results) > 1:
             try:
@@ -190,6 +198,13 @@ class SearchService:
                 stages_active.append("reranker")
             except Exception as e:
                 logger.warning("Reranker failed: %s", e)
+
+        # Filter by min_score after reranking
+        if min_score is not None:
+            all_results = [
+                r for r in all_results
+                if r.get("rerank_score", r.get("score", 0)) >= min_score
+            ]
 
         # Final limit
         all_results = all_results[:limit]
@@ -212,6 +227,7 @@ class SearchService:
         query: str,
         limit: int = 10,
         min_score: Optional[float] = None,
+        filters: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Search within a specific dataset."""
         record = self.processing_service.get_dataset(dataset_id)
@@ -227,6 +243,7 @@ class SearchService:
             dataset_id=dataset_id,
             limit=limit,
             min_score=min_score,
+            filters=filters,
         )
 
     def _get_searchable_collections(self) -> List[str]:

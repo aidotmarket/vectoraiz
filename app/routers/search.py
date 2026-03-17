@@ -5,7 +5,7 @@ BQ-110: All sync SearchService calls wrapped via run_sync().
 """
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import BaseModel
 
 from app.core.async_utils import run_sync
@@ -23,6 +23,7 @@ class SearchRequest(BaseModel):
     dataset_id: Optional[str] = None
     limit: int = 10
     min_score: Optional[float] = None
+    filters: Optional[Dict[str, Any]] = None
 
 
 @router.get("")
@@ -78,6 +79,7 @@ async def search_post(
         results = await run_sync(
             search_service.search,
             request.query, request.dataset_id, request.limit, request.min_score,
+            request.filters,
         )
         return results
     except ValueError as e:

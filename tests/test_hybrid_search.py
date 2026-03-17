@@ -362,3 +362,177 @@ class TestHybridSearchConfig:
         assert settings.reranker_top_k == 30
         assert settings.reranker_timeout_ms == 200
         assert settings.fts_enabled is True
+
+
+# ---------------------------------------------------------------------------
+# 8. Gate-3 regression tests
+# ---------------------------------------------------------------------------
+
+
+class TestRerankerTopKCap:
+    """Reranker should receive at most reranker_top_k (30) candidates."""
+
+    def test_multi_collection_capped_at_top_k(self):
+        """With >30 total candidates from multiple collections, reranker gets ≤30."""
+        from app.services.search_service import SearchService
+
+        service = SearchService()
+
+        mock_embedding = MagicMock()
+        mock_embedding.embed_text.return_value = [0.1] * 384
+        service.embedding_service = mock_embedding
+
+        # Each collection returns 20 results → 40 total
+        def fake_hybrid_search(**kwargs):
+            return [
+                {"id": str(i), "score": 0.9 - i * 0.01,
+                 "payload": {"text_content": f"doc {i}", "row_index": i, "row_data": {}}}
+                for i in range(20)
+            ]
+
+        mock_qdrant = MagicMock()
+        mock_qdrant.hybrid_search.side_effect = fake_hybrid_search
+        mock_qdrant.collection_has_sparse.return_value = False
+        service.qdrant_service = mock_qdrant
+
+        mock_processing = MagicMock()
+        mock_processing.get_dataset.return_value = None
+        service.processing_service = mock_processing
+
+        mock_reranker = MagicMock()
+        mock_reranker.rerank.return_value = [{"text_content": "a", "score": 1.0, "rerank_score": 1.0}]
+        service._reranker = mock_reranker
+        service._sparse_encoder = False
+
+        with patch.object(service, '_get_searchable_collections',
+                          return_value=["dataset_a", "dataset_b"]), \
+             patch("app.services.search_service.settings") as mock_settings:
+            mock_settings.hybrid_search_mode = "dense_only"
+            mock_settings.reranker_enabled = True
+            mock_settings.fts_enabled = False
+            mock_settings.reranker_top_k = 30
+
+            service.search("test query", limit=10)
+
+        # The reranker should have been called with ≤30 documents
+        call_args = mock_reranker.rerank.call_args
+        docs_passed = call_args.kwargs.get("documents", call_args[1].get("documents", []))
+        assert len(docs_passed) <= 30
+
+
+class TestMinScoreFiltering:
+    """Results below min_score should be excluded after reranking."""
+
+    def test_min_score_filters_results(self):
+        """Results with score below min_score are excluded."""
+        from app.services.search_service import SearchService
+
+        service = SearchService()
+
+        mock_embedding = MagicMock()
+        mock_embedding.embed_text.return_value = [0.1] * 384
+        service.embedding_service = mock_embedding
+
+        mock_qdrant = MagicMock()
+        mock_qdrant.hybrid_search.return_value = [
+            {"id": "1", "score": 0.9, "payload": {"text_content": "high", "row_index": 0, "row_data": {}}},
+            {"id": "2", "score": 0.3, "payload": {"text_content": "low", "row_index": 1, "row_data": {}}},
+            {"id": "3", "score": 0.1, "payload": {"text_content": "very low", "row_index": 2, "row_data": {}}},
+        ]
+        mock_qdrant.collection_has_sparse.return_value = False
+        service.qdrant_service = mock_qdrant
+
+        mock_processing = MagicMock()
+        mock_processing.get_dataset.return_value = None
+        service.processing_service = mock_processing
+        service._sparse_encoder = False
+        service._reranker = False  # No reranker
+
+        with patch.object(service, '_get_searchable_collections', return_value=["dataset_test"]), \
+             patch("app.services.search_service.settings") as mock_settings:
+            mock_settings.hybrid_search_mode = "dense_only"
+            mock_settings.reranker_enabled = False
+            mock_settings.fts_enabled = False
+            mock_settings.reranker_top_k = 30
+
+            result = service.search("test query", limit=10, min_score=0.5)
+
+        # Only the result with score >= 0.5 should remain
+        assert result["total"] == 1
+        assert result["results"][0]["score"] == 0.9
+
+
+class TestRerankerTimeoutFallback:
+    """Reranker timeout should return un-reranked results gracefully."""
+
+    def test_timeout_returns_unreranked(self):
+        """When predict() times out, returns original order."""
+        from app.services.reranker_service import RerankerService
+
+        service = RerankerService()
+
+        # Mock model that sleeps longer than timeout
+        mock_model = MagicMock()
+
+        def slow_predict(pairs):
+            time.sleep(2)  # Sleep 2 seconds
+            return [0.5] * len(pairs)
+
+        mock_model.predict.side_effect = slow_predict
+        service._model = mock_model
+
+        docs = [
+            {"text_content": "doc A", "score": 0.8},
+            {"text_content": "doc B", "score": 0.6},
+        ]
+
+        with patch("app.services.reranker_service.settings") as mock_settings:
+            mock_settings.reranker_top_k = 10
+            mock_settings.reranker_timeout_ms = 100  # 100ms timeout
+
+            result = service.rerank("query", docs, top_k=2)
+
+        # Should return un-reranked docs (no rerank_score)
+        assert len(result) == 2
+        assert "rerank_score" not in result[0]
+
+
+class TestFacetFiltersPassthrough:
+    """Facet filters should be passed through to Qdrant."""
+
+    def test_filters_passed_to_qdrant(self):
+        """Filters dict is forwarded to qdrant_service.hybrid_search."""
+        from app.services.search_service import SearchService
+
+        service = SearchService()
+
+        mock_embedding = MagicMock()
+        mock_embedding.embed_text.return_value = [0.1] * 384
+        service.embedding_service = mock_embedding
+
+        mock_qdrant = MagicMock()
+        mock_qdrant.hybrid_search.return_value = []
+        mock_qdrant.collection_has_sparse.return_value = False
+        service.qdrant_service = mock_qdrant
+
+        mock_processing = MagicMock()
+        mock_processing.get_dataset.return_value = None
+        service.processing_service = mock_processing
+        service._sparse_encoder = False
+        service._reranker = False
+
+        test_filters = {"must": [{"key": "file_type", "match": {"value": "csv"}}]}
+
+        with patch.object(service, '_get_searchable_collections', return_value=["dataset_test"]), \
+             patch("app.services.search_service.settings") as mock_settings:
+            mock_settings.hybrid_search_mode = "dense_only"
+            mock_settings.reranker_enabled = False
+            mock_settings.fts_enabled = False
+            mock_settings.reranker_top_k = 30
+
+            service.search("test query", limit=5, filters=test_filters)
+
+        # Verify filters were passed to hybrid_search
+        mock_qdrant.hybrid_search.assert_called_once()
+        call_kwargs = mock_qdrant.hybrid_search.call_args[1]
+        assert call_kwargs["filter_conditions"] == test_filters
