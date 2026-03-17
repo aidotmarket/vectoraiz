@@ -123,8 +123,8 @@ class Settings(BaseSettings):
 
     # Co-Pilot metering (BQ-073)
     # Markup rate applied to Anthropic wholesale cost.
-    # 3.0 = 300% of wholesale → e.g. $0.01 wholesale → $0.03 customer cost.
-    copilot_markup_rate: float = 3.0
+    # 2.0 = 200% of wholesale → e.g. $0.01 wholesale → $0.02 customer cost.
+    copilot_markup_rate: float = 2.0
     # Minimum cost per query in cents (ensures even tiny queries incur a charge)
     copilot_min_cost_cents: int = 1
     # Estimated cost of an average Co-Pilot query in cents (for pre-flight checks)
@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     stripe_secret_key: Optional[str] = None
     stripe_price_id: Optional[str] = None
     stripe_webhook_secret: Optional[str] = None
-    billing_markup_rate: float = 3.0
+    billing_markup_rate: float = 2.0
     
     # Public URL for this vectorAIz instance (used in OpenAPI specs for Custom GPT Actions)
     public_url: str = "https://vectoraiz-backend-production.up.railway.app"
