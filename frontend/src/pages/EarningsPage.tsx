@@ -118,7 +118,7 @@ const EarningsPage = () => {
   // Overview stats from MarketplaceContext
   const totalEarnings = getTotalEarnings();
   const totalSales = publishedDatasetsArray.reduce((sum, d) => sum + d.sales, 0);
-  const pendingPayout = Math.round(totalEarnings * 0.15); // 15% pending
+  const pendingPayout = Math.round(totalEarnings * 0.05); // 5% pending
   const thisMonth = Math.round(totalEarnings * 0.25); // Approximate this month
 
   if (!hasFeature("marketplace")) {

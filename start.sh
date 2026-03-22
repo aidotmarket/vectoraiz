@@ -213,6 +213,9 @@ if [ ! -f ".env" ]; then
     FIRST_RUN=true
     info "First run detected — generating configuration..."
     POSTGRES_PW=$(openssl rand -hex 16)
+    SECRET_KEY=$(openssl rand -hex 16)
+    HMAC_SECRET=$(openssl rand -hex 16)
+    KEYSTORE_PASS=$(openssl rand -hex 32)
 
     # Check for API key (backward compat — if provided via env, use it)
     API_KEY="${VECTORAIZ_API_KEY:-${VECTORAIZ_INTERNAL_API_KEY:-}}"
@@ -235,6 +238,11 @@ if [ ! -f ".env" ]; then
     cat > .env <<EOF
 # vectorAIz Configuration
 # Generated on $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+# Security keys (auto-generated, keep these safe)
+VECTORAIZ_SECRET_KEY=${SECRET_KEY}
+VECTORAIZ_APIKEY_HMAC_SECRET=${HMAC_SECRET}
+VECTORAIZ_KEYSTORE_PASSPHRASE=${KEYSTORE_PASS}
 
 # Database password (auto-generated, keep this safe)
 POSTGRES_PASSWORD=${POSTGRES_PW}
