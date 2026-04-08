@@ -20,6 +20,7 @@ pyarrow>=14.0.0
 openpyxl==3.1.2
 xlrd>=2.0.1
 python-magic==0.4.27
+Pillow>=10.0.0
 nltk==3.8.1
 matplotlib==3.8.2
 psutil==5.9.8

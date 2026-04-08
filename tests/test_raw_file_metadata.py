@@ -8,11 +8,13 @@ import wave
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from PIL import Image
 from pypdf import PdfWriter
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from app.config import settings
 from app.routers.raw_listings import router as raw_listings_router
 from app.services.raw_file_metadata import MetadataExtractor
 from app.services.raw_file_service import RawFileService
@@ -28,10 +30,16 @@ def _make_raw_file(path: Path, mime_type: str):
     )
 
 
+@pytest.fixture
+def allow_tmp_raw_dirs(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "allowed_raw_file_dirs", [str(tmp_path)])
+    return tmp_path
+
+
 class TestMetadataExtractorRouting:
-    def test_extract_routes_by_mime_type(self, tmp_path, monkeypatch):
+    def test_extract_routes_by_mime_type(self, allow_tmp_raw_dirs, monkeypatch):
         extractor = MetadataExtractor()
-        path = tmp_path / "sample.bin"
+        path = allow_tmp_raw_dirs / "sample.bin"
         path.write_bytes(b"data")
         raw_file = _make_raw_file(path, "image/png")
         calls = []
@@ -68,8 +76,8 @@ class TestMetadataExtractorRouting:
 
 
 class TestMetadataExtractorFormats:
-    def test_extract_image_returns_expected_structure(self, tmp_path, monkeypatch):
-        path = tmp_path / "sample.png"
+    def test_extract_image_returns_expected_structure(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "sample.png"
         Image.new("RGB", (10, 20), color="red").save(path)
         raw_file = _make_raw_file(path, "image/png")
         extractor = MetadataExtractor()
@@ -89,8 +97,8 @@ class TestMetadataExtractorFormats:
         assert metadata["technical_metadata"]["dimensions"] == {"width": 10, "height": 20}
         assert metadata["technical_metadata"]["format"] == "PNG"
 
-    def test_extract_pdf_returns_expected_structure(self, tmp_path, monkeypatch):
-        path = tmp_path / "sample.pdf"
+    def test_extract_pdf_returns_expected_structure(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "sample.pdf"
         writer = PdfWriter()
         writer.add_blank_page(width=72, height=72)
         writer.add_metadata({"/Title": "Sample PDF", "/Author": "VectorAIz"})
@@ -115,8 +123,8 @@ class TestMetadataExtractorFormats:
         assert metadata["technical_metadata"]["title"] == "Sample PDF"
         assert metadata["technical_metadata"]["author"] == "VectorAIz"
 
-    def test_extract_audio_gracefully_degrades_without_mutagen(self, tmp_path, monkeypatch):
-        path = tmp_path / "sample.wav"
+    def test_extract_audio_gracefully_degrades_without_mutagen(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "sample.wav"
         with wave.open(str(path), "wb") as wav_file:
             wav_file.setnchannels(1)
             wav_file.setsampwidth(2)
@@ -148,8 +156,8 @@ class TestMetadataExtractorFormats:
         assert metadata["technical_metadata"]["duration_seconds"] == 1.0
         assert "capability_notes" in metadata["technical_metadata"]
 
-    def test_extract_generic_returns_preview(self, tmp_path, monkeypatch):
-        path = tmp_path / "sample.txt"
+    def test_extract_generic_returns_preview(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "sample.txt"
         path.write_text("hello world\n" * 20)
         raw_file = _make_raw_file(path, "text/plain")
         extractor = MetadataExtractor()
@@ -166,8 +174,8 @@ class TestMetadataExtractorFormats:
         assert metadata["preview_snippet"].startswith("hello world")
         assert metadata["technical_metadata"]["sample_available"] is True
 
-    def test_extract_image_gracefully_degrades_when_pillow_missing(self, tmp_path, monkeypatch):
-        path = tmp_path / "fallback.png"
+    def test_extract_image_gracefully_degrades_when_pillow_missing(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "fallback.png"
         path.write_bytes(b"\x89PNG\r\n\x1a\nfallback")
         raw_file = _make_raw_file(path, "image/png")
         extractor = MetadataExtractor()
@@ -196,8 +204,8 @@ class TestMetadataExtractorFormats:
         )
         assert metadata["tags"] == ["png"]
 
-    def test_extract_pdf_gracefully_degrades_when_pypdf_missing(self, tmp_path, monkeypatch):
-        path = tmp_path / "fallback.pdf"
+    def test_extract_pdf_gracefully_degrades_when_pypdf_missing(self, allow_tmp_raw_dirs, monkeypatch):
+        path = allow_tmp_raw_dirs / "fallback.pdf"
         path.write_bytes(b"%PDF-1.4\n%fallback")
         raw_file = _make_raw_file(path, "application/pdf")
         extractor = MetadataExtractor()
@@ -219,6 +227,22 @@ class TestMetadataExtractorFormats:
         assert metadata["source"] == "stub"
         assert metadata["technical_metadata"]["mime_type"] == "application/pdf"
         assert "capability_notes" in metadata["technical_metadata"]
+
+    def test_extract_raises_when_file_outside_allowed_dirs(self, tmp_path, monkeypatch):
+        allowed_dir = tmp_path / "allowed"
+        blocked_dir = tmp_path / "blocked"
+        allowed_dir.mkdir()
+        blocked_dir.mkdir()
+        monkeypatch.setattr(settings, "allowed_raw_file_dirs", [str(allowed_dir)])
+
+        path = blocked_dir / "outside.txt"
+        path.write_text("outside allowed dirs")
+
+        extractor = MetadataExtractor()
+        raw_file = _make_raw_file(path, "text/plain")
+
+        with pytest.raises(ValueError, match="outside allowed raw file directories"):
+            asyncio.run(extractor.extract(raw_file))
 
 
 class TestRawFileServiceMetadataPersistence:

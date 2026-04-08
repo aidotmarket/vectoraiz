@@ -5,15 +5,14 @@ Raw File Metadata Extraction
 Format-specific metadata extraction for raw marketplace files.
 """
 
-# TODO: BQ-SECURITY — validate file_path is within allowed directories
-# before sending content to allAI. See Gate 3 finding #2.
-
 import asyncio
 import logging
 import mimetypes
 import wave
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +22,7 @@ class MetadataExtractor:
 
     async def extract(self, raw_file) -> dict:
         """Dispatch to format-specific extractor based on MIME type."""
+        self._validate_allowed_path(raw_file.file_path)
         mime = raw_file.mime_type or ""
         if mime.startswith("image/"):
             return await self._extract_image(raw_file)
@@ -33,6 +33,7 @@ class MetadataExtractor:
         return await self._extract_generic(raw_file)
 
     async def _extract_image(self, raw_file) -> dict:
+        file_path = self._validate_allowed_path(raw_file.file_path)
         technical_metadata: Dict[str, Any] = {
             "mime_type": raw_file.mime_type,
             "size_bytes": raw_file.file_size_bytes,
@@ -43,7 +44,7 @@ class MetadataExtractor:
             from PIL import Image, ExifTags  # type: ignore
 
             def _read_image() -> Dict[str, Any]:
-                with Image.open(raw_file.file_path) as image:
+                with Image.open(file_path) as image:
                     exif_raw = image.getexif() or {}
                     exif = {}
                     for key, value in exif_raw.items():
@@ -75,6 +76,7 @@ class MetadataExtractor:
         return await self._build_metadata(raw_file, prompt, technical_metadata, fallback_kind="image")
 
     async def _extract_pdf(self, raw_file) -> dict:
+        file_path = self._validate_allowed_path(raw_file.file_path)
         technical_metadata: Dict[str, Any] = {
             "mime_type": raw_file.mime_type,
             "size_bytes": raw_file.file_size_bytes,
@@ -86,7 +88,7 @@ class MetadataExtractor:
             from pypdf import PdfReader  # type: ignore
 
             def _read_pdf() -> Dict[str, Any]:
-                reader = PdfReader(raw_file.file_path)
+                reader = PdfReader(file_path)
                 info = reader.metadata or {}
                 first_page = ""
                 if reader.pages:
@@ -124,6 +126,7 @@ class MetadataExtractor:
         return await self._build_metadata(raw_file, prompt, technical_metadata, fallback_kind="document")
 
     async def _extract_audio(self, raw_file) -> dict:
+        file_path = self._validate_allowed_path(raw_file.file_path)
         technical_metadata: Dict[str, Any] = {
             "mime_type": raw_file.mime_type,
             "size_bytes": raw_file.file_size_bytes,
@@ -137,7 +140,7 @@ class MetadataExtractor:
             mutagen_available = True
 
             def _read_audio() -> Dict[str, Any]:
-                audio = MutagenFile(raw_file.file_path)
+                audio = MutagenFile(file_path)
                 if audio is None or audio.info is None:
                     return {}
                 info = audio.info
@@ -156,7 +159,7 @@ class MetadataExtractor:
             capability_notes.append(f"audio parsing failed: {exc}")
 
         if not technical_metadata.get("duration_seconds"):
-            wav_details = await self._extract_wave_fallback(raw_file.file_path)
+            wav_details = await self._extract_wave_fallback(str(file_path))
             if wav_details:
                 technical_metadata.update({k: v for k, v in wav_details.items() if v is not None})
                 if not mutagen_available:
@@ -164,9 +167,9 @@ class MetadataExtractor:
 
         inferred_format = technical_metadata.get("format")
         if not inferred_format:
-            inferred_format = Path(raw_file.file_path).suffix.lstrip(".").lower() or None
+            inferred_format = file_path.suffix.lstrip(".").lower() or None
         if not inferred_format:
-            inferred_format = mimetypes.guess_type(raw_file.file_path)[0]
+            inferred_format = mimetypes.guess_type(str(file_path))[0]
         if inferred_format:
             technical_metadata["format"] = inferred_format
 
@@ -183,7 +186,8 @@ class MetadataExtractor:
         return await self._build_metadata(raw_file, prompt, technical_metadata, fallback_kind="audio")
 
     async def _extract_generic(self, raw_file) -> dict:
-        sample = await self._read_text_sample(raw_file.file_path)
+        file_path = self._validate_allowed_path(raw_file.file_path)
+        sample = await self._read_text_sample(str(file_path))
         technical_metadata: Dict[str, Any] = {
             "mime_type": raw_file.mime_type,
             "size_bytes": raw_file.file_size_bytes,
@@ -197,6 +201,22 @@ class MetadataExtractor:
         metadata = await self._build_metadata(raw_file, prompt, technical_metadata, fallback_kind="file")
         metadata["preview_snippet"] = sample[:500]
         return metadata
+
+    def _validate_allowed_path(self, file_path: str) -> Path:
+        resolved_path = Path(file_path).expanduser().resolve(strict=True)
+        allowed_dirs = [
+            Path(allowed_dir).expanduser().resolve(strict=False)
+            for allowed_dir in settings.allowed_raw_file_dirs
+        ]
+
+        for allowed_dir in allowed_dirs:
+            if resolved_path == allowed_dir or resolved_path.is_relative_to(allowed_dir):
+                return resolved_path
+
+        allowed_display = ", ".join(str(path) for path in allowed_dirs) or "(none configured)"
+        raise ValueError(
+            f"File path '{resolved_path}' is outside allowed raw file directories: {allowed_display}"
+        )
 
     async def _read_text_sample(self, file_path: str) -> str:
         def _read() -> str:

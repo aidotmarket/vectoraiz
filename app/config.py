@@ -16,6 +16,7 @@ UPDATED:
 import logging
 import os
 from pydantic_settings import BaseSettings
+from pydantic import Field
 from typing import List, Optional, Literal
 from cryptography.fernet import Fernet
 import psutil
@@ -133,6 +134,7 @@ class Settings(BaseSettings):
     # DuckDB settings
     duckdb_threads: int = 8
     data_directory: str = "/data"
+    allowed_raw_file_dirs: List[str] = Field(default_factory=list)
     
     # Upload settings
     upload_directory: str = "/data/uploads"
@@ -207,6 +209,11 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_prefix = "VECTORAIZ_"
+
+    def model_post_init(self, __context) -> None:
+        if not self.allowed_raw_file_dirs:
+            default_raw_dir = os.environ.get("VECTORAIZ_DATA_DIR") or self.data_directory
+            self.allowed_raw_file_dirs = [default_raw_dir]
 
     @property
     def duckdb_memory_limit(self) -> str:
