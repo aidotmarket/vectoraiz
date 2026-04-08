@@ -5,6 +5,9 @@ Raw File Metadata Extraction
 Format-specific metadata extraction for raw marketplace files.
 """
 
+# TODO: BQ-SECURITY — validate file_path is within allowed directories
+# before sending content to allAI. See Gate 3 finding #2.
+
 import asyncio
 import logging
 import mimetypes

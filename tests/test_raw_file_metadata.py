@@ -166,6 +166,36 @@ class TestMetadataExtractorFormats:
         assert metadata["preview_snippet"].startswith("hello world")
         assert metadata["technical_metadata"]["sample_available"] is True
 
+    def test_extract_image_gracefully_degrades_when_pillow_missing(self, tmp_path, monkeypatch):
+        path = tmp_path / "fallback.png"
+        path.write_bytes(b"\x89PNG\r\n\x1a\nfallback")
+        raw_file = _make_raw_file(path, "image/png")
+        extractor = MetadataExtractor()
+        real_import = __import__
+
+        def _fake_import(name, *args, **kwargs):
+            if name == "PIL" or name.startswith("PIL."):
+                raise ImportError("Pillow unavailable")
+            return real_import(name, *args, **kwargs)
+
+        async def _no_ai(_prompt: str):
+            return None
+
+        monkeypatch.setattr("builtins.__import__", _fake_import)
+        monkeypatch.setattr(extractor, "_generate_ai_description", _no_ai)
+
+        metadata = asyncio.run(extractor._extract_image(raw_file))
+
+        assert isinstance(metadata, dict)
+        assert metadata["source"] == "stub"
+        assert metadata["technical_metadata"]["mime_type"] == "image/png"
+        assert metadata["technical_metadata"]["size_bytes"] == path.stat().st_size
+        assert "capability_notes" in metadata["technical_metadata"]
+        assert any(
+            "Pillow" in note for note in metadata["technical_metadata"]["capability_notes"]
+        )
+        assert metadata["tags"] == ["png"]
+
     def test_extract_pdf_gracefully_degrades_when_pypdf_missing(self, tmp_path, monkeypatch):
         path = tmp_path / "fallback.pdf"
         path.write_bytes(b"%PDF-1.4\n%fallback")
