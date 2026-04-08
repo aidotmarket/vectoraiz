@@ -7,6 +7,8 @@ Verifies:
 - Step count is identical for both channels
 """
 
+import re
+
 
 # ---------------------------------------------------------------------------
 # Helpers — we test the step definitions directly, no React rendering needed
@@ -85,6 +87,27 @@ def test_direct_starts_with_welcome():
 def test_marketplace_starts_with_aimarket_welcome():
     """Marketplace channel first step references ai.market."""
     assert "ai.market" in MARKETPLACE_TITLES[0]
+
+
+def test_aim_data_steps_have_three_steps():
+    """aim-data channel has exactly 3 onboarding steps."""
+    from pathlib import Path
+    wizard_path = Path(__file__).resolve().parent.parent / "frontend" / "src" / "components" / "onboarding" / "OnboardingWizard.tsx"
+    content = wizard_path.read_text()
+
+    assert "const AIM_DATA_STEPS: StepDef[] = [" in content
+    block = content.split("const AIM_DATA_STEPS: StepDef[] = [", 1)[1].split("];", 1)[0]
+    assert len(re.findall(r"^\s*title:", block, re.MULTILINE)) == 3
+
+
+def test_get_steps_for_channel_aim_data_returns_aim_data_steps():
+    """Onboarding source routes aim-data to AIM_DATA_STEPS."""
+    from pathlib import Path
+    wizard_path = Path(__file__).resolve().parent.parent / "frontend" / "src" / "components" / "onboarding" / "OnboardingWizard.tsx"
+    content = wizard_path.read_text()
+
+    assert 'channel === "aim-data"' in content
+    assert "? AIM_DATA_STEPS" in content
 
 
 def test_onboarding_source_file_exists():
