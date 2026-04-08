@@ -1,3 +1,6 @@
+param(
+    [string]$Channel = $(if ($env:VECTORAIZ_CHANNEL) { $env:VECTORAIZ_CHANNEL } else { "direct" })
+)
 # =============================================================================
 # vectorAIz Installer for Windows
 # =============================================================================
@@ -112,6 +115,16 @@ function Wait-ForHealthWithSpinner {
 $repo   = "aidotmarket/vectoraiz"
 $branch = "main"
 $installDir = "$HOME\vectoraiz"
+
+switch ($Channel.ToLowerInvariant()) {
+    "aim-data" {
+        $composeFile = "docker-compose.aim-data.yml"
+    }
+    "direct" { $composeFile = "docker-compose.customer.yml" }
+    "marketplace" { $composeFile = "docker-compose.customer.yml" }
+    default { Write-Err "Unsupported channel '$Channel'. Supported channels: direct, marketplace, aim-data" }
+}
+$Channel = $Channel.ToLowerInvariant()
 
 Write-Host ""
 Write-Host "  ⚡ vectorAIz Installer" -ForegroundColor Cyan
@@ -270,8 +283,8 @@ if (-not $extractedDir) {
 }
 
 $envBackup = $null
-if ($existing -and (Test-Path "$installDir\backend\.env")) {
-    $envBackup = Get-Content "$installDir\backend\.env" -Raw
+if ($existing -and (Test-Path "$installDir\.env")) {
+    $envBackup = Get-Content "$installDir\.env" -Raw
 }
 
 if (-not (Test-Path $installDir)) {
@@ -281,7 +294,7 @@ if (-not (Test-Path $installDir)) {
 Copy-Item -Path "$($extractedDir.FullName)\*" -Destination $installDir -Recurse -Force
 
 if ($envBackup) {
-    Set-Content -Path "$installDir\backend\.env" -Value $envBackup
+    Set-Content -Path "$installDir\.env" -Value $envBackup
     Write-Ok "Preserved existing configuration"
 }
 
@@ -293,7 +306,7 @@ Write-Host ""
 Write-Info "Starting vectorAIz..."
 Write-Host ""
 
-Set-Location "$installDir\backend"
+Set-Location $installDir
 
 if (-not (Test-Path ".env")) {
     $pgPass = -join ((48..57) + (97..122) | Get-Random -Count 32 | ForEach-Object { [char]$_ })
@@ -314,11 +327,20 @@ if (-not (Test-Path ".env")) {
 
 POSTGRES_PASSWORD=$pgPass
 VECTORAIZ_PORT=$port
+VECTORAIZ_CHANNEL=$Channel
 VECTORAIZ_MODE=standalone
 "@ | Set-Content -Path ".env"
 
     Write-Ok "Generated .env (port: $port)"
 }
+
+$envContent = Get-Content ".env" -Raw
+if ($envContent -match "VECTORAIZ_CHANNEL=") {
+    $envContent = $envContent -replace "VECTORAIZ_CHANNEL=.*", "VECTORAIZ_CHANNEL=$Channel"
+} else {
+    $envContent += "`nVECTORAIZ_CHANNEL=$Channel"
+}
+Set-Content -Path ".env" -Value $envContent
 
 $port = (Select-String -Path ".env" -Pattern "^VECTORAIZ_PORT=(\d+)" | ForEach-Object { $_.Matches.Groups[1].Value })
 if (-not $port) { $port = "80" }
@@ -327,7 +349,7 @@ Write-Info "Building and starting containers (first run may take a few minutes).
 
 $prev = $ErrorActionPreference
 $ErrorActionPreference = "SilentlyContinue"
-docker compose -f docker-compose.customer.yml up -d --build 2>&1 | ForEach-Object {
+docker compose -f $composeFile up -d --build 2>&1 | ForEach-Object {
     $line = "$_"
     if ($line -match "Creating|Starting|Built|Pulling|Building") {
         Write-Host "  | $line" -ForegroundColor DarkGray

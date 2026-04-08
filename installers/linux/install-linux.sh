@@ -11,23 +11,57 @@
 
 set -e
 
+CHANNEL="${VECTORAIZ_CHANNEL:-direct}"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --channel)
+            [[ $# -ge 2 ]] || { echo "Missing value for --channel" >&2; exit 1; }
+            CHANNEL="$2"
+            shift 2
+            ;;
+        --channel=*)
+            CHANNEL="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
+
+case "$CHANNEL" in
+    direct|marketplace|aim-data)
+        ;;
+    *)
+        echo "Unsupported channel: $CHANNEL" >&2
+        echo "Supported channels: direct, marketplace, aim-data" >&2
+        exit 1
+        ;;
+esac
+
 # --- Configuration ---
 INSTALL_DIR="$HOME/vectoraiz"
-COMPOSE_FILE="docker-compose.customer.yml"
+if [ "$CHANNEL" = "aim-data" ]; then
+    COMPOSE_FILE="docker-compose.aim-data.yml"
+else
+    COMPOSE_FILE="docker-compose.customer.yml"
+fi
 # --- Versioned compose download (Council S197: no main branch race) ---
 INSTALL_REF="${INSTALL_REF:-}"
 GITHUB_REPO="aidotmarket/vectoraiz"
 
 if [ -n "$INSTALL_REF" ]; then
-    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${INSTALL_REF}/docker-compose.customer.yml"
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${INSTALL_REF}/${COMPOSE_FILE}"
 elif [ -n "${VECTORAIZ_VERSION:-}" ]; then
-    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${VECTORAIZ_VERSION}/docker-compose.customer.yml"
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${VECTORAIZ_VERSION}/${COMPOSE_FILE}"
 else
     LATEST_TAG=$(curl -fsSL "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     if [ -z "$LATEST_TAG" ]; then
         LATEST_TAG="main"
     fi
-    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${LATEST_TAG}/docker-compose.customer.yml"
+    COMPOSE_URL="https://raw.githubusercontent.com/${GITHUB_REPO}/${LATEST_TAG}/${COMPOSE_FILE}"
 fi
 PREFERRED_PORTS=(8080 3000 8888 9000 80)
 
@@ -115,6 +149,17 @@ success() {
 
 warn() {
     echo -e "  ${YELLOW}⚠${NC} $1"
+}
+
+upsert_env_var() {
+    local key=$1
+    local value=$2
+    local file=$3
+    if grep -q "^${key}=" "$file" 2>/dev/null; then
+        sed -i "s/^${key}=.*/${key}=${value}/" "$file"
+    else
+        echo "${key}=${value}" >> "$file"
+    fi
 }
 
 generate_secret() {
@@ -375,16 +420,16 @@ VECTORAIZ_APIKEY_HMAC_SECRET=$(generate_secret)
 # Port to serve on
 VECTORAIZ_PORT=${PORT}
 
+# Presentation channel
+VECTORAIZ_CHANNEL=${CHANNEL}
+
 # Mode: standalone or connected (with allAI)
 VECTORAIZ_MODE=${VECTORAIZ_MODE}
 EOF
     success "Generated .env with secure defaults"
 else
-    if grep -q "^VECTORAIZ_PORT=" "$INSTALL_DIR/.env" 2>/dev/null; then
-        sed -i "s/^VECTORAIZ_PORT=.*/VECTORAIZ_PORT=${PORT}/" "$INSTALL_DIR/.env"
-    else
-        echo "VECTORAIZ_PORT=${PORT}" >> "$INSTALL_DIR/.env"
-    fi
+    upsert_env_var "VECTORAIZ_PORT" "${PORT}" "$INSTALL_DIR/.env"
+    upsert_env_var "VECTORAIZ_CHANNEL" "${CHANNEL}" "$INSTALL_DIR/.env"
     success "Using existing .env (port updated to ${PORT})"
 fi
 

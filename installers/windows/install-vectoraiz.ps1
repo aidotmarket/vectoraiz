@@ -1,3 +1,6 @@
+param(
+    [string]$Channel = $(if ($env:VECTORAIZ_CHANNEL) { $env:VECTORAIZ_CHANNEL } else { "direct" })
+)
 # =============================================================================
 # vectorAIz — Windows Installer
 # =============================================================================
@@ -13,8 +16,16 @@ $ErrorActionPreference = "Stop"
 
 # --- Configuration ---
 $InstallDir = "$env:USERPROFILE\vectoraiz"
-$ComposeFile = "docker-compose.customer.yml"
-$ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.customer.yml"
+switch ($Channel.ToLowerInvariant()) {
+    "aim-data" {
+        $ComposeFile = "docker-compose.aim-data.yml"
+    }
+    "direct" { $ComposeFile = "docker-compose.customer.yml" }
+    "marketplace" { $ComposeFile = "docker-compose.customer.yml" }
+    default { throw "Unsupported channel '$Channel'. Supported channels: direct, marketplace, aim-data" }
+}
+$Channel = $Channel.ToLowerInvariant()
+$ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/$ComposeFile"
 $PreferredPorts = @(80, 8080, 3000, 8888, 9000)
 
 # --- Helpers ---
@@ -310,6 +321,9 @@ VECTORAIZ_APIKEY_HMAC_SECRET=$(Get-RandomSecret)
 # Port to serve on
 VECTORAIZ_PORT=$Port
 
+# Presentation channel
+VECTORAIZ_CHANNEL=$Channel
+
 # Mode: standalone or connected (with allAI)
 VECTORAIZ_MODE=$VectoraizMode
 "@
@@ -322,6 +336,11 @@ VECTORAIZ_MODE=$VectoraizMode
         $content = $content -replace "VECTORAIZ_PORT=.*", "VECTORAIZ_PORT=$Port"
     } else {
         $content += "`nVECTORAIZ_PORT=$Port"
+    }
+    if ($content -match "VECTORAIZ_CHANNEL=") {
+        $content = $content -replace "VECTORAIZ_CHANNEL=.*", "VECTORAIZ_CHANNEL=$Channel"
+    } else {
+        $content += "`nVECTORAIZ_CHANNEL=$Channel"
     }
     Set-Content -Path $envFile -Value $content -Encoding UTF8
     Write-Success "Using existing .env (port updated to $Port)"
