@@ -312,6 +312,8 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 role: "assistant" as const,
                 content: channel === "marketplace"
                   ? "Hi! I'm your marketplace copilot. I'll help you get your data listed on ai.market — from upload to publishing. Ready to start?"
+                  : channel === "aim-data"
+                    ? "Hi! I'm your data management copilot. I'll help you upload, organize, and publish your data on ai.market. What would you like to work on?"
                   : "Hi! I'm allAI, your data copilot. I can help you process, explore, and query your data. What would you like to work on?",
                 createdAt: new Date().toISOString(),
               }];

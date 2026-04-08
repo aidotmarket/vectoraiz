@@ -406,13 +406,15 @@ const DatasetDetail = () => {
             </Button>
             {hasFeature("marketplace") && dataset.status === "ready" && !datasetIsPublished && (
               <Button
-                variant={channel === "marketplace" ? "default" : "ghost"}
+                variant={channel === "marketplace" || channel === "aim-data" ? "default" : "ghost"}
                 size="sm"
                 onClick={() => setPublishModalOpen(true)}
-                className={`gap-2${channel === "marketplace" ? " ring-2 ring-primary/30" : ""}`}
+                className={`gap-2${
+                  channel === "marketplace" || channel === "aim-data" ? " ring-2 ring-primary/30" : ""
+                }`}
               >
                 <Upload className="w-4 h-4" />
-                {channel === "marketplace" ? "Publish to ai.market" : "Publish"}
+                {channel === "marketplace" || channel === "aim-data" ? "Publish to ai.market" : "Publish"}
               </Button>
             )}
             <Button variant="outline" size="sm" className="text-destructive hover:text-destructive" onClick={handleDelete} disabled={isDeleting}>

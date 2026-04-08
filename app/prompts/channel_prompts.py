@@ -19,6 +19,11 @@ CHANNEL_GREETINGS: dict[ChannelType, str] = {
         "Hi! I'm your marketplace copilot. I'll help you get your data "
         "listed on ai.market — from upload to publishing. Ready to start?"
     ),
+    ChannelType.aim_data: (
+        "Hi! I'm your data management copilot. I'll help you upload, "
+        "organize, and publish your data on ai.market. What would you "
+        "like to work on?"
+    ),
 }
 
 CHANNEL_SYSTEM_CONTEXTS: dict[ChannelType, str] = {
@@ -33,6 +38,14 @@ CHANNEL_SYSTEM_CONTEXTS: dict[ChannelType, str] = {
         "in listing their data for sale. Focus on helping with listing creation, "
         "metadata enrichment, pricing strategy, compliance checks, and publishing. "
         "Data processing features support the goal of creating high-quality listings."
+    ),
+    ChannelType.aim_data: (
+        "The user is using vectorAIz as AIM Data — focused on uploading "
+        "data files, managing metadata, and publishing listings to ai.market. "
+        "Vectorization and RAG are optional enhancements, not required. "
+        "Help with file upload, metadata editing, listing creation, and "
+        "marketplace publishing. Mention vectorization as an option that "
+        "enables AI-queryable listings when relevant."
     ),
 }
 

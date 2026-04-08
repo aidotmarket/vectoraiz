@@ -70,10 +70,11 @@ const RequireFeature = ({ feature, children }: { feature: "marketplace" | "allai
   return <>{children}</>;
 };
 
-/** Channel-aware landing page: marketplace → /ai-market, direct → /datasets */
+/** Channel-aware landing page: marketplace → /ai-market, aim-data/direct → /datasets */
 const ChannelLanding = () => {
   const channel = useChannel();
-  return <Navigate to={channel === "marketplace" ? "/ai-market" : "/datasets"} replace />;
+  const target = channel === "marketplace" ? "/ai-market" : "/datasets";
+  return <Navigate to={target} replace />;
 };
 
 const App = () => (

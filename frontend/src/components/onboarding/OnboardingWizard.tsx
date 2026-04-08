@@ -126,9 +126,40 @@ const MARKETPLACE_STEPS: StepDef[] = [
   },
 ];
 
+const AIM_DATA_STEPS: StepDef[] = [
+  {
+    title: "Welcome to AIM Data",
+    subtitle: "Turn files into sellable data products",
+    description:
+      "Use vectorAIz to organize files, prepare metadata, and publish listings to ai.market from one workflow.",
+    icon: <Globe className={ICON_CLASS} />,
+    features: ["Seller-first workflow", "Local file management", "ai.market publishing"],
+  },
+  {
+    title: "Upload your first file",
+    subtitle: "Bring in any format",
+    description:
+      "Start by uploading the source files you want to manage. You can add raw files first and decide later how to package them.",
+    icon: <Upload className={ICON_CLASS} />,
+    features: ["Any file format", "Local-only storage", "Metadata-ready uploads"],
+  },
+  {
+    title: "Publish to ai.market",
+    subtitle: "Create your listing",
+    description:
+      "Review metadata, choose how to present the asset, and publish a listing to ai.market when you're ready.",
+    icon: <ShoppingBag className={ICON_CLASS} />,
+    features: ["Listing wizard", "Metadata editing", "Marketplace publishing"],
+  },
+];
+
 /** Exported for tests: get steps for a given channel */
 export function getStepsForChannel(channel: Channel): StepDef[] {
-  return channel === "marketplace" ? MARKETPLACE_STEPS : DIRECT_STEPS;
+  return channel === "marketplace"
+    ? MARKETPLACE_STEPS
+    : channel === "aim-data"
+      ? AIM_DATA_STEPS
+      : DIRECT_STEPS;
 }
 
 interface OnboardingWizardProps {

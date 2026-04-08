@@ -58,3 +58,9 @@ def test_get_system_context_returns_string():
         result = get_system_context(member)
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+def test_aim_data_prompt_keys_exist():
+    """aim-data channel is wired into both prompt dictionaries."""
+    assert ChannelType.aim_data in CHANNEL_GREETINGS
+    assert ChannelType.aim_data in CHANNEL_SYSTEM_CONTEXTS

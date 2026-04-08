@@ -1,7 +1,7 @@
 """
 Tests for channel config parsing (BQ-VZ-CHANNEL, Condition C1/C5).
 
-6 test cases: marketplace, direct, unset, invalid, case-insensitive, whitespace.
+8 test cases: marketplace, aim-data, direct, unset, invalid, case-insensitive, whitespace, default fallback.
 """
 
 import logging
@@ -23,6 +23,12 @@ def test_channel_direct():
     """VECTORAIZ_CHANNEL=direct → ChannelType.direct"""
     with patch.dict(os.environ, {"VECTORAIZ_CHANNEL": "direct"}):
         assert parse_channel() == ChannelType.direct
+
+
+def test_channel_aim_data():
+    """VECTORAIZ_CHANNEL=aim-data → ChannelType.aim_data"""
+    with patch.dict(os.environ, {"VECTORAIZ_CHANNEL": "aim-data"}):
+        assert parse_channel() == ChannelType.aim_data
 
 
 def test_channel_unset():
@@ -52,3 +58,12 @@ def test_channel_whitespace():
     """VECTORAIZ_CHANNEL=' marketplace ' → trimmed → marketplace"""
     with patch.dict(os.environ, {"VECTORAIZ_CHANNEL": " marketplace "}):
         assert parse_channel() == ChannelType.marketplace
+
+
+def test_channel_aim_data_invalid_fallback(caplog):
+    """Invalid aim-data-like value falls back to direct and logs valid values."""
+    with patch.dict(os.environ, {"VECTORAIZ_CHANNEL": "aim_data"}):
+        with caplog.at_level(logging.WARNING):
+            result = parse_channel()
+        assert result == ChannelType.direct
+        assert "Valid values: 'marketplace', 'aim-data', 'direct'" in caplog.text

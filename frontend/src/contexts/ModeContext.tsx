@@ -3,7 +3,7 @@ import { getApiUrl } from "@/lib/api";
 import { setMarketplaceApiUrl } from "@/lib/data-requests-api";
 
 type Mode = "standalone" | "connected";
-type Channel = "direct" | "marketplace";
+type Channel = "direct" | "marketplace" | "aim-data";
 
 interface Features {
   allai: boolean;
@@ -41,7 +41,13 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
         if (res.ok) {
           const data = await res.json();
           setMode(data.mode ?? "standalone");
-          setChannel(data.channel === "marketplace" ? "marketplace" : "direct");
+          setChannel(
+            data.channel === "marketplace"
+              ? "marketplace"
+              : data.channel === "aim-data"
+                ? "aim-data"
+                : "direct"
+          );
           setVersion(data.version ?? "0.0.0");
           setFeatures({ ...DEFAULT_FEATURES, ...data.features });
           setMarketplaceApiUrl(data.marketplace_api_url || null);

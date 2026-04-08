@@ -1,5 +1,5 @@
 /**
- * useChannel — Returns the current channel ("direct" | "marketplace").
+ * useChannel — Returns the current channel ("direct" | "marketplace" | "aim-data").
  *
  * Channel is a presentation hint from VECTORAIZ_CHANNEL env var.
  * It affects sidebar ordering, allAI greeting, and default landing page.
@@ -9,7 +9,7 @@
  */
 import { useMode } from "@/contexts/ModeContext";
 
-export type Channel = "direct" | "marketplace";
+export type Channel = "direct" | "marketplace" | "aim-data";
 
 export function useChannel(): Channel {
   const { channel } = useMode();

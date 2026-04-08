@@ -56,13 +56,28 @@ const NAV_ORDER_MARKETPLACE = [
   "/earnings", "/billing", "/data-types", "/settings",
 ];
 
+const NAV_ORDER_AIM_DATA = [
+  "/", "/datasets", "/ai-market", "/data-requests",
+  "/search", "/sql", "/artifacts", "/databases",
+  "/earnings", "/billing", "/data-types", "/settings",
+];
+
 // Separator index: items after this index go in the bottom section
 const SEPARATOR_INDEX_DIRECT = 7;    // after Settings
 const SEPARATOR_INDEX_MARKETPLACE = 2; // after Dashboard
+const SEPARATOR_INDEX_AIM_DATA = 4;
 
-function getOrderedItems(channel: "direct" | "marketplace"): { top: NavItem[]; bottom: NavItem[] } {
-  const order = channel === "marketplace" ? NAV_ORDER_MARKETPLACE : NAV_ORDER_DIRECT;
-  const sepIdx = channel === "marketplace" ? SEPARATOR_INDEX_MARKETPLACE : SEPARATOR_INDEX_DIRECT;
+function getOrderedItems(channel: "direct" | "marketplace" | "aim-data"): { top: NavItem[]; bottom: NavItem[] } {
+  const order = channel === "marketplace"
+    ? NAV_ORDER_MARKETPLACE
+    : channel === "aim-data"
+      ? NAV_ORDER_AIM_DATA
+      : NAV_ORDER_DIRECT;
+  const sepIdx = channel === "marketplace"
+    ? SEPARATOR_INDEX_MARKETPLACE
+    : channel === "aim-data"
+      ? SEPARATOR_INDEX_AIM_DATA
+      : SEPARATOR_INDEX_DIRECT;
   const itemMap = new Map(ALL_NAV_ITEMS.map((item) => [item.path, item]));
 
   const ordered = order.map((path) => itemMap.get(path)).filter(Boolean) as NavItem[];

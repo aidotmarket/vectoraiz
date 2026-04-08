@@ -103,3 +103,16 @@ def test_download_channel_in_publish_is_informational():
                 f"C2 violation at line {i}: CHANNEL used in conditional — "
                 f"download_channel must be informational only, not gate behavior"
             )
+
+
+def test_aim_data_is_presentation_only_channel_value():
+    """aim-data is treated as another presentation hint, not a gating concept."""
+    channel_file = REPO_ROOT / "app" / "core" / "channel_config.py"
+    prompts_file = REPO_ROOT / "app" / "prompts" / "channel_prompts.py"
+
+    channel_content = channel_file.read_text()
+    prompts_content = prompts_file.read_text()
+
+    assert 'aim_data = "aim-data"' in channel_content
+    assert 'elif raw == "aim-data":' in channel_content
+    assert "ChannelType.aim_data" in prompts_content
