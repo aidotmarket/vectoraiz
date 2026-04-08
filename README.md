@@ -45,6 +45,23 @@ Download from the [latest release](https://github.com/aidotmarket/vectoraiz/rele
 | **Linux** | `install-linux.sh` | `chmod +x install-linux.sh && ./install-linux.sh` |
 | **Windows** | `install-vectoraiz.ps1` | Run in PowerShell as Administrator |
 
+To install the `aim-data` channel instead of the standard deployment:
+
+```bash
+# macOS
+curl -fsSL https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/mac/install-mac.sh | bash -s -- --channel aim-data
+
+# Linux
+curl -fsSL https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/linux/install-linux.sh | bash -s -- --channel aim-data
+```
+
+```powershell
+# Windows PowerShell
+$tmp = Join-Path $env:TEMP 'install-vectoraiz.ps1'
+irm https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/installers/windows/install-vectoraiz.ps1 -OutFile $tmp
+& $tmp -Channel 'aim-data'
+```
+
 ### Option 3: Docker Compose (manual)
 
 ```bash
@@ -53,11 +70,30 @@ cd vectoraiz
 docker compose -f docker-compose.customer.yml up -d
 ```
 
+Use `docker-compose.customer.yml` for the standard customer deployment, or `docker-compose.aim-data.yml` for the `aim-data` channel:
+
+```bash
+# Standard customer deployment
+docker compose -f docker-compose.customer.yml up -d
+
+# aim-data channel deployment
+docker compose -f docker-compose.aim-data.yml up -d
+```
+
 Once running:
 
 - **vectorAIz UI** → [http://localhost:8080](http://localhost:8080)
 - **API docs** → [http://localhost:8080/docs](http://localhost:8080/docs)
 - **Health check** → [http://localhost:8080/api/health](http://localhost:8080/api/health)
+
+## Deployment Channels
+
+vectorAIz supports multiple deployment channels using the same application image and codebase.
+
+- Standard customer deployments use [`docker-compose.customer.yml`](/Users/max/Projects/vectoraiz/vectoraiz-monorepo/docker-compose.customer.yml). This is the default installer path.
+- `aim-data` is the seller-oriented variant and uses [`docker-compose.aim-data.yml`](/Users/max/Projects/vectoraiz/vectoraiz-monorepo/docker-compose.aim-data.yml) with `VECTORAIZ_CHANNEL=aim-data`.
+
+If you use an installer, pass `--channel aim-data` to deploy the `aim-data` experience. If you do not set a channel, the standard customer deployment is used.
 
 ## First-Time Setup
 
