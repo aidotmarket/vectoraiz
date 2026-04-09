@@ -104,6 +104,15 @@ class RawListingService:
             )
             return listings, total
 
+    def get_listing_for_file(self, raw_file_id: str) -> Optional[RawListing]:
+        """Get the most recent listing for a given raw file, if any."""
+        with _get_db_session() as session:
+            return session.exec(
+                select(RawListing)
+                .where(RawListing.raw_file_id == raw_file_id)
+                .order_by(RawListing.created_at.desc())
+            ).first()
+
     def get_listing(self, listing_id: str) -> Optional[RawListing]:
         with _get_db_session() as session:
             return session.exec(

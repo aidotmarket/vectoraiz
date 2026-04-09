@@ -31,6 +31,7 @@ import DataRequestDetailPage from "./pages/DataRequestDetailPage";
 import DashboardRequestsPage from "./pages/DashboardRequestsPage";
 import SetupPage from "./pages/SetupPage";
 import LoginPage from "./pages/LoginPage";
+import RawFileDetail from "./pages/RawFileDetail";
 import NotFound from "./pages/NotFound";
 import PortalLayout from "./pages/portal/PortalLayout";
 import PortalGate from "./pages/portal/PortalGate";
@@ -118,6 +119,7 @@ const App = () => (
                     <Route path="/" element={<ChannelLanding />} />
                     <Route path="/datasets" element={<Datasets />} />
                     <Route path="/datasets/:id" element={<DatasetDetail />} />
+                    <Route path="/raw-files/:id" element={<RawFileDetail />} />
                     <Route path="/earnings" element={<EarningsPage />} />
                     <Route path="/search" element={<SearchPage />} />
                     <Route path="/sql" element={<SqlQuery />} />

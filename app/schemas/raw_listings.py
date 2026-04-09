@@ -20,6 +20,10 @@ class RawFileRegisterRequest(BaseModel):
     file_path: str = Field(..., max_length=1024, description="Absolute path to raw file on disk")
 
 
+class RawFileUpdateRequest(BaseModel):
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Structured metadata fields")
+
+
 class RawFileResponse(BaseModel):
     id: str
     filename: str
@@ -28,6 +32,7 @@ class RawFileResponse(BaseModel):
     content_hash: str
     mime_type: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    listing_status: Optional[str] = Field(default=None, description="Listing status: draft/listed/none")
     created_at: datetime
     updated_at: datetime
 

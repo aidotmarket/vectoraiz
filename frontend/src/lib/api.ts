@@ -224,11 +224,35 @@ export interface RawFile {
   file_size_bytes: number;
   content_hash: string;
   mime_type: string | null;
+  metadata: Record<string, unknown> | null;
+  listing_status: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export type RawFileResponse = RawFile;
+
+export interface RawListing {
+  id: string;
+  raw_file_id: string;
+  marketplace_listing_id: string | null;
+  title: string;
+  description: string;
+  tags: string[];
+  auto_metadata: Record<string, unknown> | null;
+  price_cents: number | null;
+  status: string;
+  published_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RawListingListResponse {
+  listings: RawListing[];
+  total: number;
+  limit: number;
+  offset: number;
+}
 
 export interface DatasetStatusResponse {
   dataset_id: string;
@@ -729,6 +753,34 @@ export const rawFilesApi = {
   },
 
   listRawFiles: () => apiFetch<RawFile[]>('/api/raw/files'),
+
+  getRawFile: (id: string) => apiFetch<RawFile>(`/api/raw/files/${id}`),
+
+  updateRawFile: (id: string, metadata: Record<string, unknown>) =>
+    apiFetch<RawFile>(`/api/raw/files/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ metadata }),
+    }),
+
+  deleteRawFile: (id: string) =>
+    apiFetch<void>(`/api/raw/files/${id}`, { method: 'DELETE' }),
+
+  listRawListings: (params?: { limit?: number; offset?: number; status?: string }) => {
+    const searchParams = new URLSearchParams();
+    if (params?.limit) searchParams.append('limit', params.limit.toString());
+    if (params?.offset) searchParams.append('offset', params.offset.toString());
+    if (params?.status) searchParams.append('status', params.status);
+    const qs = searchParams.toString();
+    return apiFetch<RawListingListResponse>(`/api/raw/listings${qs ? `?${qs}` : ''}`);
+  },
+
+  createRawListing: (data: { raw_file_id: string; title: string; description: string; tags?: string[]; price_cents?: number }) =>
+    apiFetch<RawListing>('/api/raw/listings', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  downloadUrl: (id: string) => `${getApiUrl()}/api/raw/download/${id}`,
 };
 
 // Diagnostics API (Phase 4)

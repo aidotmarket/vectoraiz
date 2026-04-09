@@ -24,6 +24,7 @@ from app.schemas.raw_listings import (
     MetadataResponse,
     RawFileRegisterRequest,
     RawFileResponse,
+    RawFileUpdateRequest,
     RawListingCreateRequest,
     RawListingListResponse,
     RawListingResponse,
@@ -41,7 +42,7 @@ router = APIRouter()
 download_router = APIRouter()
 
 
-def _file_response(raw_file) -> RawFileResponse:
+def _file_response(raw_file, listing_status: Optional[str] = None) -> RawFileResponse:
     return RawFileResponse(
         id=raw_file.id,
         filename=raw_file.filename,
@@ -50,6 +51,7 @@ def _file_response(raw_file) -> RawFileResponse:
         content_hash=raw_file.content_hash,
         mime_type=raw_file.mime_type,
         metadata=raw_file.metadata_,
+        listing_status=listing_status,
         created_at=raw_file.created_at,
         updated_at=raw_file.updated_at,
     )
@@ -155,16 +157,38 @@ async def list_raw_files(
 @router.get(
     "/files/{file_id}",
     response_model=RawFileResponse,
-    summary="Get raw file metadata",
+    summary="Get raw file metadata with listing status",
 )
 async def get_raw_file(
     file_id: str,
     svc: RawFileService = Depends(get_raw_file_service),
+    listing_svc: RawListingService = Depends(get_raw_listing_service),
 ):
     raw_file = svc.get_file(file_id)
     if raw_file is None:
         raise HTTPException(status_code=404, detail="Raw file not found")
-    return _file_response(raw_file)
+    listing = listing_svc.get_listing_for_file(file_id)
+    listing_status = listing.status if listing else None
+    return _file_response(raw_file, listing_status=listing_status)
+
+
+@router.patch(
+    "/files/{file_id}",
+    response_model=RawFileResponse,
+    summary="Update raw file metadata",
+)
+async def update_raw_file(
+    file_id: str,
+    req: RawFileUpdateRequest,
+    svc: RawFileService = Depends(get_raw_file_service),
+    listing_svc: RawListingService = Depends(get_raw_listing_service),
+):
+    raw_file = svc.update_file_metadata(file_id, req.metadata)
+    if raw_file is None:
+        raise HTTPException(status_code=404, detail="Raw file not found")
+    listing = listing_svc.get_listing_for_file(file_id)
+    listing_status = listing.status if listing else None
+    return _file_response(raw_file, listing_status=listing_status)
 
 
 @router.delete(

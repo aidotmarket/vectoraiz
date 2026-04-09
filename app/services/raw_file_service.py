@@ -161,6 +161,24 @@ class RawFileService:
             logger.info("Deleted raw file %s (%s)", file_id, file_path)
             return True
 
+    def update_file_metadata(self, file_id: str, metadata: dict) -> Optional[RawFile]:
+        """Update the metadata JSON field on a raw file."""
+        with _get_db_session() as session:
+            raw_file = session.exec(
+                select(RawFile).where(RawFile.id == file_id)
+            ).first()
+            if raw_file is None:
+                return None
+
+            from datetime import datetime, timezone
+            raw_file.metadata_ = metadata
+            raw_file.updated_at = datetime.now(timezone.utc)
+            session.add(raw_file)
+            session.commit()
+            session.refresh(raw_file)
+            logger.info("Updated metadata for raw file %s", file_id)
+            return raw_file
+
     async def generate_metadata(self, file_id: str) -> dict:
         """
         Generate and persist structured metadata for a raw file.
