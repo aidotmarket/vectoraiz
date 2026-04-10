@@ -77,6 +77,10 @@ const DEFAULT_API_URL = '';
 
 const SettingsPage = () => {
   const brand = useBrand();
+  const defaultDataDirectory = `~/${brand.productName.toLowerCase().replace(/\s+/g, "-")}/data`;
+  const manualUpdateCommands = `cd your-${brand.installDirectoryName}-directory
+docker compose -f docker-compose.customer.yml pull ${brand.dockerComposeServiceName}
+docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeServiceName}`;
   // Dirty state tracking for Save button
   const [isDirty, setIsDirty] = useState(false);
 
@@ -97,7 +101,7 @@ const SettingsPage = () => {
   const [systemMemGb, setSystemMemGb] = useState<number | null>(null);
   
   // Storage state
-  const [dataDirectory, setDataDirectory] = useState("~/vectoraiz/data");
+  const [dataDirectory, setDataDirectory] = useState(defaultDataDirectory);
   
   // Developer mode state
   const [devMode, setDevMode] = useState(false);
@@ -1053,9 +1057,7 @@ client = QdrantClient(host="localhost", port=6333)`}
                 <span className="text-sm font-medium text-foreground">Manual update</span>
               </div>
               <pre className="text-xs font-mono bg-background p-2 rounded border border-border overflow-x-auto">
-{`cd your-vectoraiz-directory
-docker compose -f docker-compose.customer.yml pull vectoraiz
-docker compose -f docker-compose.customer.yml up -d vectoraiz`}
+{manualUpdateCommands}
               </pre>
             </div>
           )}
@@ -1098,7 +1100,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
             </p>
             <div className="flex flex-wrap gap-4">
               <a
-                href="https://github.com/aidotmarket/vectoraiz"
+                href={brand.documentationUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
@@ -1107,7 +1109,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
                 <ExternalLink className="w-3 h-3" />
               </a>
               <a
-                href="https://github.com/aidotmarket/vectoraiz"
+                href={brand.githubUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
@@ -1116,7 +1118,7 @@ docker compose -f docker-compose.customer.yml up -d vectoraiz`}
                 <ExternalLink className="w-3 h-3" />
               </a>
               <a
-                href="https://github.com/aidotmarket/vectoraiz/issues"
+                href={brand.issueTrackerUrl}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-sm text-primary hover:underline"

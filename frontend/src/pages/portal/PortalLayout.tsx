@@ -22,9 +22,9 @@ const PortalLayout = () => {
       <header className="border-b border-border px-6 py-4">
         <div className="max-w-4xl mx-auto flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-            <span className="text-primary-foreground font-bold text-sm">V</span>
+            <span className="text-primary-foreground font-bold text-sm">{brand.shortName}</span>
           </div>
-          <h1 className="text-lg font-semibold text-foreground">Search Portal</h1>
+          <h1 className="text-lg font-semibold text-foreground">{brand.productName} Search Portal</h1>
           {/* SSO user info */}
           {config?.tier === "sso" && ssoUser && (
             <div className="ml-auto flex items-center gap-3">
@@ -51,7 +51,7 @@ const PortalLayout = () => {
       <footer className="border-t border-border px-6 py-4 text-center">
         <p className="text-sm text-muted-foreground">
           Powered by{" "}
-          <span className="font-medium text-foreground">{brand.name}</span>
+          <span className="font-medium text-foreground">{brand.productName}</span>
         </p>
       </footer>
 

@@ -69,12 +69,13 @@ const BrandEffects = () => {
 /** Redirects to /login when not authenticated. Shows nothing while auth is loading. */
 const RequireAuth = ({ children }: { children: React.ReactNode }) => {
   const { isAuthenticated, isLoading } = useAuth();
+  const brand = useBrand();
 
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background">
         <div className="w-10 h-10 rounded-xl bg-primary flex items-center justify-center animate-pulse">
-          <span className="text-primary-foreground font-bold text-lg">V</span>
+          <span className="text-primary-foreground font-bold text-lg">{brand.shortName}</span>
         </div>
       </div>
     );

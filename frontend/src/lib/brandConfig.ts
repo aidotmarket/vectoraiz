@@ -1,5 +1,7 @@
 export type BrandConfig = {
   name: string;
+  productName: string;
+  shortName: string;
   tagline: string;
   logoPath: string;
   logoSmPath: string;
@@ -12,10 +14,17 @@ export type BrandConfig = {
   welcomeTitle: string;
   settingsTitle: string;
   externalUrl: string;
+  installDirectoryName: string;
+  dockerComposeServiceName: string;
+  documentationUrl: string;
+  githubUrl: string;
+  issueTrackerUrl: string;
 };
 
 export const VECTORAIZ_BRAND: BrandConfig = {
   name: "vectorAIz",
+  productName: "vectorAIz",
+  shortName: "V",
   tagline: "Your local data processing and semantic search tool",
   logoPath: "/vectoraiz-logo.jpg",
   logoSmPath: "/vectoraiz-logo-sm.png",
@@ -28,10 +37,17 @@ export const VECTORAIZ_BRAND: BrandConfig = {
   welcomeTitle: "Welcome to vectorAIz",
   settingsTitle: "vectorAIz",
   externalUrl: "https://vectoraiz.com",
+  installDirectoryName: "vectoraiz",
+  dockerComposeServiceName: "vectoraiz",
+  documentationUrl: "https://github.com/aidotmarket/vectoraiz",
+  githubUrl: "https://github.com/aidotmarket/vectoraiz",
+  issueTrackerUrl: "https://github.com/aidotmarket/vectoraiz/issues",
 };
 
 export const AIM_CHANNEL_BRAND: BrandConfig = {
   name: "AIM Channel",
+  productName: "AIM Channel",
+  shortName: "AC",
   tagline: "Data Channel for ai.market",
   logoPath: "/aim-channel-logo.jpg",
   logoSmPath: "/aim-channel-logo-sm.png",
@@ -44,6 +60,11 @@ export const AIM_CHANNEL_BRAND: BrandConfig = {
   welcomeTitle: "Welcome to AIM Channel",
   settingsTitle: "AIM Channel",
   externalUrl: "https://ai.market",
+  installDirectoryName: "aim-channel",
+  dockerComposeServiceName: "vectoraiz",
+  documentationUrl: "https://github.com/aidotmarket/vectoraiz",
+  githubUrl: "https://github.com/aidotmarket/vectoraiz",
+  issueTrackerUrl: "https://github.com/aidotmarket/vectoraiz/issues",
 };
 
 function getRuntimeBrandName(): string {
