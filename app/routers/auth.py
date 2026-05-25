@@ -27,14 +27,19 @@ from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, Field
+from sqlmodel import Session
 
 from app.auth.api_key_auth import (
     AuthenticatedUser,
     get_current_user,
     hmac_hash_secret,
+    _handle_ai_market_token,
 )
+from app.config import settings
+from app.core.database import get_session
 
 logger = logging.getLogger(__name__)
 
@@ -446,6 +451,99 @@ async def login(body: LoginRequest, request: Request, response: Response):
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid username or password.",
     )
+
+
+@router.post("/aim-market-login", response_model=None)
+async def aim_market_login(
+    payload: dict,
+    request: Request,
+    db: Session = Depends(get_session),
+):
+    """Proxy login to ai.market and pre-warm validation cache."""
+    email = payload.get("email")
+    password = payload.get("password")
+    if not email or not password:
+        raise HTTPException(status_code=400, detail="email and password required")
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(
+                f"{settings.ai_market_url}/api/v1/auth/login",
+                json={"email": email, "password": password},
+            )
+        except httpx.TimeoutException:
+            raise HTTPException(status_code=504, detail="ai.market auth service timeout")
+        except httpx.RequestError:
+            raise HTTPException(status_code=503, detail="ai.market auth service unreachable")
+
+    if r.status_code == 401:
+        raise HTTPException(status_code=401, detail="Incorrect email or password")
+    if r.status_code == 403:
+        raise HTTPException(
+            status_code=403,
+            detail=r.json().get("detail", "Account access denied"),
+        )
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=r.json().get("detail", "ai.market login failed"),
+        )
+
+    data = r.json()
+    if "access_token" not in data:
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                "Two-factor accounts not yet supported. Please disable 2FA in your "
+                "ai.market account or contact support."
+            ),
+        )
+
+    access_token = data["access_token"]
+    me = None
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        me_r = await client.get(
+            f"{settings.ai_market_url}/api/v1/auth/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+    if me_r.status_code == 200:
+        me = me_r.json()
+        await _handle_ai_market_token(access_token, user_data=me, db=db)
+
+    return {
+        "access_token": data["access_token"],
+        "refresh_token": data["refresh_token"],
+        "token_type": data.get("token_type", "bearer"),
+        "onboarding_required": data.get("onboarding_required", False),
+        "onboarding_step": data.get("onboarding_step"),
+        "user": me,
+    }
+
+
+@router.post("/aim-market-refresh", response_model=None)
+async def aim_market_refresh(payload: dict):
+    refresh_token = payload.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=400, detail="refresh_token required")
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            r = await client.post(
+                f"{settings.ai_market_url}/api/v1/auth/refresh",
+                json={"refresh_token": refresh_token},
+            )
+        except (httpx.TimeoutException, httpx.RequestError):
+            raise HTTPException(
+                status_code=503,
+                detail="ai.market auth service unavailable",
+            )
+
+    if r.status_code != 200:
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=r.json().get("detail", "Refresh failed"),
+        )
+    return r.json()
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 # API metadata
-API_TITLE = "vectorAIz API"
+API_TITLE = "AIM Data API"
 API_VERSION = os.environ.get("VECTORAIZ_VERSION", "dev")
 
 # BQ-127 (§7): Mode-aware API descriptions

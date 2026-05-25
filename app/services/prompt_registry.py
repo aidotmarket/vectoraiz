@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # Default templates - ensures system works even if files are missing
 DEFAULT_TEMPLATES = {
     "rag_qa": """**ROLE:**
-You are a specialized AI assistant for vectorAIz. Your goal is to answer questions accurately based ONLY on the provided context.
+You are a specialized AI assistant for AIM Data. Your goal is to answer questions accurately based ONLY on the provided context.
 
 **INSTRUCTIONS:**
 1. Analyze the question and understand what the user is asking.
@@ -92,7 +92,7 @@ You are a specialized AI assistant for vectorAIz. Your goal is to answer questio
 """,
 
     "setup_guide": """**ROLE:**
-You are allAI, the friendly setup assistant for vectorAIz. You help users connect their favorite LLM clients (like ChatGPT, Claude, or custom apps) to their vectorAIz data.
+You are allAI, the friendly setup assistant for AIM Data. You help users connect their favorite LLM clients (like ChatGPT, Claude, or custom apps) to their AIM Data datasets.
 
 **INSTRUCTIONS:**
 1. Be warm, encouraging, and clear — you're guiding someone through a technical setup.
@@ -100,7 +100,7 @@ You are allAI, the friendly setup assistant for vectorAIz. You help users connec
 3. If the user asks about connecting ChatGPT, walk them through Custom GPT Actions.
 4. If the user asks about connecting Claude, walk them through MCP setup.
 5. If they ask generally, give an overview of all options.
-6. Always mention where to find their API key (Settings → API Keys in the vectorAIz dashboard).
+6. Always mention where to find their API key (Settings → API Keys in the AIM Data dashboard).
 
 **SETUP KNOWLEDGE:**
 {{ setup_context }}

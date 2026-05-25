@@ -26,7 +26,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 from cachetools import TTLCache
@@ -223,6 +223,156 @@ def _get_http_client() -> httpx.AsyncClient:
     return _http_client
 
 
+def _ai_market_bearer_cache_key(token: str) -> str:
+    digest = hashlib.sha256(token.encode()).hexdigest()[:16]
+    return f"aim_market_bearer:{digest}"
+
+
+def _scopes_from_ai_market_role(role: str, status_value: str) -> List[str]:
+    if status_value != "active":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="ai.market account not active",
+        )
+    if role in ("buyer", "seller", "model_provider"):
+        return ["read", "write"]
+    if role == "admin":
+        return ["read", "write", "admin"]
+    if role == "pending":
+        return ["read"]
+    return ["read"]
+
+
+def _authenticated_user_from_ai_market_user(user_data: dict[str, Any]) -> AuthenticatedUser:
+    return AuthenticatedUser(
+        user_id=str(user_data["id"]),
+        key_id="ai_market_bearer",
+        scopes=_scopes_from_ai_market_role(
+            str(user_data.get("role", "")),
+            str(user_data.get("status", "")),
+        ),
+        valid=True,
+        balance_cents=None,
+        free_trial_remaining_cents=None,
+    )
+
+
+def _upsert_ai_market_user(user_data: dict[str, Any], db: Optional[Any] = None) -> None:
+    """Best-effort local user link for ai.market accounts."""
+    from app.core.database import get_session_context
+    from app.models.user import User
+    from sqlmodel import select
+
+    email = str(user_data.get("email") or user_data["id"]).strip().lower()
+    display_name = " ".join(
+        str(user_data.get(part) or "").strip()
+        for part in ("first_name", "last_name")
+    ).strip() or None
+    local_role = "admin" if user_data.get("role") == "admin" else "user"
+    is_active = user_data.get("status") == "active"
+
+    def apply_upsert(session: Any) -> None:
+        stmt = select(User).where(User.ai_market_user_id == str(user_data["id"]))
+        user = session.exec(stmt).first()
+        if user is None:
+            existing_stmt = select(User).where(User.username == email[:64])
+            user = session.exec(existing_stmt).first()
+        if user is None:
+            user = User(
+                ai_market_user_id=str(user_data["id"]),
+                username=email[:64],
+                display_name=display_name,
+                pw_hash=None,
+                role=local_role,
+                is_active=is_active,
+            )
+        else:
+            user.ai_market_user_id = str(user_data["id"])
+            user.display_name = user.display_name or display_name
+            user.role = local_role
+            user.is_active = is_active
+        session.add(user)
+        session.commit()
+
+    if db is not None:
+        apply_upsert(db)
+        return
+
+    with get_session_context() as session:
+        apply_upsert(session)
+
+
+async def _fetch_ai_market_me(token: str) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(
+                f"{settings.ai_market_url}/api/v1/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except (httpx.TimeoutException, httpx.RequestError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ai.market auth service unavailable",
+        )
+
+    if response.status_code == 200:
+        return response.json()
+    if response.status_code == 401:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired ai.market token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    if response.status_code >= 500:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="ai.market auth service unavailable",
+        )
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid or expired ai.market token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
+async def _handle_ai_market_token(
+    access_token: str,
+    user_data: Optional[dict[str, Any]] = None,
+    db: Optional[Any] = None,
+) -> tuple[dict[str, Any], AuthenticatedUser]:
+    """Validate/cache an ai.market token and best-effort link the local user."""
+    if user_data is None:
+        user_data = await _fetch_ai_market_me(access_token)
+
+    authenticated_user = _authenticated_user_from_ai_market_user(user_data)
+    try:
+        _upsert_ai_market_user(user_data, db=db)
+    except Exception as exc:
+        logger.warning(
+            "Failed to upsert ai.market user %s: %s",
+            user_data.get("id"),
+            exc,
+            exc_info=True,
+        )
+
+    api_key_cache[_ai_market_bearer_cache_key(access_token)] = authenticated_user
+    return user_data, authenticated_user
+
+
+async def _validate_ai_market_bearer(token: str, request: Request) -> AuthenticatedUser:
+    cache_key = _ai_market_bearer_cache_key(token)
+    cached_user = api_key_cache.get(cache_key)
+    if cached_user:
+        request.state.user = cached_user
+        request.state.user_role = "admin" if "admin" in cached_user.scopes else "user"
+        return cached_user
+
+    _, authenticated_user = await _handle_ai_market_token(token)
+    request.state.user = authenticated_user
+    request.state.user_role = "admin" if "admin" in authenticated_user.scopes else "user"
+    return authenticated_user
+
+
 async def _validate_key_against_aimarket(api_key: str) -> Optional[AuthenticatedUser]:
     """Makes an API call to ai.market to validate the key."""
     headers = {"X-API-Key": api_key}
@@ -280,6 +430,12 @@ async def get_current_user(request: Request) -> AuthenticatedUser:
         request.state.user = mock_user
         request.state.user_role = "admin"
         return mock_user
+
+    authorization = request.headers.get("Authorization", "")
+    if authorization.startswith("Bearer "):
+        token = authorization.removeprefix("Bearer ").strip()
+        if token:
+            return await _validate_ai_market_bearer(token, request)
 
     # BQ-VZ-MULTI-USER: Try JWT cookie first
     from app.middleware.auth import JWT_COOKIE_NAME, decode_jwt_token

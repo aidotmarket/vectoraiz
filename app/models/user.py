@@ -42,9 +42,17 @@ class User(SQLModel, table=True):
         max_length=128,
         description="Human-readable display name",
     )
-    pw_hash: str = Field(
+    pw_hash: Optional[str] = Field(
+        default=None,
         max_length=255,
+        nullable=True,
         description="Argon2id password hash",
+    )
+    ai_market_user_id: Optional[str] = Field(
+        default=None,
+        index=True,
+        max_length=36,
+        description="Linked ai.market user UUID",
     )
     role: str = Field(
         default="user",
