@@ -54,50 +54,58 @@ export const VECTORAIZ_BRAND: BrandConfig = {
   prodApiUrl: "",
 };
 
-export const AIM_CHANNEL_BRAND: BrandConfig = {
-  name: "AIM Channel",
-  productName: "AIM Channel",
-  shortName: "AC",
-  tagline: "Data Channel for ai.market",
-  logoPath: "/aim-channel-logo.jpg",
-  logoSmPath: "/aim-channel-logo-sm.png",
-  metaTitle: "AIM Channel — Data Processing & Analysis",
-  metaDescription: "AIM Channel - Connect your private data to ai.market",
-  metaAuthor: "AIM Channel",
-  ogTitle: "AIM Channel",
+export const AIM_DATA_BRAND: BrandConfig = {
+  name: "AIM Data",
+  productName: "AIM Data",
+  shortName: "AD",
+  tagline: "Connect your private data to ai.market",
+  logoPath: "/aim-data-logo.jpg",
+  logoSmPath: "/aim-data-logo-sm.png",
+  metaTitle: "AIM Data — ai.market",
+  metaDescription: "AIM Data — Connect your private data to ai.market",
+  metaAuthor: "AIM Data",
+  ogTitle: "AIM Data",
   twitterSite: "@aidotmarket",
-  sidebarLogoAlt: "AIM Channel",
-  welcomeTitle: "Welcome to AIM Channel",
-  settingsTitle: "AIM Channel",
+  sidebarLogoAlt: "AIM Data",
+  welcomeTitle: "Welcome to AIM Data",
+  settingsTitle: "AIM Data",
   externalUrl: "https://ai.market",
-  installDirectoryName: "aim-channel",
+  installDirectoryName: "aim-data",
   dockerComposeServiceName: "vectoraiz",
-  documentationUrl: "https://github.com/aidotmarket/vectoraiz",
+  documentationUrl: "https://ai.market/docs",
   githubUrl: "https://github.com/aidotmarket/vectoraiz",
   issueTrackerUrl: "https://github.com/aidotmarket/vectoraiz/issues",
-  importDir: "~/aim-imports/",
-  importDirEnvVar: "AIM_IMPORT_DIR",
-  docsConnectedModeUrl: "https://ai.market/docs/aim-channel/connected-mode",
+  importDir: "~/aim-data-imports/",
+  importDirEnvVar: "AIM_DATA_IMPORT_DIR",
+  docsConnectedModeUrl: "https://ai.market/docs/aim-data/connected-mode",
   devApiUrl: "",
   prodApiUrl: "",
 };
 
+export const AIM_CHANNEL_BRAND: BrandConfig = AIM_DATA_BRAND;
+
 function getRuntimeBrandName(): string {
   const envBrand = import.meta.env.VITE_BRAND?.toLowerCase();
-  if (envBrand === "aim-channel" || envBrand === "aim_channel" || envBrand === "aim") {
-    return "aim-channel";
+  if (
+    envBrand === "aim-data" ||
+    envBrand === "aim_data" ||
+    envBrand === "aim-channel" ||
+    envBrand === "aim_channel" ||
+    envBrand === "aim"
+  ) {
+    return "aim-data";
   }
   if (envBrand === "vectoraiz") {
     return "vectoraiz";
   }
 
   if (typeof window !== "undefined" && window.location.hostname.includes("ai.market")) {
-    return "aim-channel";
+    return "aim-data";
   }
 
-  return "vectoraiz";
+  return "aim-data";
 }
 
 export function getActiveBrand(): BrandConfig {
-  return getRuntimeBrandName() === "aim-channel" ? AIM_CHANNEL_BRAND : VECTORAIZ_BRAND;
+  return getRuntimeBrandName() === "aim-data" ? AIM_DATA_BRAND : VECTORAIZ_BRAND;
 }

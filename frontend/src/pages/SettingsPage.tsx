@@ -1148,6 +1148,7 @@ client = QdrantClient(host="localhost", port=6333)`}
  * Inline component for admin portal configuration.
  */
 const PortalSettingsSection = () => {
+  const brand = useBrand();
   const [portalEnabled, setPortalEnabled] = useState(false);
   const [portalTier, setPortalTier] = useState<"open" | "code" | "sso">("open");
   const [portalBaseUrl, setPortalBaseUrl] = useState("");
