@@ -179,7 +179,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-API-Key": apiKey || "",
+          "Authorization": apiKey ? `Bearer ${apiKey}` : "",
         },
         body: JSON.stringify(payload),
       });

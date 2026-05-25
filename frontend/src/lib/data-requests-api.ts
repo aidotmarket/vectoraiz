@@ -82,24 +82,24 @@ function getBaseUrl(): string {
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-function getStoredApiKey(): string | null {
+function getStoredAccessToken(): string | null {
   if (typeof window !== "undefined") {
-    return localStorage.getItem("vectoraiz_api_key");
+    return localStorage.getItem("aim_data_access_token");
   }
   return null;
 }
 
 async function marketFetch<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
   const url = `${getBaseUrl()}${endpoint}`;
-  const apiKey = getStoredApiKey();
+  const accessToken = getStoredAccessToken();
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  if (apiKey) {
-    headers["X-API-Key"] = apiKey;
+  if (accessToken) {
+    headers["Authorization"] = `Bearer ${accessToken}`;
   }
 
   const response = await fetch(url, { ...options, headers });

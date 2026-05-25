@@ -108,13 +108,13 @@ const PLATFORMS = [
 ];
 
 // ---------------------------------------------------------------------------
-// Helper: API call with stored API key
+// Helper: API call with stored bearer token
 // ---------------------------------------------------------------------------
 
 function apiHeaders(): Record<string, string> {
-  const key = localStorage.getItem("vectoraiz_api_key");
+  const accessToken = localStorage.getItem("aim_data_access_token");
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  if (key) headers["X-API-Key"] = key;
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
   return headers;
 }
 

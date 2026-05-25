@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -14,7 +14,7 @@ const LoginPage = () => {
   const { login } = useAuth();
   const brand = useBrand();
 
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -23,14 +23,14 @@ const LoginPage = () => {
     e.preventDefault();
     setError("");
 
-    if (!username || !password) {
-      setError("Username and password are required");
+    if (!email || !password) {
+      setError("Email and password are required");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      await login(username, password);
+      await login(email, password);
       navigate("/", { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Invalid credentials");
@@ -46,29 +46,29 @@ const LoginPage = () => {
         <div className="flex flex-col items-center gap-4">
           <img src={brand.logoSmPath} alt={brand.sidebarLogoAlt} className="w-14 h-14 rounded-2xl" />
           <div className="text-center space-y-1">
-            <h1 className="text-2xl font-bold text-foreground">Sign in to {brand.name}</h1>
-            <p className="text-muted-foreground">Enter your credentials to continue</p>
+            <h1 className="text-2xl font-bold text-foreground">Sign in with ai.market</h1>
+            <p className="text-muted-foreground">Use your ai.market credentials to access AIM Data</p>
           </div>
         </div>
 
         <Card className="bg-card border-border">
           <CardHeader>
-            <CardTitle className="text-foreground">Login</CardTitle>
-            <CardDescription>Authenticate with your local account</CardDescription>
+            <CardTitle className="text-foreground">Sign in</CardTitle>
+            <CardDescription>Use your ai.market account</CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div className="space-y-2">
-                <Label htmlFor="username">Username</Label>
+                <Label htmlFor="email">Email</Label>
                 <Input
-                  id="username"
-                  type="text"
-                  placeholder="Username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  id="email"
+                  type="email"
+                  placeholder="Email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
                   className="bg-background border-border"
                   autoFocus
-                  autoComplete="username"
+                  autoComplete="email"
                 />
               </div>
 
@@ -103,11 +103,16 @@ const LoginPage = () => {
                 )}
               </Button>
 
-              <p className="text-center text-sm text-muted-foreground">
-                First time?{" "}
-                <Link to="/setup" className="text-primary hover:underline">
-                  Create admin account
-                </Link>
+              <p className="text-sm text-center text-muted-foreground">
+                Don't have an account?{" "}
+                <a
+                  href="https://ai.market/signup"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-primary hover:underline"
+                >
+                  Create one at ai.market
+                </a>
               </p>
             </form>
           </CardContent>

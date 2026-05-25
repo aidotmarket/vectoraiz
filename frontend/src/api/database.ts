@@ -3,7 +3,7 @@
  * Phase 1B: BQ-VZ-DB-CONNECT
  */
 
-import { getApiUrl } from "@/lib/api";
+import { clearAuthTokens, getApiUrl } from "@/lib/api";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,8 +109,8 @@ export interface DirectQueryResponse {
 
 function getHeaders(): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
-  const apiKey = typeof window !== "undefined" ? localStorage.getItem("vectoraiz_api_key") : null;
-  if (apiKey) headers["X-API-Key"] = apiKey;
+  const accessToken = typeof window !== "undefined" ? localStorage.getItem("aim_data_access_token") : null;
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
   return headers;
 }
 
@@ -122,7 +122,7 @@ async function dbFetch<T>(endpoint: string, options: RequestInit = {}): Promise<
   });
 
   if (response.status === 401) {
-    localStorage.removeItem("vectoraiz_api_key");
+    clearAuthTokens();
   }
 
   // 204 No Content (DELETE)

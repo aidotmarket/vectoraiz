@@ -32,12 +32,25 @@ export function getApiUrl(): string {
   return brand.prodApiUrl; // same-origin when empty
 }
 
-// Read stored API key for auth header injection
-function getStoredApiKey(): string | null {
+function getStoredAccessToken(): string | null {
   if (typeof window !== 'undefined') {
-    return localStorage.getItem('vectoraiz_api_key');
+    return localStorage.getItem('aim_data_access_token');
   }
   return null;
+}
+
+function getStoredRefreshToken(): string | null {
+  if (typeof window !== 'undefined') {
+    return localStorage.getItem('aim_data_refresh_token');
+  }
+  return null;
+}
+
+export function clearAuthTokens(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem('aim_data_access_token');
+  localStorage.removeItem('aim_data_refresh_token');
+  localStorage.removeItem('vectoraiz_api_key');
 }
 
 // Generic fetch wrapper with error handling
@@ -46,15 +59,15 @@ async function apiFetch<T>(
   options: RequestInit = {}
 ): Promise<T> {
   const url = `${getApiUrl()}${endpoint}`;
-  const apiKey = getStoredApiKey();
+  const accessToken = getStoredAccessToken();
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
   };
 
-  if (apiKey) {
-    headers['X-API-Key'] = apiKey;
+  if (accessToken) {
+    headers['Authorization'] = `Bearer ${accessToken}`;
   }
 
   const response = await fetch(url, {
@@ -63,8 +76,28 @@ async function apiFetch<T>(
   });
 
   if (response.status === 401) {
-    // Clear invalid key — will trigger re-auth via AuthContext
-    localStorage.removeItem('vectoraiz_api_key');
+    const refreshToken = getStoredRefreshToken();
+    const alreadyRetried = (options.headers as Record<string, string> | undefined)?.['X-Refresh-Retry'] === '1';
+    if (refreshToken && !alreadyRetried) {
+      try {
+        const refreshResp = await fetch(`${getApiUrl()}/api/auth/aim-market-refresh`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+        if (refreshResp.ok) {
+          const tokens = await refreshResp.json();
+          localStorage.setItem('aim_data_access_token', tokens.access_token);
+          localStorage.setItem('aim_data_refresh_token', tokens.refresh_token);
+          return apiFetch<T>(endpoint, {
+            ...options,
+            headers: { ...(options.headers as Record<string, string>), 'X-Refresh-Retry': '1' },
+          });
+        }
+      } catch {}
+    }
+    clearAuthTokens();
+    if (typeof window !== 'undefined') window.location.href = '/login';
   }
 
   if (!response.ok) {
@@ -441,9 +474,9 @@ export const datasetsApi = {
     formData.append('file', file);
 
     const headers: Record<string, string> = {};
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
     }
 
     const params = options?.allowDuplicate ? '?allow_duplicate=true' : '';
@@ -454,7 +487,7 @@ export const datasetsApi = {
     });
 
     if (response.status === 401) {
-      localStorage.removeItem('vectoraiz_api_key');
+      clearAuthTokens();
     }
 
     if (response.status === 409) {
@@ -483,9 +516,9 @@ export const datasetsApi = {
     const qs = qp.toString();
     xhr.open('POST', `${getApiUrl()}/api/datasets/upload${qs ? `?${qs}` : ''}`);
 
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      xhr.setRequestHeader('X-API-Key', apiKey);
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      xhr.setRequestHeader('Authorization', `Bearer ${accessToken}`);
     }
 
     xhr.upload.onprogress = (e) => {
@@ -501,7 +534,7 @@ export const datasetsApi = {
 
       xhr.onload = () => {
         if (xhr.status === 401) {
-          localStorage.removeItem('vectoraiz_api_key');
+          clearAuthTokens();
         }
         let body: Record<string, unknown>;
         try {
@@ -572,9 +605,9 @@ export const datasetsApi = {
     }
 
     const headers: Record<string, string> = {};
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
     }
 
     const response = await fetch(`${getApiUrl()}/api/datasets/batch`, {
@@ -584,7 +617,7 @@ export const datasetsApi = {
     });
 
     if (response.status === 401) {
-      localStorage.removeItem('vectoraiz_api_key');
+      clearAuthTokens();
     }
 
     if (!response.ok) {
@@ -747,9 +780,9 @@ export const rawFilesApi = {
     formData.append('file', file);
 
     const headers: Record<string, string> = {};
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
     }
 
     const response = await fetch(`${getApiUrl()}/api/raw/files/upload`, {
@@ -759,7 +792,7 @@ export const rawFilesApi = {
     });
 
     if (response.status === 401) {
-      localStorage.removeItem('vectoraiz_api_key');
+      clearAuthTokens();
     }
 
     if (!response.ok) {
@@ -803,9 +836,9 @@ export const rawFilesApi = {
   downloadRawFile: async (file: RawFile): Promise<void> => {
     const url = `${getApiUrl()}/api/raw/files/${file.id}/content`;
     const headers: Record<string, string> = {};
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
     }
     const response = await fetch(url, { headers });
     if (!response.ok) {
@@ -825,9 +858,9 @@ export const rawFilesApi = {
   getFileObjectUrl: async (fileId: string): Promise<string> => {
     const url = `${getApiUrl()}/api/raw/files/${fileId}/content`;
     const headers: Record<string, string> = {};
-    const apiKey = getStoredApiKey();
-    if (apiKey) {
-      headers['X-API-Key'] = apiKey;
+    const accessToken = getStoredAccessToken();
+    if (accessToken) {
+      headers['Authorization'] = `Bearer ${accessToken}`;
     }
     const response = await fetch(url, { headers });
     if (!response.ok) {
@@ -865,13 +898,24 @@ export interface AuthSetupResponse {
 }
 
 export interface AuthLoginResponse {
-  user_id: number;
-  username: string;
-  api_key: string;
+  access_token: string;
+  refresh_token: string;
+  token_type: string;
+  onboarding_required: boolean;
+  onboarding_step?: string | null;
+  user: {
+    id: string;
+    email: string;
+    first_name?: string;
+    last_name?: string;
+    company_name?: string;
+    role: string;
+    status: string;
+  };
 }
 
 export interface AuthMeResponse {
-  user_id: number;
+  user_id: string;
   username: string;
   role: string;
   is_active: boolean;
@@ -897,12 +941,6 @@ export interface AuthKeyCreatedResponse {
 export const authApi = {
   setup: (username: string, password: string) =>
     apiFetch<AuthSetupResponse>('/api/auth/setup', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    }),
-
-  login: (username: string, password: string) =>
-    apiFetch<AuthLoginResponse>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),

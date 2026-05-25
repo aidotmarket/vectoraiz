@@ -39,6 +39,11 @@ interface AutoReloadConfig {
   reload_amount_usd: number;
 }
 
+function getAuthHeader() {
+  const t = localStorage.getItem("aim_data_access_token");
+  return t ? { Authorization: `Bearer ${t}` } : {};
+}
+
 const BillingPage = () => {
   const brand = useBrand();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -80,15 +85,15 @@ const BillingPage = () => {
   // Usage history
   const [showUsageHistory, setShowUsageHistory] = useState(false);
 
-  const apiKey = localStorage.getItem("vectoraiz_api_key");
+  const accessToken = localStorage.getItem("aim_data_access_token");
 
   const fetchCredits = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      if (!apiKey) { setLoading(false); return; }
+      if (!accessToken) { setLoading(false); return; }
       const res = await fetch(`${getApiUrl()}/api/allai/credits`, {
-        headers: { "X-API-Key": apiKey },
+        headers: { ...getAuthHeader() },
       });
       if (res.ok) {
         const data = await res.json();
@@ -109,13 +114,13 @@ const BillingPage = () => {
     } finally {
       setLoading(false);
     }
-  }, [apiKey]);
+  }, [accessToken]);
 
   const fetchAutoReload = useCallback(async () => {
     try {
-      if (!apiKey) return;
+      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload`, {
-        headers: { "X-API-Key": apiKey },
+        headers: { ...getAuthHeader() },
       });
       if (res.ok) {
         const data: AutoReloadConfig = await res.json();
@@ -125,15 +130,15 @@ const BillingPage = () => {
     } catch {
       // Silently fail — auto-reload is optional
     }
-  }, [apiKey]);
+  }, [accessToken]);
 
   const saveAutoReload = async (config: AutoReloadConfig) => {
     setAutoReloadLoading(true);
     try {
-      if (!apiKey) return;
+      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload`, {
         method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        headers: { ...getAuthHeader(), "Content-Type": "application/json" },
         body: JSON.stringify(config),
       });
       if (res.ok) {
@@ -154,9 +159,9 @@ const BillingPage = () => {
 
   const fetchPendingReload = useCallback(async () => {
     try {
-      if (!apiKey) return;
+      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload/pending`, {
-        headers: { "X-API-Key": apiKey },
+        headers: { ...getAuthHeader() },
       });
       if (res.ok) {
         const data = await res.json();
@@ -165,13 +170,13 @@ const BillingPage = () => {
     } catch {
       // Silently fail
     }
-  }, [apiKey]);
+  }, [accessToken]);
 
   const fetchAccount = useCallback(async () => {
     try {
-      if (!apiKey) return;
+      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/account`, {
-        headers: { "X-API-Key": apiKey },
+        headers: { ...getAuthHeader() },
       });
       if (res.ok) {
         setAccountInfo(await res.json());
@@ -179,15 +184,15 @@ const BillingPage = () => {
     } catch {
       // Silently fail — account check is optional
     }
-  }, [apiKey]);
+  }, [accessToken]);
 
   const handleSendMagicLink = async () => {
-    if (!apiKey || !recoveryEmail.trim()) return;
+    if (!accessToken || !recoveryEmail.trim()) return;
     setRecoverySending(true);
     try {
       const res = await fetch(`${getApiUrl()}/api/allai/auth/magic-link`, {
         method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        headers: { ...getAuthHeader(), "Content-Type": "application/json" },
         body: JSON.stringify({ email: recoveryEmail.trim() }),
       });
       if (res.ok) {
@@ -204,12 +209,12 @@ const BillingPage = () => {
   };
 
   const handleVerifyMagicLink = useCallback(async (token: string) => {
-    if (!apiKey) return;
+    if (!accessToken) return;
     setVerifyingMagicLink(true);
     try {
       const res = await fetch(`${getApiUrl()}/api/allai/auth/verify-magic-link`, {
         method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        headers: { ...getAuthHeader(), "Content-Type": "application/json" },
         body: JSON.stringify({ token }),
       });
       if (res.ok) {
@@ -236,15 +241,15 @@ const BillingPage = () => {
     } finally {
       setVerifyingMagicLink(false);
     }
-  }, [apiKey, fetchCredits, fetchAccount]);
+  }, [accessToken, fetchCredits, fetchAccount]);
 
   const handlePurchase = async (amountUsd: number) => {
     setPurchasing(true);
     try {
-      if (!apiKey) return;
+      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/purchase`, {
         method: "POST",
-        headers: { "X-API-Key": apiKey, "Content-Type": "application/json" },
+        headers: { ...getAuthHeader(), "Content-Type": "application/json" },
         body: JSON.stringify({ amount_usd: amountUsd }),
       });
       if (res.ok) {
@@ -287,10 +292,10 @@ const BillingPage = () => {
     if (searchParams.get("credits") === "success") {
       toast({ title: "Credits added successfully!", description: "Your allAI credits have been added." });
       // Clear pending auto-reload since purchase completed
-      if (apiKey) {
+      if (accessToken) {
         fetch(`${getApiUrl()}/api/allai/credits/auto-reload/pending`, {
           method: "DELETE",
-          headers: { "X-API-Key": apiKey },
+          headers: { ...getAuthHeader() },
         }).then(() => setPendingReload(null)).catch(() => {});
       }
       searchParams.delete("credits");
@@ -300,7 +305,7 @@ const BillingPage = () => {
       searchParams.delete("credits");
       setSearchParams(searchParams, { replace: true });
     }
-  }, [fetchCredits, fetchAutoReload, fetchPendingReload, fetchAccount, handleVerifyMagicLink, searchParams, setSearchParams]);
+  }, [accessToken, fetchCredits, fetchAutoReload, fetchPendingReload, fetchAccount, handleVerifyMagicLink, searchParams, setSearchParams]);
 
   const formatTimeAgo = (dateStr: string) => {
     const diff = Date.now() - new Date(dateStr).getTime();

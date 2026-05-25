@@ -227,8 +227,8 @@ function ArtifactCard({ data }: { data: ToolResultData }) {
     if (!artifactId) return;
     const apiUrl = typeof window !== "undefined" ? localStorage.getItem("vectoraiz_api_url") || "" : "";
     const url = `${apiUrl}/api/artifacts/${artifactId}/download`;
-    const apiKey = localStorage.getItem("vectoraiz_api_key");
-    fetch(url, { headers: apiKey ? { "X-API-Key": apiKey } : {} })
+    const accessToken = localStorage.getItem("aim_data_access_token");
+    fetch(url, { headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {} })
       .then((r) => r.blob())
       .then((blob) => {
         const a = document.createElement("a");

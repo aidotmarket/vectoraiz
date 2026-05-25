@@ -303,9 +303,9 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
   // Fetch PII settings on mount (BQ-VZ-DATA-READINESS)
   useEffect(() => {
     const url = apiUrl || window.location.origin;
-    const apiKey = localStorage.getItem('vectoraiz_api_key');
+    const accessToken = localStorage.getItem('aim_data_access_token');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (apiKey) headers['X-API-Key'] = apiKey;
+    if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
     fetch(`${url}/api/pii/settings`, { headers })
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
@@ -321,9 +321,9 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
     setPiiSettingsLoading(true);
     try {
       const url = apiUrl || window.location.origin;
-      const apiKey = localStorage.getItem('vectoraiz_api_key');
+      const accessToken = localStorage.getItem('aim_data_access_token');
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-      if (apiKey) headers['X-API-Key'] = apiKey;
+      if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
       const body = {
         score_threshold: piiThreshold[0],
         excluded_patterns: piiExcludedPatterns.split(",").map((s: string) => s.trim()).filter(Boolean),

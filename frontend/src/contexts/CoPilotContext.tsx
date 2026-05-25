@@ -183,7 +183,7 @@ export const CoPilotProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const restore = async () => {
       try {
         const res = await fetch(`${getApiUrl()}/api/copilot/sessions/current/messages`, {
-          headers: { "X-API-Key": apiKey },
+          headers: { "Authorization": `Bearer ${apiKey}` },
         });
         if (res.ok) {
           const data = await res.json();

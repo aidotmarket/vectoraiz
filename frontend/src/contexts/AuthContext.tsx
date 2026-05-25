@@ -1,13 +1,20 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
 import { getApiUrl } from "@/lib/api";
 
-const STORAGE_KEY = "vectoraiz_api_key";
+const ACCESS_TOKEN_KEY = "aim_data_access_token";
+const REFRESH_TOKEN_KEY = "aim_data_refresh_token";
+const LEGACY_KEY = "vectoraiz_api_key";
 
 interface UserInfo {
-  user_id: number;
-  username: string;
+  user_id: string;
+  username?: string;
+  email?: string;
+  first_name?: string;
+  last_name?: string;
+  company_name?: string;
   role: string;
-  is_active: boolean;
+  status?: string;
+  is_active?: boolean;
 }
 
 interface AuthContextType {
@@ -15,45 +22,89 @@ interface AuthContextType {
   user: UserInfo | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (username: string, password: string) => Promise<void>;
-  setup: (username: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
   logout: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+function normalizeUser(data: any): UserInfo {
+  return {
+    ...data,
+    user_id: data.user_id ?? data.id,
+    username: data.username ?? data.email,
+  };
+}
+
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [apiKey, setApiKey] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY));
+  const [apiKey, setApiKey] = useState<string | null>(() => localStorage.getItem(ACCESS_TOKEN_KEY));
   const [user, setUser] = useState<UserInfo | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
   const clearAuth = useCallback(() => {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(ACCESS_TOKEN_KEY);
+    localStorage.removeItem(REFRESH_TOKEN_KEY);
+    localStorage.removeItem(LEGACY_KEY);
     setApiKey(null);
     setUser(null);
   }, []);
 
-  // Validate stored key on mount
+  // Validate stored access token on mount.
   useEffect(() => {
     const validate = async () => {
-      const storedKey = localStorage.getItem(STORAGE_KEY);
-      if (!storedKey) {
+      const accessToken = localStorage.getItem(ACCESS_TOKEN_KEY);
+      if (!accessToken) {
         setIsLoading(false);
         return;
       }
 
       try {
-        const res = await fetch(`${getApiUrl()}/api/auth/me`, {
-          headers: { "X-API-Key": storedKey },
+        const meRes = await fetch(`${getApiUrl()}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
         });
-        if (res.ok) {
-          const data = await res.json();
-          setUser(data);
-        } else {
+
+        if (meRes.ok) {
+          const data = await meRes.json();
+          setApiKey(accessToken);
+          setUser(normalizeUser(data));
+        } else if (meRes.status === 401) {
+          const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+          if (!refreshToken) {
+            clearAuth();
+            return;
+          }
+
+          const refreshRes = await fetch(`${getApiUrl()}/api/auth/aim-market-refresh`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refresh_token: refreshToken }),
+          });
+
+          if (!refreshRes.ok) {
+            clearAuth();
+            return;
+          }
+
+          const tokens = await refreshRes.json();
+          localStorage.setItem(ACCESS_TOKEN_KEY, tokens.access_token);
+          localStorage.setItem(REFRESH_TOKEN_KEY, tokens.refresh_token);
+          setApiKey(tokens.access_token);
+
+          const retryRes = await fetch(`${getApiUrl()}/api/auth/me`, {
+            headers: { Authorization: `Bearer ${tokens.access_token}` },
+          });
+
+          if (retryRes.ok) {
+            const data = await retryRes.json();
+            setUser(normalizeUser(data));
+          } else {
+            clearAuth();
+          }
+        } else if (!meRes.ok) {
           clearAuth();
         }
       } catch {
-        // Network error — keep key, don't lock user out
+        // Network error: keep tokens so a transient outage does not sign the user out.
       } finally {
         setIsLoading(false);
       }
@@ -61,11 +112,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     validate();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const login = useCallback(async (username: string, password: string) => {
-    const res = await fetch(`${getApiUrl()}/api/auth/login`, {
+  const login = useCallback(async (email: string, password: string) => {
+    const res = await fetch(`${getApiUrl()}/api/auth/aim-market-login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ email, password }),
     });
 
     if (!res.ok) {
@@ -74,39 +125,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     const data = await res.json();
-    localStorage.setItem(STORAGE_KEY, data.api_key);
-    setApiKey(data.api_key);
-    setUser({ user_id: data.user_id, username: data.username, role: "admin", is_active: true });
+    localStorage.setItem(ACCESS_TOKEN_KEY, data.access_token);
+    localStorage.setItem(REFRESH_TOKEN_KEY, data.refresh_token);
+    setApiKey(data.access_token);
+    setUser(normalizeUser(data.user));
   }, []);
-
-  const setup = useCallback(async (username: string, password: string) => {
-    const res = await fetch(`${getApiUrl()}/api/auth/setup`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
-
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: "Setup failed" }));
-      throw new Error(err.detail || `Setup failed: ${res.status}`);
-    }
-
-    const data = await res.json();
-
-    // Use api_key directly from setup response if available, otherwise fall back to login
-    if (data.api_key) {
-      localStorage.setItem(STORAGE_KEY, data.api_key);
-      setApiKey(data.api_key);
-      setUser({
-        user_id: data.user?.id ?? 0,
-        username: data.user?.username ?? username,
-        role: data.user?.role ?? "admin",
-        is_active: true,
-      });
-    } else {
-      await login(username, password);
-    }
-  }, [login]);
 
   const logout = useCallback(() => {
     clearAuth();
@@ -120,7 +143,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: !!apiKey && !!user,
         isLoading,
         login,
-        setup,
         logout,
       }}
     >

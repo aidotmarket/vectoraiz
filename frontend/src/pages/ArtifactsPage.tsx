@@ -81,8 +81,8 @@ export default function ArtifactsPage() {
 
   const handleDownload = (id: string) => {
     const url = artifactsApi.downloadUrl(id);
-    const apiKey = localStorage.getItem("vectoraiz_api_key");
-    fetch(url, { headers: apiKey ? { "X-API-Key": apiKey } : {} })
+    const accessToken = localStorage.getItem("aim_data_access_token");
+    fetch(url, { headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {} })
       .then((r) => r.blob())
       .then((blob) => {
         const a = document.createElement("a");
@@ -99,8 +99,8 @@ export default function ArtifactsPage() {
   const handlePreview = async (artifact: ApiArtifact) => {
     try {
       const url = artifactsApi.downloadUrl(artifact.id);
-      const apiKey = localStorage.getItem("vectoraiz_api_key");
-      const resp = await fetch(url, { headers: apiKey ? { "X-API-Key": apiKey } : {} });
+      const accessToken = localStorage.getItem("aim_data_access_token");
+      const resp = await fetch(url, { headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : {} });
       const content = await resp.text();
       setPreview({ artifact, content });
     } catch {}
