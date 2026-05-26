@@ -7,11 +7,13 @@ STS role ARN and ExternalId are stored locally; no secret material is stored.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from pydantic import model_validator
-from sqlalchemy import CheckConstraint
-from sqlmodel import Column, Field, SQLModel, String, Text
+from sqlalchemy import CheckConstraint, event
+from sqlmodel import Column, Field, Relationship, SQLModel, String, Text
+
+if TYPE_CHECKING:
+    from app.models.s3_scan_job import S3ScanJob
 
 
 class S3Connection(SQLModel, table=True):
@@ -20,7 +22,7 @@ class S3Connection(SQLModel, table=True):
     __tablename__ = "s3_connection"
     __table_args__ = (
         CheckConstraint(
-            "(status != 'configured') OR (role_arn IS NOT NULL AND external_id IS NOT NULL)",
+            "(status = 'onboarding') OR (role_arn IS NOT NULL AND external_id IS NOT NULL)",
             name="ck_s3_connection_configured_creds_required",
         ),
     )
@@ -46,8 +48,11 @@ class S3Connection(SQLModel, table=True):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @model_validator(mode="after")
-    def configured_connections_require_credentials(self) -> "S3Connection":
-        if self.status == "configured" and (self.role_arn is None or self.external_id is None):
-            raise ValueError("configured S3 connections require role_arn and external_id")
-        return self
+    scan_jobs: list["S3ScanJob"] = Relationship(back_populates="connection", cascade_delete=True)
+
+
+@event.listens_for(S3Connection, "before_insert")
+@event.listens_for(S3Connection, "before_update")
+def _enforce_configured_credentials(mapper, connection, target):
+    if target.status == "configured" and (target.role_arn is None or target.external_id is None):
+        raise ValueError("configured S3 connections require role_arn and external_id")

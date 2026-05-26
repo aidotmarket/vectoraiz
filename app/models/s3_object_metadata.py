@@ -6,10 +6,14 @@ One row per S3 object discovered during scan.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Column, ForeignKey, String
-from sqlmodel import Field, SQLModel, Text
+from sqlalchemy import BigInteger, Column, ForeignKey, String
+from sqlmodel import Field, Relationship, SQLModel, Text
+
+if TYPE_CHECKING:
+    from app.models.s3_connection import S3Connection
+    from app.models.s3_scan_job import S3ScanJob
 
 
 class S3ObjectMetadata(SQLModel, table=True):
@@ -25,7 +29,7 @@ class S3ObjectMetadata(SQLModel, table=True):
         sa_column=Column(String(36), ForeignKey("s3_scan_job.id", ondelete="CASCADE"), nullable=False)
     )
     object_key: str = Field(max_length=1024)
-    size_bytes: int
+    size_bytes: int = Field(sa_column=Column(BigInteger, nullable=False))
     content_type: str = Field(max_length=128)
     last_modified: datetime
     etag: str = Field(max_length=128)
@@ -39,3 +43,6 @@ class S3ObjectMetadata(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    scan_job: "S3ScanJob" = Relationship(back_populates="objects")
+    connection: Optional["S3Connection"] = Relationship()

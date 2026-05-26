@@ -31,10 +31,10 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text, nullable=True),
         sa.Column("last_scanned_at", sa.DateTime, nullable=True),
         sa.Column("continuation_token", sa.Text, nullable=True),
-        sa.Column("created_at", sa.DateTime, nullable=False),
-        sa.Column("updated_at", sa.DateTime, nullable=False),
+        sa.Column("created_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime, nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint(
-            "(status != 'configured') OR (role_arn IS NOT NULL AND external_id IS NOT NULL)",
+            "(status = 'onboarding') OR (role_arn IS NOT NULL AND external_id IS NOT NULL)",
             name="ck_s3_connection_configured_creds_required",
         ),
     )
@@ -58,7 +58,7 @@ def upgrade() -> None:
         sa.Column("connection_id", sa.String(36), nullable=False),
         sa.Column("scan_job_id", sa.String(36), nullable=False),
         sa.Column("object_key", sa.String(1024), nullable=False),
-        sa.Column("size_bytes", sa.Integer, nullable=False),
+        sa.Column("size_bytes", sa.BigInteger, nullable=False),
         sa.Column("content_type", sa.String(128), nullable=False),
         sa.Column("last_modified", sa.DateTime, nullable=False),
         sa.Column("etag", sa.String(128), nullable=False),

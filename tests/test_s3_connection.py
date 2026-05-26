@@ -31,6 +31,21 @@ def _id() -> str:
 
 
 def test_s3_connection_constraint_rejects_null_creds_when_configured(s3_engine):
+    with pytest.raises(ValueError, match="configured S3 connections require role_arn and external_id"):
+        with Session(s3_engine) as session:
+            session.add(
+                S3Connection(
+                    id=_id(),
+                    name="Configured connection",
+                    bucket="seller-bucket",
+                    region="us-east-1",
+                    status="configured",
+                    role_arn=None,
+                    external_id=None,
+                )
+            )
+            session.flush()
+
     with pytest.raises(IntegrityError), Session(s3_engine) as session:
         session.exec(
             insert(S3Connection).values(
@@ -39,6 +54,22 @@ def test_s3_connection_constraint_rejects_null_creds_when_configured(s3_engine):
                 bucket="seller-bucket",
                 region="us-east-1",
                 status="configured",
+                role_arn=None,
+                external_id=None,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+        )
+        session.commit()
+
+    with pytest.raises(IntegrityError), Session(s3_engine) as session:
+        session.exec(
+            insert(S3Connection).values(
+                id=_id(),
+                name="Errored connection",
+                bucket="seller-bucket",
+                region="us-east-1",
+                status="error",
                 role_arn=None,
                 external_id=None,
                 created_at=datetime.now(timezone.utc),

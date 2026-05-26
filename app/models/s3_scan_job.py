@@ -6,10 +6,14 @@ Tracks paginated S3 object enumeration progress for a connection.
 """
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Column, ForeignKey, String
-from sqlmodel import Field, SQLModel, Text
+from sqlmodel import Field, Relationship, SQLModel, Text
+
+if TYPE_CHECKING:
+    from app.models.s3_connection import S3Connection
+    from app.models.s3_object_metadata import S3ObjectMetadata
 
 
 class S3ScanJob(SQLModel, table=True):
@@ -30,3 +34,6 @@ class S3ScanJob(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    connection: "S3Connection" = Relationship(back_populates="scan_jobs")
+    objects: list["S3ObjectMetadata"] = Relationship(back_populates="scan_job", cascade_delete=True)
