@@ -92,7 +92,7 @@ class Settings(BaseSettings):
     # BQ-127: Local auth secrets (C1 — separate from SECRET_KEY)
     apikey_hmac_secret: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("VECTORAIZ_APIKEY_HMAC_SECRET", "AIM_DATA_APIKEY_HMAC_SECRET"),
+        validation_alias=AliasChoices("AIM_DATA_APIKEY_HMAC_SECRET", "VECTORAIZ_APIKEY_HMAC_SECRET"),
         description="HMAC for local API key hashing.",
     )
     local_auth_secret: Optional[str] = None    # JWT signing key (Phase 2, not used yet)
@@ -100,18 +100,18 @@ class Settings(BaseSettings):
     # BQ-127: Premium feature flags (only relevant in connected mode)
     allai_enabled: bool = Field(
         default=True,
-        validation_alias=AliasChoices("VECTORAIZ_ALLAI_ENABLED", "AIM_DATA_ALLAI_ENABLED"),
+        validation_alias=AliasChoices("AIM_DATA_ALLAI_ENABLED", "VECTORAIZ_ALLAI_ENABLED"),
     )
     marketplace_enabled: bool = True
 
     # ai.market platform integration
     ai_market_url: str = Field(
         default=_DEFAULT_AI_MARKET_URL,
-        validation_alias=AliasChoices("VECTORAIZ_AI_MARKET_URL", "AIM_DATA_AI_MARKET_URL"),
+        validation_alias=AliasChoices("AIM_DATA_AI_MARKET_URL", "VECTORAIZ_AI_MARKET_URL"),
     )
     auth_enabled: bool = Field(
         default=True,
-        validation_alias=AliasChoices("VECTORAIZ_AUTH_ENABLED", "AIM_DATA_AUTH_ENABLED"),
+        validation_alias=AliasChoices("AIM_DATA_AUTH_ENABLED", "VECTORAIZ_AUTH_ENABLED"),
         description="S100: Default ON. Set VECTORAIZ_AUTH_ENABLED=false only for local dev.",
     )
     auth_cache_ttl: int = 300 # 5 minutes in seconds
@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     # Service-to-service auth (for internal endpoints on ai-market-backend)
     internal_api_key: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("VECTORAIZ_INTERNAL_API_KEY", "AIM_DATA_INTERNAL_API_KEY"),
+        validation_alias=AliasChoices("AIM_DATA_INTERNAL_API_KEY", "VECTORAIZ_INTERNAL_API_KEY"),
     )
     
     # Encryption key for API keys at rest (BQ-066)
@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     # REQUIRED in production — startup will fail without it.
     keystore_passphrase: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("VECTORAIZ_KEYSTORE_PASSPHRASE", "AIM_DATA_KEYSTORE_PASSPHRASE"),
+        validation_alias=AliasChoices("AIM_DATA_KEYSTORE_PASSPHRASE", "VECTORAIZ_KEYSTORE_PASSPHRASE"),
         description="Passphrase for encrypting private keys in the local keystore. REQUIRED in production. SecretStr-equivalent via env var.",
     )
     # Path to keystore file — defaults to persistent data volume for Docker.
@@ -183,7 +183,7 @@ class Settings(BaseSettings):
     # BQ-MCP-RAG: External LLM Connectivity (§4.5)
     connectivity_enabled: bool = Field(
         default=False,
-        validation_alias=AliasChoices("VECTORAIZ_CONNECTIVITY_ENABLED", "AIM_DATA_CONNECTIVITY_ENABLED"),
+        validation_alias=AliasChoices("AIM_DATA_CONNECTIVITY_ENABLED", "VECTORAIZ_CONNECTIVITY_ENABLED"),
         description="Off by default - customer must opt in.",
     )
     connectivity_bind_host: str = "127.0.0.1"  # Loopback only by default
@@ -217,7 +217,7 @@ class Settings(BaseSettings):
     # BQ-VZ-SERIAL-CLIENT: Serial activation & metering
     serial: Optional[str] = Field(
         default=None,
-        validation_alias=AliasChoices("VECTORAIZ_SERIAL", "AIM_DATA_SERIAL"),
+        validation_alias=AliasChoices("AIM_DATA_SERIAL", "VECTORAIZ_SERIAL"),
         description="Device serial number for X-Serial header.",
     )
     aimarket_url: str = _DEFAULT_AI_MARKET_URL  # ai-market serial authority base URL

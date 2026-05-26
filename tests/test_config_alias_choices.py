@@ -33,17 +33,30 @@ def test_field_reads_from_both_prefixes(monkeypatch, reload_config, env_name, fi
     assert getattr(mod.settings, field_name) == test_value
 
 
-def test_vectoraiz_prefix_wins_when_both_set(monkeypatch, reload_config):
-    monkeypatch.setenv("VECTORAIZ_KEYSTORE_PASSPHRASE", "vec-wins")
-    monkeypatch.setenv("AIM_DATA_KEYSTORE_PASSPHRASE", "aim-loses")
+def test_aim_data_prefix_wins_when_both_set(monkeypatch, reload_config):
+    monkeypatch.setenv("VECTORAIZ_KEYSTORE_PASSPHRASE", "vec-loses")
+    monkeypatch.setenv("AIM_DATA_KEYSTORE_PASSPHRASE", "aim-wins")
     mod = reload_config()
-    assert mod.settings.keystore_passphrase == "vec-wins"
+    assert mod.settings.keystore_passphrase == "aim-wins"
 
 
 def test_boolean_fields_accept_either_prefix(monkeypatch, reload_config):
     monkeypatch.setenv("AIM_DATA_CONNECTIVITY_ENABLED", "true")
     monkeypatch.setenv("AIM_DATA_AUTH_ENABLED", "false")
     monkeypatch.setenv("AIM_DATA_ALLAI_ENABLED", "true")
+    mod = reload_config()
+    assert mod.settings.connectivity_enabled is True
+    assert mod.settings.auth_enabled is False
+    assert mod.settings.allai_enabled is True
+
+
+def test_boolean_fields_legacy_vectoraiz_prefix_still_works(monkeypatch, reload_config):
+    monkeypatch.delenv("AIM_DATA_CONNECTIVITY_ENABLED", raising=False)
+    monkeypatch.delenv("AIM_DATA_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AIM_DATA_ALLAI_ENABLED", raising=False)
+    monkeypatch.setenv("VECTORAIZ_CONNECTIVITY_ENABLED", "true")
+    monkeypatch.setenv("VECTORAIZ_AUTH_ENABLED", "false")
+    monkeypatch.setenv("VECTORAIZ_ALLAI_ENABLED", "true")
     mod = reload_config()
     assert mod.settings.connectivity_enabled is True
     assert mod.settings.auth_enabled is False
