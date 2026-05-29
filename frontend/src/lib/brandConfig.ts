@@ -84,7 +84,7 @@ export const AIM_DATA_BRAND: BrandConfig = {
 
 export const AIM_CHANNEL_BRAND: BrandConfig = AIM_DATA_BRAND;
 
-function getRuntimeBrandName(): string {
+export function getRuntimeBrandName(): string {
   const envBrand = import.meta.env.VITE_BRAND?.toLowerCase();
   if (
     envBrand === "aim-data" ||

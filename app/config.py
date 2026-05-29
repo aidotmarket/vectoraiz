@@ -316,4 +316,10 @@ if not _os.environ.get("VECTORAIZ_MODE") and _os.environ.get("VECTORAIZ_AI_MARKE
             "Set VECTORAIZ_MODE=connected explicitly. This inference will be removed in v2.0."
         )
 
+from app.core.channel_config import CHANNEL, ChannelType
+
+if CHANNEL == ChannelType.aim_data and settings.mode != "connected":
+    settings.mode = "connected"
+    logger.info("AIM Data channel detected — forcing connected mode")
+
 logger.info("vectorAIz operating mode: %s", settings.mode)
