@@ -28,6 +28,7 @@ class S3Connection(SQLModel, table=True):
     )
 
     id: str = Field(primary_key=True, max_length=36)
+    owner_id: Optional[str] = Field(default=None, max_length=64, nullable=True, index=True)
     name: str = Field(max_length=255)
     bucket: str = Field(max_length=255)
     region: str = Field(max_length=64)

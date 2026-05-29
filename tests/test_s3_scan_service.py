@@ -91,6 +91,7 @@ class FakeS3Client:
 def _connection(**overrides) -> S3Connection:
     values = {
         "id": str(uuid4()),
+        "owner_id": "mock_user_auth_disabled",
         "name": "Seller bucket",
         "bucket": "seller-bucket",
         "region": "us-east-1",

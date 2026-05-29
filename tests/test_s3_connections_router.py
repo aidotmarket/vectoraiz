@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session
 
+from app.auth.api_key_auth import AuthenticatedUser, get_current_user
 from app.main import app
 from app.models.dataset import DatasetRecord  # noqa: F401
 from app.models.s3_connection import S3Connection
@@ -18,6 +19,9 @@ from app.models.s3_object_metadata import S3ObjectMetadata  # noqa: F401
 from app.models.s3_scan_job import S3ScanJob  # noqa: F401
 from app.routers import s3_connections
 from app.services import s3_scan_service
+
+USER_A = AuthenticatedUser(user_id="user-a", key_id="key-a", scopes=["read", "write"], valid=True)
+USER_B = AuthenticatedUser(user_id="user-b", key_id="key-b", scopes=["read", "write"], valid=True)
 
 
 @pytest.fixture
@@ -48,7 +52,9 @@ def client(s3_engine, monkeypatch):
     monkeypatch.setattr(s3_connections, "get_session_context", _session_context)
     monkeypatch.setattr(s3_scan_service, "get_session_context", _session_context)
     monkeypatch.setattr(s3_connections.settings, "ai_market_aws_account_id", "123456789012")
-    return TestClient(app)
+    app.dependency_overrides[get_current_user] = lambda: USER_A
+    yield TestClient(app)
+    app.dependency_overrides.pop(get_current_user, None)
 
 
 def _create_connection(client: TestClient) -> dict:
@@ -65,9 +71,15 @@ def _create_connection(client: TestClient) -> dict:
     return response.json()
 
 
-def _configured_row(s3_engine, *, prefix: Optional[str] = "exports/") -> S3Connection:
+def _configured_row(
+    s3_engine,
+    *,
+    prefix: Optional[str] = "exports/",
+    owner_id: Optional[str] = "user-a",
+) -> S3Connection:
     connection = S3Connection(
         id=str(uuid4()),
+        owner_id=owner_id,
         name="Seller bucket",
         bucket="seller-bucket",
         region="us-east-1",
@@ -159,14 +171,33 @@ def test_post_creates_row_and_returns_substituted_policies(client):
     assert data["permission_policy"]["Statement"][1]["Resource"] == "arn:aws:s3:::seller-bucket/exports/*"
 
 
-def test_get_lists_rows(client):
+def test_post_stamps_owner_id(client, s3_engine):
+    data = _create_connection(client)
+
+    with Session(s3_engine) as session:
+        stored = session.get(S3Connection, data["id"])
+        assert stored.owner_id == "user-a"
+
+
+def test_get_lists_only_caller_owned_rows(client, s3_engine):
     created = _create_connection(client)
+    foreign = _configured_row(s3_engine, owner_id="user-b")
 
     response = client.get("/api/s3-connections/")
 
     assert response.status_code == 200
     assert [row["id"] for row in response.json()] == [created["id"]]
+    assert foreign.id not in [row["id"] for row in response.json()]
     assert "trust_policy" not in response.json()[0] or response.json()[0]["trust_policy"] is None
+
+
+def test_unauthenticated_request_returns_401(client, monkeypatch):
+    app.dependency_overrides.pop(get_current_user, None)
+    monkeypatch.setenv("VECTORAIZ_AUTH_ENABLED", "true")
+
+    response = client.get("/api/s3-connections/")
+
+    assert response.status_code == 401
 
 
 def test_get_missing_returns_404(client):
@@ -260,6 +291,40 @@ def test_verify_s3_failure_after_sts_success_sets_error(client, s3_engine, monke
     assert "Access denied" in response.json()["error_message"]
     sts_stubber.assert_no_pending_responses()
     s3_stubber.assert_no_pending_responses()
+
+
+def test_user_cannot_get_scan_or_list_objects_on_foreign_connection(client, s3_engine, monkeypatch):
+    connection = _configured_row(s3_engine, owner_id="user-b")
+    scan_job = S3ScanJob(id=str(uuid4()), connection_id=connection.id, status="completed")
+    with Session(s3_engine) as session:
+        session.add(scan_job)
+        session.add(
+            S3ObjectMetadata(
+                id=str(uuid4()),
+                connection_id=connection.id,
+                scan_job_id=scan_job.id,
+                object_key="exports/foreign.csv",
+                size_bytes=1,
+                content_type="text/csv",
+                last_modified=datetime.now(timezone.utc),
+                etag="etag",
+            )
+        )
+        session.commit()
+
+    scan_called = False
+
+    def _scan_connection(_self, _connection_id):
+        nonlocal scan_called
+        scan_called = True
+        raise AssertionError("foreign connection should be rejected before scan")
+
+    monkeypatch.setattr(s3_connections.S3ScanService, "scan_connection", _scan_connection)
+
+    assert client.get(f"/api/s3-connections/{connection.id}").status_code == 403
+    assert client.post(f"/api/s3-connections/{connection.id}/scan").status_code == 403
+    assert client.get(f"/api/s3-connections/{connection.id}/objects").status_code == 403
+    assert scan_called is False
 
 
 def test_delete_removes_row(client):
