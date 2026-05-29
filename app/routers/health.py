@@ -227,11 +227,21 @@ async def _check_memory() -> dict:
 
 
 # ── System info (public, no auth) ────────────────────────────────────
+def _effective_system_mode() -> str:
+    """AIM Data is always connected, regardless of VECTORAIZ_MODE."""
+    from app.core.channel_config import CHANNEL, ChannelType
+
+    if CHANNEL == ChannelType.aim_data:
+        return "connected"
+    return settings.mode
+
+
 @router.get("/system/info")
 async def system_info():
     """Public endpoint (no auth) returning system mode, feature flags, and system capabilities."""
     from app.core.channel_config import CHANNEL
 
+    mode = _effective_system_mode()
     mem = psutil.virtual_memory()
     cores = os.cpu_count() or 4
     mem_gb = round(mem.total / (1024**3), 1)
@@ -240,11 +250,11 @@ async def system_info():
     recommended_concurrent = min(max(cores // 4, 2), 6)
 
     return {
-        "mode": settings.mode,
+        "mode": mode,
         "version": APP_VERSION,
         "channel": CHANNEL.value,
         "features": {
-            "allai": settings.allai_enabled and settings.mode != "standalone",
+            "allai": settings.allai_enabled and mode != "standalone",
             "marketplace": settings.marketplace_enabled,
             "earnings": settings.marketplace_enabled,
             "local_auth": True,
@@ -254,7 +264,7 @@ async def system_info():
             "memory_gb": mem_gb,
             "recommended_concurrent_uploads": recommended_concurrent,
         },
-        "marketplace_api_url": settings.ai_market_url if settings.mode != "standalone" else None,
+        "marketplace_api_url": settings.ai_market_url if mode != "standalone" else None,
     }
 
 
@@ -264,11 +274,12 @@ async def system_mode():
 
     Alias for /system/info with the shape requested by the frontend.
     """
+    mode = _effective_system_mode()
     return {
-        "mode": settings.mode,
+        "mode": mode,
         "features": {
             "marketplace": settings.marketplace_enabled,
-            "allai": settings.allai_enabled and settings.mode != "standalone",
+            "allai": settings.allai_enabled and mode != "standalone",
             "earnings": settings.marketplace_enabled,
         },
     }

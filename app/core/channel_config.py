@@ -1,11 +1,10 @@
 """
-Channel Config — Presentation-only channel hint (BQ-VZ-CHANNEL)
-===============================================================
+Channel Config — Runtime channel hint (BQ-VZ-CHANNEL)
+=====================================================
 
 Parses VECTORAIZ_CHANNEL env var once at startup.
-Channel is PRESENTATION ONLY — it affects sidebar ordering,
-allAI greeting, and default landing page. It NEVER gates features,
-auth, billing, or access control (Condition C2).
+Channel affects sidebar ordering, allAI greeting, and default landing page.
+The AIM Data channel also forces connected operating mode in app.config.
 """
 
 from enum import Enum

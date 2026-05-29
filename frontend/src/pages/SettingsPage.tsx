@@ -67,6 +67,7 @@ import {
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { getApiUrl, systemApi } from "@/lib/api";
+import { getRuntimeBrandName } from "@/lib/brandConfig";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { useMode } from "@/contexts/ModeContext";
@@ -78,6 +79,7 @@ const DEFAULT_API_URL = '';
 
 const SettingsPage = () => {
   const brand = useBrand();
+  const isAimDataBrand = getRuntimeBrandName() === "aim-data";
   const defaultDataDirectory = `~/${brand.productName.toLowerCase().replace(/\s+/g, "-")}/data`;
   const manualUpdateCommands = `cd your-${brand.installDirectoryName}-directory
 docker compose -f docker-compose.customer.yml pull ${brand.dockerComposeServiceName}
@@ -452,78 +454,79 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
         </CardContent>
       </Card>
 
-      {/* Section 0: Backend Connection */}
-      <Card className="bg-card border-border">
-        <CardHeader>
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
-              <Server className="w-5 h-5 text-primary" />
+      {!isAimDataBrand && (
+        <Card className="bg-card border-border">
+          <CardHeader>
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-secondary flex items-center justify-center">
+                <Server className="w-5 h-5 text-primary" />
+              </div>
+              <div>
+                <CardTitle className="text-foreground">Backend Connection</CardTitle>
+                <CardDescription>Configure the {brand.name} backend API URL</CardDescription>
+              </div>
             </div>
-            <div>
-              <CardTitle className="text-foreground">Backend Connection</CardTitle>
-              <CardDescription>Configure the {brand.name} backend API URL</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="backend-url" className="text-foreground">Backend URL</Label>
+              <div className="flex gap-2">
+                <Input
+                  id="backend-url"
+                  type="text"
+                  placeholder={`Same origin (${window.location.origin})`}
+                  value={apiUrl}
+                  onChange={(e) => {
+                    setApiUrl(e.target.value);
+                    setBackendTestStatus('idle');
+                    setIsDirty(true);
+                  }}
+                  className="flex-1 bg-background border-border text-foreground font-mono"
+                />
+                <Button
+                  variant="outline"
+                  onClick={testBackendConnection}
+                  disabled={backendTestStatus === 'testing'}
+                >
+                  {backendTestStatus === 'testing' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    'Test'
+                  )}
+                </Button>
+              </div>
             </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="backend-url" className="text-foreground">Backend URL</Label>
-            <div className="flex gap-2">
-              <Input
-                id="backend-url"
-                type="text"
-                placeholder={`Same origin (${window.location.origin})`}
-                value={apiUrl}
-                onChange={(e) => {
-                  setApiUrl(e.target.value);
-                  setBackendTestStatus('idle');
-                  setIsDirty(true);
-                }}
-                className="flex-1 bg-background border-border text-foreground font-mono"
-              />
-              <Button
-                variant="outline"
-                onClick={testBackendConnection}
-                disabled={backendTestStatus === 'testing'}
-              >
-                {backendTestStatus === 'testing' ? (
-                  <Loader2 className="w-4 h-4 animate-spin" />
-                ) : (
-                  'Test'
-                )}
+
+            {/* Connection status */}
+            {backendTestStatus === 'success' && (
+              <div className="flex items-center gap-2 text-sm text-[hsl(var(--haven-success))]">
+                <Wifi className="w-4 h-4" />
+                Connected successfully
+              </div>
+            )}
+            {backendTestStatus === 'error' && (
+              <div className="flex items-center gap-2 text-sm text-destructive">
+                <WifiOff className="w-4 h-4" />
+                {backendErrorMessage || 'Connection failed'}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-2">
+              <Button variant="outline" size="sm" onClick={handleSaveBackendUrl}>
+                Save
+              </Button>
+              <Button variant="ghost" size="sm" onClick={handleResetBackendUrl}>
+                Reset to Default
               </Button>
             </div>
-          </div>
 
-          {/* Connection status */}
-          {backendTestStatus === 'success' && (
-            <div className="flex items-center gap-2 text-sm text-[hsl(var(--haven-success))]">
-              <Wifi className="w-4 h-4" />
-              Connected successfully
-            </div>
-          )}
-          {backendTestStatus === 'error' && (
-            <div className="flex items-center gap-2 text-sm text-destructive">
-              <WifiOff className="w-4 h-4" />
-              {backendErrorMessage || 'Connection failed'}
-            </div>
-          )}
-
-          <div className="flex gap-2 pt-2">
-            <Button variant="outline" size="sm" onClick={handleSaveBackendUrl}>
-              Save
-            </Button>
-            <Button variant="ghost" size="sm" onClick={handleResetBackendUrl}>
-              Reset to Default
-            </Button>
-          </div>
-
-          <p className="text-xs text-muted-foreground">
-            Default: same origin (auto-detect). Leave empty when the frontend is served from the backend.
-            Only set a custom URL if the backend is on a different host.
-          </p>
-        </CardContent>
-      </Card>
+            <p className="text-xs text-muted-foreground">
+              Default: same origin (auto-detect). Leave empty when the frontend is served from the backend.
+              Only set a custom URL if the backend is on a different host.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Section: Local API Keys Management */}
       <Card className="bg-card border-border" id="api-keys">
