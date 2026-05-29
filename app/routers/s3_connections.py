@@ -11,10 +11,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlmodel import select
 
+from app.auth.api_key_auth import AuthenticatedUser, get_current_user
 from app.config import settings
 from app.core.database import get_session_context
 from app.models.dataset import DatasetRecord
@@ -246,6 +247,23 @@ def _dataset_file_type(object_key: str) -> str:
     return extension or "unknown"
 
 
+def _user_can_access_connection(connection: S3Connection, user: AuthenticatedUser) -> bool:
+    if connection.owner_id == user.user_id:
+        return True
+    if connection.owner_id is None and "admin" in user.scopes:
+        return True
+    return False
+
+
+def _get_connection_for_user(session, connection_id: str, user: AuthenticatedUser) -> S3Connection:
+    connection = session.get(S3Connection, connection_id)
+    if not connection:
+        raise HTTPException(status_code=404, detail="S3 connection not found")
+    if not _user_can_access_connection(connection, user):
+        raise HTTPException(status_code=403, detail="S3 connection is not owned by this user")
+    return connection
+
+
 def _create_dataset_for_object(metadata: S3ObjectMetadata, body: S3ObjectRegisterRequest) -> DatasetRecord:
     now = datetime.now(timezone.utc)
     return DatasetRecord(
@@ -273,9 +291,13 @@ async def get_config() -> S3ConfigResponse:
 
 
 @router.post("/", status_code=201, summary="Create S3 connection")
-async def create_connection(body: S3ConnectionCreate) -> S3ConnectionResponse:
+async def create_connection(
+    body: S3ConnectionCreate,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3ConnectionResponse:
     connection = S3Connection(
         id=str(uuid.uuid4()),
+        owner_id=user.user_id,
         name=body.name,
         bucket=body.bucket,
         region=body.region,
@@ -291,30 +313,33 @@ async def create_connection(body: S3ConnectionCreate) -> S3ConnectionResponse:
 
 
 @router.get("/", summary="List S3 connections")
-async def list_connections() -> List[S3ConnectionResponse]:
+async def list_connections(user: AuthenticatedUser = Depends(get_current_user)) -> List[S3ConnectionResponse]:
     with get_session_context() as session:
-        rows = session.exec(select(S3Connection)).all()
+        rows = session.exec(select(S3Connection).where(S3Connection.owner_id == user.user_id)).all()
         return [_to_response(row) for row in rows]
 
 
 @router.get("/{connection_id}", summary="Get S3 connection")
-async def get_connection(connection_id: str) -> S3ConnectionResponse:
+async def get_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3ConnectionResponse:
     with get_session_context() as session:
-        connection = session.get(S3Connection, connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="S3 connection not found")
+        connection = _get_connection_for_user(session, connection_id, user)
         return _to_response(connection, include_policies=True)
 
 
 @router.put("/{connection_id}/role-arn", summary="Set S3 role ARN")
-async def set_role_arn(connection_id: str, body: S3ConnectionRoleArn) -> S3ConnectionResponse:
+async def set_role_arn(
+    connection_id: str,
+    body: S3ConnectionRoleArn,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3ConnectionResponse:
     if not ROLE_ARN_RE.match(body.role_arn):
         raise HTTPException(status_code=400, detail="Invalid IAM role ARN")
 
     with get_session_context() as session:
-        connection = session.get(S3Connection, connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="S3 connection not found")
+        connection = _get_connection_for_user(session, connection_id, user)
 
         connection.role_arn = body.role_arn
         connection.status = "configured"
@@ -327,11 +352,12 @@ async def set_role_arn(connection_id: str, body: S3ConnectionRoleArn) -> S3Conne
 
 
 @router.post("/{connection_id}/verify", summary="Verify S3 connection")
-async def verify_connection(connection_id: str) -> S3VerifyResponse:
+async def verify_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3VerifyResponse:
     with get_session_context() as session:
-        connection = session.get(S3Connection, connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="S3 connection not found")
+        connection = _get_connection_for_user(session, connection_id, user)
         if not connection.role_arn:
             raise HTTPException(status_code=400, detail="S3 connection role ARN is not configured")
 
@@ -374,7 +400,12 @@ async def verify_connection(connection_id: str) -> S3VerifyResponse:
 
 
 @router.post("/{connection_id}/scan", summary="Scan S3 connection objects")
-async def scan_connection(connection_id: str) -> S3ScanJobResponse:
+async def scan_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3ScanJobResponse:
+    with get_session_context() as session:
+        _get_connection_for_user(session, connection_id, user)
     try:
         scan_job = S3ScanService().scan_connection(connection_id)
     except ValueError:
@@ -383,8 +414,13 @@ async def scan_connection(connection_id: str) -> S3ScanJobResponse:
 
 
 @router.get("/{connection_id}/scan/{scan_job_id}", summary="Get S3 scan job")
-async def get_scan_job(connection_id: str, scan_job_id: str) -> S3ScanJobResponse:
+async def get_scan_job(
+    connection_id: str,
+    scan_job_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> S3ScanJobResponse:
     with get_session_context() as session:
+        _get_connection_for_user(session, connection_id, user)
         scan_job = session.get(S3ScanJob, scan_job_id)
         if scan_job is None or scan_job.connection_id != connection_id:
             raise HTTPException(status_code=404, detail="S3 scan job not found")
@@ -397,6 +433,7 @@ async def list_objects(
     limit: int = 100,
     offset: int = 0,
     dataset_linked: Optional[bool] = None,
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> S3ObjectsResponse:
     if limit < 1 or limit > 500:
         raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
@@ -404,9 +441,7 @@ async def list_objects(
         raise HTTPException(status_code=400, detail="offset must be non-negative")
 
     with get_session_context() as session:
-        connection = session.get(S3Connection, connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="S3 connection not found")
+        _get_connection_for_user(session, connection_id, user)
 
         stmt = select(S3ObjectMetadata).where(S3ObjectMetadata.connection_id == connection_id)
         if dataset_linked is True:
@@ -429,8 +464,10 @@ async def register_object(
     connection_id: str,
     object_id: str,
     body: S3ObjectRegisterRequest,
+    user: AuthenticatedUser = Depends(get_current_user),
 ) -> S3ObjectRegisterResponse:
     with get_session_context() as session:
+        _get_connection_for_user(session, connection_id, user)
         metadata = session.get(S3ObjectMetadata, object_id)
         if metadata is None or metadata.connection_id != connection_id:
             raise HTTPException(status_code=404, detail="S3 object metadata not found")
@@ -477,11 +514,12 @@ async def register_object(
 
 
 @router.delete("/{connection_id}", status_code=204, summary="Delete S3 connection")
-async def delete_connection(connection_id: str) -> Response:
+async def delete_connection(
+    connection_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Response:
     with get_session_context() as session:
-        connection = session.get(S3Connection, connection_id)
-        if not connection:
-            raise HTTPException(status_code=404, detail="S3 connection not found")
+        connection = _get_connection_for_user(session, connection_id, user)
         session.delete(connection)
         session.commit()
     return Response(status_code=204)

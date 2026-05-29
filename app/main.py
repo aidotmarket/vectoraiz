@@ -617,6 +617,7 @@ def create_app() -> FastAPI:
         s3_connections.router,
         prefix="/api/s3-connections",
         tags=["s3-connections"],
+        dependencies=any_user_dependency,
     )
 
     # ADMIN + USER — Co-Pilot (REST + WebSocket)
