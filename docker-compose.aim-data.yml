@@ -19,8 +19,8 @@ services:
       - "${AIM_DATA_PORT:-8080}:80"
     volumes:
       - aim-data-data:/data
-      # Optional: host directory for local file import (read-only)
-      - ${HOST_IMPORT_DIR:-./import}:/data/import:ro
+      # Optional: host directory for local file import
+      - ${HOST_IMPORT_DIR:-./import}:/data/import
       # Optional: enables one-click auto-update from the UI
       # Remove this line if you don't want the container to have Docker access
       - /var/run/docker.sock:/var/run/docker.sock
