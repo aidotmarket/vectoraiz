@@ -136,6 +136,7 @@ async def upload_raw_file(
             stored_path.unlink()
         raise
     except Exception:
+        logger.exception("Upload handler failed")
         if stored_path.exists():
             stored_path.unlink()
         raise
