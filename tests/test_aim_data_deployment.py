@@ -30,8 +30,8 @@ def test_aim_data_compose_yaml_is_valid():
     assert "volumes" in data
 
 
-def test_aim_data_compose_uses_standard_vectoraiz_image_and_env():
-    """AIM Data deploys the shared vectoraiz image with channel config."""
+def test_aim_data_compose_uses_aim_data_image_and_env():
+    """AIM Data deploys its canonical image with channel config."""
     data = yaml.safe_load(COMPOSE_FILE.read_text())
 
     assert "vectoraiz" in data["services"]
@@ -40,7 +40,7 @@ def test_aim_data_compose_uses_standard_vectoraiz_image_and_env():
     service = data["services"]["vectoraiz"]
     env = set(service["environment"])
 
-    assert service["image"] == "ghcr.io/aidotmarket/vectoraiz:${VECTORAIZ_VERSION:-latest}"
+    assert service["image"] == "ghcr.io/aidotmarket/aim-data:${VECTORAIZ_VERSION:-latest}"
     assert REQUIRED_ENV.issubset(env)
     assert all(not item.startswith("AIM_DATA_VERSION=") for item in env)
     assert all(not any(item.startswith(f"{key}=") for key in FORBIDDEN_KEYS) for item in env)

@@ -5,12 +5,13 @@ on:
     branches: [main]
     paths:
       - 'docker-compose.customer.yml'
+      - 'docker-compose.aim-data.yml'
       - 'installers/**'
       - 'install.sh'
       - 'install.ps1'
-      - 'scripts/release.sh'
+      - 'scripts/**'
       - 'Dockerfile.customer'
-      - '.github/workflows/release.yml'
+      - '.github/workflows/**'
 
 jobs:
   verify-integrity:
@@ -72,6 +73,54 @@ jobs:
           echo "✅ QEMU setup action present"
 
           echo "✅ Multi-arch build configuration verified"
+
+      - name: Verify single AIM Data release target and entry point
+        shell: bash
+        run: |
+          AIM_DATA_IMAGE="ghcr.io/aidotmarket/aim-data"
+
+          if ! grep -qF "${AIM_DATA_IMAGE}:\${VERSION}" .github/workflows/release.yml; then
+            echo "::error::INTEGRITY FAILED — release.yml is missing the versioned AIM Data target."
+            exit 1
+          fi
+
+          if ! grep -qF "${AIM_DATA_IMAGE}:latest" .github/workflows/release.yml; then
+            echo "::error::INTEGRITY FAILED — release.yml is missing the stable AIM Data target."
+            exit 1
+          fi
+
+          if ! grep -qF "$AIM_DATA_IMAGE" scripts/release.sh; then
+            echo "::error::INTEGRITY FAILED — scripts/release.sh does not cover the AIM Data target."
+            exit 1
+          fi
+
+          while IFS= read -r workflow; do
+            case "$workflow" in
+              .github/workflows/release.yml|.github/workflows/ci-release-integrity.yml) continue ;;
+            esac
+            if grep -qF "$AIM_DATA_IMAGE" "$workflow"; then
+              echo "::error::INTEGRITY FAILED — second AIM Data release workflow: $workflow"
+              exit 1
+            fi
+          done < <(find .github/workflows -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) -print)
+
+          while IFS= read -r script; do
+            [ "$script" = "scripts/release.sh" ] && continue
+            if grep -qF "$AIM_DATA_IMAGE" "$script"; then
+              echo "::error::INTEGRITY FAILED — second AIM Data release script: $script"
+              exit 1
+            fi
+          done < <(find scripts -type f -print)
+
+          while IFS= read -r candidate; do
+            name="$(basename "$candidate" | tr '[:upper:]_' '[:lower:]-')"
+            if [[ "$name" == *release* && "$name" == *aim*data* ]]; then
+              echo "::error::INTEGRITY FAILED — second AIM Data release entry point: $candidate"
+              exit 1
+            fi
+          done < <(find .github/workflows scripts -type f -print)
+
+          echo "✅ AIM Data has one GHCR target and scripts/release.sh is its only release entry point"
 
       - name: Verify install scripts use versioned downloads
         run: |

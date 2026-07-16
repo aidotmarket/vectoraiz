@@ -12,6 +12,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 IMAGE="ghcr.io/aidotmarket/vectoraiz"
+AIM_DATA_IMAGE="ghcr.io/aidotmarket/aim-data"
+PRODUCT_IMAGES=("$IMAGE" "$AIM_DATA_IMAGE")
 COMPOSE_FILE="docker-compose.customer.yml"
 
 # ---------------------------------------------------------------------------
@@ -168,7 +170,8 @@ cmd_rc() {
   pass "GitHub pre-release created"
 
   echo -e "\n${GREEN}${BOLD}RC RELEASED: v${ver}${RESET}"
-  echo -e "  Image: ${IMAGE}:v${ver}"
+  echo -e "  vectorAIz image: ${IMAGE}:v${ver}"
+  echo -e "  AIM Data image: ${AIM_DATA_IMAGE}:v${ver}"
   echo -e "  Tag:   v${ver}\n"
 }
 
@@ -201,16 +204,20 @@ cmd_promote() {
   update_compose "$ver"
   commit_tag_push "$ver" "chore: release v${ver}" false
 
-  # Retag: copy multi-arch manifest from RC → stable (instant, no rebuild)
-  header "Retagging $IMAGE:${rc_tag} → $IMAGE:v${ver}"
-  "$DOCKER" buildx imagetools create \
-    --tag "$IMAGE:v${ver}" \
-    "$IMAGE:${rc_tag}" \
-    || die "Failed to retag $IMAGE:${rc_tag} → v${ver}" \
-           "Verify RC image exists: $DOCKER manifest inspect $IMAGE:${rc_tag}"
-  pass "Multi-arch retag complete"
+  # Promote each product target independently. The release workflow builds both
+  # targets from one source SHA; no cross-repository digest comparison is needed.
+  for image in "${PRODUCT_IMAGES[@]}"; do
+    header "Retagging ${image}:${rc_tag} → ${image}:v${ver}"
+    "$DOCKER" buildx imagetools create \
+      --tag "${image}:v${ver}" \
+      "${image}:${rc_tag}" \
+      || die "Failed to retag ${image}:${rc_tag} → v${ver}" \
+             "Verify RC image exists: $DOCKER manifest inspect ${image}:${rc_tag}"
+    pass "Multi-arch retag complete for $image"
+  done
 
-  # Smoke: pull the image
+  # Preserve the existing vectorAIz product smoke. Added cross-product smoke
+  # and cross-repository digest matching are intentionally out of scope.
   info "Pulling image..."
   "$DOCKER" pull "$IMAGE:v${ver}" &>/dev/null && pass "docker pull OK" || die "docker pull failed"
 
@@ -220,7 +227,8 @@ cmd_promote() {
   pass "GitHub release created (latest)"
 
   echo -e "\n${GREEN}${BOLD}STABLE RELEASED: v${ver}${RESET}  (promoted from $rc_tag)"
-  echo -e "  Image: ${IMAGE}:v${ver}"
+  echo -e "  vectorAIz image: ${IMAGE}:v${ver}"
+  echo -e "  AIM Data image: ${AIM_DATA_IMAGE}:v${ver}"
   echo -e "  Tag:   v${ver}\n"
 }
 
