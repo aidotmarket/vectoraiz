@@ -10,6 +10,10 @@
 #   docker compose -f docker-compose.aim-data.yml up -d
 #
 # First run: Complete setup wizard to create admin account.
+#
+# Version pinning: VECTORAIZ_VERSION defaults to "latest". To pin a release,
+# include the v prefix exactly as published on GHCR, e.g. VECTORAIZ_VERSION=v1.20.42
+# (a bare "1.20.42" resolves to a nonexistent tag).
 # =============================================================================
 
 services:
