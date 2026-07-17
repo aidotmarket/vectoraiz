@@ -124,11 +124,9 @@ jobs:
         run: |
           VERSION="${{ needs.verify-release.outputs.version }}"
           IS_RC="${{ needs.verify-release.outputs.is_rc }}"
-          TAGS="$(printf '%s\n%s' \
-            "ghcr.io/aidotmarket/vectoraiz:${VERSION}" \
-            "ghcr.io/aidotmarket/aim-data:${VERSION}")"
+          TAGS="ghcr.io/aidotmarket/vectoraiz:${VERSION}"
           if [ "$IS_RC" != "true" ]; then
-            TAGS="$(printf '%s\nghcr.io/aidotmarket/vectoraiz:latest\nghcr.io/aidotmarket/aim-data:latest' "$TAGS")"
+            TAGS="$(printf '%s\nghcr.io/aidotmarket/vectoraiz:latest' "$TAGS")"
           fi
           echo "tags<<EOF" >> "$GITHUB_OUTPUT"
           echo "$TAGS" >> "$GITHUB_OUTPUT"

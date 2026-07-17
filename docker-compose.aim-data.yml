@@ -11,6 +11,9 @@
 #
 # First run: Complete setup wizard to create admin account.
 #
+# Image ownership: the canonical image ships from the standalone aidotmarket/aim-data
+# repository's own release train. This compose merely consumes it.
+#
 # Version pinning: VECTORAIZ_VERSION defaults to "latest". To pin a release,
 # include the v prefix exactly as published on GHCR, e.g. VECTORAIZ_VERSION=v1.20.42
 # (a bare "1.20.42" resolves to a nonexistent tag).
