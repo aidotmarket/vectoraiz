@@ -19,6 +19,7 @@ from typing import Awaitable, Callable, List, Optional, Tuple
 
 import httpx
 
+from app.core.local_only_guard import is_local_only
 from app.services.allie_provider import AllieDisabledError, AllieTimeoutError, AllieUsage, read_allie_config
 from app.services.allai_tool_executor import AllAIToolExecutor
 
@@ -158,6 +159,11 @@ class AgenticAllieProvider:
         tools: List[dict],
     ) -> dict:
         """Call ai.market proxy for tool-enabled agentic LLM request."""
+        if is_local_only():
+            raise AllieDisabledError(
+                "Allie requires an ai.market connection. "
+                "Switch to connected mode to use Allie."
+            )
         from app.config import settings
 
         config = read_allie_config()

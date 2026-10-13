@@ -31,6 +31,8 @@ from typing import AsyncIterator, Optional
 
 import httpx
 
+from app.core.local_only_guard import is_local_only
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,6 +166,11 @@ class AiMarketAllieProvider(BaseAllieProvider):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
     ):
+        if is_local_only():
+            raise AllieDisabledError(
+                "Allie requires an ai.market connection. "
+                "Switch to connected mode to use Allie."
+            )
         from app.config import settings
         self.base_url = (base_url or settings.ai_market_url).rstrip("/")
         self.api_key = api_key or settings.internal_api_key
@@ -177,6 +184,11 @@ class AiMarketAllieProvider(BaseAllieProvider):
         chat_history: Optional[list] = None,
     ) -> AsyncIterator[AllieStreamChunk]:
         """Stream response from ai.market Allie proxy via SSE."""
+        if is_local_only():
+            raise AllieDisabledError(
+                "Allie requires an ai.market connection. "
+                "Switch to connected mode to use Allie."
+            )
         messages = []
         if context:
             messages.append({"role": "user", "content": context})
@@ -355,7 +367,9 @@ def get_allie_provider() -> BaseAllieProvider:
             logger.info("Allie provider: MockAllieProvider (env)")
         elif not provider_type:
             # No explicit env var — check config file written by serial activation
-            config = read_allie_config()
+            # Standalone retains the local mock fallback without loading any
+            # private credentials left by a previous connected installation.
+            config = None if is_local_only() else read_allie_config()
             if config:
                 _provider_instance = AiMarketAllieProvider(
                     serial=config["serial_number"],

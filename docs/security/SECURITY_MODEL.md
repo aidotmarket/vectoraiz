@@ -45,9 +45,29 @@ vectorAIz backend → ai.market proxy → Anthropic Claude API
 | Dataset upload/process | Yes | Yes |
 | Credit metering | Yes | Skipped |
 
-The standalone guard (`is_local_only()`) is checked at the service layer.
-Attempting to call Allie in standalone mode raises `AllieDisabledError`, which
-the WebSocket handler converts to an `ALLIE_DISABLED` error message.
+The standalone guard (`is_local_only()`) is checked by Co-Pilot services and
+both real ai.market providers. The agentic proxy rejects calls before reading
+allAI credentials or constructing an HTTP client/request. The streaming
+provider rejects construction in standalone mode and checks again before
+building messages or opening attachments, including when a connected provider
+was cached before the mode changed. These shared boundaries also cover RAG,
+context summarization and website chat callers. Real provider attempts raise
+`AllieDisabledError`; the WebSocket handler converts it to `ALLIE_DISABLED`.
+
+Portal chat keeps its existing portal authentication, request validation and
+rate limiting. In standalone mode it returns an SSE `{"type":"error","text":...}`
+explaining that Allie requires connected mode, before constructing or calling
+a provider. `allai_enabled` does not override the standalone mode boundary.
+The default local mock fallback and explicit mock provider remain available
+without reading retained allAI credentials; local retrieval is unaffected.
+
+Offline regression verification mounts the actual portal router and auth
+dependency in an owned minimal app and uses real provider loops with synthetic
+credentials and fake HTTP transport. It checks denial before credential reads,
+attachment opens, HTTP client construction and transport, plus connected
+payload/header/stream/tool-summary controls. This is bounded verification of
+the allAI paths, not a full application lifespan, live provider test or proof
+that every unrelated integration is air-gapped.
 
 ## Input Sanitization Layers
 

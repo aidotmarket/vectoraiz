@@ -720,6 +720,10 @@ class _FakeAsyncClient:
 class TestAiMarketAllieProvider:
     """Test the AiMarketAllieProvider SSE client."""
 
+    @pytest.fixture(autouse=True)
+    def connected_mode(self, monkeypatch):
+        monkeypatch.setattr("app.core.local_only_guard.settings.mode", "connected")
+
     def _make_provider(self):
         """Create an AiMarketAllieProvider with test config."""
         provider = AiMarketAllieProvider.__new__(AiMarketAllieProvider)
@@ -910,6 +914,10 @@ class TestAiMarketAllieProvider:
 
 class TestGetAllieProviderFactory:
     """Test the get_allie_provider() factory function."""
+
+    @pytest.fixture(autouse=True)
+    def connected_mode(self, monkeypatch):
+        monkeypatch.setattr("app.core.local_only_guard.settings.mode", "connected")
 
     def test_mock_provider_default(self):
         """Default provider is MockAllieProvider."""

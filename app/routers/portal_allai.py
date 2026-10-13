@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.core.local_only_guard import is_local_only
 from app.middleware.portal_auth import get_portal_session
 from app.schemas.portal import PortalSession, PortalTier
 from app.services.portal_tool_filter import (
@@ -123,6 +124,25 @@ async def portal_allai_chat(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Chat rate limit exceeded (20 requests per hour). Please try again later.",
+        )
+
+    if is_local_only():
+        async def disabled_stream():
+            event = json.dumps({
+                "type": "error",
+                "text": "Allie requires an ai.market connection. "
+                "Switch to connected mode to use Allie.",
+            })
+            yield f"data: {event}\n\n"
+
+        return StreamingResponse(
+            disabled_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     # Build messages for LLM

@@ -50,6 +50,8 @@ from app.routers.portal_allai import (
 @pytest.fixture(autouse=True)
 def reset_portal(tmp_path, monkeypatch):
     """Reset portal config, JWT secret, and rate limits for each test."""
+    # These are connected chat/ACL controls; standalone has its own regression.
+    monkeypatch.setattr("app.core.local_only_guard.settings.mode", "connected")
     monkeypatch.setattr("app.models.portal._PORTAL_CONFIG_PATH", tmp_path / "portal_config.json")
     monkeypatch.setattr("app.middleware.portal_auth._PORTAL_JWT_SECRET_PATH", tmp_path / "portal_jwt.key")
     monkeypatch.setattr("app.middleware.portal_auth._portal_jwt_secret", None)
