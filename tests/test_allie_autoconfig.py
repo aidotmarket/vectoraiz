@@ -30,8 +30,9 @@ from app.services.allie_provider import (
 
 
 @pytest.fixture(autouse=True)
-def clean_provider_singleton():
+def clean_provider_singleton(monkeypatch):
     """Reset the provider singleton before and after each test."""
+    monkeypatch.setattr("app.core.local_only_guard.settings.mode", "connected")
     reset_provider()
     yield
     reset_provider()

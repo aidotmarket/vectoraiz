@@ -18,7 +18,8 @@ from app.services.allie_provider import (
 
 
 @pytest.fixture(autouse=True)
-def _reset():
+def _reset(monkeypatch):
+    monkeypatch.setattr("app.core.local_only_guard.settings.mode", "connected")
     reset_provider()
     yield
     reset_provider()
