@@ -66,6 +66,14 @@ const PortalAllAIChat = () => {
           });
         } else if (event.type === "error") {
           setError(event.text);
+          // Remove only the empty placeholder; keep any partial response.
+          setMessages((prev) => {
+            const last = prev[prev.length - 1];
+            if (last.role === "assistant" && !last.content) {
+              return prev.slice(0, -1);
+            }
+            return prev;
+          });
         }
       }
     } catch (err: any) {
