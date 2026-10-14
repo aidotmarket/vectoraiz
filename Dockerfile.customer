@@ -37,6 +37,10 @@ RUN pip install --no-cache-dir --prefix=/install \
     --extra-index-url https://download.pytorch.org/whl/cpu \
     -r requirements.txt
 
+# Fail on numerical runtime incompatibilities before downloading models.
+RUN PYTHONPATH=/install/lib/python3.11/site-packages \
+    python -c "import numpy; import pandas; import pyarrow.parquet; import duckdb"
+
 # Pre-download NLTK data
 RUN PYTHONPATH=/install/lib/python3.11/site-packages \
     python -c "import nltk; nltk.download('punkt', download_dir='/install/nltk_data'); nltk.download('averaged_perceptron_tagger', download_dir='/install/nltk_data')"
