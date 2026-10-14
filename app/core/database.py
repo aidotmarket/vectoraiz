@@ -29,6 +29,7 @@ from sqlalchemy.exc import OperationalError
 from sqlmodel import Session as SQLModelSession, SQLModel, create_engine
 
 from app.config import settings
+from app.core.database_url import normalize_database_url
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ _legacy_engine: Optional[Engine] = None
 
 def _build_engine(url: str) -> Engine:
     """Create an engine appropriate for the database backend."""
+    url = normalize_database_url(url)
     if url.startswith("sqlite"):
         # Ensure parent directory exists
         db_path = url.replace("sqlite:///", "")
@@ -91,7 +93,7 @@ def get_engine() -> Engine:
     global _engine
     if _engine is None:
         _engine = _build_engine(DATABASE_URL)
-        logger.info("Database engine created: %s", DATABASE_URL.split("@")[-1] if "@" in DATABASE_URL else DATABASE_URL)
+        logger.info("Database engine created: %s", _engine.dialect.name)
     return _engine
 
 
@@ -317,7 +319,8 @@ def _run_alembic_upgrade() -> None:
             return
 
         cfg = Config(str(alembic_ini))
-        cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+        # ConfigParser needs escaped percent signs for URL-encoded values.
+        cfg.set_main_option("sqlalchemy.url", normalize_database_url(DATABASE_URL).replace("%", "%%"))
         command.upgrade(cfg, "head")
         logger.info("Alembic migrations applied (upgrade head)")
     except Exception as exc:
