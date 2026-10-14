@@ -13,6 +13,7 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlmodel import SQLModel
+from app.core.database_url import normalize_database_url
 
 # Import all BQ-111 models so their tables are registered on metadata
 from app.models.dataset import DatasetRecord  # noqa: F401
@@ -29,8 +30,12 @@ config = context.config
 
 # Override sqlalchemy.url from DATABASE_URL env var (used in Docker deployments)
 database_url = os.environ.get("DATABASE_URL")
+if not database_url:
+    database_url = config.get_main_option("sqlalchemy.url")
 if database_url:
-    config.set_main_option("sqlalchemy.url", database_url)
+    # Normalize both CLI fallback and environment/programmatic URLs. Escape
+    # percent signs for ConfigParser; consumers receive the original encoding.
+    config.set_main_option("sqlalchemy.url", normalize_database_url(database_url).replace("%", "%%"))
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
