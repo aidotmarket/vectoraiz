@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+if __name__ != "__main__":
+    raise unittest.SkipTest("Run this isolated harness directly; it replaces product dependencies")
+
 OWNED = tempfile.TemporaryDirectory(prefix="r305-role-")
 for field in ("DATA_DIRECTORY", "UPLOAD_DIRECTORY", "PROCESSED_DIRECTORY", "RAW_FILE_IMPORT_DIRECTORY", "SERIAL_DATA_DIR", "KEYSTORE_PATH"):
     os.environ["VECTORAIZ_" + field] = str(Path(OWNED.name) / field.lower())
