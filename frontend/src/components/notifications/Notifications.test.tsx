@@ -205,6 +205,33 @@ describe("notification read feedback", () => {
 });
 
 describe("notification bell count", () => {
+  it.each(["success", "failure"])("does not show count failure while a post-read count is pending before %s", async (outcome) => {
+    const pending = deferred<{ count: number }>();
+    api.unreadCount.mockResolvedValueOnce({ count: 75 }).mockResolvedValueOnce({ count: 75 })
+      .mockReturnValueOnce(pending.promise).mockResolvedValue({ count: 74 });
+    render(<NotificationBell />);
+    fireEvent.click(await screen.findByRole("button", { name: "Notifications, 75 unread" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Notice notice/ }));
+    await waitFor(() => expect(api.unreadCount).toHaveBeenCalledTimes(3));
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Notifications, 75 unread" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    await act(async () => {
+      if (outcome === "success") pending.resolve({ count: 74 });
+      else pending.reject(new Error("Count refused"));
+    });
+    if (outcome === "failure") {
+      expect(screen.getByRole("alert")).toHaveTextContent("The unread count could not be refreshed.");
+      expect(screen.getByRole("button", { name: "Notifications, 75 unread (stale; count unavailable)" })).toBeVisible();
+      const retry = screen.getByRole("button", { name: "Retry" });
+      expect(retry).toBeEnabled();
+      fireEvent.click(retry);
+    }
+    await waitFor(() => expect(screen.getByRole("button", { name: "Notifications, 74 unread" })).toBeVisible());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.unreadCount).toHaveBeenCalledTimes(outcome === "success" ? 3 : 4);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
   it("shows 74 global unread after reading one of 50 rows from 75", async () => {
     api.list.mockResolvedValue({ notifications: Array.from({ length: 50 }, (_, i) => row(String(i))), count: 50 });
     api.unreadCount.mockResolvedValueOnce({ count: 75 }).mockResolvedValueOnce({ count: 75 }).mockResolvedValue({ count: 74 });

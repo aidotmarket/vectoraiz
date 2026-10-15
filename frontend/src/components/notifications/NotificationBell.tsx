@@ -48,8 +48,7 @@ export default function NotificationBell() {
   };
 
   const handleRefreshUnreadCount = () => {
-    // Keep the last known count, visibly stale, until this global read succeeds.
-    setCountError(true);
+    // Keep the last known count while this global read is pending.
     return fetchUnreadCount();
   };
   const countLabel = unreadCount === null
