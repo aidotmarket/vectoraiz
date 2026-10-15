@@ -36,6 +36,8 @@ Most AI data tools send your data to the cloud. vectorAIz doesn't. Everything ru
 git clone https://github.com/aidotmarket/vectoraiz.git && cd vectoraiz && ./start.sh
 ```
 
+The updated source scripts preserve existing Docker data volumes on reruns and reuse `.env`. Older versions of `start.sh` and the macOS installer, including v1.20.43, contain automatic cleanup; do not rerun them against an existing installation. Use scripts containing the data-preservation correction before retrying. Keep a backup of the original `.env`: its database password and application secrets are needed to use existing data. If `.env` is missing while data volumes remain, restore the original file to the startup directory (`~/vectoraiz/.env` for the macOS installer). A health timeout is a reason to inspect Compose logs, not to delete volumes.
+
 ### Option 2: Platform installers
 
 Download from the [latest release](https://github.com/aidotmarket/vectoraiz/releases/latest):

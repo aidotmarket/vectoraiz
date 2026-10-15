@@ -82,6 +82,11 @@ warn() {
 
 is_port_free() {
     local port=$1
+    # A running service in this Compose project can keep its published port.
+    # This avoids stopping the deployment just to pass port detection on rerun.
+    if [ -f .env ] && docker compose -f "$COMPOSE_FILE" port vectoraiz 80 2>/dev/null | grep -q ":${port}$"; then
+        return 0
+    fi
     if command -v lsof &>/dev/null; then
         ! lsof -i :"$port" -sTCP:LISTEN &>/dev/null
     elif command -v ss &>/dev/null; then
@@ -127,29 +132,27 @@ success "Docker is running"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Preserve existing deployment data. Only generate credentials for a new install.
+# Compose's default project name is the normalized directory basename; an explicit
+# environment override takes precedence. Compare full volume names, never prefixes.
+if [ ! -f ".env" ]; then
+    DATA_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$SCRIPT_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')}"
+    if ! DATA_VOLUMES=$(docker volume ls --format '{{.Name}}'); then
+        fail "Cannot check existing data volumes. Restore the original .env if this is an existing installation, then retry."
+    fi
+    while IFS= read -r DATA_VOLUME; do
+        case "$DATA_VOLUME" in
+            "${DATA_PROJECT}_vectoraiz-data"|"${DATA_PROJECT}_postgres-data"|"${DATA_PROJECT}_qdrant-storage")
+                fail "Existing installation data found, but the original .env is missing. Restore the original .env to $SCRIPT_DIR/.env (including the original database password and application secrets), then rerun. Keep all Docker volumes; new credentials cannot recover existing data. No configuration or data has been changed."
+                ;;
+        esac
+    done <<< "$DATA_VOLUMES"
+fi
+# Compose pull/up below manages this deployment without deleting volumes or
+# removing containers from other installations.
+
 if [ ! -f "$COMPOSE_FILE" ]; then
     fail "Cannot find $COMPOSE_FILE in $(pwd)"
-fi
-
-# ─── Step 2b: Clean stale Docker resources from previous install ─
-EXISTING_VOLUMES=$(docker volume ls --filter "name=vectoraiz_" --format "{{.Name}}" 2>/dev/null)
-if [ -n "$EXISTING_VOLUMES" ]; then
-    info "Found existing vectorAIz volumes. Cleaning up stale data..."
-    # Stop any running containers first
-    if [ -f "$COMPOSE_FILE" ]; then
-        docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
-    else
-        # No compose file, remove volumes directly
-        docker container ls -a --filter "name=vectoraiz" --format "{{.ID}}" | xargs -r docker rm -f 2>/dev/null || true
-        echo "$EXISTING_VOLUMES" | xargs -r docker volume rm 2>/dev/null || true
-    fi
-    success "Cleaned up previous installation"
-fi
-
-EXISTING_CONTAINERS=$(docker container ls -a --filter "name=vectoraiz" --format "{{.ID}}" 2>/dev/null)
-if [ -n "$EXISTING_CONTAINERS" ]; then
-    info "Removing stale containers..."
-    echo "$EXISTING_CONTAINERS" | xargs -r docker rm -f 2>/dev/null || true
 fi
 
 # ─── Step 3: Port detection ─────────────────────────────────────
@@ -332,7 +335,7 @@ if [ $WAITED -ge $MAX_WAIT ]; then
     warn "Timed out waiting for health check."
     echo -e "  Check logs: ${BOLD}docker compose -f $COMPOSE_FILE logs${NC}"
     echo -e "  The app may still be starting. Try opening ${BOLD}$URL${NC} in a minute."
-    echo -e "  ${YELLOW}If this is a reinstall, try:${NC} docker volume rm vectoraiz_postgres-data && rerun the installer"
+    echo -e "  Keep your .env and Docker volumes. If configuration is missing, restore the original .env before rerunning."
 else
     success "All services healthy"
 fi

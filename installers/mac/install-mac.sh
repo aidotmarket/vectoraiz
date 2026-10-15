@@ -196,6 +196,10 @@ generate_secret() {
 
 is_port_free() {
     local port=$1
+    # Reuse this deployment's published port without tearing down its services.
+    if [ -f "$INSTALL_DIR/.env" ] && docker compose -f "$INSTALL_DIR/$COMPOSE_FILE" port vectoraiz 80 2>/dev/null | grep -q ":${port}$"; then
+        return 0
+    fi
     ! lsof -i :"$port" -sTCP:LISTEN &>/dev/null
 }
 
@@ -290,31 +294,24 @@ else
     fi
 fi
 
-# ─── Step 1.5: Clean up previous installation ───────────────────
-EXISTING_CONTAINERS=$(docker ps -a --filter "name=vectoraiz-" --format "{{.Names}}" 2>/dev/null)
-EXISTING_VOLUMES=$(docker volume ls --filter "name=vectoraiz_" --format "{{.Name}}" 2>/dev/null)
-
-if [ -n "$EXISTING_CONTAINERS" ] || [ -n "$EXISTING_VOLUMES" ]; then
-    warn "Existing vectorAIz installation detected (Docker containers/volumes)."
-    info "Cleaning up previous installation..."
-
-    if [ -f "$INSTALL_DIR/$COMPOSE_FILE" ]; then
-        # Preferred: use compose to tear down cleanly (removes containers + volumes)
-        cd "$INSTALL_DIR" && docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null
-        cd "$HOME" 2>/dev/null || cd /tmp
-    else
-        # Fallback: manually stop/remove containers and volumes
-        if [ -n "$EXISTING_CONTAINERS" ]; then
-            echo "$EXISTING_CONTAINERS" | xargs -r docker stop 2>/dev/null
-            echo "$EXISTING_CONTAINERS" | xargs -r docker rm 2>/dev/null
-        fi
-        if [ -n "$EXISTING_VOLUMES" ]; then
-            echo "$EXISTING_VOLUMES" | xargs -r docker volume rm 2>/dev/null
-        fi
+# Preserve existing deployment data. Only generate credentials for a new install.
+# Compose's default project name is the normalized directory basename; an explicit
+# environment override takes precedence. Compare full volume names, never prefixes.
+if [ ! -f "$INSTALL_DIR/.env" ]; then
+    DATA_PROJECT="${COMPOSE_PROJECT_NAME:-$(basename "$INSTALL_DIR" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-' | sed 's/^[-_]*//')}"
+    if ! DATA_VOLUMES=$(docker volume ls --format '{{.Name}}'); then
+        fail "Cannot check existing data volumes. Restore the original .env if this is an existing installation, then retry."
     fi
-
-    success "Previous installation cleaned up"
+    while IFS= read -r DATA_VOLUME; do
+        case "$DATA_VOLUME" in
+            "${DATA_PROJECT}_vectoraiz-data"|"${DATA_PROJECT}_postgres-data"|"${DATA_PROJECT}_qdrant-storage"|"${DATA_PROJECT}_aim-data-data")
+                fail "Existing installation data found, but the original .env is missing. Restore the original .env to $INSTALL_DIR/.env (including the original database password and application secrets), then rerun. Keep all Docker volumes; new credentials cannot recover existing data. No configuration or data has been changed."
+                ;;
+        esac
+    done <<< "$DATA_VOLUMES"
 fi
+# Compose pull/up below manages this deployment without deleting volumes or
+# removing containers from other installations.
 
 # ─── Step 2: Create install directory ────────────────────────────
 info "Setting up install directory..."
@@ -403,9 +400,9 @@ if [ ! -f "$INSTALL_DIR/.env" ]; then
 fi
 
 # ─── Step 5: Generate .env ───────────────────────────────────────
-# On reinstall the .env won't exist because the user removed ~/vectoraiz.
-# The matching Docker volumes were already cleaned up in Step 1.5, so a fresh
-# POSTGRES_PASSWORD here will match the fresh postgres volume created at start.
+# Existing volumes require the original credentials; the check above stops a
+# reinstall with missing .env before any configuration is written. Generate new
+# secrets only for a new installation, preserving existing .env on reruns.
 if [ ! -f "$INSTALL_DIR/.env" ]; then
     info "Generating secure configuration..."
     cat > "$INSTALL_DIR/.env" <<EOF
