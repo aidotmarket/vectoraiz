@@ -53,12 +53,14 @@ function isDiagnosticAction(n: ApiNotification): boolean {
 interface NotificationSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onRefreshUnreadCount?: () => Promise<boolean>;
+  countError?: boolean;
+  onRefreshUnreadCount?: () => Promise<void>;
 }
 
 export default function NotificationSheet({
   open,
   onOpenChange,
+  countError: bellCountError,
   onRefreshUnreadCount,
 }: NotificationSheetProps) {
   const [notifications, setNotifications] = useState<ApiNotification[]>([]);
@@ -66,7 +68,8 @@ export default function NotificationSheet({
   const [hasLoaded, setHasLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [readError, setReadError] = useState(false);
-  const [countError, setCountError] = useState(false);
+  const [localCountError, setLocalCountError] = useState(false);
+  const countError = bellCountError ?? localCountError;
   const [reading, setReading] = useState(false);
   const [transmitting, setTransmitting] = useState<string | null>(null);
   const mounted = useRef(false);
@@ -102,14 +105,13 @@ export default function NotificationSheet({
   const refreshUnreadCount = async () => {
     try {
       // The Bell owns ordering between polling and mutation count refreshes.
-      const refreshed = onRefreshUnreadCount
-        ? await onRefreshUnreadCount()
-        : await notificationsApi.unreadCount().then(() => true);
+      if (onRefreshUnreadCount) await onRefreshUnreadCount();
+      else await notificationsApi.unreadCount();
       if (!mounted.current) return;
-      setCountError(!refreshed);
+      if (bellCountError === undefined) setLocalCountError(false);
     } catch {
       if (!mounted.current) return;
-      setCountError(true);
+      if (bellCountError === undefined) setLocalCountError(true);
     }
   };
 
@@ -196,7 +198,7 @@ export default function NotificationSheet({
           )}
           {countError && (
             <div role="alert" className="text-sm text-destructive py-3">
-              Notification updated, but the unread count could not be refreshed.
+              The unread count could not be refreshed.
               <Button variant="outline" size="sm" className="ml-2" disabled={reading} onClick={refreshUnreadCount}>
                 Retry
               </Button>

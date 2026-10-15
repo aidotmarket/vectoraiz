@@ -22,14 +22,12 @@ export default function NotificationBell() {
     const request = ++countRequest.current;
     try {
       const res = await notificationsApi.unreadCount();
-      if (!mounted.current || request !== countRequest.current) return true;
+      if (!mounted.current || request !== countRequest.current) return;
       setUnreadCount(res.count);
       setCountError(false);
-      return true;
     } catch {
-      if (!mounted.current || request !== countRequest.current) return true;
+      if (!mounted.current || request !== countRequest.current) return;
       setCountError(true);
-      return false;
     }
   }, []);
 
@@ -91,6 +89,7 @@ export default function NotificationBell() {
       <NotificationSheet
         open={sheetOpen}
         onOpenChange={handleOpenChange}
+        countError={countError}
         onRefreshUnreadCount={handleRefreshUnreadCount}
       />
     </>

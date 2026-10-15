@@ -8,7 +8,7 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("@/lib/api", () => ({ notificationsApi: api, diagnosticsApi: { transmit: api.transmit } }));
 vi.mock("@/components/ui/sheet", () => ({
-  Sheet: ({ open, children }: { open: boolean; children: React.ReactNode }) => open ? <div>{children}</div> : null,
+  Sheet: ({ open, onOpenChange, children }: { open: boolean; onOpenChange: (open: boolean) => void; children: React.ReactNode }) => open ? <div><button onClick={() => onOpenChange(false)}>Close notifications</button>{children}</div> : null,
   SheetContent: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SheetHeader: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   SheetTitle: ({ children }: { children: React.ReactNode }) => <h2>{children}</h2>,
@@ -38,10 +38,9 @@ function sheet() {
     try {
       const res = await api.unreadCount();
       count(res.count);
-      return true;
-    } catch {
+    } catch (error) {
       count(null);
-      return false;
+      throw error;
     }
   } };
   const view = render(<NotificationSheet {...props} />);
@@ -184,6 +183,16 @@ describe("notification read feedback", () => {
     fireEvent.click(await screen.findByRole("button", { name: /Notice notice/ }));
     await waitFor(() => expect(api.unreadCount).toHaveBeenCalledTimes(1));
   });
+  it("shows and retries a failed count when used without a Bell", async () => {
+    api.unreadCount.mockRejectedValueOnce(new Error("Count refused"));
+    render(<NotificationSheet open onOpenChange={vi.fn()} />);
+    fireEvent.click(await screen.findByRole("button", { name: /Notice notice/ }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/unread count/i);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.queryByRole("alert")).not.toBeInTheDocument());
+    expect(api.unreadCount).toHaveBeenCalledTimes(2);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
   it("keeps diagnostic actions inert through ordinary reads and retry", async () => {
     api.list.mockResolvedValue({ notifications: [{ ...row(), type: "action_required", category: "diagnostic", metadata_json: '{"action":"transmit_diagnostic"}' }], count: 1 });
     sheet();
@@ -274,4 +283,59 @@ describe("notification bell count", () => {
     await act(async () => slow.resolve({ count: 74 }));
     expect(screen.getByRole("button", { name: "Notifications, 73 unread" })).toBeVisible();
   });
+  it.each(["poll", "reopen"])("clears the Sheet count warning after authoritative recovery via %s", async (recovery) => {
+    vi.useFakeTimers();
+    api.unreadCount.mockResolvedValueOnce({ count: 75 }).mockResolvedValueOnce({ count: 75 })
+      .mockRejectedValueOnce(new Error("Count refused")).mockResolvedValue({ count: 74 });
+    render(<NotificationBell />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Notifications, 75 unread" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: /Notice notice/ }));
+    await act(async () => {});
+    expect(screen.getByRole("alert")).toHaveTextContent(/unread count/i);
+    expect(screen.getByRole("button", { name: /75.*stale/i })).toBeVisible();
+    if (recovery === "poll") {
+      await act(async () => vi.advanceTimersByTime(30_000));
+    } else {
+      fireEvent.click(screen.getByRole("button", { name: "Close notifications" }));
+      await act(async () => {});
+      fireEvent.click(screen.getByRole("button", { name: "Notifications, 74 unread" }));
+      await act(async () => {});
+    }
+    expect(screen.getByText("Notice notice")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Notifications, 74 unread" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
+  it.each(["success", "failure"])("retains Sheet retry after a newer failing poll overtakes a post-read count %s", async (outcome) => {
+    vi.useFakeTimers();
+    const slow = deferred<{ count: number }>();
+    api.unreadCount.mockResolvedValueOnce({ count: 75 }).mockResolvedValueOnce({ count: 75 })
+      .mockReturnValueOnce(slow.promise).mockRejectedValueOnce(new Error("Newer poll refused"))
+      .mockResolvedValue({ count: 73 });
+    render(<NotificationBell />);
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: "Notifications, 75 unread" }));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole("button", { name: /Notice notice/ }));
+    await act(async () => {});
+    await act(async () => vi.advanceTimersByTime(30_000));
+    await act(async () => {
+      if (outcome === "success") slow.resolve({ count: 74 });
+      else slow.reject(new Error("Older count refused"));
+    });
+    expect(screen.getByRole("button", { name: "Notifications, 75 unread (stale; count unavailable)" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent(/unread count/i);
+    const retry = screen.getByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+    await act(async () => {});
+    expect(screen.getByRole("button", { name: "Notifications, 73 unread" })).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.unreadCount).toHaveBeenCalledTimes(5);
+    expect(api.markRead).toHaveBeenCalledTimes(1);
+  });
+
 });
