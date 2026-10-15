@@ -524,7 +524,8 @@ printf "\r                                                          \r"
 if [ "$HEALTH_OK" = true ]; then
     success "All services healthy"
 else
-    warn "Timed out waiting for health check after ${MAX_WAIT}s."
+    print_failed
+    exit 1
 fi
 
 # ─── Step 11: Create .desktop file ───────────────────────────────

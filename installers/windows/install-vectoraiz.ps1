@@ -380,8 +380,7 @@ Write-Host "`r                                                          `r" -NoN
 if ($healthy) {
     Write-Success "All services healthy"
 } else {
-    Write-Warn "Timed out waiting for health check."
-    Write-Host "  The app may still be starting. Try opening $Url in a minute." -ForegroundColor DarkGray
+    Write-Fail "Timed out waiting for health check.`n  View logs: cd $InstallDir; docker compose -f $ComposeFile logs -f"
 }
 
 # ─── Step 10: Create shortcuts ───────────────────────────────────
