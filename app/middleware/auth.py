@@ -9,9 +9,11 @@ Provides:
     - require_admin, require_any convenience shortcuts
 
 JWT auth runs IN PARALLEL with the existing X-API-Key system:
-    1. Check vz_session cookie → decode JWT → verify role
-    2. Fall back to X-API-Key header → existing BQ-127 flow → default role="admin"
-    3. Neither present → 401
+    1. Connected Bearer → existing unified validator → validated role/scopes
+       (standalone role gate refuses before remote validation)
+    2. Check vz_session cookie → decode JWT → verify role
+    3. Fall back to X-API-Key header → existing BQ-127 flow → default role="admin"
+    4. Neither present → 401
 
 Phase: BQ-VZ-MULTI-USER — Admin/User Role Split
 Created: 2026-03-03
@@ -100,7 +102,7 @@ def decode_jwt_token(token: str) -> Optional[dict]:
 def role_required(*roles: str):
     """FastAPI dependency factory for endpoint-level role enforcement.
 
-    Checks authentication via JWT cookie or X-API-Key, then verifies the
+    Checks validated connected Bearer, JWT cookie or X-API-Key, then verifies the
     user's role is in the allowed set.
 
     Usage::
@@ -121,6 +123,22 @@ def role_required(*roles: str):
             request.state.user_role = "admin"
             # Still call get_current_user to set request.state.user
             user = await get_current_user(request)
+            return user
+
+        # Bearer has the same priority as in the existing unified authenticator.
+        # The role gate does not introduce remote validation in standalone mode.
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer ") and authorization.removeprefix("Bearer ").strip():
+            if settings.mode != "connected":
+                raise HTTPException(status_code=401, detail="Bearer role authentication requires connected mode")
+            user = await get_current_user(request)
+            user_role = getattr(request.state, "user_role", None)
+            if not user.is_valid:
+                raise HTTPException(status_code=401, detail="Not authenticated")
+            if user_role not in roles or (user_role == "admin" and "admin" not in user.scopes):
+                raise HTTPException(status_code=403, detail="Insufficient permissions")
+            if request.method not in ("GET", "HEAD", "OPTIONS") and "write" not in user.scopes:
+                raise HTTPException(status_code=403, detail="Insufficient permissions")
             return user
 
         # 1. Try JWT cookie first

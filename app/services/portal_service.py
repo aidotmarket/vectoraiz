@@ -97,13 +97,16 @@ class PortalService:
 
         for r in raw_results.get("results", []):
             row_data = r.get("row_data", {})
+            text_content = r.get("text_content", "")
             if display_cols:
-                row_data = {k: v for k, v in row_data.items() if k in display_cols}
+                row_data = {k: v for k, v in (row_data or {}).items() if k in display_cols}
+                # Retrieved text can contain hidden columns; never use it as a fallback.
+                text_content = "\n".join(f"{k}: {v}" for k, v in row_data.items())
 
             filtered_results.append({
                 "score": r.get("score"),
                 "row_data": row_data,
-                "text_content": r.get("text_content", ""),
+                "text_content": text_content,
             })
 
         # Get dataset name

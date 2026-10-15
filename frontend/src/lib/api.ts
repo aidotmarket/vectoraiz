@@ -54,7 +54,7 @@ export function clearAuthTokens(): void {
 }
 
 // Generic fetch wrapper with error handling
-async function apiFetch<T>(
+export async function apiFetch<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {

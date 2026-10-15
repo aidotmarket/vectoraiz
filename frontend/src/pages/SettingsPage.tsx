@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   HardDrive,
   Code,
@@ -66,7 +66,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
-import { getApiUrl, systemApi } from "@/lib/api";
+import { getApiUrl, systemApi, apiFetch } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { useMode } from "@/contexts/ModeContext";
@@ -1147,7 +1147,19 @@ client = QdrantClient(host="localhost", port=6333)`}
  * BQ-VZ-SHARED-SEARCH: Portal Settings Section
  * Inline component for admin portal configuration.
  */
-const PortalSettingsSection = () => {
+interface PortalDataset { id: string; original_filename?: string; filename?: string }
+interface PortalSettingsData {
+  enabled: boolean;
+  tier: "open" | "code" | "sso";
+  base_url: string;
+  active_session_count: number;
+  oidc_issuer?: string;
+  oidc_client_id?: string;
+  sso_enabled?: boolean;
+  datasets?: Record<string, { portal_visible: boolean }>;
+}
+
+export const PortalSettingsSection = () => {
   const brand = useBrand();
   const [portalEnabled, setPortalEnabled] = useState(false);
   const [portalTier, setPortalTier] = useState<"open" | "code" | "sso">("open");
@@ -1172,62 +1184,60 @@ const PortalSettingsSection = () => {
   const [accessLogs, setAccessLogs] = useState<Array<{ timestamp: string; oidc_email: string | null; action: string; detail: string | null }>>([]);
   const [showAccessLogs, setShowAccessLogs] = useState(false);
 
+  const [verified, setVerified] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [pending, setPending] = useState(false);
+  const busy = useRef(false);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
   const apiUrl = getApiUrl();
+  const begin = () => {
+    if (!verified || busy.current) return false;
+    busy.current = true;
+    setPending(true);
+    return true;
+  };
+  const finish = () => { busy.current = false; setPending(false); };
 
-  // Load portal config + datasets on mount
+  // Publish one verified snapshot; a failed read never becomes default config.
   useEffect(() => {
-    const loadPortalConfig = async () => {
+    let active = true;
+    setPortalLoading(true);
+    setVerified(false);
+    setPortalError(null);
+    const load = async () => {
       try {
-        const res = await fetch(`${apiUrl}/api/settings/portal`, {
-          credentials: "include",
-        });
-        if (res.ok) {
-          const data = await res.json();
-          setPortalEnabled(data.enabled);
-          setPortalTier(data.tier === "code" ? "code" : data.tier === "sso" ? "sso" : "open");
-          setPortalBaseUrl(data.base_url || "");
-          setPortalSessionCount(data.active_session_count || 0);
-          setOidcIssuer(data.oidc_issuer || "");
-          setOidcClientId(data.oidc_client_id || "");
-          setSsoEnabled(data.sso_enabled !== false);
+        const data = await apiFetch<PortalSettingsData>("/api/settings/portal", { credentials: "include" });
+        const dsData = await apiFetch<{ datasets: PortalDataset[] } | PortalDataset[]>("/api/datasets", { credentials: "include" });
+        const rows = Array.isArray(dsData) ? dsData : dsData.datasets;
+        if (!Array.isArray(rows) || typeof data.enabled !== "boolean" || typeof data.active_session_count !== "number") {
+          throw new Error("Invalid portal settings response");
         }
-
-        // Load datasets to show visibility toggles
-        const dsRes = await fetch(`${apiUrl}/api/datasets`, {
-          credentials: "include",
-        });
-        if (dsRes.ok) {
-          const dsData = await dsRes.json();
-          const datasets = (dsData.datasets || dsData || []).map((ds: { id: string; original_filename?: string; filename?: string }) => ({
-            id: ds.id,
-            name: ds.original_filename || ds.filename || ds.id,
-            visible: false,
-          }));
-
-          // Overlay portal visibility from config
-          const portalRes = await fetch(`${apiUrl}/api/settings/portal`, {
-            credentials: "include",
-          });
-          if (portalRes.ok) {
-            const portalData = await portalRes.json();
-            const portalDs = portalData.datasets || {};
-            datasets.forEach((ds: { id: string; visible: boolean }) => {
-              const cfg = portalDs[ds.id];
-              if (cfg) ds.visible = cfg.portal_visible;
-            });
-          }
-          setPortalDatasets(datasets);
-        }
+        if (!active) return;
+        setPortalEnabled(data.enabled);
+        setPortalTier(data.tier);
+        setPortalBaseUrl(data.base_url || "");
+        setPortalSessionCount(data.active_session_count);
+        setOidcIssuer(data.oidc_issuer || "");
+        setOidcClientId(data.oidc_client_id || "");
+        setSsoEnabled(data.sso_enabled !== false);
+        setPortalDatasets(rows.map(ds => ({
+          id: ds.id, name: ds.original_filename || ds.filename || ds.id,
+          visible: data.datasets?.[ds.id]?.portal_visible === true,
+        })));
+        setVerified(true);
       } catch {
-        setPortalError("Failed to load portal settings");
+        if (active) setPortalError("Portal settings unavailable. Configuration, datasets and sessions could not be verified.");
       } finally {
-        setPortalLoading(false);
+        if (active) setPortalLoading(false);
       }
     };
-    loadPortalConfig();
-  }, [apiUrl]);
+    void load();
+    return () => { active = false; };
+  }, [apiUrl, retry]);
 
   const savePortalSettings = async () => {
+    if (!begin()) return;
     setPortalSaving(true);
     setPortalError(null);
     try {
@@ -1243,16 +1253,12 @@ const PortalSettingsSection = () => {
         if (oidcClientSecret) body.oidc_client_secret = oidcClientSecret;
       }
 
-      const res = await fetch(`${apiUrl}/api/settings/portal`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(body),
+      const data = await apiFetch<PortalSettingsData>("/api/settings/portal", {
+        method: "PUT", credentials: "include", body: JSON.stringify(body),
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.detail || "Failed to save portal settings");
-      }
+      setPortalSessionCount(data.active_session_count);
+      setPortalBaseUrl(data.base_url);
+      setOidcClientSecret("");
       setPortalAccessCode("");
       toast({ title: "Portal settings saved" });
     } catch (err) {
@@ -1261,36 +1267,32 @@ const PortalSettingsSection = () => {
       toast({ title: "Error", description: msg, variant: "destructive" });
     } finally {
       setPortalSaving(false);
+      finish();
     }
   };
 
   const toggleDatasetVisibility = async (datasetId: string, visible: boolean) => {
+    if (!begin()) return;
     try {
-      await fetch(`${apiUrl}/api/settings/portal/datasets/${datasetId}`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ portal_visible: visible }),
+      const data = await apiFetch<{ portal_visible: boolean }>(`/api/settings/portal/datasets/${encodeURIComponent(datasetId)}`, {
+        method: "PUT", credentials: "include", body: JSON.stringify({ portal_visible: visible }),
       });
-      setPortalDatasets((prev) =>
-        prev.map((ds) => (ds.id === datasetId ? { ...ds, visible } : ds))
-      );
+      if (typeof data.portal_visible !== "boolean") throw new Error("Invalid visibility response");
+      setPortalDatasets(prev => prev.map(ds => ds.id === datasetId ? { ...ds, visible: data.portal_visible } : ds));
     } catch {
       toast({ title: "Failed to update dataset visibility", variant: "destructive" });
-    }
+    } finally { finish(); }
   };
 
   const revokeAllSessions = async () => {
+    if (!begin()) return;
     try {
-      await fetch(`${apiUrl}/api/settings/portal/revoke-sessions`, {
-        method: "POST",
-        credentials: "include",
-      });
+      await apiFetch("/api/settings/portal/revoke-sessions", { method: "POST", credentials: "include" });
       setPortalSessionCount(0);
       toast({ title: "All portal sessions revoked" });
     } catch {
       toast({ title: "Failed to revoke sessions", variant: "destructive" });
-    }
+    } finally { finish(); }
   };
 
   const codeStrength = (code: string): "weak" | "medium" | "strong" | "" => {
@@ -1303,7 +1305,14 @@ const PortalSettingsSection = () => {
   const strength = codeStrength(portalAccessCode);
   const shareUrl = portalBaseUrl ? `${portalBaseUrl}/portal` : "";
 
-  if (portalLoading) return null;
+  if (portalLoading || !verified) return (
+    <Card><CardHeader><CardTitle>Shared Search Portal</CardTitle></CardHeader>
+      <CardContent>
+        <p role="status">{portalLoading ? "Loading portal settings..." : portalError}</p>
+        {!portalLoading && <Button onClick={() => setRetry(n => n + 1)}>Retry portal settings</Button>}
+      </CardContent>
+    </Card>
+  );
 
   return (
     <Card className="bg-card border-border">
@@ -1319,10 +1328,12 @@ const PortalSettingsSection = () => {
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        <fieldset disabled={pending} className="space-y-4">
         {/* Enable toggle */}
         <div className="flex items-center justify-between">
           <Label htmlFor="portal-enabled">Enable Portal</Label>
           <Switch
+            disabled={pending}
             id="portal-enabled"
             checked={portalEnabled}
             onCheckedChange={setPortalEnabled}
@@ -1332,7 +1343,7 @@ const PortalSettingsSection = () => {
         {/* Tier selector */}
         <div className="space-y-1.5">
           <Label>Access Tier</Label>
-          <Select value={portalTier} onValueChange={(v) => setPortalTier(v as "open" | "code" | "sso")}>
+          <Select disabled={pending} value={portalTier} onValueChange={(v) => setPortalTier(v as "open" | "code" | "sso")}>
             <SelectTrigger>
               <SelectValue />
             </SelectTrigger>
@@ -1400,27 +1411,27 @@ const PortalSettingsSection = () => {
             <Button
               variant="outline"
               size="sm"
-              disabled={!oidcIssuer || oidcTesting}
+              disabled={!oidcIssuer || oidcTesting || pending}
               onClick={async () => {
+                if (!begin()) return;
                 setOidcTesting(true);
                 setOidcTestResult(null);
                 try {
-                  // Save first so the backend has the issuer
-                  const res = await fetch(`${apiUrl}/api/settings/portal/test-oidc`, {
-                    method: "POST",
-                    credentials: "include",
+                  const data = await apiFetch<{ success: boolean; error?: string }>("/api/settings/portal/test-oidc", {
+                    method: "POST", credentials: "include",
                   });
-                  const data = await res.json();
                   setOidcTestResult(data);
                 } catch {
                   setOidcTestResult({ success: false, error: "Connection failed" });
                 } finally {
                   setOidcTesting(false);
+                  finish();
                 }
               }}
             >
               {oidcTesting ? "Testing..." : "Test Connection"}
             </Button>
+            <p className="text-xs text-muted-foreground">Tests the saved OIDC configuration. Save changes before testing.</p>
             {oidcTestResult && (
               <p className={`text-xs ${oidcTestResult.success ? "text-green-500" : "text-destructive"}`}>
                 {oidcTestResult.success ? "Connection successful" : `Error: ${oidcTestResult.error}`}
@@ -1471,6 +1482,8 @@ const PortalSettingsSection = () => {
                 <div key={ds.id} className="flex items-center justify-between">
                   <span className="text-sm text-foreground truncate max-w-[250px]">{ds.name}</span>
                   <Switch
+                    aria-label={`Visibility for ${ds.name}`}
+                    disabled={pending}
                     checked={ds.visible}
                     onCheckedChange={(v) => toggleDatasetVisibility(ds.id, v)}
                   />
@@ -1506,21 +1519,24 @@ const PortalSettingsSection = () => {
                   setShowAccessLogs(false);
                   return;
                 }
-                try {
-                  const res = await fetch(`${apiUrl}/api/admin/portal/access-logs?limit=50`, {
-                    credentials: "include",
-                  });
-                  if (res.ok) {
-                    const data = await res.json();
-                    setAccessLogs(data.logs || []);
-                  }
-                } catch { /* ignore */ }
+                if (!begin()) return;
+                setLogsLoading(true);
+                setLogsError(null);
                 setShowAccessLogs(true);
+                try {
+                  const data = await apiFetch<{ logs: typeof accessLogs }>("/api/admin/portal/access-logs?limit=50", { credentials: "include" });
+                  if (!Array.isArray(data.logs)) throw new Error("Invalid access logs response");
+                  setAccessLogs(data.logs);
+                } catch {
+                  setLogsError("Access logs unavailable. Close and reopen to retry.");
+                } finally { setLogsLoading(false); finish(); }
               }}
             >
               {showAccessLogs ? "Hide Access Logs" : "View SSO Access Logs"}
             </Button>
-            {showAccessLogs && accessLogs.length > 0 && (
+            {showAccessLogs && logsError && <p role="alert">{logsError}</p>}
+            {showAccessLogs && logsLoading && <p role="status">Loading access logs...</p>}
+            {showAccessLogs && !logsError && !logsLoading && accessLogs.length > 0 && (
               <div className="max-h-48 overflow-y-auto border border-border rounded-md p-2 space-y-1">
                 {accessLogs.map((log, i) => (
                   <div key={i} className="text-xs text-muted-foreground flex gap-2">
@@ -1532,7 +1548,7 @@ const PortalSettingsSection = () => {
                 ))}
               </div>
             )}
-            {showAccessLogs && accessLogs.length === 0 && (
+            {showAccessLogs && !logsError && !logsLoading && accessLogs.length === 0 && (
               <p className="text-xs text-muted-foreground">No access logs yet.</p>
             )}
           </div>
@@ -1544,9 +1560,10 @@ const PortalSettingsSection = () => {
         )}
 
         {/* Save button */}
-        <Button onClick={savePortalSettings} disabled={portalSaving} className="w-full">
+        <Button onClick={savePortalSettings} disabled={pending} className="w-full">
           {portalSaving ? "Saving..." : "Save Portal Settings"}
         </Button>
+        </fieldset>
       </CardContent>
     </Card>
   );
