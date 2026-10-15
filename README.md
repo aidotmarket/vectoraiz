@@ -93,8 +93,8 @@ Once running:
 
 vectorAIz supports multiple deployment channels using the same application image and codebase.
 
-- Standard customer deployments use [`docker-compose.customer.yml`](/Users/max/Projects/vectoraiz/vectoraiz-monorepo/docker-compose.customer.yml). This is the default installer path.
-- `aim-data` is the seller-oriented variant and uses [`docker-compose.aim-data.yml`](/Users/max/Projects/vectoraiz/vectoraiz-monorepo/docker-compose.aim-data.yml) with `VECTORAIZ_CHANNEL=aim-data`.
+- Standard customer deployments use [`docker-compose.customer.yml`](docker-compose.customer.yml). This is the default installer path.
+- `aim-data` is the seller-oriented variant and uses [`docker-compose.aim-data.yml`](docker-compose.aim-data.yml) with `VECTORAIZ_CHANNEL=aim-data`.
 
 If you use an installer, pass `--channel aim-data` to deploy the `aim-data` experience. If you do not set a channel, the standard customer deployment is used.
 
