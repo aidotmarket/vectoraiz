@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Sheet,
   SheetContent,
@@ -53,53 +53,85 @@ function isDiagnosticAction(n: ApiNotification): boolean {
 interface NotificationSheetProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onUnreadCountChange?: (count: number) => void;
+  onRefreshUnreadCount?: () => Promise<boolean>;
 }
 
 export default function NotificationSheet({
   open,
   onOpenChange,
-  onUnreadCountChange,
+  onRefreshUnreadCount,
 }: NotificationSheetProps) {
   const [notifications, setNotifications] = useState<ApiNotification[]>([]);
   const [loading, setLoading] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [readError, setReadError] = useState(false);
+  const [countError, setCountError] = useState(false);
+  const [reading, setReading] = useState(false);
   const [transmitting, setTransmitting] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const listRequest = useRef(0);
+  const readPending = useRef(false);
 
-  const fetchNotifications = async () => {
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const fetchNotifications = useCallback(async () => {
+    const request = ++listRequest.current;
     setLoading(true);
     try {
       const res = await notificationsApi.list({ limit: 50 });
+      if (!mounted.current || request !== listRequest.current) return;
       setNotifications(res.notifications);
+      setHasLoaded(true);
+      setLoadError(false);
     } catch {
-      // silent
+      if (mounted.current && request === listRequest.current) setLoadError(true);
     } finally {
-      setLoading(false);
+      if (mounted.current && request === listRequest.current) setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     if (open) fetchNotifications();
-  }, [open]);
+    else ++listRequest.current;
+  }, [open, fetchNotifications]);
 
-  const handleMarkRead = async (id: string) => {
+  const refreshUnreadCount = async () => {
     try {
-      await notificationsApi.markRead(id);
-      setNotifications((prev) =>
-        prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-      );
-      onUnreadCountChange?.(notifications.filter((n) => !n.read && n.id !== id).length);
+      // The Bell owns ordering between polling and mutation count refreshes.
+      const refreshed = onRefreshUnreadCount
+        ? await onRefreshUnreadCount()
+        : await notificationsApi.unreadCount().then(() => true);
+      if (!mounted.current) return;
+      setCountError(!refreshed);
     } catch {
-      // silent
+      if (!mounted.current) return;
+      setCountError(true);
     }
   };
 
-  const handleMarkAllRead = async () => {
+  const markRead = async (id?: string) => {
+    if (readPending.current) return;
+    readPending.current = true;
+    setReading(true);
     try {
-      await notificationsApi.markAllRead();
-      setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
-      onUnreadCountChange?.(0);
+      if (id) await notificationsApi.markRead(id);
+      else await notificationsApi.markAllRead();
+      if (!mounted.current) return;
+      // A pre-mutation list response must not restore unread records.
+      ++listRequest.current;
+      setLoading(false);
+      setNotifications((prev) => prev.map((n) => !id || n.id === id ? { ...n, read: true } : n));
+      setReadError(false);
+      await refreshUnreadCount();
     } catch {
-      // silent
+      if (mounted.current) setReadError(true);
+    } finally {
+      readPending.current = false;
+      if (mounted.current) setReading(false);
     }
   };
 
@@ -109,9 +141,12 @@ export default function NotificationSheet({
       await diagnosticsApi.transmit();
       // Mark the action notification as read
       await notificationsApi.markRead(notificationId);
+      if (!mounted.current) return;
+      ++listRequest.current;
       setNotifications((prev) =>
         prev.map((n) => (n.id === notificationId ? { ...n, read: true } : n))
       );
+      await refreshUnreadCount();
       // Refresh to show the new success notification
       await fetchNotifications();
     } catch (err) {
@@ -119,7 +154,7 @@ export default function NotificationSheet({
       const msg = err instanceof Error ? err.message : "Transmission failed";
       alert(msg);
     } finally {
-      setTransmitting(null);
+      if (mounted.current) setTransmitting(null);
     }
   };
 
@@ -135,7 +170,8 @@ export default function NotificationSheet({
               variant="ghost"
               size="sm"
               className="text-xs text-muted-foreground"
-              onClick={handleMarkAllRead}
+              disabled={reading || transmitting !== null}
+              onClick={() => markRead()}
             >
               Mark all read
             </Button>
@@ -143,13 +179,36 @@ export default function NotificationSheet({
         </SheetHeader>
 
         <div className="flex-1 overflow-y-auto mt-4 -mx-6 px-6">
+          {loadError && (
+            <div role="alert" className="text-sm text-destructive py-3">
+              {hasLoaded
+                ? "Could not refresh notifications. Showing stale results."
+                : "Could not load notifications."}
+              <Button variant="outline" size="sm" className="ml-2" disabled={loading || reading} onClick={fetchNotifications}>
+                Retry
+              </Button>
+            </div>
+          )}
+          {readError && (
+            <p role="alert" className="text-sm text-destructive py-3">
+              Could not mark notifications as read. Please try the read action again.
+            </p>
+          )}
+          {countError && (
+            <div role="alert" className="text-sm text-destructive py-3">
+              Notification updated, but the unread count could not be refreshed.
+              <Button variant="outline" size="sm" className="ml-2" disabled={reading} onClick={refreshUnreadCount}>
+                Retry
+              </Button>
+            </div>
+          )}
           {loading && notifications.length === 0 && (
             <div className="text-sm text-muted-foreground text-center py-8">
               Loading...
             </div>
           )}
 
-          {!loading && notifications.length === 0 && (
+          {!loading && hasLoaded && !loadError && notifications.length === 0 && (
             <div className="text-sm text-muted-foreground text-center py-8">
               No notifications yet
             </div>
@@ -170,7 +229,8 @@ export default function NotificationSheet({
                         ? "opacity-60 hover:bg-secondary/50"
                         : "bg-secondary/50 hover:bg-secondary"
                     }`}
-                    onClick={() => !n.read && !showTransmitButton && handleMarkRead(n.id)}
+                    disabled={reading || transmitting !== null}
+                    onClick={() => !n.read && !showTransmitButton && markRead(n.id)}
                   >
                     <div className="flex gap-3">
                       <Icon className={`w-4 h-4 mt-0.5 shrink-0 ${cfg.color}`} />
