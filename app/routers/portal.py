@@ -459,10 +459,16 @@ async def update_dataset_portal_config(dataset_id: str, body: DatasetPortalConfi
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
     config = get_portal_config()
-    config.datasets[dataset_id] = body
+    current = config.datasets.get(dataset_id, DatasetPortalConfig())
+    # Defaults on the request model are not updates unless explicitly supplied.
+    merged = DatasetPortalConfig.model_validate({
+        **current.model_dump(),
+        **body.model_dump(exclude_unset=True),
+    })
+    config.datasets[dataset_id] = merged
     save_portal_config(config)
 
-    return {"dataset_id": dataset_id, **body.model_dump()}
+    return {"dataset_id": dataset_id, **merged.model_dump()}
 
 
 @admin_router.post("/settings/portal/revoke-sessions")
