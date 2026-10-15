@@ -15,14 +15,18 @@ mode through the existing `get_current_user` validator. Only validated active
 accounts receive scopes: admin has read/write/admin; buyer, seller and
 model_provider have read/write and map to the existing user role. Pending or
 unknown roles retain the validator's read-only mapping; they receive no admin
-scope. Invalid, expired, inactive and unavailable-provider responses remain
+scope. Bearer requests with methods other than GET, HEAD or OPTIONS require
+write scope; admin routes also retain their role and admin-scope checks.
+Invalid, expired, inactive and unavailable-provider responses remain
 refusals. Headers are never treated as trusted claims. Remote role membership
 does not grant local ownership.
 
-The role gate refuses Bearer authentication in standalone mode before invoking
-the unified validator; it adds no outbound validation or standalone access.
-Without Bearer, existing `vz_session` cookie validation (including active-user
-lookup), X-API-Key compatibility and development behavior are retained. API key
+The role gate refuses nonempty Bearer authentication in standalone mode before
+invoking the unified validator; it adds no outbound validation or standalone
+access.
+Without a nonempty Bearer token (including empty or whitespace-only tokens),
+existing `vz_session` cookie validation (including active-user lookup),
+X-API-Key compatibility and development behavior are retained. API key
 users retain the existing admin role compatibility. Local `vz_` keys use HMAC
 SHA-256 hashes; standalone uses local keys, while connected mode also accepts
 `aim_` keys validated by ai.market. WebSocket authentication continues through

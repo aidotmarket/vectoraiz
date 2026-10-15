@@ -127,7 +127,8 @@ def role_required(*roles: str):
 
         # Bearer has the same priority as in the existing unified authenticator.
         # The role gate does not introduce remote validation in standalone mode.
-        if request.headers.get("Authorization", "").startswith("Bearer "):
+        authorization = request.headers.get("Authorization", "")
+        if authorization.startswith("Bearer ") and authorization.removeprefix("Bearer ").strip():
             if settings.mode != "connected":
                 raise HTTPException(status_code=401, detail="Bearer role authentication requires connected mode")
             user = await get_current_user(request)
@@ -135,6 +136,8 @@ def role_required(*roles: str):
             if not user.is_valid:
                 raise HTTPException(status_code=401, detail="Not authenticated")
             if user_role not in roles or (user_role == "admin" and "admin" not in user.scopes):
+                raise HTTPException(status_code=403, detail="Insufficient permissions")
+            if request.method not in ("GET", "HEAD", "OPTIONS") and "write" not in user.scopes:
                 raise HTTPException(status_code=403, detail="Insufficient permissions")
             return user
 
