@@ -10,17 +10,27 @@ vectorAIz operates in two modes with different security boundaries:
 
 ## Authentication Flow
 
-```
-Client → REST API:  X-API-Key header → validate against ai.market gateway
-Client → WebSocket: ?token=aim_xxx  → validate via get_current_user_ws()
-```
+Role-gated REST routes accept ai.market Bearer authentication in connected
+mode through the existing `get_current_user` validator. Only validated active
+accounts receive scopes: admin has read/write/admin; buyer, seller and
+model_provider have read/write and map to the existing user role. Pending or
+unknown roles retain the validator's read-only mapping; they receive no admin
+scope. Invalid, expired, inactive and unavailable-provider responses remain
+refusals. Headers are never treated as trusted claims. Remote role membership
+does not grant local ownership.
 
-- **Connected mode**: API keys are validated against the ai.market backend.
-  Tokens carry `user_id`, `balance_cents`, `scopes`, and `free_trial_remaining_cents`.
-- **Standalone mode**: Local auth via `LocalUser` + `LocalAPIKey` tables.
-  Keys are hashed (SHA-256) at rest. No external validation.
-- **Development**: Auth can be disabled (`VECTORAIZ_AUTH_ENABLED=false` +
-  `ENVIRONMENT=development` + `VECTORAIZ_DEBUG=true`). Returns a mock user.
+The role gate refuses Bearer authentication in standalone mode before invoking
+the unified validator; it adds no outbound validation or standalone access.
+Without Bearer, existing `vz_session` cookie validation (including active-user
+lookup), X-API-Key compatibility and development behavior are retained. API key
+users retain the existing admin role compatibility. Local `vz_` keys use HMAC
+SHA-256 hashes; standalone uses local keys, while connected mode also accepts
+`aim_` keys validated by ai.market. WebSocket authentication continues through
+`get_current_user_ws()` with its existing token parameter behavior.
+
+Development auth disable still requires the existing debug/development guards.
+Portal administration remains admin-gated; public portal sessions have their
+own trust zone and do not confer administrative access.
 
 ## Allie LLM Path Security
 

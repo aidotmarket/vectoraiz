@@ -23,7 +23,7 @@ from app.middleware.portal_auth import (
 from app.models.portal import (
     AccessCodeValidator,
     get_portal_config,
-    save_portal_config,
+    portal_config_update,
 )
 from app.schemas.portal import (
     DatasetPortalConfig,
@@ -76,52 +76,50 @@ async def get_portal_public_config():
 @router.post("/auth/code", response_model=PortalAuthResponse)
 async def authenticate_with_code(body: PortalAuthRequest, request: Request):
     """Shared access code authentication. Rate-limited per IP (M5)."""
-    config = get_portal_config()
+    with portal_config_update() as config:
+        if not config.enabled:
+            raise HTTPException(status_code=404, detail="Portal is not enabled")
 
-    if not config.enabled:
-        raise HTTPException(status_code=404, detail="Portal is not enabled")
+        if config.tier != PortalTier.code:
+            raise HTTPException(status_code=400, detail="Access code auth not available for this portal tier")
 
-    if config.tier != PortalTier.code:
-        raise HTTPException(status_code=400, detail="Access code auth not available for this portal tier")
+        client_ip = request.client.host if request.client else "unknown"
 
-    client_ip = request.client.host if request.client else "unknown"
+        # Rate limit check (M5)
+        if not AccessCodeValidator.check_rate_limit(client_ip):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many attempts. Try again later.",
+            )
 
-    # Rate limit check (M5)
-    if not AccessCodeValidator.check_rate_limit(client_ip):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail="Too many attempts. Try again later.",
+        # Record attempt before verification
+        AccessCodeValidator.record_attempt(client_ip)
+
+        # Verify code
+        if not config.access_code_hash:
+            raise HTTPException(status_code=500, detail="Portal access code not configured")
+
+        if not AccessCodeValidator.verify_code(body.code, config.access_code_hash):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid access code",
+            )
+
+        # Issue portal JWT (SS-C1)
+        now = datetime.now(timezone.utc)
+        session = PortalSession(
+            session_id=secrets.token_hex(16),
+            tier=PortalTier.code,
+            ip_address=client_ip,
+            created_at=now,
+            expires_at=now + timedelta(minutes=config.session_ttl_minutes),
+            portal_session_version=config.portal_session_version,
         )
 
-    # Record attempt before verification
-    AccessCodeValidator.record_attempt(client_ip)
+        token = create_portal_jwt(session)
 
-    # Verify code
-    if not config.access_code_hash:
-        raise HTTPException(status_code=500, detail="Portal access code not configured")
-
-    if not AccessCodeValidator.verify_code(body.code, config.access_code_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid access code",
-        )
-
-    # Issue portal JWT (SS-C1)
-    now = datetime.now(timezone.utc)
-    session = PortalSession(
-        session_id=secrets.token_hex(16),
-        tier=PortalTier.code,
-        ip_address=client_ip,
-        created_at=now,
-        expires_at=now + timedelta(minutes=config.session_ttl_minutes),
-        portal_session_version=config.portal_session_version,
-    )
-
-    token = create_portal_jwt(session)
-
-    # Track session (SS-C3)
-    config.active_sessions[session.session_id] = session.expires_at.isoformat()
-    save_portal_config(config)
+        # Track session (SS-C3)
+        config.active_sessions[session.session_id] = session.expires_at.isoformat()
 
     return PortalAuthResponse(
         token=token,
@@ -214,25 +212,34 @@ async def sso_callback(
     if not oidc_subject:
         raise HTTPException(status_code=401, detail="ID token missing sub claim")
 
-    # Create portal session
-    now = datetime.now(timezone.utc)
-    session = PortalSession(
-        session_id=secrets.token_hex(16),
-        tier=PortalTier.sso,
-        ip_address=request.client.host if request.client else "unknown",
-        created_at=now,
-        expires_at=now + timedelta(minutes=config.session_ttl_minutes),
-        portal_session_version=config.portal_session_version,
-        oidc_subject=oidc_subject,
-        oidc_email=oidc_email,
-        oidc_name=oidc_name,
-    )
+    authenticated_config = config
+    with portal_config_update() as config:
+        # A revocation or auth-setting change during provider awaits cancels login.
+        auth_fields = (
+            "enabled", "tier", "oidc_issuer", "oidc_client_id",
+            "oidc_client_secret", "base_url", "portal_session_version",
+        )
+        if any(getattr(config, field) != getattr(authenticated_config, field) for field in auth_fields):
+            raise HTTPException(status_code=400, detail="SSO configuration changed; please sign in again")
 
-    portal_token = create_portal_jwt(session)
+        # Create portal session
+        now = datetime.now(timezone.utc)
+        session = PortalSession(
+            session_id=secrets.token_hex(16),
+            tier=PortalTier.sso,
+            ip_address=request.client.host if request.client else "unknown",
+            created_at=now,
+            expires_at=now + timedelta(minutes=config.session_ttl_minutes),
+            portal_session_version=config.portal_session_version,
+            oidc_subject=oidc_subject,
+            oidc_email=oidc_email,
+            oidc_name=oidc_name,
+        )
 
-    # Track session
-    config.active_sessions[session.session_id] = session.expires_at.isoformat()
-    save_portal_config(config)
+        portal_token = create_portal_jwt(session)
+
+        # Track session
+        config.active_sessions[session.session_id] = session.expires_at.isoformat()
 
     # Store refresh token if provided
     if tokens.get("refresh_token"):
@@ -255,14 +262,12 @@ async def sso_callback(
 @router.post("/auth/sso/logout")
 async def sso_logout(session: PortalSession = Depends(get_portal_session)):
     """Logout SSO session: clear portal session, optionally redirect to IdP logout."""
-    config = get_portal_config()
+    with portal_config_update() as config:
+        # Retrieve id_token BEFORE clearing tokens (clear_refresh_token wipes both)
+        id_token_hint = get_id_token(session.session_id) if config.oidc_issuer else None
 
-    # Retrieve id_token BEFORE clearing tokens (clear_refresh_token wipes both)
-    id_token_hint = get_id_token(session.session_id) if config.oidc_issuer else None
-
-    # Remove from active sessions
-    config.active_sessions.pop(session.session_id, None)
-    save_portal_config(config)
+        # Remove from active sessions
+        config.active_sessions.pop(session.session_id, None)
 
     # Clear refresh token (also clears id_token)
     clear_refresh_token(session.session_id)
@@ -370,76 +375,73 @@ async def get_portal_settings():
 @admin_router.put("/settings/portal")
 async def update_portal_settings(body: PortalConfigUpdate):
     """Enable/disable portal, set tier, set access code, set base URL."""
-    config = get_portal_config()
+    with portal_config_update() as config:
+        if body.tier is not None:
+            config.tier = body.tier
 
-    if body.tier is not None:
-        config.tier = body.tier
+        if body.base_url is not None:
+            config.base_url = body.base_url.rstrip("/")
 
-    if body.base_url is not None:
-        config.base_url = body.base_url.rstrip("/")
+        if body.session_ttl_minutes is not None:
+            config.session_ttl_minutes = body.session_ttl_minutes
 
-    if body.session_ttl_minutes is not None:
-        config.session_ttl_minutes = body.session_ttl_minutes
+        # Handle OIDC config update (Phase 2)
+        if body.oidc_issuer is not None:
+            config.oidc_issuer = body.oidc_issuer
+        if body.oidc_client_id is not None:
+            config.oidc_client_id = body.oidc_client_id
+        if body.oidc_client_secret is not None:
+            if body.oidc_client_secret:
+                config.oidc_client_secret = encrypt_client_secret(body.oidc_client_secret)
+            else:
+                config.oidc_client_secret = None
 
-    # Handle OIDC config update (Phase 2)
-    if body.oidc_issuer is not None:
-        config.oidc_issuer = body.oidc_issuer
-    if body.oidc_client_id is not None:
-        config.oidc_client_id = body.oidc_client_id
-    if body.oidc_client_secret is not None:
-        if body.oidc_client_secret:
-            config.oidc_client_secret = encrypt_client_secret(body.oidc_client_secret)
-        else:
-            config.oidc_client_secret = None
-
-    # Validate SSO tier has OIDC configured
-    if config.tier == PortalTier.sso:
-        if not config.oidc_issuer or not config.oidc_client_id or not config.oidc_client_secret:
-            raise HTTPException(
-                status_code=400,
-                detail="SSO tier requires oidc_issuer, oidc_client_id, and oidc_client_secret",
-            )
-
-    # Handle access code update (M5)
-    if body.access_code is not None:
-        if body.access_code == "":
-            # Clear access code
-            config.access_code_hash = None
-        else:
-            if not AccessCodeValidator.validate_strength(body.access_code):
+        # Validate SSO tier has OIDC configured
+        if config.tier == PortalTier.sso:
+            if not config.oidc_issuer or not config.oidc_client_id or not config.oidc_client_secret:
                 raise HTTPException(
                     status_code=400,
-                    detail="Access code must be at least 6 alphanumeric characters and not purely numeric",
+                    detail="SSO tier requires oidc_issuer, oidc_client_id, and oidc_client_secret",
                 )
-            config.access_code_hash = AccessCodeValidator.hash_code(body.access_code)
-            # Invalidate existing sessions on code rotation (SS-C1)
-            config = AccessCodeValidator.invalidate_sessions_on_rotation(config)
 
-    # Handle enable/disable
-    if body.enabled is not None:
-        if body.enabled:
-            # M6: Reject enable without base_url
-            if not config.base_url:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot enable portal without setting a base URL (Mandate M6)",
-                )
-            # Validate tier=code has access code set
-            if config.tier == PortalTier.code and not config.access_code_hash:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Cannot enable portal with 'code' tier without setting an access code",
-                )
-            # Validate tier=sso has OIDC configured
-            if config.tier == PortalTier.sso:
-                if not config.oidc_issuer or not config.oidc_client_id or not config.oidc_client_secret:
+        # Handle access code update (M5)
+        if body.access_code is not None:
+            if body.access_code == "":
+                # Clear access code
+                config.access_code_hash = None
+            else:
+                if not AccessCodeValidator.validate_strength(body.access_code):
                     raise HTTPException(
                         status_code=400,
-                        detail="Cannot enable portal with 'sso' tier without OIDC configuration",
+                        detail="Access code must be at least 6 alphanumeric characters and not purely numeric",
                     )
-        config.enabled = body.enabled
+                config.access_code_hash = AccessCodeValidator.hash_code(body.access_code)
+                # Invalidate existing sessions on code rotation (SS-C1)
+                AccessCodeValidator.invalidate_sessions_on_rotation(config)
 
-    save_portal_config(config)
+        # Handle enable/disable
+        if body.enabled is not None:
+            if body.enabled:
+                # M6: Reject enable without base_url
+                if not config.base_url:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot enable portal without setting a base URL (Mandate M6)",
+                    )
+                # Validate tier=code has access code set
+                if config.tier == PortalTier.code and not config.access_code_hash:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Cannot enable portal with 'code' tier without setting an access code",
+                    )
+                # Validate tier=sso has OIDC configured
+                if config.tier == PortalTier.sso:
+                    if not config.oidc_issuer or not config.oidc_client_id or not config.oidc_client_secret:
+                        raise HTTPException(
+                            status_code=400,
+                            detail="Cannot enable portal with 'sso' tier without OIDC configuration",
+                        )
+            config.enabled = body.enabled
 
     data = config.model_dump()
     data["access_code_hash"] = "***" if config.access_code_hash else None
@@ -458,19 +460,24 @@ async def update_dataset_portal_config(dataset_id: str, body: DatasetPortalConfi
     if not record:
         raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found")
 
-    config = get_portal_config()
-    config.datasets[dataset_id] = body
-    save_portal_config(config)
+    with portal_config_update() as config:
+        current = config.datasets.get(dataset_id, DatasetPortalConfig())
+        # Defaults on the request model are not updates unless explicitly supplied.
+        merged = DatasetPortalConfig.model_validate({
+            **current.model_dump(),
+            **body.model_dump(exclude_unset=True),
+        })
+        config.datasets[dataset_id] = merged
 
-    return {"dataset_id": dataset_id, **body.model_dump()}
+    return {"dataset_id": dataset_id, **merged.model_dump()}
 
 
 @admin_router.post("/settings/portal/revoke-sessions")
 async def revoke_all_portal_sessions():
     """Revoke all active portal sessions by incrementing portal_session_version."""
-    config = get_portal_config()
-    config = AccessCodeValidator.invalidate_sessions_on_rotation(config)
-    save_portal_config(config)
+    with portal_config_update() as config:
+        AccessCodeValidator.invalidate_sessions_on_rotation(config)
+
     return {"message": "All portal sessions revoked", "portal_session_version": config.portal_session_version}
 
 
@@ -519,11 +526,11 @@ async def get_portal_access_logs(
 @admin_router.delete("/admin/portal/sessions/{session_id}")
 async def revoke_portal_session(session_id: str):
     """Revoke a specific portal session."""
-    config = get_portal_config()
-    if session_id not in config.active_sessions:
-        raise HTTPException(status_code=404, detail="Session not found")
-    del config.active_sessions[session_id]
-    save_portal_config(config)
+    with portal_config_update() as config:
+        if session_id not in config.active_sessions:
+            raise HTTPException(status_code=404, detail="Session not found")
+        del config.active_sessions[session_id]
+
     # Clear refresh token if any
     clear_refresh_token(session_id)
     return {"message": f"Session {session_id} revoked"}
@@ -532,9 +539,9 @@ async def revoke_portal_session(session_id: str):
 @admin_router.delete("/admin/portal/sessions")
 async def revoke_all_portal_sessions_v2():
     """Revoke all portal sessions (increments portal_session_version)."""
-    config = get_portal_config()
-    config = AccessCodeValidator.invalidate_sessions_on_rotation(config)
-    save_portal_config(config)
+    with portal_config_update() as config:
+        AccessCodeValidator.invalidate_sessions_on_rotation(config)
+
     # Clear session tokens but preserve audit logs (Gate 3)
     from app.services.portal_oidc import clear_sessions_only
     clear_sessions_only()

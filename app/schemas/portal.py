@@ -10,7 +10,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Optional, List, Dict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 
 class PortalTier(str, Enum):
@@ -29,6 +29,9 @@ class DatasetPortalConfig(BaseModel):
 
 class PortalConfig(BaseModel):
     """Portal configuration — stored in /data/portal_config.json."""
+    # Process-local snapshot marker; never part of stored or HTTP data.
+    _store_generation: Optional[int] = PrivateAttr(default=None)
+
     enabled: bool = False
     tier: PortalTier = PortalTier.open
     base_url: str = ""                              # M6: explicit, required when enabled
