@@ -302,7 +302,7 @@ class ConnectivitySetupGenerator:
                     "list_datasets": f"{api_url}/datasets",
                     "search": f"{api_url}/search",
                     "sql": f"{api_url}/sql",
-                    "schema": f"{api_url}/schema/{{dataset_id}}",
+                    "schema": f"{api_url}/datasets/{{dataset_id}}/schema",
                 },
             },
             "troubleshooting": [
@@ -494,7 +494,7 @@ class ConnectivitySetupGenerator:
                     "list_datasets": {"method": "GET", "path": "/datasets"},
                     "search": {"method": "POST", "path": "/search"},
                     "sql": {"method": "POST", "path": "/sql"},
-                    "schema": {"method": "GET", "path": "/schema/{dataset_id}"},
+                    "schema": {"method": "GET", "path": "/datasets/{dataset_id}/schema"},
                 },
             },
             "troubleshooting": [
@@ -606,14 +606,14 @@ Body: {{"query": "natural language search", "top_k": 5, "dataset_id": "optional"
 Execute read-only SQL queries. Tables are named dataset_<id>.
 Body: {{"sql": "SELECT * FROM dataset_<id> LIMIT 10", "dataset_id": "optional"}}
 
-### GET {api_url}/schema/{{dataset_id}}
+### GET {api_url}/datasets/{{dataset_id}}/schema
 Get column definitions for a specific dataset.
 
 ## When to Use Each Endpoint
 - **Search** (POST /search): Use for fuzzy, meaning-based queries like "find records about renewable energy" or "customers in California".
 - **SQL** (POST /sql): Use for exact queries with filters, aggregations, joins, or counts like "how many rows have price > 100" or "average revenue by region".
 - **List datasets** (GET /datasets): Use to discover what data is available.
-- **Schema** (GET /schema/{{id}}): Use to understand column names and types before writing SQL.
+- **Schema** (GET /datasets/{{id}}/schema): Use to understand column names and types before writing SQL.
 
 ## Important Notes
 - All queries are read-only. No INSERT, UPDATE, DELETE, or DDL.
