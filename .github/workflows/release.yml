@@ -231,18 +231,24 @@ jobs:
         if: needs.verify-release.outputs.is_rc != 'true'
         run: |
           TAG="${{ needs.verify-release.outputs.version }}"
-          docker pull "ghcr.io/aidotmarket/vectoraiz:latest"
-          
-          RELEASE_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/aidotmarket/vectoraiz:${TAG}" | cut -d@ -f2)
-          LATEST_DIGEST=$(docker inspect --format='{{index .RepoDigests 0}}' "ghcr.io/aidotmarket/vectoraiz:latest" | cut -d@ -f2)
-          
-          echo "Release digest: $RELEASE_DIGEST"
-          echo "Latest digest:  $LATEST_DIGEST"
-          
-          if [ "$RELEASE_DIGEST" != "$LATEST_DIGEST" ]; then
-            echo "::warning::latest tag digest does not match ${TAG} — may need time to propagate"
+
+          # Compare the remote full manifest, not local platform RepoDigests.
+          # Require one JSON value with a nonempty, valid sha256 digest.
+          DIGEST_FILTER='select(length == 1) | .[0].digest | select(type == "string") | select(length == 71) | select(test("^sha256:[0-9a-f]{64}$"))'
+          if RELEASE_MANIFEST=$(docker buildx imagetools inspect "ghcr.io/aidotmarket/vectoraiz:${TAG}" --format '{{json .Manifest}}') &&
+             LATEST_MANIFEST=$(docker buildx imagetools inspect "ghcr.io/aidotmarket/vectoraiz:latest" --format '{{json .Manifest}}') &&
+             RELEASE_DIGEST=$(jq -ers "$DIGEST_FILTER" <<< "$RELEASE_MANIFEST") &&
+             LATEST_DIGEST=$(jq -ers "$DIGEST_FILTER" <<< "$LATEST_MANIFEST"); then
+            echo "Release digest: $RELEASE_DIGEST"
+            echo "Latest digest:  $LATEST_DIGEST"
+
+            if [ "$RELEASE_DIGEST" != "$LATEST_DIGEST" ]; then
+              echo "::warning::latest tag digest does not match ${TAG} — may need time to propagate"
+            else
+              echo "✅ latest tag matches ${TAG}"
+            fi
           else
-            echo "✅ latest tag matches ${TAG}"
+            echo "::warning::UNVERIFIED — could not inspect valid full-manifest digests for ${TAG} and latest"
           fi
 
       - name: Simulate install — verify compose resolves correctly
