@@ -8,8 +8,8 @@ Requires authentication. Rate limited.
 """
 import asyncio
 import faulthandler
-import io
 import logging
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
@@ -235,6 +235,8 @@ async def dump_threads(
     Useful for diagnosing deadlocks and blocked event loops.
     Requires authentication.
     """
-    buffer = io.StringIO()
-    faulthandler.dump_traceback(file=buffer, all_threads=True)
-    return {"thread_dump": buffer.getvalue()}
+    with tempfile.TemporaryFile(mode="w+b") as buffer:
+        faulthandler.dump_traceback(file=buffer, all_threads=True)
+        buffer.seek(0)
+        thread_dump = buffer.read().decode("utf-8", errors="replace")
+    return {"thread_dump": thread_dump}
