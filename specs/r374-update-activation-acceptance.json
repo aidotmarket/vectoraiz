@@ -11,15 +11,16 @@
       "step(clock, journal, compose_adapter, image_adapter, health_adapter, startup_event_adapter) -> persisted_snapshot",
       "resume(installation_id) -> reconciled_operation",
       "launch(installation_id) -> exact_selected_generation",
-      "status(operation_id, read_capability) -> bounded_redacted_snapshot"
+      "status(operation_id, existing_OS_read_authorization_or_app_auth) -> bounded_redacted_snapshot (no mutation capability)"
     ],
     "adapter_contracts": {
       "ProcessRunner": "accept literal argv + explicit cwd + private environment, return exit code/stdout/stderr bounded internally; preserve full durable redacted receipt. No shell interpolation. Every subprocess argv begins rtk proxy, including future Docker/git/platform adapters.",
       "ComposeAdapter": "construct original docker context, project directory/name, ordered -f and env files plus last owner override; privately resolve and compare config; capture compose up exit directly; inspect project/service/image/mounts after action. No global cleanup.",
-      "ImageAdapter": "resolve allowed tag to immutable per-platform digest, pull exact reference, inspect actual image id and release manifest; support fake injected failures without network.",
+      "ImageAdapter": "Resolve authenticated allowed tag and index/platform/config identities; pull exact platform reference and compare existing version label or equivalent immutable evidence. No mandatory new manifest.",
       "JournalAndLock": "stdlib fake uses TemporaryDirectory and injected clock; native adapter uses real OS locks/fsync/atomic replace and process-tree supervision. Expose fault hook at each durable boundary.",
-      "FixtureManager": "future owned-Docker mode records ownership manifest before creating anything; unique project/ports/fixture volumes, synthetic auth/config/serial/data; no Docker socket in application except if specifically needed and scoped by future plan. Markers are made only in future owned fixtures.",
-      "ObservationAdapter": "read expected fixture app/Postgres/Qdrant/import identity/data using fixture-owned tooling; exact pre/post comparisons remain private, receipt records only pass booleans/owned resource ids and digests of nonsensitive fixtures. No provider calls."
+      "FixtureManager": "future owned-Docker mode records ownership manifest before creating anything; unique project/ports/fixture volumes, synthetic auth/config/serial/data; retain original Docker-socket mount/authority for option C fixture, record presence and cooperative-only limits; also exercise preexisting no-socket variant. Markers are made only in future owned fixtures.",
+      "ObservationAdapter": "read expected fixture app/Postgres/Qdrant/import identity/data using fixture-owned tooling; exact pre/post comparisons remain private, receipt records only pass booleans/owned resource ids and digests of nonsensitive fixtures. No provider calls.",
+      "MailboxAndStatus": "Bounded authenticated transport across client A / daemon B with no shared filesystem, durable A ack/journal and status-file/CLI/launcher, app API snapshot copy/resync; archive proposal or equivalent outcomes accepted. Read-only status grants no update rights."
     },
     "run_phases": [
       "Validate explicit owned fixture manifest and isolated mode before enabling native adapters; default fake mode never opens network/socket.",
@@ -48,7 +49,7 @@
       "trigger": "One authenticated UI click for target release.",
       "assertions": [
         "Owner ack precedes app disconnect; exact target only pulled; new container id differs and local image id matches target platform digest.",
-        "Reported/build version maps to target manifest; Docker and HTTP health stable; succeeded only after three observations. Old image cached alone cannot pass."
+        "Reported/build version maps to chosen authenticated release via existing label or equivalent evidence and exact platform image identity. Health stable for configured N >= 1 observations/interval or equivalent justified proof; no requirement for three/five-second samples or new metadata. Old cached image alone fails."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -66,12 +67,14 @@
     {
       "id": "A03-custom-context",
       "proof_layer": "future_owned_Docker + future_native_platform",
-      "setup": "Owned path with spaces/non-ASCII, custom -p distinct from directory, --project-directory, ordered -f files, last override, two --env-file files, default .env alternatives, exported variables including stale version; Docker context explicitly recorded.",
+      "setup": "Owned path with spaces/non-ASCII, custom -p distinct from directory, --project-directory, ordered -f files, last override, two --env-file files, default .env alternatives, exported variables including stale version; Docker context explicitly recorded. Exercise local Desktop/VM, native Linux and working two-host A Compose client/config/owner -> B daemon/app, browser C, with no shared filesystem or extra proxy/listener. Existing bind sources belong to B.",
       "trigger": "Register/adopt then update and relaunch.",
       "assertions": [
         "Original config resolution retained except exact release selector and explicit owner fields; literal final override wins both old pins.",
         "Preserve relative paths, ports, networks, service env_file and all mount targets/options; retain override order and shell precedence for non-version values. Compare resolved data privately; receipt exposes booleans and fixture ids only.",
-        "Run separate cases for COMPOSE_FILE, Compose name, external/renamed volumes and bind mounts; do not infer identity from directory basename."
+        "Run separate cases for COMPOSE_FILE, Compose name, external/renamed volumes and bind mounts; do not infer identity from directory basename.",
+        "Bounded authenticated submit/complete durable ack before 202 crosses original Docker context; owner A continues while B app absent, recreates original project/service, re-pairs verified replacement and restores status. No A-path bind assumption/helper container/new SSH grant.",
+        "Image-created non-mounted mailbox ownership/modes allow current root app writer and existing owner context archive access; A private OS ACLs protect journal/pairing and read-only status. Validate actual configured limits and reject partial/stale/cross-generation/wrong-container/wrong-MAC ack; no untrusted tar extraction/link following. Equivalent bounded transport may satisfy outcomes without cp."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -82,7 +85,8 @@
       "trigger": "Update, relaunch and failure/recovery variants.",
       "assertions": [
         "Same original app/Postgres/Qdrant/import mount identities and contents; original auth works with preserved serial/keystore, no provisioning calls/new credentials.",
-        "Dependency container ids and images unchanged; no fresh project/parallel blank installation. Byte comparisons private; no secrets in receipt."
+        "Dependency container ids and images unchanged; no fresh project/parallel blank installation. Byte comparisons private; no secrets in receipt.",
+        "Record original/post-activation Docker socket mount presence and unchanged existing authority under explicit option C. Mailbox limits are cooperative only, no privilege reduction/compromised-app containment. Preserve customer mounts and no-socket variants; no Compose !override/!reset version requirement."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -137,7 +141,8 @@
       "trigger": "Activate target.",
       "assertions": [
         "migration_failed only when phase event establishes it; otherwise startup_failed_migration_unconfirmed. No success/reload countdown.",
-        "Config/data intact; no automatic database/image downgrade, credential generation or deletion. Original recovery context retained; forward repair/retry specified."
+        "Config/data intact; no automatic database/image downgrade, credential generation or deletion. Original recovery context retained; forward repair/retry specified.",
+        "After configured bounded owner observation record recovery_required and terminal host status, retain original restart policy and report app may continue migration/restart loop. No automatic app stop or image/database rollback; owner restarts never renew full observation budget."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -148,7 +153,9 @@
       "trigger": "Restart app/UI or refresh status page.",
       "assertions": [
         "Owner completes independent of app lifespan; UI reconnects to same operation; last_verified differs from desired until verified.",
-        "Persistent journal/status survives; lost acknowledgement resubmission deduplicates."
+        "Persistent journal/status survives; lost acknowledgement resubmission deduplicates.",
+        "Persist pre-submit correlation/key; lost ack deduplicates before/after expiry/reload. Recovered authenticated app current/id or host history returns same operation; partial copy never valid 202/ack.",
+        "Confirmed pre-submission owner refusal has no side effects; timeout after handoff reports acceptance_unknown and looks up/retries SAME idempotency key. A committed-but-undelivered ack may proceed, never falsely promise no mutation or mint a duplicate operation."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -159,7 +166,9 @@
       "trigger": "Kill only owned owner process, restart supervisor and reconcile.",
       "assertions": [
         "One OS lock/mutation; durable intent restores consistent generation; inspect before replay. Same target and remaining deadline, no repeat full budget.",
-        "Target running -> verify; old running -> bounded continuation only with unchanged context; unknown state -> recovery_required. Completed state does not reactivate."
+        "Target running -> verify; old running -> bounded continuation only with unchanged context; unknown state -> recovery_required. Completed state does not reactivate.",
+        "Reconcile original dependencies before app-only activation; start stopped existing containers in original context and health-wait within remaining configured budget, with unchanged ids/images/config/data and no recreation. Missing/mismatched dependencies produce truthful recovery state, not inferred migration failure.",
+        "Owner A journal/status survive B container replacement; reacquire exact original project/service/image, new epoch and snapshot resync. Daemon absence does not block host file/CLI reads or justify replay/new operation."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -170,19 +179,22 @@
       "trigger": "Reboot owned native fixture; logon/headless startup per supported platform.",
       "assertions": [
         "Supervisor resumes under original user/context; owner/app remain separate; daemon absence produces bounded truthful status.",
-        "No extra service/permission assumption; Linux user-session/linger behavior and Windows scheduled task/mac LaunchAgent lifecycle evidenced separately."
+        "No extra service/permission assumption; Linux user-session/linger behavior and Windows scheduled task/mac LaunchAgent lifecycle evidenced separately.",
+        "Reconcile original dependencies before app-only activation; start stopped existing containers in original context and health-wait within remaining configured budget, with unchanged ids/images/config/data and no recreation. Missing/mismatched dependencies produce truthful recovery state, not inferred migration failure.",
+        "Owner A journal/status survive B container replacement; reacquire exact original project/service/image, new epoch and snapshot resync. Daemon absence does not block host file/CLI reads or justify replay/new operation."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
     {
       "id": "A13-owner-unavailable-adoption",
       "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker + future_native_platform",
-      "setup": "Actual old app/Compose without protocol, owner or control mount; variants missing optional installer metadata, equivalent original invocation available, missing original .env, ambiguous custom mappings.",
+      "setup": "Actual old app/Compose without protocol, owner or image mailbox; variants missing optional installer metadata, equivalent original invocation available, missing original .env, ambiguous custom mappings.",
       "trigger": "Run future verified host adopter in original context; also submit update while owner missing.",
       "assertions": [
         "Old source publication does not change host; no automatic in-app adoption claim. Unavailable POST has no Docker side effects.",
         "Equivalent context accepted despite optional metadata absent; uncertain original config/data stops before changes; preserve original recovery instructions.",
-        "After adoption, actual launch paths use owner and first protocol-capable activation is verified; subsequent user update is one click. Never execute legacy overwriting installer for adoption."
+        "After adoption, actual launch paths use owner and first protocol-capable activation is verified; subsequent user update is one click. Never execute legacy overwriting installer for adoption.",
+        "One-time verified adoption establishes future scoped pairing/host ACLs without changing original credentials/socket/custom mounts or granting new Docker/SSH access. No required listener/proxy/default numeric constants/new metadata artifact; protocol-capable subsequent updates fully activate in one click."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
@@ -199,10 +211,10 @@
     {
       "id": "A15-bounded-progress-retention",
       "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
-      "setup": "Oversized request/log stream, stalled registry/Compose/health, stale heartbeat, repeated owner restarts and terminal history overflow.",
+      "setup": "Oversized request/log stream, stalled registry/Compose/health, stale heartbeat, repeated owner restarts and terminal history overflow. Include malicious/truncated/extra-member tar, links, interrupted copy, old epoch replay and configured non-default limits.",
       "trigger": "Advance fake clock; inject same delays in owned fixture.",
       "assertions": [
-        "Limits equal design: 4KiB request, 32KiB snapshot, 1MiB log ring, 60/1800/180/600 second phase deadlines, 15 second kill grace and stale threshold.",
+        "Test effective configured finite request/snapshot/log/archive/member/phase/copy/kill/poll/heartbeat/stale/retention limits, deadlines and stability policy, including justified non-default settings. Design numbers are provisional default values under test, not product acceptance gates. Persist limits and remaining budget across every crash; heartbeat default 5 seconds / stale 15 seconds consistently.",
         "No false percent/success, active/recovery state never evicted, remaining budget survives crash, unresolved child blocks mutation. Public output redacted; fake clock evidence explicitly fake."
       ],
       "result": "NOT_RUN; acceptance specification only"
@@ -210,19 +222,22 @@
     {
       "id": "A16-outage-status-auth",
       "proof_layer": "future_stdlib_fake_and_source + future_native_platform",
-      "setup": "Browser authenticated to standard local app; future owner endpoint independent; variants expired capability, unauthenticated submission, wrong origin and remote HTTPS app.",
-      "trigger": "Replace app and force migration failure; continue polling without app nginx.",
+      "setup": "Authenticated app on local Desktop/native Linux and working two-host remote context; durable host status file/CLI/launcher on A. Force app/nginx unavailable permanently, elapsed former read-token lifetime, UI refresh, owner restart, lost correlation, denied notification/native permissions.",
+      "trigger": "Submit once, force startup/migration failure; observe loaded browser unreachable display and independently recover same operation on A while failed app never returns.",
       "assertions": [
-        "Desktop UI gets durable bounded failed status while app is unavailable; expired read capability requires reauthentication and never grants update.",
-        "Browser/firewall/local-network/mixed-content behavior evidenced on each platform. Remote case requires independent same-origin proxy route; absent route yields transport_unavailable before enabling update.",
-        "No wildcard CORS, credentials/serial/env leaked or public arbitrary-command endpoint. Security implementation validation is future work; no held scanner executed."
+        "Existing authenticated app status API is primary when available. Loaded UI shows last phase/time/deadline and unreachable/unknown on HTTP error; full refresh may not load app and never fabricates success/failure. No expiring browser read capability or failed-app renewal dependency.",
+        "A private durable bounded terminal status file always exists; existing OS-authorized read-only CLI and launcher status UI recover same operation without app/nginx, daemon or running owner. After owner restart reconcile same journal/generation, mark stale/unknown honestly until observed. Read-only status/file never grants update authority or reveals keys/config/serial.",
+        "Native notification delivered where available; denial/absent session is not false product success. Prove file/CLI fallback independently. Native permission/supervision failures remain failed/unknown evidence, never inferred acceptance.",
+        "Lost ack/key/id/page reload recovers via host current/history and, when app returns, authenticated current/id API; no duplicate mutation or old success reused. Elapsed request-key/expiry does not erase acknowledged journal/status. Active/unresolved recovery retained until explicit reconciliation; no expiring host read authorization tied to app.",
+        "Two-host case works without shared filesystem, new listener, browser bearer token or independent proxy route. Browser-only C need not receive live terminal status while app is down; A launcher/CLI/file provide independently authorized recovery. No secrets or public arbitrary-command endpoint; security implementation remains unproved, held scanner not executed.",
+        "Reject unauthenticated submit/status app API access, wrong paired app/principal/installation identity, missing update scope, invalid MAC and expired/replayed fresh requests; no side effects or authority granted by status reads. Acked operation remains recoverable after request expiry. Keep reasons behind existing authentication and public capability boolean only; no auth metadata exposure expansion."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },
     {
       "id": "A17-channel-and-selector-integrity",
       "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
-      "setup": "Direct, marketplace and aim-data registration fixtures with allowed repository manifests; target tag moves after resolution.",
+      "setup": "Direct, marketplace and aim-data registration fixtures with allowed repository and equivalent authenticated release evidence; target tag moves after resolution.",
       "trigger": "Update exact target and relaunch.",
       "assertions": [
         "Frozen digest used throughout; no latest pull and no repository crossing. Marketplace retains original presentation/config.",
@@ -247,12 +262,12 @@
       "setup": "Future controller and adapters imported alone with stdlib unittest/tempfile/json and fake clock/process/filesystem.",
       "trigger": "Source parse target files and invoke fake controller; no application imports, conftest, daemon/socket/network/DB.",
       "assertions": [
-        "Check target-selection/argv assembly, persistent transaction/replay, limits, state transitions and no false success.",
+        "Check target-selection/argv assembly, persistent transaction/replay, limits, state transitions and no false success. Future fake coverage includes bounded archive/partial-copy rejection, epoch/ack recovery, status read-only contract, dependency readiness and configured limits; no fake is executed now.",
         "Fakes test controller behavior only, never prove real Compose preservation, migrations, authentication integration or native platform lifecycle."
       ],
       "result": "NOT_RUN; acceptance specification only"
     }
   ],
   "turn_safe_validation": "Only parse three design JSON files with stdlib, compare source hashes and Git diff against exact base, and inspect publication metadata. No fake controller implementation or application tests created.",
-  "holds": "R289 SQLSandbox and its source/artifacts/tests/reviews/import chains remain excluded, R328 scanner hold unchanged, R339 native local services forbidden. Searches exclude !**/*sandbox*, !**/*Sandbox*, !**/security/**. No subagents/reviewer dispatch."
+  "holds": "R289 SQLSandbox and its source/artifacts/tests/reviews/import chains remain excluded, R328 scanner hold unchanged, R339 native local services forbidden. Searches exclude !**/*sandbox*, !**/*Sandbox*, !**/security/**. No subagents/reviewer dispatch. Vulcan13893 backend/data-verification/Stripe/config freeze remains active."
 }

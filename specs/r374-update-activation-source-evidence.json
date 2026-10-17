@@ -1,8 +1,8 @@
 {
   "id": "R374/S1806 source evidence",
-  "base": "b4ee5518a5c1299164dd651404bcd0fc78c8b5e8",
-  "checkout": "/private/var/tmp/koskadeux/minimal-bridge-worktrees/af8b6662cb1b-0cd58b",
-  "private_evidence_directory": "/Users/max/specs/athena-runbook-system-audit-s1799/s1806-r374-author-evidence-af8b6662cb1b-0cd58b",
+  "base": "18821ccb2505bda38ca7f42e7d1eda0207c4ba6c",
+  "checkout": "/var/tmp/koskadeux/minimal-bridge-worktrees/bf540bfe2b2c-ddfc5f",
+  "private_evidence_directory": "/Users/max/specs/athena-runbook-system-audit-s1799/s1806-r374-owner-transport-fold-evidence-bf540bfe2b2c-ddfc5f",
   "source_manifest": [
     {
       "path": "app/services/update_service.py",
@@ -100,16 +100,39 @@
       "read_scope": "complete"
     }
   ],
-  "task_and_boundary": "Full task and boundary JSON read; original bytes retained privately.",
+  "task_and_boundary": "Complete fold task, original author task, original boundary analysis, root receipt, remote mount reference and both complete Astra/CC reviews read; exact input bytes preserved privately. Relevant source facts checked statically; no fresh Docker documentation fetch.",
   "agents": "No applicable AGENTS found in ancestors or scoped source directories; no delegation.",
-  "output_limits": "Combined installer output display was truncated; full source snapshots are retained without truncation and missing lifecycle bodies reread in bounded chunks. Failed command attempts and corrections preserved in private command-limitations.json.",
-  "proof": "Source-only design and stdlib parsing/hash validation. No runtime/native/installed outcome; no release/PR/Council acceptance.",
-  "preservation": "External recovery runbook unchanged. All existing tracked files including R373 remain byte-identical to base. Only three new JSON specs and narrow specs/.gitignore tracking exceptions are committed.",
-  "external_context": "Main SHA and Docker docs references supplied by task/root prior evidence; no remote main or Docker behavior re-probed.",
+  "output_limits": "Large initial discovery/combined displays were truncated; required review/task/spec bodies recovered in bounded reads. Exact originals, full final diff, static-check logs, source snapshots and hashes are preserved privately without durable truncation. No failed runtime check is hidden; lifecycle NOT_RUN.",
+  "proof": "Only stdlib JSON/byte hashes and local Git metadata/diff checks this fold; all 19 lifecycle cases NOT_RUN, no runtime/native/source implementation or acceptance. Both reviews are inputs, no new reviewer/delegation.",
+  "preservation": "Against fold base 18821ccb2505bda38ca7f42e7d1eda0207c4ba6c only three existing R374 JSON specs change. Original 16-entry source_manifest retained exactly, rehashed and source snapshots preserved privately. Whole other tracked tree, production/tests/R373/specs tracking exceptions and external recovery runbook unchanged.",
+  "external_context": "Assigned checkout/base/publication branch are supplied job intent; detached HEAD is normal. No branch/ref movement in other checkout and no network publication/PR query. Official cp/bind contracts from root task/read receipt, not newly fetched and not native proof.",
   "touched_files": [
     "specs/r374-update-activation-design.json",
     "specs/r374-update-activation-acceptance.json",
-    "specs/r374-update-activation-source-evidence.json",
-    "specs/.gitignore"
-  ]
+    "specs/r374-update-activation-source-evidence.json"
+  ],
+  "prior_design_base": "b4ee5518a5c1299164dd651404bcd0fc78c8b5e8",
+  "supplemental_source_facts": [
+    {
+      "path": "Dockerfile.customer",
+      "sha256": "dd30a6a1d0def74d2e58dbcd8c161125f55daa3aa685de18226729f93c7d3141",
+      "read_scope": "version ARG/LABEL/ENV and runtime ownership source"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "575f0fd5e279d4e80c46ce1affadecf35ef7c18f92bc69a5d994fab4f7c52361",
+      "read_scope": "tag compute / verified version build-args / multi-platform build"
+    }
+  ],
+  "requirement_mapping": {
+    "Astra outage + CC MEDIUM-2": "transport_and_api.outage_status/ui; A10/A16: host status authority, no token expiry/failed-app renewal/listener/proxy gate",
+    "Astra two-host + CC LOW-3": "topologies/app_to_owner/archive_safety/permissions_and_pairing/generation_and_ack/replacement_resync; A03/A11/A13: non-mounted mailbox proposal, original context and ACLs",
+    "CC MEDIUM-1": "docker_authority_boundary + A04: explicit option C full remaining Docker authority/cooperative limits",
+    "Astra provisional gates + CC LOW-1": "boundedness + verifying + A01/A15: effective configured bounded values/stability and crash budgets",
+    "CC LOW-2": "version_selection.release_evidence + A01/A17: existing LABEL/version workflow, platform vs index identities, equivalent evidence",
+    "CC LOW-4": "resolving/activating/crash_resume + A11/A12: start original stopped dependencies, health-wait, no recreation",
+    "CC LOW-5": "failure_policy + A09: bounded observation, recovery_required, original restart policy retained, no automatic downgrade/stop",
+    "One-click preservation/adoption": "outcome + host_installation_record/version_selection/owner_runtime + all nineteen cases: exact release, durable ack, original configuration/data, one-time adoption then full one-click"
+  },
+  "remaining_limits": "No native permission, archive transport, supervision, supply-chain, browser, migration or retained-data proof. Source proposal is optional equivalent architectural direction. R289/R328/R339 and Vulcan13893 holds unchanged; full sixteen ACTIVE/incomplete. Pair delta review remains future, not dispatched."
 }
