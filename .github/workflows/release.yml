@@ -225,6 +225,9 @@ jobs:
           TAG="${{ needs.verify-release.outputs.version }}"
           echo "Pulling ghcr.io/aidotmarket/vectoraiz:${TAG}..."
           docker pull "ghcr.io/aidotmarket/vectoraiz:${TAG}"
+          # Retain the local platform image ID from this pull, before Compose starts.
+          CANDIDATE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "ghcr.io/aidotmarket/vectoraiz:${TAG}")
+          echo "CANDIDATE_IMAGE_ID=$CANDIDATE_IMAGE_ID" >> "$GITHUB_ENV"
           echo "✅ Image pullable"
 
       - name: Verify latest tag matches release
@@ -270,9 +273,11 @@ jobs:
       - name: Container startup test
         run: |
           TAG="${{ needs.verify-release.outputs.version }}"
+          export VECTORAIZ_VERSION="$TAG"
           
           # Create minimal .env
-          echo "POSTGRES_PASSWORD=testpassword123" > .env
+          echo "VECTORAIZ_VERSION=$TAG" > .env
+          echo "POSTGRES_PASSWORD=testpassword123" >> .env
           echo "VECTORAIZ_SECRET_KEY=testsecret123" >> .env
           echo "VECTORAIZ_APIKEY_HMAC_SECRET=testhmac123" >> .env
           echo "VECTORAIZ_PORT=8080" >> .env
@@ -281,18 +286,16 @@ jobs:
           mkdir -p /tmp/vectoraiz-imports
           
           # Start with compose
-          docker compose -f docker-compose.customer.yml up -d
+          docker compose -f docker-compose.customer.yml up -d --no-build --pull missing
           
           # Wait for health (up to 90s)
           echo "Waiting for health check..."
           for i in $(seq 1 30); do
-            if curl -sf http://localhost:8080/api/health 2>/dev/null; then
-              echo ""
-              echo "✅ Container health check passed"
-              
-              # Verify version in health response
-              HEALTH=$(curl -sf http://localhost:8080/api/health)
-              echo "Health response: $HEALTH"
+            if HEALTH=$(curl -sf http://localhost:8080/api/health 2>/dev/null); then
+              CID=$(docker compose -f docker-compose.customer.yml ps -q vectoraiz)
+              CONTAINER_JSON=$(docker container inspect "$CID")
+              python3 scripts/release-smoke-identity.py "$TAG" "$CANDIDATE_IMAGE_ID" "$CONTAINER_JSON" "$HEALTH"
+              echo "✅ Requested release container and health version verified: $TAG"
               
               docker compose -f docker-compose.customer.yml down -v
               exit 0
@@ -315,13 +318,20 @@ jobs:
       - name: Run verification suite
         run: |
           TAG="${{ needs.verify-release.outputs.version }}"
-          if ! curl -sf http://localhost:8080/api/health 2>/dev/null; then
-            docker compose -f docker-compose.customer.yml up -d
+          export VECTORAIZ_VERSION="$TAG"
+          if ! HEALTH=$(curl -sf http://localhost:8080/api/health 2>/dev/null); then
+            docker compose -f docker-compose.customer.yml up -d --no-build --pull missing
             for i in $(seq 1 30); do
-              curl -sf http://localhost:8080/api/health 2>/dev/null && break
+              if HEALTH=$(curl -sf http://localhost:8080/api/health 2>/dev/null); then
+                break
+              fi
               sleep 3
             done
           fi
+          CID=$(docker compose -f docker-compose.customer.yml ps -q vectoraiz)
+          CONTAINER_JSON=$(docker container inspect "$CID")
+          python3 scripts/release-smoke-identity.py "$TAG" "$CANDIDATE_IMAGE_ID" "$CONTAINER_JSON" "$HEALTH"
+          # Broader diagnostics remain optional; candidate identity above is required.
           chmod +x scripts/verify-customer-image.sh
           bash scripts/verify-customer-image.sh "${TAG}" --compose || true
           docker compose -f docker-compose.customer.yml down -v 2>/dev/null || true
