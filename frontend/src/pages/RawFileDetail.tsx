@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   ArrowLeft,
@@ -202,7 +202,17 @@ function FilePreview({ file }: { file: RawFile }) {
 
 export default function RawFileDetail() {
   const { id } = useParams<{ id: string }>();
+  // A new keyed instance owns every visit, including returning from A -> B -> A.
+  return <RawFileVisit key={id} id={id} />;
+}
+
+function RawFileVisit({ id }: { id: string | undefined }) {
   const navigate = useNavigate();
+  const active = useRef(false);
+  useLayoutEffect(() => {
+    active.current = true;
+    return () => { active.current = false; };
+  }, []);
   const { isConnected } = useMode();
   const [file, setFile] = useState<RawFile | null>(null);
   const [loading, setLoading] = useState(true);
@@ -210,11 +220,23 @@ export default function RawFileDetail() {
   const [deleting, setDeleting] = useState(false);
   const [form, setForm] = useState<MetadataForm>({ title: "", description: "", tags: "" });
 
+  const [loadError, setLoadError] = useState(false);
+  const [readAttempt, setReadAttempt] = useState(0);
+
   useEffect(() => {
-    if (!id) return;
+    if (!id) {
+      setLoading(false);
+      return;
+    }
+    let current = true;
     setLoading(true);
+    setLoadError(false);
+    setFile(null);
+
     rawFilesApi.getRawFile(id)
       .then((data) => {
+        if (!current || !active.current) return;
+        if (data.id !== id) throw new Error("File identity mismatch");
         setFile(data);
         const meta = data.metadata as Record<string, unknown> | null;
         setForm({
@@ -224,13 +246,18 @@ export default function RawFileDetail() {
         });
       })
       .catch(() => {
+        if (!current || !active.current) return;
+        setLoadError(true);
         toast({ title: "Error", description: "Failed to load file details", variant: "destructive" });
       })
-      .finally(() => setLoading(false));
-  }, [id]);
+      .finally(() => {
+        if (current && active.current) setLoading(false);
+      });
+    return () => { current = false; };
+  }, [id, readAttempt]);
 
   const handleSave = async () => {
-    if (!id || !file) return;
+    if (!active.current || !id || file?.id !== id || saving) return;
     setSaving(true);
     try {
       const metadata = {
@@ -240,30 +267,35 @@ export default function RawFileDetail() {
         tags: form.tags.split(",").map((t) => t.trim()).filter(Boolean),
       };
       const updated = await rawFilesApi.updateRawFile(id, metadata);
+      if (!active.current) return;
+      if (updated.id !== id) throw new Error("File identity mismatch");
       setFile(updated);
       toast({ title: "Saved", description: "Metadata updated successfully" });
     } catch {
+      if (!active.current) return;
       toast({ title: "Error", description: "Failed to save metadata", variant: "destructive" });
     } finally {
-      setSaving(false);
+      if (active.current) setSaving(false);
     }
   };
 
   const handleDelete = async () => {
-    if (!id || !confirm("Are you sure you want to delete this file?")) return;
+    if (!active.current || !id || file?.id !== id || deleting || !confirm("Are you sure you want to delete this file?")) return;
     setDeleting(true);
     try {
       await rawFilesApi.deleteRawFile(id);
+      if (!active.current) return;
       toast({ title: "Deleted", description: "File has been deleted" });
       navigate("/datasets");
     } catch {
+      if (!active.current) return;
       toast({ title: "Error", description: "Failed to delete file", variant: "destructive" });
       setDeleting(false);
     }
   };
 
   const handleCreateListing = () => {
-    if (!file) return;
+    if (!active.current || !id || file?.id !== id) return;
     const meta = file.metadata as Record<string, unknown> | null;
     const title = (meta?.title as string) || file.filename;
     const description = (meta?.description as string) || "";
@@ -272,7 +304,7 @@ export default function RawFileDetail() {
   };
 
   const handleVectorize = () => {
-    if (!file) return;
+    if (!active.current || !id || file?.id !== id) return;
     toast({
       title: "Coming Soon",
       description: "Vectorization from raw files is not yet available. Upload the file as a dataset to vectorize it.",
@@ -289,10 +321,15 @@ export default function RawFileDetail() {
     );
   }
 
-  if (!file) {
+  if (!id || !file || file.id !== id) {
     return (
       <div className="container mx-auto py-6 max-w-4xl">
-        <p className="text-muted-foreground">File not found.</p>
+        <p role={loadError ? "alert" : undefined} className="text-muted-foreground">
+          {loadError ? "Failed to load file details." : "No file selected."}
+        </p>
+        {loadError && id && (
+          <Button className="mt-4" onClick={() => setReadAttempt((attempt) => attempt + 1)}>Retry</Button>
+        )}
         <Button variant="ghost" asChild className="mt-4">
           <Link to="/datasets"><ArrowLeft className="w-4 h-4 mr-2" />Back to Datasets</Link>
         </Button>
@@ -320,9 +357,11 @@ export default function RawFileDetail() {
             variant="outline"
             size="sm"
             onClick={async () => {
+              if (!active.current || file.id !== id) return;
               try {
                 await rawFilesApi.downloadRawFile(file);
               } catch {
+                if (!active.current) return;
                 toast({ title: "Error", description: "Failed to download file", variant: "destructive" });
               }
             }}
