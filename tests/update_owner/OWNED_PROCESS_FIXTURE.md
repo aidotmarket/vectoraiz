@@ -29,7 +29,10 @@ Source: https://github.com/rtk-ai/rtk/blob/v0.34.3/src/main.rs#L1932-L2035
 (`src/core/utils.rs::resolved_command` constructs a direct `Command`).
 
 After separate explicit native authorization, use an existing owner binary and
-an existing, owned, private (0700 or equivalent), disposable output directory:
+an existing, owned, private (0700 or equivalent), disposable output directory.
+The outer guest RTK invocation must also receive equivalent launch-environment
+confinement: explicit `RTK_DB_PATH`, `HOME`, `XDG_CONFIG_HOME`, and `XDG_DATA_HOME`
+paths beneath a new private guest launch directory before running the command below:
 
 ```text
 rtk proxy python3 tests/update_owner/owned_process_fixture.py --native --owner-binary /absolute/path/to/existing/vectoraiz-owner --output-root /absolute/path/to/private-disposable-directory
@@ -38,11 +41,20 @@ rtk proxy python3 tests/update_owner/owned_process_fixture.py --native --owner-b
 The supplied directory is never removed or pruned. A unique private
 `TemporaryDirectory` is deliberately retained beneath it, including logs,
 synthetic records, per-case `outcome.json`, and `receipt.json` on failure as well
-as completion. Only this new directory receives fixture writes. The printed
+as completion. Fixture writes and spawned RTK bookkeeping stay beneath this new
+directory; ordinary host operator RTK history remains separate. The printed
 receipt location is local; receipts omit host environment, binary location,
 credentials, and customer data. Binary and driver hashes are recorded, with
 binary source provenance explicitly UNKNOWN. Do not replace the binary during
 a run. The input binary is an explicitly trusted executable, not sandboxed code.
+
+`spawn` derives its explicit `RTK_DB_PATH` and HOME/XDG paths from the current
+case's `process.log` parent, never caller metadata. Official RTK v0.34.3
+[`tracking.rs`](https://raw.githubusercontent.com/rtk-ai/rtk/v0.34.3/src/core/tracking.rs)
+gives `RTK_DB_PATH` first priority; `TimedExecution.track` ignores tracker
+creation/record failures. This is optional normal tool bookkeeping, not an app
+database/shared-service test. No tracker database is opened in this source-only
+delivery; this does not promise an absence of all database or host writes.
 
 ## What the native mode would observe
 
@@ -91,8 +103,10 @@ helper, preserving the product watchdog's helper-PID/group contract. The wrapper
 remains in its own launch group. Sentinel ownership likewise follows its pinned
 wrapper's sole child. Wrapper identity and exact ancestry are checked again after
 child pinning. Kernel child-list reads are scoped to verified owned processes,
-never a host process scan. No persisted numeric identity is used for signaling. No group kill, pkill, process
-prune, shell command, or retry of a case is performed. Short polling for initial
+never a host process scan. The driver and cleanup guardians send no numeric/group
+signals and perform no group kill, pkill, process prune, shell command, or retry
+of a case. The product watchdog intentionally SIGKILLs its own verified helper
+group; observing that behavior is the point. Short polling for initial
 exec/readiness does not relaunch anything or manufacture an outcome.
 
 Setup failures stop the run. Already verified pidfds are cleaned; an unverified
@@ -112,7 +126,7 @@ are NOT_RUN. A fabricated registration, status, supervisor marker, or command
 publication path is not used to force those observations. The direct command
 record is the existing internal CLI contract, not a new public publication API.
 
-No daemon/socket, listener/port, network, database, application, auth/provider,
+No daemon/socket, listener/port, network, app database, application, auth/provider,
 real Docker, supervisor/install/service, shared resource, or customer data is
 used. There is no reboot/platform-supervisor/full-updater/adoption success claim.
 Exit zero would mean only the listed observations met the fixture's strict

@@ -123,10 +123,16 @@ def wait_until(predicate, until):
 
 def spawn(argv, log, **kwargs):
     # All subprocesses launched by the operator driver use rtk. No shell.
+    # Confine optional RTK bookkeeping to this newly created private case.
+    root = Path(log.name).parent
     return subprocess.Popen(["rtk", "proxy", *map(str, argv)],
                             stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                             env={"PATH": str(Path(shutil.which("rtk")).parent)
-                                 + os.pathsep + os.defpath, "LANG": "C"}, **kwargs)
+                                 + os.pathsep + os.defpath, "LANG": "C",
+                                 "RTK_DB_PATH": str(root / "rtk.db"),
+                                 "HOME": str(root / "home"),
+                                 "XDG_CONFIG_HOME": str(root / "config"),
+                                 "XDG_DATA_HOME": str(root / "data")}, **kwargs)
 
 
 def pin_proxy_child(handle, launch_argv, pins, until, target_argv=None):
