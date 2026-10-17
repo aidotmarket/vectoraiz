@@ -69,10 +69,64 @@ func startHelper(c helperProcess) error {
 	return nil
 }
 
+// Shared, injectable policy; the Unix adapter supplies a private helper-lifetime
+// pipe, the original absolute deadline and a kill of its own pinned group.
+func watchLifetime(helperEnded <-chan struct{}, deadline <-chan time.Time, stop func()) {
+	select {
+	case <-helperEnded:
+	case <-deadline:
+	}
+	stop()
+}
+
 type Processes struct {
-	Root, Cwd  string
-	Env        []string
-	GroupAlive func(int) bool // Tests inject observation without native adapters.
+	Root, Cwd    string
+	Env          []string
+	GroupAlive   func(int) bool      // Tests inject observation without native adapters.
+	StartCommand func(Command) error // Injected fake; never enables native execution.
+	Acquire      func(string) (func(), error)
+	Now          func() time.Time
+	Pause        func()
+}
+
+func (p *Processes) now() time.Time {
+	if p.Now != nil {
+		return p.Now()
+	}
+	return time.Now()
+}
+func (p *Processes) pause() {
+	if p.Pause != nil {
+		p.Pause()
+		return
+	}
+	time.Sleep(100 * time.Millisecond)
+}
+func (p *Processes) acquire(name string) (func(), error) {
+	path := filepath.Join(p.Root, name)
+	if p.Acquire != nil {
+		return p.Acquire(path)
+	}
+	f, e := lock(path)
+	if e != nil {
+		return nil, e
+	}
+	return func() { unlock(f) }, nil
+}
+func (p *Processes) waitLock(name string, deadline int64) (func(), error) {
+	for {
+		release, e := p.acquire(name)
+		if e == nil {
+			return release, nil
+		}
+		if e.Error() != "installation_busy" {
+			return nil, e
+		}
+		if p.now().Unix() > deadline+5 {
+			return nil, errors.New("child_may_be_running")
+		}
+		p.pause()
+	}
 }
 
 func (p *Processes) groupAlive(pid int) bool {
@@ -121,7 +175,7 @@ func execute(r *Command) error {
 	return nil
 }
 func (p *Processes) Run(args []string, input []byte, deadline int64, max int, mutate bool) ([]byte, error) {
-	if !allowNativeExecution {
+	if !allowNativeExecution && (!mutate || p.StartCommand == nil) {
 		return nil, errors.New("ISOLATION_GUARD: native process denied")
 	}
 	r := Command{ID: token(), Args: args, Env: p.Env, Cwd: p.Cwd, Input: input, Deadline: deadline, Max: max}
@@ -133,19 +187,31 @@ func (p *Processes) Run(args []string, input []byte, deadline int64, max int, mu
 	// and durable result are reconciled before any subsequent mutation. Uncertain
 	// handoff is never re-executed automatically.
 	path := filepath.Join(p.Root, "child.json")
-	if e := p.Reconcile(); e != nil {
+	// Separate from child.lock: retain serialization across reconciliation,
+	// record publication and result collection, including concurrent CLI callers.
+	release, e := p.waitLock("handoff.lock", deadline)
+	if e != nil {
+		return nil, e
+	}
+	defer release()
+	if e := p.reconcile(); e != nil {
 		return nil, e
 	}
 	if e := save(path, &r); e != nil {
 		return nil, e
 	}
-	exe, e := os.Executable()
-	if e != nil {
-		return nil, e
+	if p.StartCommand != nil {
+		e = p.StartCommand(r)
+	} else {
+		var exe string
+		exe, e = os.Executable()
+		if e == nil {
+			c := exec.Command(exe, "command", p.Root, r.ID)
+			childGroup(c)
+			e = startHelper(c)
+		}
 	}
-	c := exec.Command(exe, "command", p.Root, r.ID)
-	childGroup(c)
-	if e = startHelper(c); e != nil {
+	if e != nil {
 		return nil, errors.New("child_handoff_unknown")
 	}
 	for {
@@ -157,18 +223,33 @@ func (p *Processes) Run(args []string, input []byte, deadline int64, max int, mu
 			return nil, errors.New("child_identity")
 		}
 		if got.Done {
+			// Done is the durable result, but ownership lasts until unlock.
+			released, e := p.waitLock("child.lock", deadline)
+			if e != nil {
+				return nil, e
+			}
+			released()
 			if got.Code != "" {
 				return got.Output, errors.New(got.Code)
 			}
 			return got.Output, nil
 		}
-		if time.Now().Unix() > deadline+5 {
+		if p.now().Unix() > deadline+5 {
 			return nil, errors.New("child_may_be_running")
 		}
-		time.Sleep(100 * time.Millisecond)
+		p.pause()
 	}
 }
 func (p *Processes) Reconcile() error {
+	// Run owns this same gate until its handoff/result collection is complete.
+	release, e := p.acquire("handoff.lock")
+	if e != nil {
+		return e
+	}
+	defer release()
+	return p.reconcile()
+}
+func (p *Processes) reconcile() error {
 	var r Command
 	e := load(filepath.Join(p.Root, "child.json"), &r)
 	if os.IsNotExist(e) {
@@ -178,25 +259,35 @@ func (p *Processes) Reconcile() error {
 		return e
 	}
 	if r.Done {
+		release, e := p.waitLock("child.lock", r.Deadline)
+		if e != nil {
+			return e
+		}
+		release()
 		return nil
 	}
 	// A surviving helper owns its finite budget. A missing completion remains a
 	// recovery state even after deadline: no guess about daemon-side mutation.
-	for time.Now().Unix() <= r.Deadline+5 {
+	for p.now().Unix() <= r.Deadline+5 {
 		if e = load(filepath.Join(p.Root, "child.json"), &r); e != nil {
 			return e
 		}
 		if r.Done {
+			release, e := p.waitLock("child.lock", r.Deadline)
+			if e != nil {
+				return e
+			}
+			release()
 			return nil
 		}
-		time.Sleep(100 * time.Millisecond)
+		p.pause()
 	}
 	// A dead helper can leave an unknown outcome, rather than a permanent dead
 	// end. Its process group (Unix) or kill-on-close job (Windows) must also be
 	// gone. Never kill an unverified/reused identity or replay this command.
-	guard, le := lock(filepath.Join(p.Root, "child.lock"))
+	release, le := p.acquire("child.lock")
 	if le == nil {
-		defer unlock(guard)
+		defer release()
 		if e = load(filepath.Join(p.Root, "child.json"), &r); e != nil {
 			return e
 		}
@@ -215,13 +306,22 @@ func (p *Processes) Reconcile() error {
 	return errors.New("child_may_be_running")
 }
 func commandMain(root, id string) error {
-	f, e := lock(filepath.Join(root, "child.lock"))
+	path := filepath.Join(root, "child.json")
+	var r Command
+	if e := load(path, &r); e != nil {
+		return e
+	}
+	if r.ID != id || r.Started || r.Done {
+		return errors.New("child_identity")
+	}
+	// A delayed predecessor may still be exiting after losing ownership. Wait
+	// within this command's original budget, then revalidate under child.lock.
+	p := Processes{Root: root}
+	release, e := p.waitLock("child.lock", r.Deadline)
 	if e != nil {
 		return e
 	}
-	defer unlock(f)
-	path := filepath.Join(root, "child.json")
-	var r Command
+	defer release()
 	if e = load(path, &r); e != nil {
 		return e
 	}
@@ -233,7 +333,7 @@ func commandMain(root, id string) error {
 	if e = save(path, &r); e != nil {
 		return e
 	}
-	if e = helperJob(); e != nil {
+	if e = superviseHelper(r.Deadline); e != nil {
 		r.Code = "child_supervision_unavailable"
 		r.Done = true
 		r.Args, r.Env, r.Input = nil, nil, nil

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -19,6 +20,17 @@ var packageVersion = "dev" // Set from the verified release tag by owner-assets.
 func (v *listFlag) String() string     { return strings.Join(*v, ",") }
 func (v *listFlag) Set(s string) error { *v = append(*v, s); return nil }
 func runMain(args []string) error {
+	if len(args) == 3 && args[0] == "watchdog" {
+		deadline, e := strconv.ParseInt(args[1], 10, 64)
+		if e != nil {
+			return e
+		}
+		group, e := strconv.Atoi(args[2])
+		if e != nil {
+			return e
+		}
+		return watchdogMain(deadline, group)
+	}
 	if len(args) == 1 && args[0] == "version" {
 		fmt.Println(packageVersion)
 		return nil

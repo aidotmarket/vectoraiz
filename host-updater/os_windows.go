@@ -135,3 +135,6 @@ func helperJob() error {
 	// Deliberately retained until process exit, after the durable result is saved.
 	return nil
 }
+
+func superviseHelper(int64) error   { return helperJob() }
+func watchdogMain(int64, int) error { return errors.New("watchdog_unix_only") }

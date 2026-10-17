@@ -4,10 +4,12 @@ package main
 
 import (
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 func lock(path string) (*os.File, error) {
@@ -68,7 +70,81 @@ func killTree(c *exec.Cmd) {
 		syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
 }
-func helperJob() error { return nil }
+
+// A second member pins the helper's live group, so its kill never targets a
+// persisted/reused identity. Its stdin is a private pipe: only the helper holds
+// the write end (CLOEXEC), independent of the polling owner. No daemon/listener.
+func superviseHelper(deadline int64) error {
+	if !allowNativeExecution {
+		return errors.New("ISOLATION_GUARD: native supervision denied")
+	}
+	exe, e := os.Executable()
+	if e != nil {
+		return e
+	}
+	lifeRead, lifeWrite, e := os.Pipe()
+	if e != nil {
+		return e
+	}
+	readyRead, readyWrite, e := os.Pipe()
+	if e != nil {
+		lifeRead.Close()
+		lifeWrite.Close()
+		return e
+	}
+	c := exec.Command(exe, "watchdog", strconv.FormatInt(deadline, 10), itoa(os.Getpid()))
+	c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: os.Getpid()}
+	c.Stdin, c.Stdout = lifeRead, readyWrite
+	e = startHelper(c)
+	lifeRead.Close()
+	readyWrite.Close()
+	if e != nil {
+		lifeWrite.Close()
+		readyRead.Close()
+		return e
+	}
+	// Handshake is bounded by the existing absolute command budget. Do not start
+	// Docker unless the group-pinning watchdog has entered its monitoring loop.
+	if e = readyRead.SetReadDeadline(time.Unix(deadline, 0)); e == nil {
+		var b [1]byte
+		_, e = io.ReadFull(readyRead, b[:])
+		if e == nil && b[0] != 1 {
+			e = errors.New("watchdog_not_ready")
+		}
+	}
+	readyRead.Close()
+	if e != nil {
+		lifeWrite.Close()
+		return e
+	}
+	// Keep reachable until process exit, including durable save and unlock.
+	// It must not be finalized early or inherited by the external command.
+	helperLifetime = lifeWrite
+	return nil
+}
+
+var helperLifetime *os.File
+
+func watchdogMain(deadline int64, group int) error {
+	if !allowNativeExecution {
+		return errors.New("ISOLATION_GUARD: native watchdog denied")
+	}
+	if group <= 1 || syscall.Getpgrp() != group || os.Getppid() != group {
+		return errors.New("watchdog_identity")
+	}
+	ended := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, os.Stdin); close(ended) }()
+	timer := time.NewTimer(time.Until(time.Unix(deadline, 0)))
+	defer timer.Stop()
+	if _, e := os.Stdout.Write([]byte{1}); e != nil {
+		return e // No readiness -> helper cannot execute an external command.
+	}
+	watchLifetime(ended, timer.C, func() {
+		// The watchdog is itself still a member: the group cannot be reused.
+		_ = syscall.Kill(-syscall.Getpgrp(), syscall.SIGKILL)
+	})
+	return errors.New("watchdog_kill_failed")
+}
 func commandGroupAlive(pid int) bool {
 	e := syscall.Kill(-pid, 0)
 	return e != syscall.ESRCH
