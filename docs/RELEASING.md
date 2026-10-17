@@ -1,5 +1,19 @@
 # Releasing vectorAIz
 
+## Current release guidance
+
+The [canonical operator procedure](https://github.com/aidotmarket/runbooks/blob/main/vz-release-process.md) supersedes the historical instructions below; use it for exact commands. The tag-driven `.github/workflows/release.yml` handles vectorAIz-only image builds, verification, smoke and Linux installer checks, and GitHub release creation.
+
+1. Use a clean, owned release checkout starting from current authorized main and normally fetched tags. Choose an unused RC tag and push it normally to trigger the existing workflow.
+2. Validate the actual results for the intended tag and commit. After RC acceptance, use its exact commit to prepare an unused stable tag and trigger a separate normal workflow build; inspect its actual results and release assets.
+3. Keep main's Compose defaults at the current stable version throughout RC builds and until the new stable image is available. Then advance main through the documented release-class normal fast-forward path, reconciling with current authorized main if necessary.
+
+Source review and checks, image and asset distribution, and customer acceptance are separate evidence. A successful workflow alone does not establish customer acceptance; inspect actual outputs and retain their stated limits.
+
+## Historical instructions — do not use for current releases
+
+The old `release.sh` procedure, Doppler fallback, and tag deletion/reuse recovery below are preserved as history and must not be used as current operator instructions.
+
 ## Overview
 
 Releases are a two-part process: a local script that prepares the release, and GitHub Actions that builds, verifies, and publishes it.
