@@ -262,6 +262,7 @@ const DatasetDetail = () => {
   const datasetIsPublished = isPublished(dataset.id) || dataset.marketplace?.isPublished;
   const publishedData = getPublishedData(dataset.id);
   const marketplaceData = publishedData || dataset.marketplace;
+  const marketplacePrice = marketplaceData?.price == null ? "Unavailable" : `$${marketplaceData.price}`;
 
   const handlePublishSuccess = () => {
     toast({
@@ -379,7 +380,7 @@ const DatasetDetail = () => {
                 </span>
                 {hasFeature("marketplace") && datasetIsPublished && marketplaceData && (
                   <span className="text-sm font-medium text-primary">
-                    ${marketplaceData.price}
+                    {marketplacePrice}
                   </span>
                 )}
               </div>
@@ -961,7 +962,7 @@ const DatasetDetail = () => {
                     <div>
                       <h3 className="text-lg font-semibold text-foreground">Live on Marketplace</h3>
                       <p className="text-sm text-muted-foreground">
-                        Listed at ${marketplaceData?.price || 450}
+                        Listed at {marketplacePrice}
                       </p>
                     </div>
                   </div>
@@ -984,7 +985,7 @@ const DatasetDetail = () => {
                     <div>
                       <p className="text-sm text-muted-foreground">Views</p>
                       <p className="text-2xl font-bold text-foreground">
-                        {marketplaceData?.views || 145}
+                        {marketplaceData?.views ?? "Unavailable"}
                       </p>
                     </div>
                   </div>
@@ -1000,7 +1001,7 @@ const DatasetDetail = () => {
                     <div>
                       <p className="text-sm text-muted-foreground">Purchases</p>
                       <p className="text-2xl font-bold text-foreground">
-                        {marketplaceData?.purchases || 3}
+                        {marketplaceData?.purchases ?? "Unavailable"}
                       </p>
                     </div>
                   </div>
@@ -1016,7 +1017,7 @@ const DatasetDetail = () => {
                     <div>
                       <p className="text-sm text-muted-foreground">Earnings</p>
                       <p className="text-2xl font-bold text-[hsl(var(--haven-success))]">
-                        ${(marketplaceData?.earnings || 1080).toLocaleString()}
+                        {marketplaceData?.earnings == null ? "Unavailable" : `$${marketplaceData.earnings.toLocaleString()}`}
                       </p>
                     </div>
                   </div>
