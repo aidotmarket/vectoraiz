@@ -280,6 +280,33 @@ func (p *Processes) reconcile() error {
 			release()
 			return nil
 		}
+		// A started, identified group already observed absent need not spend the
+		// remaining budget. The helper's lock is still the ownership authority:
+		// re-read completion and recheck identity/liveness while holding it.
+		if r.Started && r.ProcessGroup > 0 && !p.groupAlive(r.ProcessGroup) {
+			release, le := p.acquire("child.lock")
+			if le == nil {
+				if e = load(filepath.Join(p.Root, "child.json"), &r); e != nil {
+					release()
+					return e
+				}
+				if r.Done {
+					release()
+					return nil
+				}
+				if r.Started && r.ProcessGroup > 0 && !p.groupAlive(r.ProcessGroup) {
+					r.Done, r.Code = true, "child_outcome_unknown"
+					r.Args, r.Env, r.Input = nil, nil, nil
+					e = save(filepath.Join(p.Root, "child.json"), &r)
+					release()
+					if e != nil {
+						return e
+					}
+					return errors.New("child_outcome_unknown")
+				}
+				release()
+			}
+		}
 		p.pause()
 	}
 	// A dead helper can leave an unknown outcome, rather than a permanent dead
