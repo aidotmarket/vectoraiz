@@ -278,17 +278,14 @@ func runMain(args []string) error {
 		if e = startSupervisor(*root, rec.Installation); e != nil {
 			return errors.New("owner_supervisor_unavailable: read status.json")
 		}
-		if o.S.Current != nil && (o.S.Current.Phase == "failed_resolution" || o.S.Current.Phase == "failed_download") {
-			if e = o.resumeSelection(); e != nil {
-				return e
-			}
-		}
-		if o.S.Current.active() {
+		if pending, le := o.launchPending(time.Now, func() { time.Sleep(time.Second) }, d.startRuntime, func() error {
 			release()
 			if e = runMain([]string{"wait", "--root", *root}); e != nil {
 				return e
 			}
 			return runMain(args)
+		}); pending || le != nil {
+			return le
 		}
 		if o.S.Current != nil && o.S.Current.Phase == "recovery_required" {
 			return errors.New("update_or_recovery_in_progress: read status; do not repeat activation")

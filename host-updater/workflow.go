@@ -235,6 +235,25 @@ func (o *Owner) launchSelected(now func() time.Time, pause func(), start func() 
 		pause()
 	}
 }
+
+// The ordinary launcher must make the original runtime available even when
+// retrying adoption or waiting for an update already owned by the supervisor.
+func (o *Owner) launchPending(now func() time.Time, pause func(), start func() error, wait func() error) (bool, error) {
+	if o.S.Current != nil && (o.S.Current.Phase == "failed_resolution" || o.S.Current.Phase == "failed_download") {
+		if e := o.resumeSelection(); e != nil {
+			return false, e
+		}
+	}
+	if !o.S.Current.active() {
+		return false, nil
+	}
+	// Retain the existing absolute deadline; availability must not renew it.
+	if e := o.D.waitAvailable(o.S.Current.Deadline, now, pause, start); e != nil {
+		return true, e
+	}
+	return true, wait()
+}
+
 func (o *Owner) resumeSelection() error {
 	c := o.S.Current
 	if c == nil || c.ActivationIssued || (c.Phase != "failed_download" && c.Phase != "failed_resolution") {
