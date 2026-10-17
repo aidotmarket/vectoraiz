@@ -580,9 +580,22 @@ const FileUploadModal = () => {
             </Button>
           )}
           {allDone && (
-            <Button variant={hasFailures ? "secondary" : "ghost"} onClick={closeModal}>
-              Close
-            </Button>
+            <>
+              <Button variant={hasFailures ? "secondary" : "ghost"} onClick={closeModal}>
+                Close
+              </Button>
+              <Button
+                variant="outline"
+                disabled={isUploading || isImporting}
+                onClick={() => {
+                  if (!allDone || isUploading || isImporting) return;
+                  queue.filter((f) => f.state === "complete" || f.state === "error" || f.state === "rejected")
+                    .forEach((f) => removeFile(f.id));
+                }}
+              >
+                Upload more files
+              </Button>
+            </>
           )}
         </DialogFooter>
         )}

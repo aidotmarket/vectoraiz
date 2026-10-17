@@ -337,7 +337,7 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [processingKey]);
 
-  // ----- allDone effect: summary toast + auto-clear -----
+  // ----- completion side effects (independent of result-view visibility) -----
   useEffect(() => {
     if (!allDone || queue.length === 0) return;
 
@@ -360,27 +360,23 @@ export function UploadProvider({ children }: { children: React.ReactNode }) {
     } else {
       toast.success(parts.join(", "));
       onSuccess();
-      // Auto-clear after 5 seconds if modal is not open (indicator will show final status)
-      const timer = setTimeout(() => {
-        // Only auto-clear if modal is closed — if modal is open, let user close manually
-        setQueue((prev) => {
-          const stillAllDone = prev.length > 0 && prev.every((f) => f.state === "complete" || f.state === "error" || f.state === "rejected");
-          const noFailures = !prev.some((f) => f.state === "error" || f.state === "rejected");
-          if (stillAllDone && noFailures) return [];
-          return prev;
-        });
-      }, 5000);
-      return () => clearTimeout(timer);
     }
   }, [allDone]);
 
+  // Presentation cleanup must react to visibility without repeating completion effects.
+  useEffect(() => {
+    if (!allDone || hasFailures || isModalOpen) return;
+    const timer = setTimeout(() => {
+      setQueue((prev) => {
+        const stillSuccessful = prev.length > 0 && prev.every((f) => f.state === "complete");
+        return stillSuccessful ? [] : prev;
+      });
+    }, 5000);
+    return () => clearTimeout(timer);
+  }, [allDone, hasFailures, isModalOpen]);
+
   // ----- modal -----
   const openModal = useCallback(() => {
-    // Auto-reset stale completed results when reopening
-    setQueue((prev) => {
-      const allFinished = prev.length > 0 && prev.every((f) => f.state === "complete" || f.state === "error" || f.state === "rejected");
-      return allFinished ? [] : prev;
-    });
     setIsModalOpen(true);
   }, []);
 
