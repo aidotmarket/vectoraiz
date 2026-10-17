@@ -108,7 +108,7 @@ async def check_for_updates(force: bool = False) -> dict:
 
     if not force and _cache["latest_version"] and (now - _cache["checked_at"]) < CACHE_TTL_S:
         latest = _cache["latest_version"]
-        return _build_response(current, latest, _cache["latest_published_at"])
+        return _build_response(current, latest, _cache["latest_published_at"], _cache.get("error"))
 
     # Fetch from GHCR
     try:
@@ -116,32 +116,32 @@ async def check_for_updates(force: bool = False) -> dict:
         _cache["latest_version"] = latest
         _cache["latest_published_at"] = None  # GHCR tags/list doesn't include dates
         _cache["checked_at"] = now
+        _cache.pop("error", None)
         logger.info("GHCR version check: current=%s latest=%s", current, latest)
     except Exception as e:
         logger.warning("GHCR version check failed: %s", e)
         latest = _cache.get("latest_version")
-        if latest is None:
-            return {
-                "current": current,
-                "latest": None,
-                "update_available": False,
-                "error": str(e),
-                "changelog_url": "https://github.com/aidotmarket/vectoraiz/releases",
-                "can_auto_update": _docker_available(),
-            }
+        # Cached tags remain context, but must not hide a failed refresh on later reads.
+        _cache["error"] = str(e) or "Registry version check failed."
 
-    return _build_response(current, latest, _cache.get("latest_published_at"))
+    return _build_response(current, latest, _cache.get("latest_published_at"), _cache.get("error"))
 
 
-def _build_response(current: str, latest: str | None, published_at: str | None) -> dict:
+def _build_response(
+    current: str, latest: str | None, published_at: str | None, error: str | None = None
+) -> dict:
     update_available = False
-    if latest:
+    if not latest:
+        error = error or "No recognized latest version tag was found."
+    else:
         cur = _parse_semver(current)
         lat = _parse_semver(latest)
         if cur and lat:
             update_available = lat > cur
+        else:
+            error = error or "Cannot compare current and latest versions: unrecognized version format."
 
-    return {
+    response = {
         "current": current,
         "latest": latest,
         "update_available": update_available,
@@ -149,6 +149,9 @@ def _build_response(current: str, latest: str | None, published_at: str | None) 
         "changelog_url": "https://github.com/aidotmarket/vectoraiz/releases",
         "can_auto_update": _docker_available(),
     }
+    if error:
+        response["error"] = error
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +179,8 @@ async def trigger_update() -> dict:
 
     current = _get_current_version()
     latest_info = await check_for_updates(force=True)
+    if latest_info.get("error"):
+        return {"status": "error", "message": f"Version check failed: {latest_info['error']}"}
     if not latest_info.get("update_available"):
         return {"status": "up_to_date", "message": f"Already running the latest version ({current})."}
 
