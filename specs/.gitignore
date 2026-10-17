@@ -1,0 +1,4 @@
+# Track only the R374 source-only design and acceptance artifacts.
+!r374-update-activation-design.json
+!r374-update-activation-acceptance.json
+!r374-update-activation-source-evidence.json

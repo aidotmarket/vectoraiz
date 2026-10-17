@@ -1,0 +1,115 @@
+{
+  "id": "R374/S1806 source evidence",
+  "base": "b4ee5518a5c1299164dd651404bcd0fc78c8b5e8",
+  "checkout": "/private/var/tmp/koskadeux/minimal-bridge-worktrees/af8b6662cb1b-0cd58b",
+  "private_evidence_directory": "/Users/max/specs/athena-runbook-system-audit-s1799/s1806-r374-author-evidence-af8b6662cb1b-0cd58b",
+  "source_manifest": [
+    {
+      "path": "app/services/update_service.py",
+      "sha256": "a39c1b4997bcb08b3ec215bb1c0e8e3e2e41d5e754100deca40f2c88945eb114",
+      "lines": 257,
+      "read_scope": "complete"
+    },
+    {
+      "path": "app/routers/version.py",
+      "sha256": "36ec0aa98f341e68ab18e232c7391323fc425ca59312ece8bf72370485cbfe81",
+      "lines": 63,
+      "read_scope": "complete"
+    },
+    {
+      "path": "frontend/src/pages/SettingsPage.tsx",
+      "sha256": "7f1ee3f5e6fe4e6ac013cf504bf37745a791071c044eaa699dac7488639fa5f2",
+      "lines": 1572,
+      "read_scope": "update state/handler and Software Updates section"
+    },
+    {
+      "path": "docker-compose.customer.yml",
+      "sha256": "e2bb7b0e4f47ec82261f00fd09dc122027df3a1443efabbe7b5d9ecf66353510",
+      "lines": 118,
+      "read_scope": "complete"
+    },
+    {
+      "path": "deploy/entrypoint.sh",
+      "sha256": "958a9dd0d9779590b8afa7330703834e363ebf534ccaaf34ab9bc8d709852600",
+      "lines": 103,
+      "read_scope": "complete"
+    },
+    {
+      "path": "deploy/nginx.conf",
+      "sha256": "3902f478417a60b74facf4f996d4f6a4f2fa1a9486d23832c846fb1d5e420ffd",
+      "lines": 56,
+      "read_scope": "complete"
+    },
+    {
+      "path": "start.sh",
+      "sha256": "5d662a526d5fd8bb53fe07733d5166562ceb82e857ab422359f8a7f9d3434ca9",
+      "lines": 402,
+      "read_scope": "complete"
+    },
+    {
+      "path": "install.sh",
+      "sha256": "ab2eaeb146c3b6904dd32546911db8ce7a7efd273bc0eb6069fd904989222efb",
+      "lines": 92,
+      "read_scope": "complete"
+    },
+    {
+      "path": "install.ps1",
+      "sha256": "4da17f3ac71fd65f4096cecb4253638fefa6e9de501985b9c310b66d38606983",
+      "lines": 386,
+      "read_scope": "complete"
+    },
+    {
+      "path": "installers/mac/install-mac.sh",
+      "sha256": "b0a4a6487378877ce57175c7326c8c2804bf56981128fe7d46be4be5146199e8",
+      "lines": 665,
+      "read_scope": "complete"
+    },
+    {
+      "path": "installers/linux/install-linux.sh",
+      "sha256": "0af12d4ad0faf863930e74f2a18587f3ac6c9c15a0add9340c295d0fe72ff04b",
+      "lines": 619,
+      "read_scope": "complete"
+    },
+    {
+      "path": "installers/windows/install-vectoraiz.ps1",
+      "sha256": "afd8349436af7e3aeabf0bfbff999bb43ec7c55c235919fd86854a088ba80ef2",
+      "lines": 470,
+      "read_scope": "complete"
+    },
+    {
+      "path": "installers/aim-data/install.sh",
+      "sha256": "7d8f34a00f11ee49f00a95d8c5ba7ef8533021a4121488fcc810b3f6de61a2e9",
+      "lines": 90,
+      "read_scope": "complete"
+    },
+    {
+      "path": "installers/aim-data/install.ps1",
+      "sha256": "e734dda010b10a207674a601d2f07008baa0f9e6e5bf3e7ef53b27a58bce26c9",
+      "lines": 117,
+      "read_scope": "complete"
+    },
+    {
+      "path": "docker-compose.aim-data.yml",
+      "sha256": "f359aad37a6fcfc1055b3b61ce2b5119def6379c979cfbf9f2e330e3dc4c3ab1",
+      "lines": 122,
+      "read_scope": "complete"
+    },
+    {
+      "path": "/Users/max/Projects/ai-market/runbooks/vectoraiz-installation-recovery.md",
+      "sha256": "9a713a91337d66c615e8ce899fe6f6c9b394f7aaddf6acb01035b0290af87b6d",
+      "read_scope": "complete"
+    }
+  ],
+  "task_and_boundary": "Full task and boundary JSON read; original bytes retained privately.",
+  "agents": "No applicable AGENTS found in ancestors or scoped source directories; no delegation.",
+  "output_limits": "Combined installer output display was truncated; full source snapshots are retained without truncation and missing lifecycle bodies reread in bounded chunks. Failed command attempts and corrections preserved in private command-limitations.json.",
+  "proof": "Source-only design and stdlib parsing/hash validation. No runtime/native/installed outcome; no release/PR/Council acceptance.",
+  "preservation": "External recovery runbook unchanged. All existing tracked files including R373 remain byte-identical to base. Only three new JSON specs and narrow specs/.gitignore tracking exceptions are committed.",
+  "external_context": "Main SHA and Docker docs references supplied by task/root prior evidence; no remote main or Docker behavior re-probed.",
+  "touched_files": [
+    "specs/r374-update-activation-design.json",
+    "specs/r374-update-activation-acceptance.json",
+    "specs/r374-update-activation-source-evidence.json",
+    "specs/.gitignore"
+  ]
+}

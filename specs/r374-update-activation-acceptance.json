@@ -1,0 +1,258 @@
+{
+  "id": "R374/S1806 owned lifecycle acceptance preparation",
+  "status": "ALL CASES NOT_RUN; neither native nor fake acceptance is claimed by this design commit",
+  "ownership": "Only disposable explicitly owned fixtures in future separately authorized runs. No customer configuration, services, providers or real credentials. This turn creates no markers and executes no controller/Docker/platform code.",
+  "neutral_oracle": "Judge observed identities and retained data, not implementation response text. A controller reporting succeeded with old image, wrong project, wrong version, missing data, unresolved migration or unverified health fails. Fake/source passes are distinct from Docker/platform proof.",
+  "future_runnable_controller_design": {
+    "entrypoint": "Proposed tests/update_owner/run_owned_lifecycle.py, not created/executed now. Future argv: [rtk, proxy, python3, tests/update_owner/run_owned_lifecycle.py, --mode, fake|owned-docker|native-platform, --fixture-root, ABS_OWNED_PATH, --case, Axx, --receipt-dir, ABS_PRIVATE_PATH]. No app/test conftest import chain.",
+    "controller_interface": [
+      "register(original_context, observed_installation) -> context_revision",
+      "submit(target_tag, idempotency_key, authenticated_envelope) -> durable_operation_ack",
+      "step(clock, journal, compose_adapter, image_adapter, health_adapter, startup_event_adapter) -> persisted_snapshot",
+      "resume(installation_id) -> reconciled_operation",
+      "launch(installation_id) -> exact_selected_generation",
+      "status(operation_id, read_capability) -> bounded_redacted_snapshot"
+    ],
+    "adapter_contracts": {
+      "ProcessRunner": "accept literal argv + explicit cwd + private environment, return exit code/stdout/stderr bounded internally; preserve full durable redacted receipt. No shell interpolation. Every subprocess argv begins rtk proxy, including future Docker/git/platform adapters.",
+      "ComposeAdapter": "construct original docker context, project directory/name, ordered -f and env files plus last owner override; privately resolve and compare config; capture compose up exit directly; inspect project/service/image/mounts after action. No global cleanup.",
+      "ImageAdapter": "resolve allowed tag to immutable per-platform digest, pull exact reference, inspect actual image id and release manifest; support fake injected failures without network.",
+      "JournalAndLock": "stdlib fake uses TemporaryDirectory and injected clock; native adapter uses real OS locks/fsync/atomic replace and process-tree supervision. Expose fault hook at each durable boundary.",
+      "FixtureManager": "future owned-Docker mode records ownership manifest before creating anything; unique project/ports/fixture volumes, synthetic auth/config/serial/data; no Docker socket in application except if specifically needed and scoped by future plan. Markers are made only in future owned fixtures.",
+      "ObservationAdapter": "read expected fixture app/Postgres/Qdrant/import identity/data using fixture-owned tooling; exact pre/post comparisons remain private, receipt records only pass booleans/owned resource ids and digests of nonsensitive fixtures. No provider calls."
+    },
+    "run_phases": [
+      "Validate explicit owned fixture manifest and isolated mode before enabling native adapters; default fake mode never opens network/socket.",
+      "Prepare old pinned fixture and original context variants, snapshot original identities privately, then drive same UI/owner protocol as product.",
+      "Inject selected failure/crash boundary; poll independently and enforce external watchdog using phase deadlines plus cleanup budget.",
+      "Compare all expected image/version/health/context/data observations independently of controller status; emit structured per-case receipt, failures and uncropped redacted logs.",
+      "Cleanup only resources named by owned manifest after preserving receipt; cleanup failure is separate failed result and leaves precise resource inventory. Never broad prune/down on arbitrary current directory."
+    ],
+    "receipt_schema": [
+      "case id, mode/proof layer, platform/arch and tool versions",
+      "source/base/candidate/tree and owner/installer/image digests",
+      "fixture ownership id, context variant and original/selected/observed identity",
+      "timestamped durable phases and external observations",
+      "individual assertion pass/fail/unknown, exit codes, timeout/fault injection point",
+      "preservation comparisons as booleans, not credentials or resolved env",
+      "full private redacted stdout/stderr paths and hashes; UI/status trace",
+      "cleanup inventory/result and explicit limitations"
+    ],
+    "success_policy": "All applicable assertions must pass in their actual layer. Missing platform, browser, channel, migration or preservation observations remain NOT_RUN/UNKNOWN; no aggregation from fake tests into native success. Native runs await future authorization and R339 release of boundary."
+  },
+  "cases": [
+    {
+      "id": "A01-pinned-old-replacement",
+      "proof_layer": "future_owned_Docker",
+      "setup": "Original customer Compose defaults old v1.20.47 in image AND env; owned fixture has old container/image id and known distinct target digest.",
+      "trigger": "One authenticated UI click for target release.",
+      "assertions": [
+        "Owner ack precedes app disconnect; exact target only pulled; new container id differs and local image id matches target platform digest.",
+        "Reported/build version maps to target manifest; Docker and HTTP health stable; succeeded only after three observations. Old image cached alone cannot pass."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A02-relaunch-persistence",
+      "proof_layer": "future_owned_Docker + future_native_platform",
+      "setup": "Complete A01 with stale exported VECTORAIZ_VERSION=old and old .env pin.",
+      "trigger": "Normal stop/start through each real integrated launcher, then installer rerun in same context.",
+      "assertions": [
+        "Same target digest/version selected, no up --build, no downloaded Compose overwrite; same installation id and data.",
+        "Record actual root, Mac .app, Linux desktop/optional boot unit, root and platform Windows launcher paths; no untested platform claim."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A03-custom-context",
+      "proof_layer": "future_owned_Docker + future_native_platform",
+      "setup": "Owned path with spaces/non-ASCII, custom -p distinct from directory, --project-directory, ordered -f files, last override, two --env-file files, default .env alternatives, exported variables including stale version; Docker context explicitly recorded.",
+      "trigger": "Register/adopt then update and relaunch.",
+      "assertions": [
+        "Original config resolution retained except exact release selector and explicit owner fields; literal final override wins both old pins.",
+        "Preserve relative paths, ports, networks, service env_file and all mount targets/options; retain override order and shell precedence for non-version values. Compare resolved data privately; receipt exposes booleans and fixture ids only.",
+        "Run separate cases for COMPOSE_FILE, Compose name, external/renamed volumes and bind mounts; do not infer identity from directory basename."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A04-retained-identity-data",
+      "proof_layer": "future_owned_Docker",
+      "setup": "Owned synthetic app/keystore/serial/HMAC/encryption files, authenticated synthetic account, PostgreSQL row, Qdrant point and import bind file. Capture before identity and readback; no real credentials/provider/serial API.",
+      "trigger": "Update, relaunch and failure/recovery variants.",
+      "assertions": [
+        "Same original app/Postgres/Qdrant/import mount identities and contents; original auth works with preserved serial/keystore, no provisioning calls/new credentials.",
+        "Dependency container ids and images unchanged; no fresh project/parallel blank installation. Byte comparisons private; no secrets in receipt."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A05-concurrent-duplicate",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Two users/tabs, same target and competing target; lost acknowledgement retry.",
+      "trigger": "Simultaneous same-key/same-payload, same-key/different-payload, same-target/different-key, different-target requests and normal launcher.",
+      "assertions": [
+        "Exactly one active mutation; same key/payload returns same id; same target joins; conflicts return 409/active id. Launcher waits/joins lock.",
+        "Owner restart does not create second operation; idempotency survives app replacement; stale requests cannot overwrite target."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A06-pull-failure",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Owned target reference unavailable or registry failure injected by fixture adapter; current healthy old deployment.",
+      "trigger": "Submit chosen update.",
+      "assertions": [
+        "failed_download within bound; old selection/image/container/data remain; no latest fallback or false updating/succeeded.",
+        "Retry linked new attempt may succeed exact same chosen digest; no unbounded queued retries."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A07-compose-failure",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Adapter emits nonzero before replacement, and separate case after partial recreation.",
+      "trigger": "Activate downloaded target.",
+      "assertions": [
+        "Actual child exit captured (no pipeline swallowing); observed active image recorded independently.",
+        "Before-replacement old remains; partial replacement inspects actual new/unknown state and reports recovery_required without unsafe blind revert."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A08-unhealthy-and-wrong-identity",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Target unhealthy, wrong reported version, wrong image digest, wrong project, health endpoint belonging to old/unrelated app: separate variants.",
+      "trigger": "Activate/verify.",
+      "assertions": [
+        "No variant succeeds merely on HTTP 200 or expected environment string; exact project/service/image/build version plus stable health mandatory.",
+        "Bounded failure with actual/unknown observed fields; independent status remains available."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A09-migration-startup-failure",
+      "proof_layer": "future_owned_Docker",
+      "setup": "Owned synthetic database and fixture target whose entrypoint migration phase fails; separately target exits before phase telemetry. No production migration imported by fake suite.",
+      "trigger": "Activate target.",
+      "assertions": [
+        "migration_failed only when phase event establishes it; otherwise startup_failed_migration_unconfirmed. No success/reload countdown.",
+        "Config/data intact; no automatic database/image downgrade, credential generation or deletion. Original recovery context retained; forward repair/retry specified."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A10-app-ui-crash",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Durable owner ack; app or UI killed before/after replacement, lost POST response.",
+      "trigger": "Restart app/UI or refresh status page.",
+      "assertions": [
+        "Owner completes independent of app lifespan; UI reconnects to same operation; last_verified differs from desired until verified.",
+        "Persistent journal/status survives; lost acknowledgement resubmission deduplicates."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A11-owner-crash-resume",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Fault after each journal write/rename, pull start/end, selector/override commit, Compose start/end and final verification.",
+      "trigger": "Kill only owned owner process, restart supervisor and reconcile.",
+      "assertions": [
+        "One OS lock/mutation; durable intent restores consistent generation; inspect before replay. Same target and remaining deadline, no repeat full budget.",
+        "Target running -> verify; old running -> bounded continuation only with unchanged context; unknown state -> recovery_required. Completed state does not reactivate."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A12-host-reboot-and-daemon-unavailable",
+      "proof_layer": "future_native_platform",
+      "setup": "Prepared owned installation with operation in progress and Docker temporarily unavailable.",
+      "trigger": "Reboot owned native fixture; logon/headless startup per supported platform.",
+      "assertions": [
+        "Supervisor resumes under original user/context; owner/app remain separate; daemon absence produces bounded truthful status.",
+        "No extra service/permission assumption; Linux user-session/linger behavior and Windows scheduled task/mac LaunchAgent lifecycle evidenced separately."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A13-owner-unavailable-adoption",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker + future_native_platform",
+      "setup": "Actual old app/Compose without protocol, owner or control mount; variants missing optional installer metadata, equivalent original invocation available, missing original .env, ambiguous custom mappings.",
+      "trigger": "Run future verified host adopter in original context; also submit update while owner missing.",
+      "assertions": [
+        "Old source publication does not change host; no automatic in-app adoption claim. Unavailable POST has no Docker side effects.",
+        "Equivalent context accepted despite optional metadata absent; uncertain original config/data stops before changes; preserve original recovery instructions.",
+        "After adoption, actual launch paths use owner and first protocol-capable activation is verified; subsequent user update is one click. Never execute legacy overwriting installer for adoption."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A14-config-drift",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Original Compose/env source or mounts change after preflight or owner restart.",
+      "trigger": "Attempt activation under same recorded generation.",
+      "assertions": [
+        "Fingerprint mismatch stops before activation; active original context untouched; require concrete recapture evidence rather than guessing or generic approval loop."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A15-bounded-progress-retention",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Oversized request/log stream, stalled registry/Compose/health, stale heartbeat, repeated owner restarts and terminal history overflow.",
+      "trigger": "Advance fake clock; inject same delays in owned fixture.",
+      "assertions": [
+        "Limits equal design: 4KiB request, 32KiB snapshot, 1MiB log ring, 60/1800/180/600 second phase deadlines, 15 second kill grace and stale threshold.",
+        "No false percent/success, active/recovery state never evicted, remaining budget survives crash, unresolved child blocks mutation. Public output redacted; fake clock evidence explicitly fake."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A16-outage-status-auth",
+      "proof_layer": "future_stdlib_fake_and_source + future_native_platform",
+      "setup": "Browser authenticated to standard local app; future owner endpoint independent; variants expired capability, unauthenticated submission, wrong origin and remote HTTPS app.",
+      "trigger": "Replace app and force migration failure; continue polling without app nginx.",
+      "assertions": [
+        "Desktop UI gets durable bounded failed status while app is unavailable; expired read capability requires reauthentication and never grants update.",
+        "Browser/firewall/local-network/mixed-content behavior evidenced on each platform. Remote case requires independent same-origin proxy route; absent route yields transport_unavailable before enabling update.",
+        "No wildcard CORS, credentials/serial/env leaked or public arbitrary-command endpoint. Security implementation validation is future work; no held scanner executed."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A17-channel-and-selector-integrity",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Direct, marketplace and aim-data registration fixtures with allowed repository manifests; target tag moves after resolution.",
+      "trigger": "Update exact target and relaunch.",
+      "assertions": [
+        "Frozen digest used throughout; no latest pull and no repository crossing. Marketplace retains original presentation/config.",
+        "AIM-Data adapter disabled without its own release evidence; aim-data-data never mapped to vectoraiz-data. This repo cannot attest another release train."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A18-recovery-retry",
+      "proof_layer": "future_stdlib_fake_and_source + future_owned_Docker",
+      "setup": "Pull failure, partial Compose, startup/migration failure; retained original private config and valid forward-repair fixture.",
+      "trigger": "Retry through owner after reconciling actual state; exercise runbook missing-original-config refusal.",
+      "assertions": [
+        "Attempt history and actual image preserved; no old safe result reused as current success; exact target verified after repair.",
+        "No down -v/prune/reset/new secrets or serial; image fallback only with separately evidenced schema compatibility. Missing original .env recovery cannot bypass through equivalent-looking generated credentials."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    },
+    {
+      "id": "A19-source-contract-isolation",
+      "proof_layer": "future_stdlib_fake_and_source",
+      "setup": "Future controller and adapters imported alone with stdlib unittest/tempfile/json and fake clock/process/filesystem.",
+      "trigger": "Source parse target files and invoke fake controller; no application imports, conftest, daemon/socket/network/DB.",
+      "assertions": [
+        "Check target-selection/argv assembly, persistent transaction/replay, limits, state transitions and no false success.",
+        "Fakes test controller behavior only, never prove real Compose preservation, migrations, authentication integration or native platform lifecycle."
+      ],
+      "result": "NOT_RUN; acceptance specification only"
+    }
+  ],
+  "turn_safe_validation": "Only parse three design JSON files with stdlib, compare source hashes and Git diff against exact base, and inspect publication metadata. No fake controller implementation or application tests created.",
+  "holds": "R289 SQLSandbox and its source/artifacts/tests/reviews/import chains remain excluded, R328 scanner hold unchanged, R339 native local services forbidden. Searches exclude !**/*sandbox*, !**/*Sandbox*, !**/security/**. No subagents/reviewer dispatch."
+}

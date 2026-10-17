@@ -1,0 +1,324 @@
+{
+  "id": "R374/S1806",
+  "status": "SOURCE_ONLY_DESIGN; implementation and native acceptance pending; full sixteen-repository goal ACTIVE/incomplete",
+  "base": "b4ee5518a5c1299164dd651404bcd0fc78c8b5e8",
+  "publication_branch": "build/athena-r374-update-activation-design-s1806",
+  "checkout": "/var/tmp/koskadeux/minimal-bridge-worktrees/af8b6662cb1b-0cd58b",
+  "scope": "Only design and acceptance preparation. Accepted R373 production and test bytes remain unchanged. PR38 is draft, not released. Main supplied as 985cf1b73e35777f7e7db2c1a9d4d81de4b7ae76, not independently queried this turn.",
+  "outcome": "Once legitimately integrated/adopted, one authenticated click hands a chosen exact release to a host owner surviving app replacement. It downloads, durably selects, recreates in the original Compose project, and verifies image identity plus reported version and health. Original configuration, credentials, keystore, serial and app/Postgres/Qdrant/import data survive; normal launch and rerun retain selected release. Downloaded is never activated or successful.",
+  "source_findings": [
+    {
+      "files": [
+        "app/services/update_service.py"
+      ],
+      "finding": "Complete body read: socket existence sets can_auto_update. _docker_pull_and_signal pulls selected tag AND latest, writes /data/.update-pending, restarts HOSTNAME container, catches restart failure and still returns updating. No Compose context or version persistence is applied."
+    },
+    {
+      "files": [
+        "app/routers/version.py"
+      ],
+      "finding": "Complete router read: public GET /version; authenticated POST /version/update takes no target/idempotency input. Billing route is outside this change; retain it."
+    },
+    {
+      "files": [
+        "frontend/src/pages/SettingsPage.tsx"
+      ],
+      "finding": "Update state/handler lines 129-214 and Software Updates section 975-1106 read. updating response sets done and reloads after 10 seconds; socket capability controls button. Manual pull/up also retains old pin."
+    },
+    {
+      "files": [
+        "docker-compose.customer.yml"
+      ],
+      "finding": "Complete file read. Both image and environment VECTORAIZ_VERSION use ${VECTORAIZ_VERSION:-v1.20.47}. Only /data, import and Docker socket mounted. No host .env/Compose mount or existing owner is established. App, postgres and qdrant use distinct named volumes; HOST_IMPORT_DIR defaults to ./import."
+    },
+    {
+      "files": [
+        "deploy/entrypoint.sh",
+        "deploy/nginx.conf"
+      ],
+      "finding": "Complete bodies read. Entrypoint reuses /data HMAC/encryption files, runs alembic upgrade head before API/nginx, then exits if either process exits. nginx proxies API within the app image. The updater marker has no consumer in this lifecycle. Image rollback is not database rollback."
+    },
+    {
+      "files": [
+        "start.sh"
+      ],
+      "finding": "Complete body read. Changes to script directory; fixed customer Compose; preserves existing .env, may update port; original-config guard for standard named volumes; normal pull/up; root shortcuts are URL links, not host update owners. Exported version can outrank .env."
+    },
+    {
+      "files": [
+        "install.sh",
+        "install.ps1"
+      ],
+      "finding": "Complete bodies read. Universal shell wrapper dispatches platform installer/channel from main; root PowerShell instead downloads main ZIP, copies files into HOME/vectoraiz, conditionally backs up .env based on backend directory detection, uses up --build; it has no durable update owner. Root PowerShell must be integrated separately rather than assumed a wrapper."
+    },
+    {
+      "files": [
+        "installers/mac/install-mac.sh"
+      ],
+      "finding": "Complete body read. HOME/vectoraiz, INSTALL_REF then exported version then latest stable/main Compose selection; downloads Compose over current file; preserves existing .env/serial in standard volume; persists explicit version. Generated .app launcher calls compose up with channel-selected file. This is not an update owner."
+    },
+    {
+      "files": [
+        "installers/linux/install-linux.sh"
+      ],
+      "finding": "Complete body read. HOME/vectoraiz, versioned download selection like Mac, explicit version persistence; desktop command and optional oneshot systemd service call Compose up. Existing oneshot service does not watch updater requests. Pull/up output pipelines are not reliable exit capture; do not reuse them for owner."
+    },
+    {
+      "files": [
+        "installers/windows/install-vectoraiz.ps1"
+      ],
+      "finding": "Complete body read. USERPROFILE/vectoraiz, downloads main Compose, keeps existing env with port/channel rewrite; generated launch-vectoraiz.ps1 calls up, then opens browser even after launcher health wait. No owner, no owner transport or persisted update digest."
+    },
+    {
+      "files": [
+        "installers/aim-data/install.sh",
+        "installers/aim-data/install.ps1",
+        "docker-compose.aim-data.yml"
+      ],
+      "finding": "Complete bodies read as shipped channel entry paths, not a new module audit. Wrappers use HOME/aim-data or AIM_DATA_INSTALL_DIR and vectoraiz:latest, while Compose consumes ghcr.io/aidotmarket/aim-data with aim-data-data. Never silently update that installation with vectoraiz repository image. Channel adapter requires its own release evidence; no second-repository change authorized here."
+    }
+  ],
+  "contract_references": {
+    "provenance": "Docker CLI contracts supplied in boundary analysis and root-read official Docker references dated 2026-10-17; not re-executed or re-fetched here (no network operations).",
+    "urls": [
+      "https://docs.docker.com/reference/cli/docker/container/restart/",
+      "https://docs.docker.com/reference/cli/docker/compose/pull/",
+      "https://docs.docker.com/reference/cli/docker/compose/up/",
+      "https://docs.docker.com/compose/how-tos/environment-variables/variable-interpolation/",
+      "https://docs.docker.com/compose/how-tos/environment-variables/envvars-precedence/"
+    ],
+    "rules": [
+      "Restart starts the same configured container/image; pull only downloads.",
+      "Compose up recreates changed-image service containers while preserving mounted volumes.",
+      "Shell interpolation values outrank --env-file/.env; ordered env files and Compose overrides matter. Preserve distinction between interpolation environment and service environment/env_file."
+    ]
+  },
+  "decision": {
+    "preferred": "New host-owned controller invoking original Compose context; same installation user and Docker context, independent supervised lifetime. It is proposed software, not an existing agent or installed service.",
+    "alternatives": [
+      {
+        "option": "Restart current container or consume marker in same entrypoint",
+        "disposition": "Rejected: container configuration still references old image; owner dies with app, and no current marker consumer exists."
+      },
+      {
+        "option": "Privileged updater sidecar with copied context",
+        "disposition": "Possible future variant but requires explicit host context mounts, permissions and launch persistence. Socket alone gives none of those. More configuration copies and Docker Desktop path coupling than host owner."
+      },
+      {
+        "option": "Recreate from docker inspect",
+        "disposition": "Rejected as default: loses source interpolation/override provenance and durable normal-launch selection; exhaustive reconstruction of mounts/networks/secrets/build options is harder to prove."
+      },
+      {
+        "option": "Manual pull/up or truthful cosmetic status only",
+        "disposition": "Recovery aid only; does not satisfy one-click lifecycle."
+      }
+    ],
+    "tradeoff": "Host owner needs platform packaging/supervision and a status transport surviving app failure. This is more work than fixing UI text, but preserves Compose ownership rather than reconstructing deployment inside the application."
+  },
+  "host_installation_record": {
+    "storage": "Proposed owner-private directory under the original installation: .vectoraiz-owner. Never search arbitrary HOME or copy customer context into application image. Restrictive user ACL; installation id is random and non-secret. No files created there this turn.",
+    "fields": [
+      "schema_version",
+      "installation_id",
+      "original working directory and project_directory (absolute, canonical, spaces preserved)",
+      "exact effective project name and its origin (-p / COMPOSE_PROJECT_NAME / Compose name / directory)",
+      "ordered absolute Compose file list (including all custom overrides)",
+      "ordered explicit env-file list or explicit default discovery rule and cwd",
+      "Docker context/endpoint and installation user identity",
+      "channel, allowed image repository, app service name",
+      "original interpolation shell variables actually affecting configuration, with origin and private storage or retrievable source",
+      "service env_file sources and mount identities",
+      "launcher entrypoints and installer version",
+      "configuration fingerprint/revision",
+      "desired release tag + platform digest + local image id + prior selection",
+      "last verified release and operation journal pointers",
+      "owner transport address/origin policy and pairing material reference"
+    ],
+    "evidence": "Registration compares source-resolved intended context with actual running project/service labels, mounts, image and dependency identities. Compose labels are hints; they cannot reconstruct missing --env-file, original shell values or custom invocation. Missing optional installer metadata is acceptable when equivalent original paths/invocation and observed identity establish ownership.",
+    "configuration_rules": [
+      "Resolve source privately with original Compose semantics; never print/store resolved secrets in public evidence or UI. Private original env bytes retain existing ACLs; record origins, not secret values in receipts. Do not source .env as executable shell.",
+      "Retain source files, overrides, relative path bases, project name, external volumes, bind options, network attachments, ports, resource options and service env_file precedence. Compare pre/post normalized service configuration privately, allowing only exact release selectors and new owner integration fields. Dependency image/config changes require separate scope; owner updates app only.",
+      "Stop as configuration_unresolved on missing original credentials/context or ambiguous data ownership. Do not infer fresh installation from absence of recognized default volumes. Restore original .env/Compose from verified backup as recovery runbook specifies.",
+      "Fingerprint originals and recheck under installation lock immediately before mutation; any drift invalidates plan. No overwriting custom Compose on installer rerun."
+    ]
+  },
+  "version_selection": {
+    "mechanism": "Owner creates a small installation-owned final Compose override with literal app image repository@sha256:platform-manifest-digest and literal VECTORAIZ_VERSION=chosen published tag, plus a durable selection.json. Original ordered Compose files remain first; owner override appended last by every integrated launch/rerun path. No mutable latest pull. Exact repository/digest tied to channel and selected platform.",
+    "precedence": "Integrated launchers delegate to owner launch, which reads selection and original interpolation context; appended literal override wins over old Compose pin and stale exported VECTORAIZ_VERSION for both image and reported version. Preserve all other effective shell/env-file semantics. Warn of ignored stale version selector using its origin only. An intentional later version change is an explicit owner selection operation, not incidental inheritance from launcher shell.",
+    "persistence": "fsync temp files then atomic replace and directory sync (Windows equivalent FlushFileBuffers/replace semantics). Journal intent before publishing selector. launch and update share installation lock and generation. Resume repairs partial selection/override pair from journal; do not launch mixed generations. A selected-but-unhealthy release remains desired with failed status and last_verified old value; never relabel as verified.",
+    "normal_rerun": "Root start, Mac installer and launcher, Linux installer/desktop/autostart, both Windows installers/launcher and applicable channel wrappers must consult existing registered context BEFORE download/copy/config generation. They retain custom files and owner override and must not up --build an accepted release. They delegate ordinary startup to owner launch; root URL shortcuts reach the already supervised app/owner.",
+    "limits": "Unmodified old scripts or hand-run Compose excluding the owner override can still revert version. Adoption must replace actual used launch paths or decline full integration. Do not claim resistance to arbitrary explicit operator bypass. Custom read-only/generated launch systems require integration evidence, not modification guesses."
+  },
+  "owner_runtime": {
+    "platforms": {
+      "root_source_start": "Future start.sh bootstraps verified packaged owner for detected host platform from the existing source/install context, registers original invocation and starts supervision before enabling auto-update. No requirement to install a Python package on customer hosts; ship a standalone platform binary.",
+      "mac": "Future installer stages verified owner under installation, registers context and user LaunchAgent (RunAtLoad, KeepAlive), and .app launcher delegates owner launch. Docker Desktop/OrbStack availability is a bounded precondition; do not start a second daemon or change context.",
+      "linux": "Future installer stages verified owner, registers user systemd simple/restart-on-failure service. Existing vectoraiz.service oneshot is a launch delegate, not an owner. Headless boot/session and Docker access must be proven; no silent privilege escalation or group changes in update flow.",
+      "windows": "Both root install.ps1 and platform installer stage signed/verified standalone owner; per-user scheduled task at logon with restart policy and single-instance behavior survives PowerShell/launcher exit. Generated launcher and existing shortcuts delegate owner launch. No admin service assumed; daemon must be accessible to that user.",
+      "aim_data": "Integrate only after its allowed repository/release adapter is evidenced; retain aim-data-data and original install directory. Present unavailable_owner/channel_not_integrated until then; vectoraiz release must never cross into aim-data channel."
+    },
+    "fresh_install": "Distribution must include owner binaries/manifests for supported OS/architectures plus installer integrations. Register private context while installer legitimately has it, run owner readiness handshake, retain current configuration/data safeguards. App advertises one-click capability only after owner protocol/context/transport readiness; socket existence is irrelevant.",
+    "adoption_from_old_app": [
+      "Old app cannot gain host filesystem access or install a host process through a source release. Existing UI cannot speak proposed protocol until actually upgraded. A verified dedicated adoption package must be distributed through the host installer/recovery channel; the host operator runs it in the ORIGINAL existing deployment context once. This is a prerequisite for old installs, not a replacement for subsequent one-click updates.",
+      "Adopter discovers candidate context using labels and existing launcher/source paths, and accepts equivalent original invocation evidence when optional installer metadata is absent. It retains .env, overrides, project, mounts, data, serial and keystore; never runs the old installer destructive download/copy path. Ask only for genuinely missing context, not a generic form or repeated approval.",
+      "Before app replacement, adopter establishes exact mapping, installs supervisor and future status transport, patches only known launch integration with backup, and uses original-context Compose to activate a verified protocol-capable release. That initial activation may itself migrate the database and must meet the same recovery restrictions. No claim that an older unchanged UI can issue a trustworthy new protocol request.",
+      "If original env/Compose cannot be recovered or launch provenance remains uncertain, stop adoption before replacement and preserve current usable deployment. Explain unavailable_owner and exact missing evidence. No guessing from socket or default directory."
+    ],
+    "unavailable": "GET capability reports owner_unavailable, adoption_required, context_unresolved, transport_unavailable or channel_not_integrated with concise recovery guidance. POST returns 503 without pulling/writing markers/restarting; no fallback into current unsafe updater. Owner heartbeat freshness <=15 seconds, protocol/schema and installation match required."
+  },
+  "transport_and_api": {
+    "design_not_installed": "No listening endpoint, service, token or host mount is created this turn. The following endpoints and keys are FUTURE implementation contracts.",
+    "app_api": "Retain authenticated POST /api/version/update; extend request to chosen release tag and idempotency_key and return 202 only after owner durable acknowledgement. Owner validates allowed repository/platform and freezes tag-to-digest resolution. Public GET /api/version exposes availability/reason and observed current version, never a capability. New authenticated GET /api/version/update/operations/current and /{id} proxy durable owner status while app available. Preserve billing endpoint.",
+    "app_to_owner": "Proposed narrowly mounted control directory, separate from /data and host config: app writes bounded signed request envelopes, owner consumes them under exclusive lock and atomically writes ack/status. Owner owns protocol and installation-scoped pairing key; installer grants only mailbox access, not host .env/Compose. This explicit mount is new integration; current socket is not reused as ownership proof. Owner never accepts shell commands, paths or arbitrary image repositories from envelope.",
+    "outage_status": "For standard localhost desktop use, future owner also exposes a loopback-only status HTTP endpoint on a reserved recorded port, independently supervised. App returns a short-lived operation-specific bearer read capability only to an already authenticated user. Browser polls that endpoint directly before replacement; exact origin allowlist, no wildcard CORS, no cookies, no mutation API there. Status payload contains no secrets. Capability can be retained in sessionStorage with installation/id and expiry for reload; never URL query/log. Owner continues when app and nginx fail.",
+    "remote_custom": "A remote browser cannot reach host loopback. Before enabling one-click for remote or HTTPS custom deployments, original reverse-proxy operator must provide an independent same-origin status route to owner (TLS and access policy preserved) that survives app replacement. App-container nginx alone cannot provide it. Without evidenced route, advertise transport_unavailable; do not expose a new public listener or silently relax origin rules. Browser local-network/mixed-content policies and Windows/macOS firewalls remain native acceptance blockers, not assumed solved.",
+    "auth_boundary": "Existing app authentication authorizes operation submission and issuance of read capability; owner verifies installation-paired signed envelope with nonce, expiry and monotonically consumed request id, and never needs customer API keys/DB access. Pairing material is new updater-only material, not regenerated application credentials. No auth/security source operations performed in this turn; implementation must separately establish protocol authentication correctness within allowed scope.",
+    "ui": "Button submits the displayed chosen version, stores operation id/capability on durable ack, and polls bounded owner snapshots at 2 seconds then exponential backoff up to 10 seconds. Distinguish accepted, resolving, downloading, downloaded, activating, verifying, succeeded, failed and recovery_required. HTTP success, pull completion or elapsed time never means success. Check response status/schema; 401 requests sign-in, 409 joins/busy, 503 shows unavailable. Reload only after succeeded and show observed digest/version/health; direct status page remains readable during startup failure. On missing/stale heartbeat, show owner unreachable/last observed phase and time, never success or definitive failure from a network exception. Resume current operation after UI reload and reauthenticate if capability expired."
+  },
+  "durable_operation_protocol": {
+    "journal": "Owner-private append/checkpoint journal and public redacted snapshots, outside replaced container. Record schema, installation, operation UUID, idempotency key, revision/generation, target tag/digest/platform, prior image/container id, desired and last_verified selection, phase, wall timestamps, elapsed/deadline budgets, heartbeat, subcommand start/exit and observed identities. Write-ahead intent + atomic snapshots; no raw env or secret logs.",
+    "concurrency": "OS-held installation lock (flock/Windows exclusive file handle or mutex with installation id) protects launch/activation, not PID-file guess. All launch paths take same lock. Same idempotency key and payload returns same operation; same active target joins existing id; different target during active operation returns 409 with active id, no queue of stale updates. Reused key with different payload returns 409. After lock loss, reconcile durable generation and process/container state before new work.",
+    "boundedness": {
+      "resolution_seconds": 60,
+      "pull_seconds": 1800,
+      "activation_seconds": 180,
+      "verification_seconds": 600,
+      "command_kill_grace_seconds": 15,
+      "poll_max_seconds": 10,
+      "heartbeat_seconds": 5,
+      "stale_seconds": 15,
+      "public_snapshot_max_bytes": 32768,
+      "request_max_bytes": 4096,
+      "redacted_log_ring_max_bytes": 1048576,
+      "terminal_retention": "last 20 operations or 30 days, whichever is smaller; never evict active or unresolved recovery state",
+      "timeout_rule": "Persist deadline; never restart full budget on crash. No fabricated byte-percent if Docker cannot report total; show phase and known bytes only."
+    },
+    "steps": [
+      {
+        "phase": "accepted",
+        "action": "Authenticate, validate bounded request, owner acquire lock/deduplicate, durable ack before app responds; persist original context revision and target intent. No app restart yet."
+      },
+      {
+        "phase": "resolving",
+        "action": "Resolve chosen immutable release within recorded allowed channel/repository and platform; retain exact tag-to-digest mapping. Preflight original context/config/mount equivalence and dependency readiness without logging secrets. Reject wrong channel/digest or original configuration drift."
+      },
+      {
+        "phase": "downloading",
+        "action": "Pull only repository@digest using original Docker context; no latest pull, no prune, no dependency upgrades. Capture actual exit and bounded redacted progress; failure keeps active selection and old running app unchanged."
+      },
+      {
+        "phase": "downloaded",
+        "action": "Inspect downloaded platform image and immutable image id match. This is not activation. Persist intended final override and selector transaction; record old verified image/config generation for recovery."
+      },
+      {
+        "phase": "activating",
+        "action": "Publish new selection generation under lock, recheck unchanged original source and allowed config diff, invoke original Compose prefix with final override: up -d --no-deps --no-build --pull never <recorded app service>. Capture child exit directly without filtering pipelines. Never down, rm volumes, recreate dependencies, overwrite original config, generate credentials or execute arbitrary request argv. Exact supported Compose flag/version checked at registration; incompatibility prevents enablement."
+      },
+      {
+        "phase": "verifying",
+        "action": "Inspect exact original project/service container after recreation. Require replacement container id when image changed, local image id matching resolved platform digest, consistent env VECTORAIZ_VERSION and actual reported version, running healthy status, health and version HTTP responses from that container/service (not unrelated port/cached response), and unchanged mounts/project/dependency identity. At least three consecutive successful observations 5 seconds apart within 600 seconds; startup/migration failure overrides health claims."
+      },
+      {
+        "phase": "succeeded",
+        "action": "Atomically publish observed image id/digest, reported version, health and observation time plus verified selection generation. UI can now report success. Download status and last_verified historical version remain distinct."
+      }
+    ],
+    "failure_policy": [
+      "Before selection publication/pull failure: fail operation, leave original active selection/config/data intact; retry gets new attempt id linked to old failure.",
+      "Compose nonzero can mean partial replacement: reconcile container identity before deciding old/new active; report failed_activation with observed state, not assumed old app. Do not blindly restore old selection if new entrypoint may have migrated.",
+      "New-image unhealthy, migration exit, version mismatch, wrong image or deadline expiry -> failed/recovery_required with observed image/version/health (unknown explicitly), redacted diagnostic code and retained original recovery context. If entrypoint fails before nginx, owner endpoint still returns status.",
+      "Never promise automatic downgrade after alembic. Image fallback needs evidenced schema compatibility and original-context mapping; otherwise retain volumes/config and diagnose/make forward repair. Database restore requires separately validated owned backup/restore procedure and explicit authorized scope; not supplied or executed here.",
+      "If no stage-specific migration telemetry exists, report startup_failed_migration_unconfirmed rather than invent migration success/failure from missing health. Future entrypoint supplies redacted phase events; no raw migration SQL required.",
+      "No prune, reset, new credentials/serial provision, volume deletion or retry through old installer path. Original recovery runbook instructions retained verbatim in private evidence; runbook unchanged."
+    ],
+    "crash_resume": [
+      "App/UI crash after owner ack: owner continues; reload joins recorded operation, including duplicate POST after lost ack. Before ack no success implied; stable idempotency key permits retry.",
+      "Owner crash during pull: supervisor restarts, takes OS lock, reads journal/deadline and inspects cached image; resumes same digest within remaining budget. Never assumes download done from marker.",
+      "Owner crash between selector files or before/after Compose: replay selection generation transaction, inspect project/service/current image. If old still runs, continue planned exact activation only when configuration unchanged and remaining budget permits; if target runs, verify it. Unknown image/mount drift -> recovery_required.",
+      "Host reboot: same supervisor starts under original user after Docker available; reconcile same journal and budgets. Unavailable daemon is bounded failure/recovery state, not automatic reinstall. Completed operations do not reactivate on restart.",
+      "Timed-out Compose process: terminate tracked child tree with bounded grace; journal may_be_running if termination uncertain and prohibit conflicting mutation until reconciled. Supervisor must recover orphan process state before retry. No kill by process-name pattern."
+    ]
+  },
+  "future_file_touch_list": [
+    {
+      "path": "app/services/update_service.py",
+      "change": "Replace socket/restart/marker activation with owner client, target/idempotency/status contract; retain safe registry checks and R373 error reporting."
+    },
+    {
+      "path": "app/routers/version.py",
+      "change": "Extend authenticated update input and add authenticated status routes; preserve public version and billing behavior."
+    },
+    {
+      "path": "frontend/src/pages/SettingsPage.tsx",
+      "change": "Durable operation lifecycle, direct owner status polling during replacement, bounded reconnect, truthful errors and actual verification display."
+    },
+    {
+      "path": "host-updater/ (new standalone owner package)",
+      "change": "Controller state machine, context registration/adoption, atomic journal/selection, OS locks/supervision adapters, Compose argv adapter, status-only listener, protocol and redaction; no application imports."
+    },
+    {
+      "path": "deploy/owner/ (new packaging/templates)",
+      "change": "Per-platform signed/verified binaries/manifests, LaunchAgent/systemd/scheduled task templates and narrowly scoped control mount/override templates. Build/release packaging only in future authorized work."
+    },
+    {
+      "path": "docker-compose.customer.yml",
+      "change": "Installer-controlled optional mailbox/readiness integration; describe owner requirement instead of promising socket alone. Original mounts/dependencies/credentials retained."
+    },
+    {
+      "path": "deploy/entrypoint.sh",
+      "change": "Future bounded startup/migration phase reporting through control mount without secret/SQL logging; retain migrations and secret reuse. No held imports."
+    },
+    {
+      "path": "start.sh",
+      "change": "Register/bootstrap original context and delegate launch before version selection/config writes; preserve R373 and original-config safeguards."
+    },
+    {
+      "path": "install.sh",
+      "change": "Route verified owner-aware installer packages with channel preserved."
+    },
+    {
+      "path": "install.ps1",
+      "change": "Separate archive path integration; existing-install adoption before any copying/overwriting/build/config generation."
+    },
+    {
+      "path": "installers/mac/install-mac.sh",
+      "change": "Owner-aware fresh install/adoption and generated .app launcher; avoid overwriting original Compose/selected version on rerun."
+    },
+    {
+      "path": "installers/linux/install-linux.sh",
+      "change": "Owner-aware fresh install/adoption, desktop launcher and optional boot unit; direct exit capture and preserved context."
+    },
+    {
+      "path": "installers/windows/install-vectoraiz.ps1",
+      "change": "Owner-aware fresh install/adoption and generated launch-vectoraiz.ps1, task supervisor, quoting/exit/health behavior."
+    },
+    {
+      "path": "installers/aim-data/install.sh; installers/aim-data/install.ps1; docker-compose.aim-data.yml",
+      "change": "Conditional channel adapter integration after separate release ownership evidence; never substitute vectoraiz image. Not a current implementation or cross-repository audit."
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "change": "Future owner artifact build/sign/verification and installer payload inclusion, no release executed now."
+    },
+    {
+      "path": "tests/update_owner/ (new isolated future suite)",
+      "change": "Stdlib fakes/source checks and separately gated owned Docker/platform runner per acceptance matrix; no app/main/settings/conftest import chain."
+    },
+    {
+      "path": "README.md / recovery documentation",
+      "change": "Future distribution/adoption/launch/recovery instructions; preserve original configuration/data recovery. External recovery runbook unchanged now."
+    }
+  ],
+  "unresolved_implementation_and_evidence": [
+    "Implement and select standalone binary toolchain/OS support matrix, packaging trust verification, and supervisor retry policy; prove startup under original user with Docker Desktop/OrbStack and Linux headless session. No owner exists today.",
+    "Prototype direct loopback status from actual desktop browsers (CORS, local-network permissions, mixed content, firewall). For remote/HTTPS deployments establish independent same-origin route or design equivalent surviving gateway; no claim universal outage UI is solved before that evidence.",
+    "Adoption must establish actual original custom invocation/env origins, launch paths, mount identities and permissions without exposing secrets. Unrecoverable old shell-only values or unknown external volume ownership require concrete recovery, not generated metadata.",
+    "Confirm Compose versions support literal final override/environment merging and required flags, including shell precedence, multiple env files, COMPOSE_FILE, -p/name, relative path bases, external/bind mounts, Windows quoting and path translation. Disable enablement until context equivalence and relaunch tested.",
+    "Reported version presently follows environment; require immutable build version attestation mapped to digest as additional future packaged metadata (new host-updater release manifest/image label). Environment echo plus health alone cannot attest binary release. Verification compares image identity and release manifest/build metadata; no app.main edit/import needed in design turn.",
+    "Define migration phase telemetry, compatible forward repair and separately validated backup recovery; no downgrade guarantee. Migration/no-health distinction must remain unknown when telemetry absent.",
+    "AIM-Data owns a different image/release train. Need its allowed release manifest and adapter evidence before enabling its updater; no broad second-repository audit or production change now.",
+    "Run every future owned native matrix case before claiming repaired lifecycle on that platform. This preparation grants no Council acceptance, release, installed fix, native success or full-audit completion."
+  ],
+  "acceptance_artifact": "specs/r374-update-activation-acceptance.json",
+  "source_evidence_artifact": "specs/r374-update-activation-source-evidence.json"
+}
