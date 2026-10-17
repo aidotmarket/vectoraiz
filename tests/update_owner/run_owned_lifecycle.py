@@ -94,6 +94,9 @@ class OwnedFixture:
                   "-H", "Content-Type: application/json", "--data-binary", "@" + str(payload), self.m["app_url"] + "/api/version/update"], timeout=35)
 
     def observe(self, baseline):
+        def mounts(container):
+            return sorted(json.dumps(mount, sort_keys=True) for mount in container["Mounts"])
+
         deadline = time.monotonic() + self.m.get("watchdog_seconds", 3000)
         while time.monotonic() < deadline:
             # Independent owner status works when nginx/app/daemon do not.
@@ -116,8 +119,8 @@ class OwnedFixture:
         }
         for service in ("postgres", "qdrant"):
             old, new = baseline["containers"][service], observed[service]
-            assertions[service + "_unchanged"] = all(old[field] == new[field] for field in ("Id", "Image", "Mounts", "Config", "HostConfig"))
-        assertions["app_mounts_restart_policy_retained"] = (baseline["containers"]["vectoraiz"]["Mounts"] == app["Mounts"] and baseline["containers"]["vectoraiz"]["HostConfig"]["RestartPolicy"] == app["HostConfig"]["RestartPolicy"])
+            assertions[service + "_unchanged"] = mounts(old) == mounts(new) and all(old[field] == new[field] for field in ("Id", "Image", "Config", "HostConfig"))
+        assertions["app_mounts_restart_policy_retained"] = (mounts(baseline["containers"]["vectoraiz"]) == mounts(app) and baseline["containers"]["vectoraiz"]["HostConfig"]["RestartPolicy"] == app["HostConfig"]["RestartPolicy"])
         health = json.loads(self.docker("exec", app["Id"], "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1/api/health"))
         assertions["reported_version"] = health["version"].lstrip("v") == self.m["target_tag"].lstrip("v")
         return {"assertions": assertions, "pass": all(assertions.values()), "operation": op, "commands": self.commands,
