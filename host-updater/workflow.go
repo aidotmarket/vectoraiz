@@ -108,27 +108,36 @@ func (d *Docker) waitAvailable(until int64, now func() time.Time, pause func(), 
 		pause()
 	}
 }
-func (o *Owner) launchSelected(now func() time.Time, pause func(), start func() error) (result error) {
+
+// Status is finalized before a pending launch releases the owner lock to wait.
+func (o *Owner) launchStatus(now func() time.Time, pause func()) (func(), func(error) error, error) {
 	o.Reason = "launch_waiting"
 	if e := o.hostStatus(); e != nil {
-		return e
+		return nil, nil, e
 	}
-	defer func() {
+	finish := func(result error) error {
 		o.Reason = ""
 		if result != nil {
 			o.Reason = result.Error()
 		}
 		if e := o.hostStatus(); result == nil {
-			result = e
+			return e
 		}
-	}()
-	originalPause := pause
-	pause = func() {
-		originalPause()
+		return result
+	}
+	return func() {
+		pause()
 		if now().Unix()-o.LastPublished >= 5 {
 			_ = o.hostStatus()
 		}
+	}, finish, nil
+}
+func (o *Owner) launchSelected(now func() time.Time, pause func(), start func() error) (result error) {
+	pause, finish, e := o.launchStatus(now, pause)
+	if e != nil {
+		return e
 	}
+	defer func() { result = finish(result) }()
 	d := o.D
 	deadline := now().Unix() + o.S.Limits.Activate
 	if e := d.waitAvailable(deadline, now, pause, start); e != nil {
@@ -152,7 +161,6 @@ func (o *Owner) launchSelected(now func() time.Time, pause func(), start func() 
 	}
 	var c Identity
 	var selected bool
-	var e error
 	for {
 		if now().Unix() >= deadline {
 			return errors.New("launch_observation_deadline")
@@ -239,17 +247,39 @@ func (o *Owner) launchSelected(now func() time.Time, pause func(), start func() 
 // The ordinary launcher must make the original runtime available even when
 // retrying adoption or waiting for an update already owned by the supervisor.
 func (o *Owner) launchPending(now func() time.Time, pause func(), start func() error, wait func() error) (bool, error) {
-	if o.S.Current != nil && (o.S.Current.Phase == "failed_resolution" || o.S.Current.Phase == "failed_download") {
-		if e := o.resumeSelection(); e != nil {
-			return false, e
+	c := o.S.Current
+	if !c.active() && (c == nil || c.Phase != "failed_resolution" && c.Phase != "failed_download") {
+		return false, nil
+	}
+	pause, finish, e := o.launchStatus(now, pause)
+	if e != nil {
+		return true, e
+	}
+	// Reconcile expiry under the caller's owner lock, using the controller's
+	// existing classification. Post-activation expiry must remain recovery.
+	if c.active() && now().Unix() >= c.Deadline {
+		if e = o.step(); e != nil {
+			return true, finish(e)
 		}
+	}
+	if c.Phase == "failed_resolution" || c.Phase == "failed_download" {
+		if c.ActivationIssued {
+			return true, finish(errors.New("confirmed_pre_activation_failure_required"))
+		}
+		// Startup has its own existing budget. Submit only once the original
+		// runtime is available so the new Resolve budget starts at resolution.
+		if e = o.D.waitAvailable(now().Unix()+o.S.Limits.Activate, now, pause, start); e == nil {
+			e = o.resumeSelection()
+		}
+	} else if c.active() {
+		// Existing work retains its absolute deadline without renewal.
+		e = o.D.waitAvailable(c.Deadline, now, pause, start)
+	}
+	if e = finish(e); e != nil {
+		return true, e
 	}
 	if !o.S.Current.active() {
 		return false, nil
-	}
-	// Retain the existing absolute deadline; availability must not renew it.
-	if e := o.D.waitAvailable(o.S.Current.Deadline, now, pause, start); e != nil {
-		return true, e
 	}
 	return true, wait()
 }
