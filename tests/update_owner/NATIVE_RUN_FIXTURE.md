@@ -8,7 +8,7 @@ do not retry, skip ahead, or count missing Done as success.
 
 `native_run_probe.go` is standalone test glue, **not a production owner
 executable**. It must be compiled with byte-exact c721ca2d13d8e96c71304160440acc9b5658f97b
-`host-updater/{process.go,storage.go,os_unix.go}` only. No product main, controller,
+`host-updater/{process.go,storage.go,os_unix.go,go.mod}` only. No product main, controller,
 application, native adapter replacement, or injected policy. Production's true
 native guard remains true in this explicit probe; existing TestMain and guarded
 tests are unchanged. `command` and `watchdog` dispatch into the actual production
@@ -17,26 +17,33 @@ called once in the final case against the same root and original deadline.
 
 ## Root's offline build (not author execution)
 
-Use existing Go **1.27.1 linux/arm64**, Python with Linux pidfd support, and
-RTK **0.34.3** spawn/wait topology. Set absolute `R374_SOURCE` to this checkout,
+Build with existing Go **1.27.1 darwin/arm64** on the Darwin arm64 host,
+cross-compiling for **linux/arm64**. Native execution later requires Linux arm64,
+Python with Linux pidfd support, and RTK **0.34.3** spawn/wait topology. Set absolute `R374_SOURCE` to this checkout,
 `R374_BUILD` to a newly created private owned build directory,
 `R374_OUTPUT` to an existing private owned disposable evidence directory,
 and `R374_GO` to the existing Go 1.27.1 executable. These paths are operator
 choices, not product metadata. Keep all resulting files private and retained.
 All operator process launches, including the build, begin with `rtk proxy`.
 
-Copy the three production files and `native_run_probe.go` into `R374_BUILD`
-using `rtk proxy cp` (source checkout remains unchanged). In the shell executing
+Copy the three production Go files, production `host-updater/go.mod`, and
+`native_run_probe.go` into `R374_BUILD` using `rtk proxy cp` (source checkout
+remains unchanged). The isolated package must contain exactly these four Go files
+and `go.mod`, with no other package sources. Copy `go.mod` byte-exact: module
+`vectoraiz/owner`, `go 1.23`, SHA-256
+`649930347732c9800e78827fd8ba01702c6f82850ef43e1077921b9fc58305d3`. In the shell executing
 these commands, export the four variables. Confine RTK bookkeeping for build and
 receipt commands too: set `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
 `XDG_CACHE_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, and `RTK_DB_PATH` to paths
 inside the fresh build directory; create the directory paths with mode 0700.
 Do not change PATH to another Go installation.
 
+Change into `R374_BUILD` so the production module selects the Go language version.
 The complete compile command is:
 
 ```sh
-rtk proxy env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOPROXY=off GOSUMDB=off GO111MODULE=off GOTOOLCHAIN=local GOCACHE="$R374_BUILD/go-cache" "$R374_GO" build -o "$R374_BUILD/probe" "$R374_BUILD/native_run_probe.go" "$R374_BUILD/process.go" "$R374_BUILD/storage.go" "$R374_BUILD/os_unix.go"
+cd "$R374_BUILD"
+rtk proxy env GOOS=linux GOARCH=arm64 CGO_ENABLED=0 GOPROXY=off GOSUMDB=off GO111MODULE=on GOTOOLCHAIN=local GOCACHE="$R374_BUILD/go-cache" "$R374_GO" build -o "$R374_BUILD/probe" .
 ```
 
 Prepare the build attestation after that command succeeds. This reads sources
@@ -50,9 +57,9 @@ build = Path(os.environ['R374_BUILD']).resolve(strict=True)
 source = Path(os.environ['R374_SOURCE']).resolve(strict=True)
 go = os.environ['R374_GO']
 version = subprocess.check_output(['rtk', 'proxy', go, 'version'], text=True).strip()
-assert version == 'go version go1.27.1 linux/arm64', version
+assert version == 'go version go1.27.1 darwin/arm64', version
 sha = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-names = ('process.go', 'storage.go', 'os_unix.go', 'native_run_probe.go')
+names = ('process.go', 'storage.go', 'os_unix.go', 'go.mod', 'native_run_probe.go')
 hashes = {n: sha(build / n) for n in names}
 for n in names:
     original = source / ('host-updater' if n != 'native_run_probe.go' else 'tests/update_owner') / n
@@ -62,13 +69,14 @@ hashes['probe'] = sha(build / 'probe')
 receipt = dict(base='c721ca2d13d8e96c71304160440acc9b5658f97b',
                toolchain='go1.27.1', go_version=version, go_executable_sha256=sha(Path(go)),
                GOOS='linux', GOARCH='arm64', CGO_ENABLED='0', GOPROXY='off', GOSUMDB='off',
+               GO111MODULE='on', GOTOOLCHAIN='local', build_cwd=str(build),
                source_head=subprocess.check_output(['rtk','proxy','git','-C',str(source),'rev-parse','HEAD'], text=True).strip(),
                source_tree=subprocess.check_output(['rtk','proxy','git','-C',str(source),'rev-parse','HEAD^{tree}'], text=True).strip(),
                sha256=hashes,
                command=['rtk','proxy','env','GOOS=linux','GOARCH=arm64','CGO_ENABLED=0',
-                        'GOPROXY=off','GOSUMDB=off','GO111MODULE=off','GOTOOLCHAIN=local',
+                        'GOPROXY=off','GOSUMDB=off','GO111MODULE=on','GOTOOLCHAIN=local',
                         'GOCACHE='+str(build/'go-cache'),go,'build','-o',str(build/'probe'),
-                        *[str(build/n) for n in ('native_run_probe.go','process.go','storage.go','os_unix.go')]])
+                        '.'])
 p = build / 'build-receipt.json'
 p.write_text(json.dumps(receipt, indent=2, sort_keys=True)+'\n')
 p.chmod(0o600)
@@ -117,7 +125,7 @@ records, build receipt, binary, and build sources. Cleanup uses pinned pidfds
 only, waits retained Popen handles, and preserves files. Unverified early setup
 can leave descendant coverage unknown; bounded product/command/guardian lifetimes
 are a limit, never cleanup-success evidence. Unknown stops subsequent cases.
-Receipt source hashes bind the three production files, wrapper, driver, and
+Receipt source hashes bind the three production Go files, production `go.mod`, wrapper, driver, and
 binary; build provenance is an operator attestation. Hash checks also run after
 observation. A result-file observation bounds return timing from above; polling
 is not a claim about an exact process exit instant.

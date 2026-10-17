@@ -465,7 +465,8 @@ def main():
     expected_product = {
         "process.go": "fc5e61711dab8b7f9b8cf1b7ecba574e453a7afddb66d7e090241fedb0b58c33",
         "storage.go": "a8707cd57a3aa1a4e272f5745943bd285a166d6ee5a7456495e746fc8ea51489",
-        "os_unix.go": "71a5436fc9a020a37fa3fd45549758702c87f130b81b05dbc4779f61ae6527b9"}
+        "os_unix.go": "71a5436fc9a020a37fa3fd45549758702c87f130b81b05dbc4779f61ae6527b9",
+        "go.mod": "649930347732c9800e78827fd8ba01702c6f82850ef43e1077921b9fc58305d3"}
     hashes = {name: digest(source_root / "host-updater" / name) for name in expected_product}
     require(hashes == expected_product, "production sources differ from c721")
     hashes.update({"native_run_probe.go": digest(here / "native_run_probe.go"),
@@ -476,6 +477,7 @@ def main():
             and build["toolchain"] == "go1.27.1" and build["GOOS"] == "linux"
             and build["GOARCH"] == "arm64" and build["CGO_ENABLED"] == "0"
             and build["GOPROXY"] == "off" and build["GOSUMDB"] == "off"
+            and build["GO111MODULE"] == "on" and build["GOTOOLCHAIN"] == "local"
             and bool(build["command"]), "build provenance mismatch")
     os.umask(0o077)
     root = Path(tempfile.mkdtemp(prefix="r374-", dir=output))
