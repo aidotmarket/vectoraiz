@@ -129,6 +129,51 @@ def spawn(argv, log, **kwargs):
                                  + os.pathsep + os.defpath, "LANG": "C"}, **kwargs)
 
 
+def pin_proxy_child(handle, launch_argv, pins, until, target_argv=None):
+    """RTK v0.34.3 spawn/wait: inspect only the retained wrapper's child."""
+    wrapper_argv = ["rtk", "proxy", *map(str, launch_argv)]
+    identity = None
+    while time.monotonic() < until:
+        try:
+            identity = proc(handle.pid)
+            fd = pin(handle.pid, os.getpid(), handle.pid, wrapper_argv)
+            pins.append(fd)
+            break
+        except (FileNotFoundError, RuntimeError):
+            if handle.poll() is not None:
+                raise RuntimeError("rtk wrapper exited before ownership established")
+            time.sleep(0.01)
+    else:
+        raise RuntimeError("rtk wrapper ownership not established")
+    while time.monotonic() < until:
+        if ended(fd):
+            raise RuntimeError("pinned rtk wrapper exited during discovery")
+        now = proc(handle.pid)
+        keys = ("pid", "ppid", "group", "start", "uid", "argv")
+        if any(identity[k] != now[k] for k in keys):
+            raise RuntimeError("rtk wrapper identity changed")
+        children = descendants(handle.pid)
+        if len(children) > 1:
+            raise RuntimeError("unexpected rtk wrapper children")
+        if children:
+            pid = children[0]
+            try:
+                child_fd = pin(pid, handle.pid,
+                               pid if target_argv is not None else handle.pid,
+                               target_argv if target_argv is not None else launch_argv)
+            except (FileNotFoundError, RuntimeError):
+                time.sleep(0.01)  # Allow only this retained child's exec to settle.
+                continue
+            pins.append(child_fd)
+            now = proc(handle.pid)
+            if (ended(fd) or any(identity[k] != now[k] for k in keys)
+                    or descendants(handle.pid) != [pid]):
+                raise RuntimeError("rtk ancestry changed while pinning child")
+            return pid, child_fd
+        time.sleep(0.01)
+    raise RuntimeError("rtk actual child ownership not established")
+
+
 def guardian(control, ready, fds):
     """Independent process, pinned handles only, finite lifetime, no group kill."""
     if (not fds or any(os.readlink("/proc/self/fd/" + str(fd)) != "anon_inode:[pidfd]"
@@ -213,40 +258,20 @@ def run_case(binary, root, name, receipt):
         sentinel = spawn([sys.executable, "-c", "import time; time.sleep(25)"],
                          log, start_new_session=True)
         handles.append(sentinel)
-        # rtk must exec transparently. A wrapping implementation is unsupported;
-        # never infer the actual helper PID from a persisted numeric field.
-        sentinel_fd = None
-        sentinel_until = time.monotonic() + 2
-        while time.monotonic() < sentinel_until:
-            try:
-                sentinel_fd = pin(sentinel.pid, os.getpid(), sentinel.pid,
-                                  [sys.executable, "-c", "import time; time.sleep(25)"])
-                break
-            except (FileNotFoundError, RuntimeError):
-                if sentinel.poll() is not None:
-                    raise RuntimeError("sentinel exited before ownership established")
-                time.sleep(0.01)
-        if sentinel_fd is None:
-            raise RuntimeError("rtk did not expose directly owned sentinel")
-        pins.append(sentinel_fd)
-        helper = spawn([binary, "command", root, ident], log,
-                       start_new_session=True)
+        sentinel_pid, sentinel_fd = pin_proxy_child(
+            sentinel, [sys.executable, "-c", "import time; time.sleep(25)"],
+            pins, time.monotonic() + 2)
+        helper_argv = [str(binary), "command", str(root), ident]
+        # RTK 0.34.3 waits for its child. Make that child the helper's group
+        # leader before exec, as required by the unchanged product watchdog.
+        launch_argv = [sys.executable, "-c",
+                       "import os,sys; os.setpgid(0, 0); os.execv(sys.argv[1], sys.argv[1:])",
+                       *helper_argv]
+        helper = spawn(launch_argv, log, start_new_session=True)
         handles.append(helper)
-        # Allow rtk exec to settle; never signal until a successful exact pin.
         until = time.monotonic() + SETUP_LIMIT
-        helper_fd = None
-        while time.monotonic() < until:
-            try:
-                helper_fd = pin(helper.pid, os.getpid(), helper.pid,
-                                [str(binary), "command", str(root), ident])
-                break
-            except (FileNotFoundError, RuntimeError):
-                if helper.poll() is not None:
-                    raise RuntimeError("helper exited before ownership established")
-                time.sleep(0.01)
-        if helper_fd is None:
-            raise RuntimeError("rtk did not expose directly owned helper")
-        pins.append(helper_fd)
+        helper_pid, helper_fd = pin_proxy_child(
+            helper, launch_argv, pins, until, target_argv=helper_argv)
         # Hold the real child.lock until an external watchdog owns pinned
         # helper/sentinel handles. The helper cannot execute its command yet.
         initial_control = arm_guardian(pins, log, handles)
@@ -255,10 +280,10 @@ def run_case(binary, root, name, receipt):
         if not wait_until(lambda: (root / "ready").exists(), until):
             raise RuntimeError("fixture readiness absent")
         state = json.loads(record.read_text())
-        if not state.get("Started") or state.get("ProcessGroup") != helper.pid:
-            raise RuntimeError("actual helper group differs from retained Popen")
-        candidates = descendants(helper.pid)
-        watchdog_argv = [str(binary), "watchdog", str(deadline), str(helper.pid)]
+        if not state.get("Started") or state.get("ProcessGroup") != helper_pid:
+            raise RuntimeError("actual helper group differs from pinned wrapper child")
+        candidates = descendants(helper_pid)
+        watchdog_argv = [str(binary), "watchdog", str(deadline), str(helper_pid)]
         child_argv = [sys.executable, str(idle), "parent"]
         expected = {tuple(map(os.fsencode, watchdog_argv)): "watchdog",
                     tuple(map(os.fsencode, child_argv)): "child"}
@@ -268,7 +293,7 @@ def run_case(binary, root, name, receipt):
             role = expected.get(tuple(argv))
             if role is None or role in owned:
                 raise RuntimeError("unexpected helper child")
-            fd = pin(pid, helper.pid, helper.pid, list(map(os.fsdecode, argv)))
+            fd = pin(pid, helper_pid, helper_pid, list(map(os.fsdecode, argv)))
             pins.append(fd)
             owned[role] = (pid, fd)
         if set(owned) != {"watchdog", "child"}:
@@ -276,23 +301,25 @@ def run_case(binary, root, name, receipt):
         leaves = descendants(owned["child"][0])
         if len(leaves) != 1:
             raise RuntimeError("unexpected fixture descendants")
-        leaf_fd = pin(leaves[0], owned["child"][0], helper.pid,
+        leaf_fd = pin(leaves[0], owned["child"][0], helper_pid,
                       [sys.executable, str(idle), "leaf"])
         pins.append(leaf_fd)
         if descendants(leaves[0]) or descendants(owned["watchdog"][0]):
             raise RuntimeError("unexpected deeper descendants")
-        result["owned_pids"] = {"helper": helper.pid, "sentinel": sentinel.pid,
+        result["owned_pids"] = {"helper": helper_pid, "sentinel": sentinel_pid,
                                 "watchdog": owned["watchdog"][0],
                                 "child": owned["child"][0], "leaf": leaves[0]}
         result["ownership_complete"] = True
-        result["observations"].append("all five live; exact ancestry/argv/group pinned")
+        result["observations"].append(
+            "all five roles and retained wrappers live; exact ancestry/argv/group pinned")
         control_write = arm_guardian(pins, log, handles)
-        # Replacement is armed with all five pinned processes before the
+        # Replacement is armed with all pinned roles/wrappers before the
         # startup watchdog is disarmed. No unguarded external-command interval.
         os.write(initial_control, b"D")
         os.close(initial_control)
         initial_control = None
         targets = [helper_fd, owned["watchdog"][1], owned["child"][1], leaf_fd]
+        live_sample_start = time.time()
         if any(ended(fd) for fd in pins):
             raise RuntimeError("process exited before observation")
         if time.time() >= deadline - 2:
@@ -308,17 +335,33 @@ def run_case(binary, root, name, receipt):
             # An early death is not deadline enforcement evidence. Establish
             # the live control interval without adding a fresh command budget.
             near_deadline = time.monotonic() + max(0, deadline - time.time() - 0.25)
-            if wait_until(lambda: any(ended(fd) for fd in targets), near_deadline):
+            def predeadline_exit():
+                nonlocal live_sample_start
+                live_sample_start = time.time()
+                return any(ended(fd) for fd in targets)
+
+            if wait_until(predeadline_exit, near_deadline):
                 raise RuntimeError("process ended before original deadline observation window")
             result["all_targets_live_unix"] = time.time()
             limit = deadline + 0.25
         remaining = max(0, limit - time.time())
         detections = {}
+        intervals = {}
+        last_live = dict.fromkeys(("helper", "watchdog", "child", "leaf"), live_sample_start)
 
         def observe():
             for role, fd in zip(("helper", "watchdog", "child", "leaf"), targets):
-                if role not in detections and ended(fd):
-                    detections[role] = time.time()
+                if role not in detections:
+                    sample_start = time.time()
+                    dead = ended(fd)
+                    sample_end = time.time()
+                    if dead:
+                        detections[role] = sample_end
+                        intervals[role] = {"last_live_sample_start_unix": last_live[role],
+                                           "first_dead_sample_end_unix": sample_end,
+                                           "deadline_latency_seconds": sample_end - deadline}
+                    else:
+                        last_live[role] = sample_start
             return len(detections) == len(targets)
 
         all_dead = wait_until(observe, time.monotonic() + remaining)
@@ -327,14 +370,19 @@ def run_case(binary, root, name, receipt):
         result.update({"all_targets_terminated": all_dead,
                        "observed_unix": observed,
                        "termination_observed_unix": detections,
+                       "termination_measurement_intervals": intervals,
+                       "observation_limit_unix": limit,
                        "sentinel_survived": sentinel_alive,
                        "terminated_roles": [role for role, fd in
                                             zip(("helper", "watchdog", "child", "leaf"), targets)
                                             if ended(fd)]})
-        # Sampling cannot establish sub-poll timing. Never promote a late
-        # observation to evidence of termination by the original deadline.
+        # The existing 250ms deadline observation allowance bounds the claim;
+        # it cannot establish termination at the exact original deadline instant.
         result["status"] = ("OBSERVED" if all_dead and sentinel_alive
-                            and observed <= min(deadline, limit) else "UNKNOWN")
+                            and result["ownership_complete"]
+                            and len(detections) == len(targets)
+                            and all(sample <= limit for sample in detections.values())
+                            else "UNKNOWN")
         if not all_dead or not sentinel_alive:
             raise RuntimeError("unexpected process lifetime/control behavior")
         completed = json.loads(record.read_text())
@@ -421,8 +469,8 @@ def main():
                "binary_sha256": digest(binary), "contract_source": CONTRACT_SOURCE,
                "binary_source_revision": "UNKNOWN: hash identifies supplied artifact only",
                "assigned_base": JOB_BASE,
-               "limitations": ["Linux only; rtk must exec transparently",
-                               "deadline sampling may be inconclusive at boundary",
+               "limitations": ["Linux only; RTK v0.34.3 spawn/wait topology assumed from source, not natively verified",
+                               "bounded deadline observation includes existing 250ms allowance; exact instant unproved",
                                "polling/launch parent exit NOT_RUN: no safe CLI entry",
                                "Processes.Run/Reconcile lock handoff NOT_RUN",
                                "flock/Done observations are not full updater success",
