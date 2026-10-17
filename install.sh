@@ -50,6 +50,10 @@ case "$CHANNEL" in
         ;;
 esac
 
+if [ -f "$HOME/vectoraiz/.vectoraiz-owner/registration.json" ]; then
+    exec "$HOME/vectoraiz/.vectoraiz-owner/owner" launch --root "$HOME/vectoraiz/.vectoraiz-owner" --open
+fi
+
 echo ""
 echo -e "${CYAN}${BOLD}  vectorAIz — Universal Installer${NC}"
 echo ""

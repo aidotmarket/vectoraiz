@@ -71,9 +71,25 @@ if [ -z "$VECTORAIZ_SECRET_KEY" ]; then
     fi
 fi
 
-# Run database migrations
+# Fixed bounded startup telemetry, no credentials/SQL. It is observational only;
+# the independent host owner retains the terminal journal and restart policy.
+startup_phase() {
+    OWNER_MAILBOX="${VECTORAIZ_OWNER_MAILBOX:-/run/vectoraiz-owner-mailbox}"
+    case "$OWNER_MAILBOX" in /run/vectoraiz-owner-mailbox|/var/lib/vectoraiz-owner-mailbox|/opt/vectoraiz-owner-mailbox) ;; *) return ;; esac
+    if [ -d "$OWNER_MAILBOX" ]; then
+        python3 -c 'import json,os,sys,tempfile; p=sys.argv[2]; f,n=tempfile.mkstemp(dir=p); os.fchmod(f,0o600); s=os.fdopen(f,"w"); json.dump({"phase":sys.argv[1],"version":os.environ.get("VECTORAIZ_VERSION", "dev")},s); s.flush(); os.fsync(s.fileno()); s.close(); os.replace(n,p+"/startup.json")' "$1" "$OWNER_MAILBOX" || true
+    fi
+}
 echo "[INFO] Running database migrations..."
-cd /app && python -m alembic upgrade head
+startup_phase migration_running
+cd /app
+if python -m alembic upgrade head; then
+    startup_phase migration_complete
+else
+    MIGRATION_EXIT=$?
+    startup_phase migration_failed
+    exit "$MIGRATION_EXIT"
+fi
 echo "[INFO] Migrations complete"
 
 # Co-Pilot requires single-worker mode (file lock enforced).

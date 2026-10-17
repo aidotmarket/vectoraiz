@@ -23,7 +23,6 @@ import {
   LogOut,
   ArrowUpCircle,
   Download,
-  Terminal,
   Coins,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -67,6 +66,7 @@ import {
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { getApiUrl, systemApi, apiFetch } from "@/lib/api";
+import { UpdateController, type UpdateView } from "@/lib/updateProtocol";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { useMode } from "@/contexts/ModeContext";
@@ -78,9 +78,7 @@ const DEFAULT_API_URL = '';
 const SettingsPage = () => {
   const brand = useBrand();
   const defaultDataDirectory = `~/${brand.productName.toLowerCase().replace(/\s+/g, "-")}/data`;
-  const manualUpdateCommands = `cd your-${brand.installDirectoryName}-directory
-docker compose -f docker-compose.customer.yml pull ${brand.dockerComposeServiceName}
-docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeServiceName}`;
+
   // Dirty state tracking for Save button
   const [isDirty, setIsDirty] = useState(false);
 
@@ -138,8 +136,8 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
   }
   const [versionInfo, setVersionInfo] = useState<VersionInfo | null>(null);
   const [versionLoading, setVersionLoading] = useState(false);
-  const [updateStatus, setUpdateStatus] = useState<"idle" | "updating" | "done" | "error">("idle");
-  const [updateMessage, setUpdateMessage] = useState("");
+  const [updateView, setUpdateView] = useState<UpdateView>({ status: "idle", message: "", notice: "", correlation: null, retrySameKey: false, submitting: false });
+  const { status: updateStatus, message: updateMessage, notice: ownerNotice } = updateView;
   const [lastChecked, setLastChecked] = useState<Date | null>(null);
 
   const fetchLocalKeys = useCallback(async () => {
@@ -178,40 +176,21 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
     }
   }, []);
 
-  const triggerUpdate = async () => {
-    setUpdateStatus("updating");
-    setUpdateMessage("Pulling latest image... This may take a minute.");
-    try {
-      const storedKey = localStorage.getItem("vectoraiz_api_key");
-      if (!storedKey) {
-        setUpdateStatus("error");
-        setUpdateMessage("Authentication required. Please sign in.");
-        return;
-      }
-      const res = await fetch(`${getApiUrl()}/api/version/update`, {
-        method: "POST",
-        headers: { "X-API-Key": storedKey },
-      });
-      const data = await res.json();
-      if (data.status === "updating") {
-        setUpdateStatus("done");
-        setUpdateMessage("Update downloaded. Restarting...");
-        // Auto-refresh after 10 seconds to pick up the new version
-        setTimeout(() => window.location.reload(), 10000);
-      } else if (data.status === "up_to_date") {
-        setUpdateStatus("idle");
-        toast({ title: "Up to date", description: data.message });
-      } else if (data.status === "docker_not_available") {
-        setUpdateStatus("error");
-        setUpdateMessage(data.message);
-      } else {
-        setUpdateStatus("error");
-        setUpdateMessage(data.message || "Update failed.");
-      }
-    } catch (e) {
-      setUpdateStatus("error");
-      setUpdateMessage(e instanceof Error ? e.message : "Update request failed.");
-    }
+  const updateController = useRef<UpdateController | null>(null);
+  useEffect(() => {
+    const controller = new UpdateController({
+      storage: localStorage, fetch: (...args) => fetch(...args), apiUrl: getApiUrl,
+      uuid: () => crypto.randomUUID(), changed: setUpdateView,
+    });
+    updateController.current = controller;
+    setUpdateView({ ...controller.view });
+    void controller.observe();
+    const timer = window.setInterval(() => void controller.observe(), 5000);
+    return () => { window.clearInterval(timer); updateController.current = null; };
+  }, []);
+
+  const triggerUpdate = () => {
+    if (versionInfo?.latest) void updateController.current?.submit(versionInfo.latest);
   };
 
   const createLocalKey = async () => {
@@ -1049,16 +1028,22 @@ client = QdrantClient(host="localhost", port=6333)`}
             </div>
           )}
 
-          {/* Manual update instructions (when Docker socket not available) */}
-          {versionInfo && !versionInfo.can_auto_update && versionInfo.update_available && (
-            <div className="space-y-2 p-3 bg-secondary/50 rounded-lg">
-              <div className="flex items-center gap-2">
-                <Terminal className="w-4 h-4 text-muted-foreground" />
-                <span className="text-sm font-medium text-foreground">Manual update</span>
-              </div>
-              <pre className="text-xs font-mono bg-background p-2 rounded border border-border overflow-x-auto">
-{manualUpdateCommands}
-              </pre>
+          <div className="space-y-2 p-3 bg-secondary/50 rounded-lg text-sm">
+            <p>{ownerNotice || "Checking the registered host owner..."}</p>
+            <p>Before updating: the original Compose client has independent recovery through its launcher and <code>vectoraiz-owner status --root &lt;installation&gt;/.vectoraiz-owner</code>. The private status.json file is readable even when the app, Docker or owner is unavailable.</p>
+            <p>Existing installations need one verified host adoption. Subsequent updates use this button. Keep the original configuration, credentials and volumes.</p>
+          </div>
+
+          {updateView.correlation && updateView.correlation.acceptance !== "refused" && (
+            <div className="flex gap-2">
+              <Button variant="outline" disabled={updateView.submitting} onClick={() => void updateController.current?.observe()}>
+                Check update status
+              </Button>
+              {updateView.retrySameKey && (
+                <Button disabled={updateView.submitting} onClick={() => void updateController.current?.retry()}>
+                  Retry same request
+                </Button>
+              )}
             </div>
           )}
 
@@ -1080,7 +1065,7 @@ client = QdrantClient(host="localhost", port=6333)`}
             {versionInfo?.update_available && versionInfo?.can_auto_update && (
               <Button
                 className="gap-2"
-                disabled={updateStatus === "updating" || updateStatus === "done"}
+                disabled={updateStatus === "updating" || (!!updateView.correlation && updateView.correlation.acceptance !== "refused" && !(updateStatus === "done" && updateView.correlation.target !== versionInfo.latest))}
                 onClick={triggerUpdate}
               >
                 {updateStatus === "updating" ? (

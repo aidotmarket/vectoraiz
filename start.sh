@@ -14,7 +14,18 @@
 #   7. Opens your browser
 # =============================================================================
 
-set -e
+set -eo pipefail
+
+# Owner selection/context outranks incidental launcher environment on every rerun.
+OWNER_START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$OWNER_START_DIR/.vectoraiz-owner/registration.json" ]; then
+    "$OWNER_START_DIR/.vectoraiz-owner/owner" launch --root "$OWNER_START_DIR/.vectoraiz-owner" --open || {
+        result=$?
+        cat "$OWNER_START_DIR/.vectoraiz-owner/status.json"
+        exit "$result"
+    }
+    exit 0
+fi
 
 # --- Configuration ---
 COMPOSE_FILE="docker-compose.customer.yml"
@@ -153,6 +164,13 @@ fi
 
 if [ ! -f "$COMPOSE_FILE" ]; then
     fail "Cannot find $COMPOSE_FILE in $(pwd)"
+fi
+
+# Existing configuration is adopted once without the legacy rewrite/pull path.
+if [ -f .env ]; then
+    OWNER_RELEASE="${VECTORAIZ_OWNER_RELEASE:-${VECTORAIZ_VERSION:-$(sed -n 's/.*VECTORAIZ_VERSION:-\([^}]*\)}.*/\1/p' "$COMPOSE_FILE" | head -1)}}"
+    OWNER_PORT=$(sed -n 's/^VECTORAIZ_PORT=//p' .env | head -1 | tr -d '\r')
+    exec bash "$SCRIPT_DIR/deploy/owner/setup-owner.sh" "$SCRIPT_DIR" "$COMPOSE_FILE" "$OWNER_RELEASE" "${VECTORAIZ_APP_URL:-http://localhost:${OWNER_PORT:-8080}}" "${VECTORAIZ_CHANNEL:-direct}"
 fi
 
 # ─── Step 3: Port detection ─────────────────────────────────────
@@ -339,6 +357,12 @@ if [ $WAITED -ge $MAX_WAIT ]; then
 else
     success "All services healthy"
 fi
+
+if [ $WAITED -ge $MAX_WAIT ]; then
+    fail "Startup remains unverified; keep original configuration and volumes."
+fi
+OWNER_RELEASE="${VECTORAIZ_OWNER_RELEASE:-${VECTORAIZ_VERSION:-$(sed -n 's/.*VECTORAIZ_VERSION:-\([^}]*\)}.*/\1/p' "$COMPOSE_FILE" | head -1)}}"
+bash "$SCRIPT_DIR/deploy/owner/setup-owner.sh" "$SCRIPT_DIR" "$COMPOSE_FILE" "$OWNER_RELEASE" "${VECTORAIZ_APP_URL:-$URL}" "${VECTORAIZ_CHANNEL:-direct}"
 
 # ─── Step 7: Desktop shortcut ───────────────────────────────────
 create_webloc() {

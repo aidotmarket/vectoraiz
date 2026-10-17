@@ -126,6 +126,39 @@ switch ($Channel.ToLowerInvariant()) {
 }
 $Channel = $Channel.ToLowerInvariant()
 
+# R374: registered context/selection wins on rerun, before copying/downloading/config writes.
+$ownerState = Join-Path $installDir '.vectoraiz-owner'
+$ownerExe = Join-Path $ownerState 'owner.exe'
+if (Test-Path (Join-Path $ownerState 'registration.json')) {
+    & $ownerExe launch --root $ownerState --open
+    if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $ownerState 'status.json'); throw 'Owner recovery required.' }
+    return
+}
+function Invoke-OwnerSetup([string]$ExistingUrl) {
+    $release = $env:VECTORAIZ_OWNER_RELEASE
+    if (-not $release) { $release = $env:VECTORAIZ_VERSION }
+    if (-not $release) { $release = (Invoke-RestMethod 'https://api.github.com/repos/aidotmarket/vectoraiz/releases/latest').tag_name }
+    if ($release -notmatch '^v?\d+\.\d+\.\d+(-rc\.\d+)?$') { throw 'Exact owner release required.' }
+    $helper = Join-Path $env:TEMP ('owner-setup-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        if ($env:VECTORAIZ_OWNER_PACKAGE_DIR) {
+            Copy-Item (Join-Path $env:VECTORAIZ_OWNER_PACKAGE_DIR 'setup-owner.ps1') $helper
+        } else {
+            Invoke-WebRequest -Uri "https://github.com/aidotmarket/vectoraiz/releases/download/$release/setup-owner.ps1" -OutFile $helper -UseBasicParsing -TimeoutSec 30
+        }
+        & $helper -InstallDir $installDir -ComposeFile $composeFile -Release $release -AppUrl $ExistingUrl -Channel $Channel
+    } finally { Remove-Item $helper -Force -ErrorAction SilentlyContinue }
+}
+if ((Test-Path (Join-Path $installDir $composeFile)) -or (Test-Path (Join-Path $installDir '.env'))) {
+    if (-not (Test-Path (Join-Path $installDir $composeFile))) { throw 'Restore the original Compose file before adoption.' }
+    $oldPort = (Select-String -Path (Join-Path $installDir '.env') -Pattern '^VECTORAIZ_PORT=(\d+)' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1)
+    if (-not $oldPort) { $oldPort = '8080' }
+    $existingUrl = if ($env:VECTORAIZ_APP_URL) { $env:VECTORAIZ_APP_URL } else { "http://localhost:$oldPort" }
+    Invoke-OwnerSetup $existingUrl
+    return
+}
+
+
 Write-Host ""
 Write-Host "  ⚡ vectorAIz Installer" -ForegroundColor Cyan
 Write-Host ""
@@ -349,7 +382,7 @@ Write-Info "Building and starting containers (first run may take a few minutes).
 
 $prev = $ErrorActionPreference
 $ErrorActionPreference = "SilentlyContinue"
-docker compose -f $composeFile up -d --build 2>&1 | ForEach-Object {
+docker compose -f $composeFile up -d --no-build 2>&1 | ForEach-Object {
     $line = "$_"
     if ($line -match "Creating|Starting|Built|Pulling|Building") {
         Write-Host "  | $line" -ForegroundColor DarkGray
@@ -363,6 +396,8 @@ if ($composeExit -ne 0) {
 }
 
 $url = if ($port -eq "80") { "http://localhost" } else { "http://localhost:$port" }
+Invoke-OwnerSetup $url
+
 
 $ready = Wait-ForHealthWithSpinner -Url "$url/api/health" -MaxSeconds 180
 

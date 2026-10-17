@@ -25,6 +25,39 @@ switch ($Channel.ToLowerInvariant()) {
     default { throw "Unsupported channel '$Channel'. Supported channels: direct, marketplace, aim-data" }
 }
 $Channel = $Channel.ToLowerInvariant()
+
+# R374: registered context/selection wins on rerun, before copying/downloading/config writes.
+$ownerState = Join-Path $InstallDir '.vectoraiz-owner'
+$ownerExe = Join-Path $ownerState 'owner.exe'
+if (Test-Path (Join-Path $ownerState 'registration.json')) {
+    & $ownerExe launch --root $ownerState --open
+    if ($LASTEXITCODE -ne 0) { Get-Content (Join-Path $ownerState 'status.json'); throw 'Owner recovery required.' }
+    return
+}
+function Invoke-OwnerSetup([string]$ExistingUrl) {
+    $release = $env:VECTORAIZ_OWNER_RELEASE
+    if (-not $release) { $release = $env:VECTORAIZ_VERSION }
+    if (-not $release) { $release = (Invoke-RestMethod 'https://api.github.com/repos/aidotmarket/vectoraiz/releases/latest').tag_name }
+    if ($release -notmatch '^v?\d+\.\d+\.\d+(-rc\.\d+)?$') { throw 'Exact owner release required.' }
+    $helper = Join-Path $env:TEMP ('owner-setup-' + [guid]::NewGuid().ToString('N') + '.ps1')
+    try {
+        if ($env:VECTORAIZ_OWNER_PACKAGE_DIR) {
+            Copy-Item (Join-Path $env:VECTORAIZ_OWNER_PACKAGE_DIR 'setup-owner.ps1') $helper
+        } else {
+            Invoke-WebRequest -Uri "https://github.com/aidotmarket/vectoraiz/releases/download/$release/setup-owner.ps1" -OutFile $helper -UseBasicParsing -TimeoutSec 30
+        }
+        & $helper -InstallDir $InstallDir -ComposeFile $ComposeFile -Release $release -AppUrl $ExistingUrl -Channel $Channel
+    } finally { Remove-Item $helper -Force -ErrorAction SilentlyContinue }
+}
+if ((Test-Path (Join-Path $InstallDir $ComposeFile)) -or (Test-Path (Join-Path $InstallDir '.env'))) {
+    if (-not (Test-Path (Join-Path $InstallDir $ComposeFile))) { throw 'Restore the original Compose file before adoption.' }
+    $oldPort = (Select-String -Path (Join-Path $InstallDir '.env') -Pattern '^VECTORAIZ_PORT=(\d+)' | ForEach-Object { $_.Matches.Groups[1].Value } | Select-Object -First 1)
+    if (-not $oldPort) { $oldPort = '8080' }
+    $existingUrl = if ($env:VECTORAIZ_APP_URL) { $env:VECTORAIZ_APP_URL } else { "http://localhost:$oldPort" }
+    Invoke-OwnerSetup $existingUrl
+    return
+}
+
 $ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/$ComposeFile"
 $PreferredPorts = @(80, 8080, 3000, 8888, 9000)
 
@@ -383,51 +416,13 @@ if ($healthy) {
     Write-Fail "Timed out waiting for health check.`n  View logs: cd $InstallDir; docker compose -f $ComposeFile logs -f"
 }
 
+Invoke-OwnerSetup $Url
+
 # ─── Step 10: Create shortcuts ───────────────────────────────────
 Write-Info "Creating shortcuts..."
 
-# Create a launcher script
-$launcherScript = @"
-# vectorAIz Launcher
-`$InstallDir = "$InstallDir"
-`$ComposeFile = "$ComposeFile"
-`$Port = $Port
-`$Url = "$Url"
-
-Set-Location `$InstallDir
-
-# Start Docker Desktop if not running
-try {
-    `$null = docker info 2>&1
-    if (`$LASTEXITCODE -ne 0) { throw }
-} catch {
-    `$dockerDesktop = "`$env:ProgramFiles\Docker\Docker\Docker Desktop.exe"
-    if (Test-Path `$dockerDesktop) { Start-Process `$dockerDesktop }
-    `$maxWait = 60
-    `$waited = 0
-    while (`$waited -lt `$maxWait) {
-        try { `$null = docker info 2>&1; if (`$LASTEXITCODE -eq 0) { break } } catch {}
-        Start-Sleep -Seconds 3
-        `$waited += 3
-    }
-}
-
-docker compose -f `$ComposeFile up -d 2>&1 | Out-Null
-
-# Wait for health then open browser
-for (`$i = 0; `$i -lt 40; `$i++) {
-    try {
-        `$r = Invoke-WebRequest -Uri "`$Url/api/health" -UseBasicParsing -TimeoutSec 2 -ErrorAction SilentlyContinue
-        if (`$r.StatusCode -eq 200) { break }
-    } catch {}
-    Start-Sleep -Seconds 3
-}
-
-Start-Process `$Url
-"@
-
+# The owner installed launch-vectoraiz.ps1; it reads the durable selection.
 $launcherPath = "$InstallDir\launch-vectoraiz.ps1"
-Set-Content -Path $launcherPath -Value $launcherScript -Encoding UTF8
 
 # Create Desktop shortcut
 try {

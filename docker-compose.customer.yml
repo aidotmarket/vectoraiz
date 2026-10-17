@@ -25,7 +25,8 @@ services:
       - vectoraiz-data:/data
       # Optional: host directory for local file import
       - ${HOST_IMPORT_DIR:-./import}:/data/import
-      # Optional: enables one-click auto-update from the UI
+      # Optional: retained existing Docker authority (cooperative-only).
+      # One-click updates require the original-user host owner, not this socket.
       # Remove this line if you don't want the container to have Docker access
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
