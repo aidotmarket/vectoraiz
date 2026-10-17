@@ -3,6 +3,7 @@ package main
 import (
 	"archive/tar"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,40 @@ type fakeDocker struct {
 }
 
 func jsonBytes(v any) []byte { b, _ := json.Marshal(v); return b }
+
+// Resolve the fake's actual original service and final override, rather than
+// returning a target hash for every query. Hashes model configuration identity,
+// not Docker's hash algorithm (real Compose remains NOT_RUN).
+func (f *fakeDocker) composeConfig(selected bool) map[string]any {
+	var config map[string]any
+	if e := json.Unmarshal(f.config, &config); e != nil {
+		f.t.Fatal(e)
+	}
+	if selected {
+		var override struct{ Services map[string]map[string]any }
+		if e := load(filepath.Join(f.root, "selection.compose.json"), &override); e != nil {
+			f.t.Fatal(e)
+		}
+		services := config["services"].(map[string]any)
+		for name, fields := range override.Services {
+			s := services[name].(map[string]any)
+			for k, v := range fields {
+				if k == "environment" {
+					for key, value := range v.(map[string]any) {
+						s[k].(map[string]any)[key] = value
+					}
+				} else {
+					s[k] = v
+				}
+			}
+		}
+	}
+	return config
+}
+func (f *fakeDocker) configHash(service string, selected bool) string {
+	s := f.composeConfig(selected)["services"].(map[string]any)[service]
+	return fmt.Sprintf("%x", sha256.Sum256(jsonBytes(s)))
+}
 func ownedIdentity(id, image, service string) Identity {
 	c := Identity{ID: id, Image: image}
 	c.Config.Image = repository + ":v1.0.0"
@@ -173,18 +208,14 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 		switch command {
 		case "config":
 			if a[len(a)-1] == "*" {
-				return []byte("vectoraiz original-vectoraiz\npostgres original-postgres\n"), nil
+				return []byte("vectoraiz " + f.configHash("vectoraiz", selected) + "\npostgres " + f.configHash("postgres", selected) + "\n"), nil
 			}
 			if a[len(a)-1] == "vectoraiz" {
-				return []byte("vectoraiz target-hash\n"), nil
+				return []byte("vectoraiz " + f.configHash("vectoraiz", selected) + "\n"), nil
 			}
-			b := append([]byte{}, f.config...)
+			b := jsonBytes(f.composeConfig(selected))
 			if f.drift {
 				b = bytes.ReplaceAll(b, []byte("private-sentinel"), []byte("changed-password"))
-			}
-			if selected {
-				b = bytes.ReplaceAll(b, []byte(repository+":v1.0.0"), []byte(repository+"@"+targetDigest))
-				b = bytes.ReplaceAll(b, []byte("v1.0.0"), []byte("v2.0.0"))
 			}
 			return b, nil
 		case "ps":
@@ -210,9 +241,15 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 			if f.wrongImage {
 				f.app.Image = oldImage
 			}
-			f.app.Config.Env = []string{"VECTORAIZ_VERSION=v2.0.0", "PASSWORD=private-sentinel"}
+			service := f.composeConfig(true)["services"].(map[string]any)["vectoraiz"].(map[string]any)
+			f.app.Config.Image = service["image"].(string)
+			f.app.Config.Env = nil
+			for k, v := range service["environment"].(map[string]any) {
+				f.app.Config.Env = append(f.app.Config.Env, k+"="+v.(string))
+			}
 			f.app.Config.Labels["version"] = "v2.0.0"
-			f.app.Config.Labels["com.docker.compose.config-hash"] = "target-hash"
+			f.app.Config.Labels["com.docker.compose.config-hash"] = f.configHash("vectoraiz", true)
+			f.app.State.Running = true
 			if f.unhealthy {
 				f.app.State.Health.Status = "unhealthy"
 			}
@@ -226,10 +263,23 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 	return nil, errors.New("unexpected_argv")
 }
 func fixture(t *testing.T) (*Owner, *fakeDocker, *int64) {
+	return fixtureWithConfig(t, false)
+}
+func fixtureWithConfig(t *testing.T, sameRelease bool) (*Owner, *fakeDocker, *int64) {
 	t.Helper()
 	root := t.TempDir()
 	f := &fakeDocker{t: t, root: root, app: ownedIdentity("old-container-0000000000000000", oldImage, "vectoraiz"), dep: ownedIdentity("dependency-000000000000000000", oldImage, "postgres"), boxes: map[string]map[string][]byte{}}
 	f.config = []byte(`{"name":"custom-project","services":{"vectoraiz":{"image":"` + repository + `:v1.0.0","environment":{"VECTORAIZ_VERSION":"v1.0.0","PASSWORD":"private-sentinel"},"restart":"unless-stopped"},"postgres":{"image":"postgres:16","environment":{"PASSWORD":"private-sentinel"}}}}`)
+	if sameRelease {
+		f.config = bytes.ReplaceAll(f.config, []byte("v1.0.0"), []byte("v2.0.0"))
+		f.app.Image = targetImage
+		f.app.Config.Image = repository + ":v2.0.0"
+		f.app.Config.Env = []string{"VECTORAIZ_VERSION=v2.0.0", "PASSWORD=private-sentinel"}
+		f.app.Config.Labels["version"] = "v2.0.0"
+		f.pulled = true
+	}
+	f.app.Config.Labels["com.docker.compose.config-hash"] = f.configHash("vectoraiz", false)
+	f.dep.Config.Labels["com.docker.compose.config-hash"] = f.configHash("postgres", false)
 	source := filepath.Join(root, "original compose ñ.json")
 	os.WriteFile(source, f.config, 0600)
 	env := filepath.Join(root, "original.env")

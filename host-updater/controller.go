@@ -347,7 +347,7 @@ func (o *Owner) step() error {
 			return o.fail("dependency_recovery_required")
 		}
 		current, e := o.D.container(o.D.Rec.Invocation.Service)
-		if e == nil && current.Image == c.Release.ImageID {
+		if e == nil && o.D.selectedActive(current, c.Release) == nil {
 			return o.phase("verifying", c.Limits.Verify)
 		}
 		if c.ActivationIssued {

@@ -533,7 +533,7 @@ func (d *Docker) observed(r Release, prior, priorImage string) (Identity, error)
 	if !found {
 		return c, errors.New("wrong_selected_version")
 	}
-	if e = d.appConfig(c, true); e != nil {
+	if e = d.selectedActive(c, r); e != nil {
 		return c, e
 	}
 	// Execute a fixed curl inside the pinned container, not an unrelated browser port.
@@ -549,6 +549,19 @@ func (d *Docker) observed(r Release, prior, priorImage string) (Identity, error)
 		return c, errors.New("reported_health_version_mismatch")
 	}
 	return c, nil
+}
+
+// Image equality alone does not establish adoption: the final override also
+// selects the version and mailbox. Share the same actual-config predicate with
+// verification, including a stopped target that still needs app-only up.
+func (d *Docker) selectedActive(c Identity, r Release) error {
+	if c.Image != r.ImageID {
+		return errors.New("wrong_image")
+	}
+	if !c.State.Running {
+		return errors.New("startup_waiting")
+	}
+	return d.appConfig(c, true)
 }
 func (d *Docker) appConfig(c Identity, selected bool) error {
 	b, e := d.comp(selected, false, "config", "--hash", d.Rec.Invocation.Service)

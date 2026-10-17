@@ -51,6 +51,24 @@ type Command struct {
 type Runner interface {
 	Run(args []string, input []byte, deadline int64, max int, mutate bool) ([]byte, error)
 }
+
+// Start the detached helper, then reap it exactly once while this owner lives.
+// Waiting is asynchronous: polling/deadlines and durable JSON remain the outcome
+// authority. Wait does not cancel a helper when the polling owner exits; the
+// helper retains its own process group/job and finite command deadline.
+type helperProcess interface {
+	Start() error
+	Wait() error
+}
+
+func startHelper(c helperProcess) error {
+	if e := c.Start(); e != nil {
+		return e
+	}
+	go func() { _ = c.Wait() }()
+	return nil
+}
+
 type Processes struct {
 	Root, Cwd  string
 	Env        []string
@@ -127,10 +145,9 @@ func (p *Processes) Run(args []string, input []byte, deadline int64, max int, mu
 	}
 	c := exec.Command(exe, "command", p.Root, r.ID)
 	childGroup(c)
-	if e = c.Start(); e != nil {
+	if e = startHelper(c); e != nil {
 		return nil, errors.New("child_handoff_unknown")
 	}
-	c.Process.Release()
 	for {
 		var got Command
 		if e = load(path, &got); e != nil {

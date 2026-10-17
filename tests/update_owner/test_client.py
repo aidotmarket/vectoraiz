@@ -204,6 +204,56 @@ class OwnerClientTest(unittest.TestCase):
         names = {n.target.id for n in model.body if isinstance(n, ast.AnnAssign)}
         self.assertTrue({"user_id", "scopes"} <= names)
 
+    def test_actual_cookie_auth_branch_with_fake_session_dependencies(self):
+        # Execute only the existing cookie branch and absent-header denial.
+        # Auth service/JWT/FastAPI dependencies are fakes; no app imports.
+        auth = ast.parse((ROOT / "app/auth/api_key_auth.py").read_text())
+        current = next(n for n in auth.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "get_current_user")
+        index = next(i for i, n in enumerate(current.body) if isinstance(n, ast.Assign)
+                     and ast.unparse(n).startswith("token = request.cookies.get"))
+        leaf = ast.parse("async def cookie_leaf(request): pass").body[0]
+        leaf.body = current.body[index:index + 4]
+        class RemoveImports(ast.NodeTransformer):
+            def visit_ImportFrom(self, node):
+                return None
+        leaf = ast.fix_missing_locations(RemoveImports().visit(leaf))
+        class User:
+            def __init__(self, **values):
+                self.__dict__.update(values)
+        class Denied(Exception):
+            def __init__(self, status_code=None, detail=None):
+                self.status = status_code
+        class Status:
+            HTTP_401_UNAUTHORIZED = 401
+        class Service:
+            async def get_user_by_id(self, user_id):
+                return User(id=user_id, is_active=True)
+        role = "admin"
+        env = {"JWT_COOKIE_NAME": "vz_session", "decode_jwt_token": lambda token: {"sub": "synthetic", "role": role},
+               "get_auth_service": Service, "AuthenticatedUser": User, "HTTPException": Denied, "status": Status}
+        exec(compile(ast.Module(body=[leaf], type_ignores=[]), "actual-cookie-auth-branch-fake-dependencies", "exec"), env)
+        routes = ast.parse((ROOT / "app/routers/version.py").read_text())
+        authorize = next(n for n in routes.body if isinstance(n, ast.FunctionDef) and n.name == "_authorize_update")
+        exec(compile(ast.Module(body=[authorize], type_ignores=[]), "actual-update-scope-leaf", "exec"), env)
+        for cookie, role, expected in [(True, "admin", 202), (True, "user", 403), (False, "user", 401)]:
+            with self.subTest(cookie=cookie, role=role):
+                request = User(cookies={"vz_session": "synthetic-cookie"} if cookie else {}, headers={}, state=User())
+                coroutine = env["cookie_leaf"](request)
+                try:
+                    try:
+                        coroutine.send(None)
+                        self.fail("fake cookie auth unexpectedly yielded external work")
+                    except StopIteration as done:
+                        user = done.value
+                    env["_authorize_update"](user)
+                    result = 202
+                except Denied as error:
+                    result = error.status
+                finally:
+                    coroutine.close()
+                self.assertEqual(result, expected)
+        print("FAKE_SCOPE_ONLY: actual extracted cookie/scopes/absent-auth branches; real FastAPI/JWT/browser NOT_RUN")
+
     def test_guards_close_application_and_native_paths(self):
         with self.assertRaises(RuntimeError):
             __import__("app")
