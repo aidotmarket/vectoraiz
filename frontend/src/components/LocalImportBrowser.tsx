@@ -77,6 +77,10 @@ export function LocalImportBrowser({
   const [entries, setEntries] = useState<ImportBrowseEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [browseError, setBrowseError] = useState<string | null>(null);
+  const [failedBrowse, setFailedBrowse] = useState<{
+    path: string;
+    isInitial: boolean;
+  } | null>(null);
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set());
 
   // Import state
@@ -91,6 +95,7 @@ export function LocalImportBrowser({
   const loadDirectory = async (path: string, isInitial = false) => {
     setLoading(true);
     setBrowseError(null);
+    setFailedBrowse(null);
     setSelectedFiles(new Set());
     try {
       const res = await importApi.browse(path);
@@ -98,6 +103,7 @@ export function LocalImportBrowser({
       setCurrentPath(res.path);
       setEntries(res.entries);
     } catch (e) {
+      setFailedBrowse({ path, isInitial });
       setBrowseError(
         e instanceof Error ? e.message : "Failed to browse directory"
       );
@@ -300,8 +306,34 @@ export function LocalImportBrowser({
           </div>
         )}
 
-        {/* Error or empty state */}
-        {!loading && (browseError || entries.length === 0) && (
+        {/* Failed directory read */}
+        {!loading && browseError !== null && (
+          <div
+            role="alert"
+            className="flex flex-col items-center gap-3 py-8 text-center"
+          >
+            <p className="text-sm text-foreground font-medium">
+              Unable to read import directory.
+            </p>
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {browseError}
+            </p>
+            {failedBrowse && (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() =>
+                  loadDirectory(failedBrowse.path, failedBrowse.isInitial)
+                }
+              >
+                Retry
+              </Button>
+            )}
+          </div>
+        )}
+
+        {/* Successful empty state */}
+        {!loading && browseError === null && entries.length === 0 && (
           <div className="flex flex-col items-center gap-3 py-8 text-center">
             <div className="w-12 h-12 rounded-full bg-secondary flex items-center justify-center">
               <HardDrive className="w-6 h-6 text-muted-foreground" />
