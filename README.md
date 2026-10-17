@@ -89,6 +89,38 @@ Once running:
 - **API docs** → [http://localhost:8080/docs](http://localhost:8080/docs)
 - **Health check** → [http://localhost:8080/api/health](http://localhost:8080/api/health)
 
+## Host-owned updates (R374 source, unreleased)
+
+This checkout implements one-time host adoption followed by one-click updates from Settings. It has isolated source/fake proof only. Native Docker transport, platform supervision, real authentication, migrations, distribution and retained-data acceptance remain **NOT_RUN**; this is not a released installer announcement. The original Docker socket remains cooperative-only authority, with no containment claim. Installations without that socket use the same host owner transport.
+
+Use the owner-aware installer from the exact verified release when these artifacts are published. The release bundle contains standalone `vectoraiz-owner-{darwin,linux}-{amd64,arm64}` or `vectoraiz-owner-windows-amd64.exe`, checksums and `setup-owner.sh`/`setup-owner.ps1`. Hosts need their existing Docker CLI/context and platform supervisor, with no Python or RTK dependency added. Checksums are retrieved from the same authenticated HTTPS release; independent signing/distribution evidence remains outstanding. Linux requires a working existing user systemd session; macOS uses a user LaunchAgent; Windows uses a per-user logon task. The updater grants no Docker permissions and does not enable linger or install an administrator service.
+
+Back up the original Compose files, `.env`, ordered overrides/env files and installation directory privately. Keep data volumes, serial, HMAC/encryption files, credentials, keystore and original dependency containers. Restore genuinely missing original configuration before adoption; do not generate replacement credentials. Owner-aware reruns delegate before downloading Compose, copying archives, changing ports/channel, provisioning serials or building an accepted release. AIM-Data one-click adoption remains `channel_not_integrated` until its own release evidence exists.
+
+For the standard shipped installation, the installer performs adoption in its original directory. Set `VECTORAIZ_OWNER_RELEASE` to the exact owner-capable release for initial adoption; it must have the corresponding owner assets. `VECTORAIZ_APP_URL` retains an existing remote browser route where needed. One-time adoption activates that exact protocol-capable image and waits for verification. Later authenticated clicks use the displayed chosen tag and a persistent request key; the owner freezes the platform digest, pulls only that reference and activates the app in the original project.
+
+Custom original invocations use the verified binary's `setup` once, under the **original installation user and original interpolation environment**. Repeat `--file` and `--env-file` in their original order; retain the original working directory, project directory/name, context and channel. Example shape (replace placeholders with actual original values):
+
+```text
+vectoraiz-owner setup --root "/original install/.vectoraiz-owner" --cwd "/original cwd" --project-directory "/original project" --project actual-project --context existing-context --file "/original/base.yml" --file "/original/override.yml" --env-file "/original/first.env" --env-file "/original/second.env" --channel direct --target vX.Y.Z --url https://existing-app.example
+```
+
+Stage the verified binary at `.vectoraiz-owner/owner` (Windows: `owner.exe`) with the restrictive permissions used by the setup helper; Windows state needs the current-user/SYSTEM ACL before setup. Registration privately resolves Compose and compares its configuration hashes with existing project/service containers. It refuses ambiguous/missing resources, changed effective configuration or ownership, unsupported activation flags, and an unwritable root filesystem or absence of a usable non-mounted mailbox. It selects among three fixed image-created private paths, so a custom `/run` mount can retain its configuration and use `/var/lib` or `/opt` instead. A signed challenge must prove the actual app mailbox reader/writer before readiness. Harmless comments, formatting and optional extension metadata can pass after effective configuration/ownership revalidation. Custom launch systems must use the new owner launcher or `launch`; hand-running Compose without the final owner override can intentionally bypass selection.
+
+Use the generated launcher or `vectoraiz-owner launch --root <state>` for subsequent starts. Selection survives stale exported version pins and installer reruns. The owner starts existing stopped dependencies and waits for their health; it never recreates/upgrades dependencies. Its app-only Compose invocation uses the literal final override, `--no-deps --no-build --pull never`. Success requires the actual project/service/configuration hash, platform image/config identity, build label, reported version and configured stable health observations.
+
+Before an update, know the independent recovery path on the original Compose client (A), even if Docker/app live on B and the browser is on C:
+
+```text
+vectoraiz-owner status --root <installation>/.vectoraiz-owner
+```
+
+The private `status.json` remains readable without Docker, the app or a running owner. Stale observations mean unknown current outcome. A loaded browser retains the key and last phase/deadline during disconnection; a full refresh may not load while the app is down. A lost HTTP/ack response is `acceptance_unknown`: look up or retry the **same key**, rather than making a new operation. Status access does not grant submission permission.
+
+For terminal startup/migration failure, retain the desired image, original restart policy, credentials and volumes. The app may continue restarting under that unchanged policy. There is no automatic app stop, rollback, database downgrade, prune or reset. `retry --target <tag>` starts a new explicit attempt after a confirmed resolution/download failure, including failed initial adoption. `reconcile` observes the original context; `repair --target <same-or-newer-tag>` explicitly starts a forward attempt after revalidating actual state. An unresolved supervised child blocks conflicting mutation; inspect its private record and actual original-context state before operator recovery. Never delete lock/journal files to force a retry. Setup interrupted before integration can resume through the staged owner's `launch` without recapturing or overwriting the original context.
+
+Isolated checks are `rtk proxy env GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off go test ./...` in `host-updater`, and `rtk proxy python3 -I tests/update_owner/test_client.py`. These use native-execution/import/network guards and synthetic temporary files. `tests/update_owner/run_owned_lifecycle.py` provides separately authorized prepared-fixture adoption/submission/observation phases, including independent data probes; its Docker/native adapters were not executed here. R289/R328/R339 holds remain active; the full sixteen-repository audit remains active and incomplete.
+
 ## Deployment Channels
 
 vectorAIz supports multiple deployment channels using the same application image and codebase.

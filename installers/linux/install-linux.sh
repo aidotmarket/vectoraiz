@@ -9,7 +9,7 @@
 #   chmod +x install-linux.sh && ./install-linux.sh
 # =============================================================================
 
-set -e
+set -eo pipefail
 
 CHANNEL="${VECTORAIZ_CHANNEL:-direct}"
 
@@ -47,6 +47,35 @@ if [ "$CHANNEL" = "aim-data" ]; then
     COMPOSE_FILE="docker-compose.aim-data.yml"
 else
     COMPOSE_FILE="docker-compose.customer.yml"
+fi
+# Adopted reruns never download/overwrite Compose or rewrite the original env.
+if [ -f "$INSTALL_DIR/.vectoraiz-owner/registration.json" ]; then
+    exec "$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
+fi
+owner_setup() {
+    local release="${VECTORAIZ_OWNER_RELEASE:-${VECTORAIZ_VERSION:-${LATEST_TAG:-}}}"
+    if [ -z "$release" ]; then
+        release=$(curl -fsSL --max-time 15 'https://api.github.com/repos/aidotmarket/vectoraiz/releases/latest' | sed -n 's/.*"tag_name": *"\([^" ]*\)".*/\1/p' | head -1)
+    fi
+    # The setup helper is shipped with the exact release, never fetched from main.
+    local helper
+    helper=$(mktemp)
+    if [ -n "${VECTORAIZ_OWNER_PACKAGE_DIR:-}" ]; then
+        cp "$VECTORAIZ_OWNER_PACKAGE_DIR/setup-owner.sh" "$helper"
+    else
+        curl -fsSL --max-time 30 "https://github.com/aidotmarket/vectoraiz/releases/download/$release/setup-owner.sh" -o "$helper"
+    fi
+    bash "$helper" "$INSTALL_DIR" "$COMPOSE_FILE" "$release" "${VECTORAIZ_APP_URL:-$URL}" "$CHANNEL"
+    local result=$?
+    rm -f "$helper"
+    return "$result"
+}
+if [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || [ -f "$INSTALL_DIR/.env" ]; then
+    [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || { echo 'Restore the original Compose file before adoption.' >&2; exit 1; }
+    OWNER_PORT=$(sed -n 's/^VECTORAIZ_PORT=//p' "$INSTALL_DIR/.env" | head -1 | tr -d '\r')
+    URL="http://localhost:${OWNER_PORT:-8080}"
+    owner_setup
+    exit $?
 fi
 # --- Versioned compose download (Council S197: no main branch race) ---
 INSTALL_REF="${INSTALL_REF:-}"
@@ -528,6 +557,8 @@ else
     exit 1
 fi
 
+owner_setup
+
 # ─── Step 11: Create .desktop file ───────────────────────────────
 info "Creating desktop entry..."
 
@@ -538,7 +569,7 @@ cat > "$DESKTOP_DIR/vectoraiz.desktop" <<EOF
 [Desktop Entry]
 Name=vectorAIz
 Comment=Self-hosted data processing & search
-Exec=bash -c 'cd $INSTALL_DIR && docker compose -f $COMPOSE_FILE up -d && sleep 5 && xdg-open $URL'
+Exec="$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
 Icon=applications-science
 Type=Application
 Categories=Development;Database;Science;
@@ -587,8 +618,8 @@ After=docker.service
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=$INSTALL_DIR
-ExecStart=/usr/bin/docker compose -f $COMPOSE_FILE up -d
-ExecStop=/usr/bin/docker compose -f $COMPOSE_FILE down
+ExecStart="$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner"
+
 
 [Install]
 WantedBy=default.target

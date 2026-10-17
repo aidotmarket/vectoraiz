@@ -327,14 +327,27 @@ jobs:
           docker compose -f docker-compose.customer.yml down -v 2>/dev/null || true
 
   e2e-install-test:
-    needs: [verify-release, build-push]
+    needs: [verify-release, build-push, owner-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: owner-*
+          path: owner-assets
+          merge-multiple: true
+      - name: Prepare the same release bundle before public asset creation
+        run: |
+          cd owner-assets
+          sha256sum vectoraiz-owner-* > owner-sha256.txt
+          cp ../deploy/owner/setup-owner.sh ../deploy/owner/setup-owner.ps1 .
+
       - name: Run Linux install script end-to-end
         env:
           INSTALL_REF: ${{ github.sha }}
+          VECTORAIZ_OWNER_RELEASE: ${{ needs.verify-release.outputs.version }}
+          VECTORAIZ_OWNER_PACKAGE_DIR: ${{ github.workspace }}/owner-assets
           VECTORAIZ_MODE: standalone
         run: |
           bash installers/linux/install-linux.sh
@@ -368,11 +381,55 @@ jobs:
   # ─────────────────────────────────────────────────────────────────
   # Job 4: Create GitHub Release (only after smoke test passes)
   # ─────────────────────────────────────────────────────────────────
+  # Standalone stdlib owner artifacts. Building is not native lifecycle acceptance.
+  owner-assets:
+    needs: verify-release
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { os: darwin, arch: amd64, suffix: '' }
+          - { os: darwin, arch: arm64, suffix: '' }
+          - { os: linux, arch: amd64, suffix: '' }
+          - { os: linux, arch: arm64, suffix: '' }
+          - { os: windows, arch: amd64, suffix: '.exe' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.23.x'
+          cache: false
+      - name: Compile standalone owner
+        working-directory: host-updater
+        env:
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+          GOPROXY: 'off'
+          GOSUMDB: 'off'
+          GOTOOLCHAIN: 'local'
+        run: go build -trimpath -ldflags '-X main.packageVersion=${{ needs.verify-release.outputs.version }}' -o ../owner-assets/vectoraiz-owner-${{ matrix.os }}-${{ matrix.arch }}${{ matrix.suffix }} .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: owner-${{ matrix.os }}-${{ matrix.arch }}
+          path: owner-assets/*
+
   create-release:
-    needs: [verify-release, smoke-test, e2e-install-test]
+    needs: [verify-release, smoke-test, e2e-install-test, owner-assets]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: owner-*
+          path: owner-assets
+          merge-multiple: true
+      - name: Bind owner artifacts to this release
+        run: |
+          cd owner-assets
+          sha256sum vectoraiz-owner-* > owner-sha256.txt
+          cp ../deploy/owner/setup-owner.sh ../deploy/owner/setup-owner.ps1 .
 
       - name: Make installer scripts executable
         run: |
@@ -386,6 +443,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            owner-assets/*
             install.sh
             installers/mac/install-mac.sh
             installers/mac/uninstall-mac.sh

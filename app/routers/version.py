@@ -3,16 +3,19 @@ BQ-VZ-AUTO-UPDATE: Version check and auto-update endpoints.
 BQ-VZ-SERIAL-CLIENT: Billing status endpoint.
 
 - GET  /api/version                    — current version + latest available from GHCR
-- POST /api/version/update             — trigger Docker-based auto-update (auth required)
+- POST /api/version/update             — submit chosen release to host owner (auth required)
 - GET  /api/v1/system/billing-status   — serial billing state for frontend
 """
 
 import logging
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from app.auth.api_key_auth import get_current_user, AuthenticatedUser
-from app.services.update_service import check_for_updates, trigger_update
+from app.services.update_service import check_for_updates, trigger_update, owner_status
+from app.services.update_owner_client import OwnerError
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +28,37 @@ async def get_version(force: bool = Query(False, description="Bypass cache and c
     return await check_for_updates(force=force)
 
 
+class UpdateRequest(BaseModel):
+    target: str = Field(min_length=5, max_length=80, pattern=r"^v?[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$")
+    idempotency_key: str = Field(min_length=16, max_length=128, pattern=r"^[a-zA-Z0-9_-]+$")
+
+
+def _authorize_update(user: AuthenticatedUser):
+    # Existing authentication supplies the principal; a request cannot assert it.
+    if "admin" not in user.scopes and "update:submit" not in user.scopes:
+        raise HTTPException(403, detail="Update permission required.")
+
+
 @router.post("/version/update")
-async def post_update(_user: AuthenticatedUser = Depends(get_current_user)):
-    """Trigger auto-update via Docker socket. Requires authentication."""
-    return await trigger_update()
+async def post_update(body: UpdateRequest, user: AuthenticatedUser = Depends(get_current_user)):
+    _authorize_update(user)
+    try:
+        result = await trigger_update(body.target, body.idempotency_key, str(user.user_id))
+        return JSONResponse(status_code=202, content=result)
+    except OwnerError as error:
+        return JSONResponse(status_code=error.http_status, content={
+            "status": error.code, "idempotency_key": body.idempotency_key,
+            "message": "Keep this request key for lookup. Use the original host launcher or owner status CLI if the app is unreachable.",
+        })
+
+
+@router.get("/version/update/operations/{identifier}")
+async def update_operation(identifier: str, user: AuthenticatedUser = Depends(get_current_user)):
+    # Read permission does not authorize submission or reveal pairing material.
+    try:
+        return await owner_status(identifier)
+    except OwnerError as error:
+        raise HTTPException(error.http_status, detail=error.code) from None
 
 
 @router.get("/v1/system/billing-status")

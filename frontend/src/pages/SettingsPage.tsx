@@ -23,7 +23,6 @@ import {
   LogOut,
   ArrowUpCircle,
   Download,
-  Terminal,
   Coins,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -78,9 +77,7 @@ const DEFAULT_API_URL = '';
 const SettingsPage = () => {
   const brand = useBrand();
   const defaultDataDirectory = `~/${brand.productName.toLowerCase().replace(/\s+/g, "-")}/data`;
-  const manualUpdateCommands = `cd your-${brand.installDirectoryName}-directory
-docker compose -f docker-compose.customer.yml pull ${brand.dockerComposeServiceName}
-docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeServiceName}`;
+
   // Dirty state tracking for Save button
   const [isDirty, setIsDirty] = useState(false);
 
@@ -178,40 +175,98 @@ docker compose -f docker-compose.customer.yml up -d ${brand.dockerComposeService
     }
   }, []);
 
-  const triggerUpdate = async () => {
-    setUpdateStatus("updating");
-    setUpdateMessage("Pulling latest image... This may take a minute.");
+  const updateCorrelation = useRef<{ key: string; target: string; id?: string } | null>(null);
+  const lastOwnerMessage = useRef("No owner observation yet.");
+  const unreachableSince = useRef<string | null>(null);
+  const [ownerNotice, setOwnerNotice] = useState("");
+
+  const observeUpdate = useCallback(async () => {
+    const storedKey = localStorage.getItem("vectoraiz_api_key");
+    if (!storedKey) return;
+    const correlation = updateCorrelation.current;
+    const identifier = correlation?.id || correlation?.key || "current";
     try {
-      const storedKey = localStorage.getItem("vectoraiz_api_key");
-      if (!storedKey) {
-        setUpdateStatus("error");
-        setUpdateMessage("Authentication required. Please sign in.");
-        return;
+      const res = await fetch(`${getApiUrl()}/api/version/update/operations/${encodeURIComponent(identifier)}`, {
+        headers: { "X-API-Key": storedKey }, signal: AbortSignal.timeout(10000),
+      });
+      if (!res.ok) throw new Error(`Owner observation unavailable (${res.status})`);
+      const data = await res.json();
+      const op = data.current;
+      unreachableSince.current = null;
+      setOwnerNotice(data.ready && !data.stale ? "Host update owner is ready." :
+        "One-time host adoption or owner recovery is required. Keep the original Compose files, environment, credentials and data.");
+      if (!op) return;
+      // Never reuse a historical success for a pending request with no matching ack.
+      if (correlation && op.target !== correlation.target) return;
+      if (correlation && !correlation.id && !data.keys?.[correlation.key]) return;
+      if (correlation && !correlation.id) {
+        correlation.id = op.id;
+        localStorage.setItem("vectoraiz_update_request", JSON.stringify(correlation));
       }
+      lastOwnerMessage.current = `Phase ${op.phase}; observed ${new Date(op.updated * 1000).toLocaleString()}; deadline ${new Date(op.deadline * 1000).toLocaleString()}.`;
+      if (data.stale) {
+        setUpdateStatus("updating");
+        setUpdateMessage(`${lastOwnerMessage.current} Owner observation is stale; current outcome unknown. Read the original host's owner status.`);
+      } else if (op.phase === "succeeded") {
+        setUpdateStatus("done");
+        setUpdateMessage(`Verified ${op.target}: selected image, build version and health match. Reload when ready.`);
+      } else if (["recovery_required", "failed_download", "failed_resolution"].includes(op.phase)) {
+        setUpdateStatus("error");
+        setUpdateMessage(`${lastOwnerMessage.current} ${op.code}. Keep configuration and volumes. Read host status for forward recovery; the original restart policy remains active.`);
+      } else {
+        setUpdateStatus("updating");
+        setUpdateMessage(lastOwnerMessage.current);
+      }
+    } catch {
+      if (!correlation) return;
+      unreachableSince.current ||= new Date().toLocaleString();
+      setUpdateStatus("updating");
+      setUpdateMessage(`App/owner status unreachable since ${unreachableSince.current}. ${lastOwnerMessage.current} Current outcome unknown. On the original Compose client, use the launcher status file or vectoraiz-owner status. A full page refresh may not load while the app is down. Keep request ${correlation.key}; do not submit a new request.`);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("vectoraiz_update_request");
+      if (saved) updateCorrelation.current = JSON.parse(saved);
+    } catch { /* Host current/history remains available if correlation was lost. */ }
+    observeUpdate();
+    const timer = window.setInterval(observeUpdate, 5000);
+    return () => window.clearInterval(timer);
+  }, [observeUpdate]);
+
+  const triggerUpdate = async () => {
+    const target = versionInfo?.latest;
+    if (!target) return;
+    const storedKey = localStorage.getItem("vectoraiz_api_key");
+    if (!storedKey) { setUpdateStatus("error"); setUpdateMessage("Authentication required."); return; }
+    // Persist before sending; a missing response is acceptance_unknown.
+    const previous = updateCorrelation.current;
+    const correlation = previous?.target === target ? previous : { key: crypto.randomUUID(), target };
+    updateCorrelation.current = correlation;
+    localStorage.setItem("vectoraiz_update_request", JSON.stringify(correlation));
+    setUpdateStatus("updating");
+    setUpdateMessage(`Submitting ${target}. If the app disconnects, use vectoraiz-owner status on the original Compose client; its status.json remains readable without Docker or the app.`);
+    try {
       const res = await fetch(`${getApiUrl()}/api/version/update`, {
-        method: "POST",
-        headers: { "X-API-Key": storedKey },
+        method: "POST", headers: { "X-API-Key": storedKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ target, idempotency_key: correlation.key }), signal: AbortSignal.timeout(25000),
       });
       const data = await res.json();
-      if (data.status === "updating") {
-        setUpdateStatus("done");
-        setUpdateMessage("Update downloaded. Restarting...");
-        // Auto-refresh after 10 seconds to pick up the new version
-        setTimeout(() => window.location.reload(), 10000);
-      } else if (data.status === "up_to_date") {
-        setUpdateStatus("idle");
-        toast({ title: "Up to date", description: data.message });
-      } else if (data.status === "docker_not_available") {
-        setUpdateStatus("error");
-        setUpdateMessage(data.message);
+      if (res.status === 202 && data.operation_id) {
+        correlation.id = data.operation_id;
+        localStorage.setItem("vectoraiz_update_request", JSON.stringify(correlation));
+        setUpdateMessage("Host owner durably accepted the update. Waiting for image, version and health verification.");
+      } else if (res.status === 504 || data.status === "acceptance_unknown") {
+        setUpdateMessage(`Acceptance unknown. Keep request ${correlation.key} for lookup. Read host owner status; do not submit a new request.`);
       } else {
         setUpdateStatus("error");
-        setUpdateMessage(data.message || "Update failed.");
+        setUpdateMessage(`${data.status || "Update refused"}. ${data.message || "Host adoption/owner recovery may be required."}`);
       }
-    } catch (e) {
-      setUpdateStatus("error");
-      setUpdateMessage(e instanceof Error ? e.message : "Update request failed.");
+    } catch {
+      setUpdateMessage(`Acceptance unknown. Keep request ${correlation.key}. Recover through the original host's owner status without submitting a new request.`);
     }
+    observeUpdate();
   };
 
   const createLocalKey = async () => {
@@ -1049,18 +1104,11 @@ client = QdrantClient(host="localhost", port=6333)`}
             </div>
           )}
 
-          {/* Manual update instructions (when Docker socket not available) */}
-          {versionInfo && !versionInfo.can_auto_update && versionInfo.update_available && (
-            <div className="space-y-2 p-3 bg-secondary/50 rounded-lg">
-              <div className="flex items-center gap-2">
-                <Terminal className="w-4 h-4 text-muted-foreground" />
-                <span className="text-sm font-medium text-foreground">Manual update</span>
-              </div>
-              <pre className="text-xs font-mono bg-background p-2 rounded border border-border overflow-x-auto">
-{manualUpdateCommands}
-              </pre>
-            </div>
-          )}
+          <div className="space-y-2 p-3 bg-secondary/50 rounded-lg text-sm">
+            <p>{ownerNotice || "Checking the registered host owner..."}</p>
+            <p>Before updating: the original Compose client has independent recovery through its launcher and <code>vectoraiz-owner status --root &lt;installation&gt;/.vectoraiz-owner</code>. The private status.json file is readable even when the app, Docker or owner is unavailable.</p>
+            <p>Existing installations need one verified host adoption. Subsequent updates use this button. Keep the original configuration, credentials and volumes.</p>
+          </div>
 
           {/* Action buttons */}
           <div className="flex gap-2">

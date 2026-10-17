@@ -117,6 +117,8 @@ RUN chmod +x /entrypoint.sh
 RUN rm -f /etc/nginx/sites-enabled/default
 
 # Create data directories
+RUN mkdir -p /run/vectoraiz-owner-mailbox /var/lib/vectoraiz-owner-mailbox /opt/vectoraiz-owner-mailbox && \
+    chmod 700 /run/vectoraiz-owner-mailbox /var/lib/vectoraiz-owner-mailbox /opt/vectoraiz-owner-mailbox
 RUN mkdir -p /data/uploads /data/processed /data/temp /data/keystore && \
     chmod 755 /data
 

@@ -15,7 +15,7 @@ die()  { echo -e "\n  ${RED}✘${NC} $*\n"; exit 1; }
 
 REPO_RAW="https://raw.githubusercontent.com/aidotmarket/vectoraiz/main"
 COMPOSE_URL="${REPO_RAW}/docker-compose.aim-data.yml"
-IMAGE="ghcr.io/aidotmarket/vectoraiz:latest"
+IMAGE="ghcr.io/aidotmarket/aim-data:latest"
 INSTALL_DIR="${AIM_DATA_INSTALL_DIR:-$HOME/aim-data}"
 COMPOSE_FILE="docker-compose.aim-data.yml"
 
@@ -40,6 +40,10 @@ if ! docker info >/dev/null 2>&1; then
   die "Docker is installed but the daemon is not running. Start Docker Desktop / the service, then re-run."
 fi
 pass "Docker is ready"
+
+if [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || [ -f "$INSTALL_DIR/.env" ]; then
+  die "channel_not_integrated: retain this original AIM-Data context; its release-to-build update adapter is not available. No files or containers changed."
+fi
 
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR"
