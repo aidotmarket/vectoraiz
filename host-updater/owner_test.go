@@ -34,6 +34,7 @@ type fakeDocker struct {
 	boxes                                                                            map[string]map[string][]byte
 	calls                                                                            [][]string
 	mutations                                                                        []bool
+	statusWrites                                                                     map[int]bool
 	pulled                                                                           bool
 	up, pulls, starts                                                                int
 	wrongImage, wrongVersion, unhealthy, noWriter, pullFail, partialFail, daemonDown bool
@@ -98,12 +99,13 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 	if deadline <= 0 || max <= 0 {
 		f.t.Fatal("unbounded process")
 	}
-	if f.daemonDown {
-		return nil, errors.New("daemon_down")
-	}
+
 	a := args[3:]
 	if len(args) < 4 || args[1] != "--context" || args[2] != "remote-B" {
 		f.t.Fatalf("lost context: %v", args)
+	}
+	if f.daemonDown && a[0] != "context" && !(a[0] == "compose" && strings.Contains(strings.Join(a, " "), "config")) && a[0] != "manifest" {
+		return nil, errors.New("command_exit")
 	}
 	switch a[0] {
 	case "context":
@@ -119,15 +121,10 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 			return nil, errors.New("unknown_container")
 		}
 		return jsonBytes([]Identity{c}), nil
-	case "buildx":
-		if strings.Contains(strings.Join(a, " "), "--format") {
-			f.resolved++
-			return jsonBytes(map[string]string{"digest": indexDigest}), nil
-		}
-		if strings.Contains(strings.Join(a, " "), "@"+indexDigest) {
-			return []byte(`{"manifests":[{"digest":"` + targetDigest + `","platform":{"os":"linux","architecture":"arm64"}}]}`), nil
-		}
-		return []byte(`{"config":{"digest":"` + targetImage + `"}}`), nil
+	case "manifest":
+		f.resolved++
+		return jsonBytes(map[string]any{"Descriptor": map[string]any{"digest": targetDigest, "platform": map[string]string{"os": "linux", "architecture": "arm64"}}, "SchemaV2Manifest": map[string]any{"config": map[string]string{"digest": targetImage}}}), nil
+
 	case "image":
 		if !f.pulled {
 			return nil, errors.New("uncached")
@@ -160,6 +157,12 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 			h, e := tr.Next()
 			if e != nil {
 				return nil, e
+			}
+			if h.Name == "status.json" {
+				if f.statusWrites == nil {
+					f.statusWrites = map[int]bool{}
+				}
+				f.statusWrites[len(f.calls)-1] = true
 			}
 			b, e := unpack(input, h.Name, 32768)
 			if e != nil {
@@ -785,7 +788,7 @@ func TestReadOnlyInspectionDoesNotEnterMutationHandoff(t *testing.T) {
 	drive(t, o, now)
 	for n, args := range f.calls {
 		a := args[3:]
-		expected := a[0] == "pull" || a[0] == "cp" && a[1] == "-"
+		expected := a[0] == "pull" || a[0] == "cp" && a[1] == "-" && !f.statusWrites[n]
 		if a[0] == "compose" {
 			for _, v := range a {
 				if v == "up" && a[len(a)-1] != "--help" || v == "start" {

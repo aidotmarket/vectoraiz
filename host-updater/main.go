@@ -109,11 +109,19 @@ func runMain(args []string) error {
 		}
 		return e
 	}
-	defer unlock(f)
+	released := false
+	release := func() {
+		if !released {
+			unlock(f)
+			released = true
+		}
+	}
+	defer release()
 	var rec Record
 	if command == "setup" {
 		if e = load(filepath.Join(*root, "registration.json"), &rec); e == nil {
-			return errors.New("already_registered: use launch or status; original context retained")
+			release()
+			return runMain([]string{"launch", "--root", *root})
 		}
 		if !os.IsNotExist(e) {
 			return e
@@ -164,7 +172,11 @@ func runMain(args []string) error {
 	p := &Processes{Root: *root, Cwd: rec.Invocation.Cwd, Env: rec.Invocation.Environment}
 	if !rec.Integrated {
 		if command == "launch" {
-			return completeSetup(*root, &rec, p)
+			if e = completeSetup(*root, &rec, p); e != nil {
+				return e
+			}
+			release()
+			return runMain(args)
 		}
 		return errors.New("launcher_supervisor_not_integrated")
 	}
@@ -185,6 +197,7 @@ func runMain(args []string) error {
 	}
 	switch command {
 	case "serve":
+		lastWork := int64(0)
 		for {
 			guard, le := lock(filepath.Join(*root, "owner.lock"))
 			if le != nil {
@@ -213,12 +226,16 @@ func runMain(args []string) error {
 				time.Sleep(2 * time.Second)
 				continue
 			}
+			o.LastWork = lastWork
 			if e = o.tick(); e != nil { // Preserve redacted host state during daemon/app outages.
-				o.Reason = "owner_reconcile_unknown"
-				o.publish()
+				if !observationWaiting(e) {
+					o.Reason = "owner_reconcile_unknown"
+				}
+				o.hostStatus()
 			}
+			lastWork = o.LastWork
 			unlock(guard)
-			time.Sleep(2 * time.Second)
+			time.Sleep(time.Second)
 		}
 	case "reconcile": // Read/inspect recovery; never starts another activation.
 		if e = d.revalidate(); e != nil {
@@ -237,6 +254,11 @@ func runMain(args []string) error {
 		}
 		o.Reason = "reconciled_status_only"
 		return o.publish()
+	case "refresh":
+		if e = o.refresh(*contextName); e != nil {
+			return e
+		}
+		return nil
 	case "repair":
 		return o.forwardRepair(*target)
 	case "retry":
@@ -256,47 +278,35 @@ func runMain(args []string) error {
 		if e = startSupervisor(*root, rec.Installation); e != nil {
 			return errors.New("owner_supervisor_unavailable: read status.json")
 		}
-		if o.S.Current.active() || o.S.Current != nil && o.S.Current.Phase == "recovery_required" {
+		if o.S.Current != nil && (o.S.Current.Phase == "failed_resolution" || o.S.Current.Phase == "failed_download") {
+			if e = o.resumeSelection(); e != nil {
+				return e
+			}
+		}
+		if o.S.Current.active() {
+			release()
+			if e = runMain([]string{"wait", "--root", *root}); e != nil {
+				return e
+			}
+			return runMain(args)
+		}
+		if o.S.Current != nil && o.S.Current.Phase == "recovery_required" {
 			return errors.New("update_or_recovery_in_progress: read status; do not repeat activation")
 		}
 		if o.S.Desired == nil || o.S.LastVerified == nil {
 			return errors.New("no_verified_selection")
 		}
-		if e = d.revalidate(); e != nil {
-			return e
-		}
-		if e = d.selectRelease(*o.S.Desired, o.S.Generation); e != nil {
-			return e
-		}
-		deadline := time.Now().Unix() + o.S.Limits.Activate
-		d.Until = deadline
-		for {
-			e = d.dependencies()
-			if e == nil {
-				break
-			}
-			if e.Error() != "dependencies_waiting" || time.Now().Unix() >= deadline {
+		if e = o.launchSelected(time.Now, func() { time.Sleep(time.Second) }, d.startRuntime); e != nil {
+			if e.Error() != "launch_verification_pending" {
 				return e
 			}
-			time.Sleep(time.Second)
-		}
-		effective, e := d.effective(true)
-		if e != nil || !bytesEqualJSON(effective, rec.Effective) {
-			return errors.New("selection_configuration_changed")
-		}
-		if _, e = d.comp(true, true, "up", "-d", "--no-deps", "--no-build", "--pull", "never", rec.Invocation.Service); e != nil {
-			return e
-		}
-		for {
-			_, e = d.observed(*o.S.Desired, "", "")
-			if e == nil {
-				break
+			release()
+			if e = runMain([]string{"wait", "--root", *root}); e != nil {
+				return e
 			}
-			if time.Now().Unix() >= deadline {
-				return errors.New("launch_health_unverified: read status")
-			}
-			time.Sleep(2 * time.Second)
+			return runMain(args)
 		}
+
 		if *openBrowser {
 			var u string
 			if e = load(filepath.Join(*root, "browser.json"), &u); e != nil {
@@ -314,7 +324,7 @@ func completeSetup(root string, rec *Record, p *Processes) error {
 		return errors.New("adoption_target_unresolved")
 	}
 	d := &Docker{R: p, Rec: rec, Root: root}
-	if e := d.revalidate(); e != nil {
+	if e := d.waitAvailable(time.Now().Unix()+defaults().Activate, time.Now, func() { time.Sleep(time.Second) }, d.startRuntime); e != nil {
 		return e
 	}
 	o, e := openOwner(root, d)
@@ -332,6 +342,11 @@ func completeSetup(root string, rec *Record, p *Processes) error {
 	}
 	if e = integrate(root, rec.Installation); e != nil {
 		return e
+	}
+	if o.S.Current != nil && (o.S.Current.Phase == "failed_resolution" || o.S.Current.Phase == "failed_download") {
+		if e = o.resumeSelection(); e != nil {
+			return e
+		}
 	}
 	if o.S.Current == nil {
 		if _, e = o.submit(Message{Key: token(), Target: rec.AdoptionTarget}); e != nil {

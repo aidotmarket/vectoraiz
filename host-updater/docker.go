@@ -158,7 +158,24 @@ func (d *Docker) effective(selected bool) ([]byte, error) {
 	return normalizeConfig(b, d.Rec.Invocation.Service)
 }
 func sameRuntime(a, b Identity) bool {
-	return reflect.DeepEqual(a.Mounts, b.Mounts) && reflect.DeepEqual(a.HostConfig.RestartPolicy, b.HostConfig.RestartPolicy) && a.HostConfig.ReadonlyRootfs == b.HostConfig.ReadonlyRootfs && reflect.DeepEqual(a.HostConfig.Tmpfs, b.HostConfig.Tmpfs) && a.Config.User == b.Config.User
+	// Match a multiset of full mount objects, retaining duplicates and options.
+	if len(a.Mounts) != len(b.Mounts) {
+		return false
+	}
+	used := make([]bool, len(b.Mounts))
+	for _, m := range a.Mounts {
+		found := false
+		for n, other := range b.Mounts {
+			if !used[n] && reflect.DeepEqual(m, other) {
+				used[n], found = true, true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true && reflect.DeepEqual(a.HostConfig.RestartPolicy, b.HostConfig.RestartPolicy) && a.HostConfig.ReadonlyRootfs == b.HostConfig.ReadonlyRootfs && reflect.DeepEqual(a.HostConfig.Tmpfs, b.HostConfig.Tmpfs) && a.Config.User == b.Config.User
 }
 func (d *Docker) revalidate() error {
 	for p, stamp := range d.Rec.Sources {
@@ -315,7 +332,7 @@ func (d *Docker) writeBox(cid, name string, b []byte) error {
 	if e != nil {
 		return e
 	}
-	_, e = d.R.Run(d.args("cp", "-", cid+":"+d.mailboxPath()+"/"), a, d.copyDeadline(), 32768, true)
+	_, e = d.R.Run(d.args("cp", "-", cid+":"+d.mailboxPath()+"/"), a, d.copyDeadline(), 32768, name != "status.json")
 	return e
 }
 func mailboxPossible(c Identity) error {
@@ -390,51 +407,64 @@ func (d *Docker) resolve(tag string) (Release, error) {
 	if !tagPattern.MatchString(tag) {
 		return r, errors.New("invalid_release")
 	}
-	// Buildx talks to the registry with the original Docker client's credentials.
-	b, e := d.run(false, nil, 2<<20, "buildx", "imagetools", "inspect", repository+":"+tag, "--format", "{{json .Manifest}}")
-	if e != nil {
-		return r, e
-	}
-	var descriptor struct{ Digest string }
-	if json.Unmarshal(b, &descriptor) != nil || !validDigest(descriptor.Digest) {
-		return r, errors.New("release_descriptor")
-	}
-	r.IndexDigest = descriptor.Digest
-	b, e = d.run(false, nil, 2<<20, "buildx", "imagetools", "inspect", repository+"@"+r.IndexDigest, "--raw")
-	if e != nil {
-		return r, e
-	}
-	var index struct {
-		Manifests []struct {
+	// The Docker CLI owns registry transport/authentication. Verbose manifest
+	// inspection supplies immutable descriptor and config identity without buildx.
+	type manifest struct {
+		Descriptor struct {
 			Digest   string
 			Platform struct{ OS, Architecture, Variant string }
 		}
-		Config struct{ Digest string }
+		SchemaV2Manifest struct{ Config struct{ Digest string } }
+		OCIManifest      struct{ Config struct{ Digest string } }
 	}
-	if json.Unmarshal(b, &index) != nil {
-		return r, errors.New("release_manifest")
-	}
-	r.Digest = r.IndexDigest
-	if len(index.Manifests) > 0 {
-		matches := 0
-		for _, m := range index.Manifests {
-			if m.Platform.OS+"/"+m.Platform.Architecture == r.Platform && (m.Platform.Variant == "" || m.Platform.Variant == "v8") {
-				r.Digest = m.Digest
-				matches++
-			}
-		}
-		if matches != 1 || !validDigest(r.Digest) {
-			return r, errors.New("release_platform")
-		}
-		b, e = d.run(false, nil, 2<<20, "buildx", "imagetools", "inspect", repository+"@"+r.Digest, "--raw")
+	read := func(ref string) ([]manifest, error) {
+		b, e := d.run(false, nil, 2<<20, "manifest", "inspect", "--verbose", ref)
 		if e != nil {
-			return r, e
+			return nil, e
 		}
-		if json.Unmarshal(b, &index) != nil {
-			return r, errors.New("release_manifest")
+		var list []manifest
+		if json.Unmarshal(b, &list) != nil {
+			var one manifest
+			if json.Unmarshal(b, &one) != nil {
+				return nil, errors.New("release_manifest")
+			}
+			list = []manifest{one}
+		}
+		return list, nil
+	}
+	list, e := read(repository + ":" + tag)
+	if e != nil {
+		return r, e
+	}
+	matches := 0
+	for _, m := range list {
+		p := m.Descriptor.Platform
+		if (p.OS+"/"+p.Architecture == r.Platform || len(list) == 1 && p.OS == "" && p.Architecture == "") && (p.Variant == "" || p.Variant == "v8") {
+			r.Digest = m.Descriptor.Digest
+			matches++
 		}
 	}
-	r.ImageID = index.Config.Digest
+	if matches != 1 || !validDigest(r.Digest) {
+		return r, errors.New("release_platform")
+	}
+	// Pin the platform manifest itself; an index digest is optional metadata.
+	r.IndexDigest = r.Digest
+	list, e = read(repository + "@" + r.Digest)
+	if e != nil {
+		return r, e
+	}
+	if len(list) != 1 || list[0].Descriptor.Digest != r.Digest {
+		return r, errors.New("release_descriptor")
+	}
+	m := list[0]
+	p := m.Descriptor.Platform
+	if (p.OS != "" || p.Architecture != "") && p.OS+"/"+p.Architecture != r.Platform || (p.Variant != "" && p.Variant != "v8") {
+		return r, errors.New("release_platform")
+	}
+	r.ImageID = m.SchemaV2Manifest.Config.Digest
+	if r.ImageID == "" {
+		r.ImageID = m.OCIManifest.Config.Digest
+	}
 	if !validDigest(r.ImageID) {
 		return r, errors.New("release_config_digest")
 	}
@@ -489,7 +519,7 @@ func (d *Docker) dependencies() error {
 		}
 		if !now.State.Running {
 			if _, e = d.comp(false, true, "start", n); e != nil {
-				return e
+				return fmt.Errorf("dependency_start_failed: %w", e)
 			}
 			return errors.New("dependencies_waiting")
 		}
@@ -582,6 +612,9 @@ func absolute(cwd, p string) string {
 	return filepath.Clean(p)
 }
 func register(root string, i Invocation, r Runner) (*Record, error) {
+	return registerExisting(root, i, r, nil, nil)
+}
+func registerExisting(root string, i Invocation, r Runner, previous *Record, selected *Release) (*Record, error) {
 	if i.Channel != "direct" && i.Channel != "marketplace" {
 		return nil, errors.New("channel_not_integrated")
 	}
@@ -736,7 +769,17 @@ func register(root string, i Invocation, r Runner) (*Record, error) {
 		if e != nil {
 			return nil, e
 		}
-		if rec.Hashes[name] == "" || rec.Hashes[name] != c.Config.Labels["com.docker.compose.config-hash"] {
+		if previous != nil {
+			before, ok := previous.Containers[name]
+			known := ok && c.ID == before.ID && c.Image == before.Image
+			if name == i.Service && selected != nil {
+				known = c.ID == previous.Pair.Container && c.Image == selected.ImageID && c.Config.Labels["version"] == selected.Tag
+			}
+			if !known || !sameRuntime(before, c) {
+				return nil, errors.New("refresh_actual_identity_changed")
+			}
+		}
+		if (previous == nil || name != i.Service) && (rec.Hashes[name] == "" || rec.Hashes[name] != c.Config.Labels["com.docker.compose.config-hash"]) {
 			return nil, errors.New("original_invocation_mismatch")
 		}
 		rec.Containers[name] = c

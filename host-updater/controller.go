@@ -78,6 +78,7 @@ type Owner struct {
 	D             *Docker
 	S             State
 	Now           func() int64
+	LastWork      int64
 	LastPublished int64
 	Reason        string
 	Notify        func(string)
@@ -262,7 +263,7 @@ func (o *Owner) step() error {
 	if o.Now() >= c.Deadline {
 		o.D.Until = o.Now() + 15
 		code := "phase_deadline"
-		if c.Phase == "verifying" {
+		if c.Phase == "verifying" && c.Code != "daemon_observation_waiting" {
 			code = "startup_failed_migration_unconfirmed"
 			if b, e := o.D.readBox(o.D.Rec.Pair.Container, "startup.json", 4096); e == nil {
 				var event struct{ Phase, Version string }
@@ -272,6 +273,23 @@ func (o *Owner) step() error {
 			}
 		}
 		return o.fail(code)
+	}
+	// Read-only observation failures can wait; helper/handoff uncertainty and
+	// verified configuration drift are never recast as daemon downtime.
+	if e := o.D.revalidate(); e != nil {
+		if observationWaiting(e) {
+			return o.waitObservation()
+		}
+		return o.fail(e.Error())
+	}
+	if _, e := o.D.run(false, nil, 32768, "info", "--format", "{{.OSType}}/{{.Architecture}}"); e != nil {
+		if observationWaiting(e) {
+			return o.waitObservation()
+		}
+		return o.fail(e.Error())
+	}
+	if c.Code == "daemon_observation_waiting" {
+		c.Code = ""
 	}
 	switch c.Phase {
 	case "accepted":
@@ -286,15 +304,15 @@ func (o *Owner) step() error {
 		if tagPattern.MatchString(from) && !forwardTag(from, c.Target) {
 			return o.fail("backward_schema_selection_refused")
 		}
-		if e := o.D.revalidate(); e != nil {
-			return o.fail(e.Error())
-		}
 		r, e := o.D.resolve(c.Target)
 		if e != nil {
 			return o.fail("release_unresolved")
 		}
 		c.Release = r
 		old, e := o.D.container(o.D.Rec.Invocation.Service)
+		if observationWaiting(e) {
+			return o.waitObservation()
+		}
 		if e != nil {
 			return o.fail("original_app_unresolved")
 		}
@@ -313,10 +331,10 @@ func (o *Owner) step() error {
 		}
 		return o.phase("downloaded", c.Limits.Activate)
 	case "downloaded":
-		if e := o.D.revalidate(); e != nil {
-			return o.fail(e.Error())
-		}
 		if e := o.D.dependencies(); e != nil {
+			if observationWaiting(e) {
+				return o.waitObservation()
+			}
 			if e.Error() == "dependencies_waiting" {
 				return nil
 			}
@@ -330,25 +348,40 @@ func (o *Owner) step() error {
 		}
 		return nil
 	case "activating":
-		if e := o.D.revalidate(); e != nil {
-			return o.fail(e.Error())
-		}
 		if e := o.D.selectRelease(c.Release, c.Generation); e != nil {
 			return e
 		}
 		effective, e := o.D.effective(true)
+		if observationWaiting(e) {
+			return o.waitObservation()
+		}
 		if e != nil || !bytesEqualJSON(effective, o.D.Rec.Effective) {
 			return o.fail("selection_configuration_changed")
 		}
 		if e = o.D.dependencies(); e != nil {
+			if observationWaiting(e) {
+				return o.waitObservation()
+			}
 			if e.Error() == "dependencies_waiting" {
 				return nil
 			}
 			return o.fail("dependency_recovery_required")
 		}
 		current, e := o.D.container(o.D.Rec.Invocation.Service)
-		if e == nil && o.D.selectedActive(current, c.Release) == nil {
-			return o.phase("verifying", c.Limits.Verify)
+		if observationWaiting(e) {
+			return o.waitObservation()
+		}
+		if e == nil {
+			selectedErr := o.D.selectedActive(current, c.Release)
+			if observationWaiting(selectedErr) {
+				return o.waitObservation()
+			}
+			if selectedErr == nil {
+				return o.phase("verifying", c.Limits.Verify)
+			}
+			if !selectionNeedsActivation(selectedErr) {
+				return o.fail(selectedErr.Error())
+			}
 		}
 		if c.ActivationIssued {
 			return o.fail("activation_outcome_requires_reconciliation")
@@ -375,10 +408,10 @@ func (o *Owner) step() error {
 		if o.Now() < c.NextSample {
 			return nil
 		}
-		if e := o.D.revalidate(); e != nil {
-			return o.fail(e.Error())
-		}
 		if e := o.D.dependencies(); e != nil {
+			if observationWaiting(e) {
+				return o.waitObservation()
+			}
 			if e.Error() == "dependencies_waiting" {
 				c.Samples = 0
 				return o.persist()
@@ -427,6 +460,12 @@ func (o *Owner) step() error {
 	return nil
 }
 func (o *Owner) tick() error {
+	// Active phases keep their one-second scheduler and absolute deadlines.
+	// Quiet observations/mailbox/status publication share the five-second beat.
+	if !o.S.Current.active() && o.LastWork != 0 && o.Now()-o.LastWork < 5 {
+		return nil
+	}
+	o.LastWork = o.Now()
 	o.D.Until = 0
 	if o.S.Current.active() {
 		if o.Now() >= o.S.Current.Deadline {
