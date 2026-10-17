@@ -222,6 +222,32 @@ func (p *Processes) Run(args []string, input []byte, deadline int64, max int, mu
 		if got.ID != r.ID {
 			return nil, errors.New("child_identity")
 		}
+		// A newly launched helper can disappear while this Run still owns the
+		// handoff. Before the original polling budget expires, only seal a
+		// positively identified missing group after acquiring its ownership lock.
+		if !got.Done && p.now().Unix() <= deadline+5 && got.Started && got.ProcessGroup > 0 && !p.groupAlive(got.ProcessGroup) {
+			observedGroup := got.ProcessGroup
+			released, le := p.acquire("child.lock")
+			if le != nil && le.Error() != "installation_busy" {
+				return nil, le
+			}
+			if le == nil {
+				// Completion or identity may have changed while acquiring the lock.
+				e = load(path, &got)
+				if e == nil && got.ID != r.ID {
+					e = errors.New("child_identity")
+				}
+				if e == nil && !got.Done && got.Started && got.ProcessGroup == observedGroup && !p.groupAlive(got.ProcessGroup) {
+					got.Done, got.Code = true, "child_outcome_unknown"
+					got.Args, got.Env, got.Input = nil, nil, nil
+					e = save(path, &got)
+				}
+				released()
+				if e != nil {
+					return nil, e
+				}
+			}
+		}
 		if got.Done {
 			// Done is the durable result, but ownership lasts until unlock.
 			released, e := p.waitLock("child.lock", deadline)
