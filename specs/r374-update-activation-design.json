@@ -143,7 +143,7 @@
       "Resolve source privately with original Compose semantics; never print/store resolved secrets in public evidence or UI. Private original env bytes retain existing ACLs; record origins, not secret values in receipts. Do not source .env as executable shell.",
       "Retain source files, overrides, relative path bases, project name, external volumes, bind options, network attachments, ports, resource options and service env_file precedence. Compare pre/post normalized service configuration privately, allowing only exact release selectors and new owner integration fields. Dependency image/config changes require separate scope; owner updates app only.",
       "Stop as configuration_unresolved on missing original credentials/context or ambiguous data ownership. Do not infer fresh installation from absence of recognized default volumes. Restore original .env/Compose from verified backup as recovery runbook specifies.",
-      "Fingerprint originals and recheck under installation lock immediately before mutation; any drift invalidates plan. No overwriting custom Compose on installer rerun."
+      "Fingerprint originals and recheck under installation lock immediately before mutation; material effective configuration, ownership/access or release identity drift invalidates the plan. Harmless comments/formatting/optional metadata are accepted after private effective configuration and ownership revalidation. No overwriting custom Compose on installer rerun."
     ]
   },
   "version_selection": {

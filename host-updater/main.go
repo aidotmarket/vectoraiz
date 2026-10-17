@@ -133,7 +133,7 @@ func runMain(args []string) error {
 			return e
 		}
 		rec = *r
-        rec.AdoptionTarget = *target
+		rec.AdoptionTarget = *target
 		if *appURL != "" && !strings.HasPrefix(*appURL, "http://") && !strings.HasPrefix(*appURL, "https://") {
 			return errors.New("browser_url_invalid")
 		}
@@ -143,17 +143,19 @@ func runMain(args []string) error {
 		if e = save(filepath.Join(*root, "registration.json"), &rec); e != nil {
 			return e
 		}
-        return completeSetup(*root, &rec, p)
+		return completeSetup(*root, &rec, p)
 
 	}
 	if e = load(filepath.Join(*root, "registration.json"), &rec); e != nil {
 		return errors.New("adoption_required")
 	}
 	p := &Processes{Root: *root, Cwd: rec.Invocation.Cwd, Env: rec.Invocation.Environment}
-    if !rec.Integrated {
-        if command == "launch" { return completeSetup(*root, &rec, p) }
-        return errors.New("launcher_supervisor_not_integrated")
-    }
+	if !rec.Integrated {
+		if command == "launch" {
+			return completeSetup(*root, &rec, p)
+		}
+		return errors.New("launcher_supervisor_not_integrated")
+	}
 	d := &Docker{R: p, Rec: &rec, Root: *root}
 	o, e := openOwner(*root, d)
 	if e != nil {
@@ -224,37 +226,24 @@ func runMain(args []string) error {
 		o.Reason = "reconciled_status_only"
 		return o.publish()
 	case "repair":
-		if !tagPattern.MatchString(*target) {
-			return errors.New("exact_forward_repair_target_required")
-		}
-		if o.S.Current == nil || o.S.Current.Phase != "recovery_required" {
-			return errors.New("no_recovery_operation")
-		}
-		if !forwardTag(o.S.Current.Target, *target) {
-			return errors.New("automatic_or_backward_downgrade_refused")
+		return o.forwardRepair(*target)
+	case "retry":
+		if !tagPattern.MatchString(*target) || o.S.Current == nil || (o.S.Current.Phase != "failed_download" && o.S.Current.Phase != "failed_resolution") {
+			return errors.New("retry_requires_a_confirmed_pre_activation_failure_and_exact_target")
 		}
 		if e = d.revalidate(); e != nil {
 			return e
 		}
-		c, e := d.container(rec.Invocation.Service)
-		if e != nil {
+		if _, e = o.submit(Message{Key: token(), Target: *target}); e != nil {
 			return e
 		}
-		if !sameRuntime(rec.Containers[rec.Invocation.Service], c) || c.Image != rec.Containers[rec.Invocation.Service].Image && o.S.Desired != nil && c.Image != o.S.Desired.ImageID {
-			return errors.New("actual_state_unresolved")
-		}
-		o.S.Current.ObservedImage = c.Image
-		o.S.Current.ObservedContainer = c.ID
-		o.S.History = append(o.S.History, o.S.Current)
-		o.S.Current = nil
-		_, e = o.submit(Message{Key: token(), Target: *target})
-		return e
-	case "retry":
-		if !tagPattern.MatchString(*target)||o.S.Current==nil||(o.S.Current.Phase!="failed_download"&&o.S.Current.Phase!="failed_resolution"){return errors.New("retry_requires_a_confirmed_pre_activation_failure_and_exact_target")}
-		if e=d.revalidate();e!=nil{return e};if _,e=o.submit(Message{Key:token(),Target:*target});e!=nil{return e};fmt.Println("Retry durably accepted; use wait/status for the actual outcome.");return startSupervisor(*root,rec.Installation)
+		fmt.Println("Retry durably accepted; use wait/status for the actual outcome.")
+		return startSupervisor(*root, rec.Installation)
 	case "launch":
-        // Idempotently recover a supervisor handoff lost during one-time setup.
-        if e=startSupervisor(*root,rec.Installation);e!=nil{return errors.New("owner_supervisor_unavailable: read status.json")}
+		// Idempotently recover a supervisor handoff lost during one-time setup.
+		if e = startSupervisor(*root, rec.Installation); e != nil {
+			return errors.New("owner_supervisor_unavailable: read status.json")
+		}
 		if o.S.Current.active() || o.S.Current != nil && o.S.Current.Phase == "recovery_required" {
 			return errors.New("update_or_recovery_in_progress: read status; do not repeat activation")
 		}
@@ -287,7 +276,7 @@ func runMain(args []string) error {
 			return e
 		}
 		for {
-			_, e = d.observed(*o.S.Desired, "")
+			_, e = d.observed(*o.S.Desired, "", "")
 			if e == nil {
 				break
 			}
@@ -308,20 +297,40 @@ func runMain(args []string) error {
 		return errors.New("unknown_command")
 	}
 }
-func completeSetup(root string,rec *Record,p *Processes)error {
-    if !tagPattern.MatchString(rec.AdoptionTarget){return errors.New("adoption_target_unresolved")}
-    d:=&Docker{R:p,Rec:rec,Root:root}
-    if e:=d.revalidate();e!=nil{return e}
-    o,e:=openOwner(root,d);if e!=nil{return e}
-    o.Reason="adoption_in_progress"
-    // A durable host status must exist before any launcher or supervisor change.
-    b,e:=json.Marshal(o.snapshot());if e!=nil{return e}
-    if e=atomicFile(filepath.Join(root,"status.json"),b);e!=nil{return e}
-    if e=integrate(root,rec.Installation);e!=nil{return e}
-    if o.S.Current==nil {if _,e=o.submit(Message{Key:token(),Target:rec.AdoptionTarget});e!=nil{return e}}
-    rec.Integrated=true
-    if e=save(filepath.Join(root,"registration.json"),rec);e!=nil{return e}
-    return startSupervisor(root,rec.Installation)
+func completeSetup(root string, rec *Record, p *Processes) error {
+	if !tagPattern.MatchString(rec.AdoptionTarget) {
+		return errors.New("adoption_target_unresolved")
+	}
+	d := &Docker{R: p, Rec: rec, Root: root}
+	if e := d.revalidate(); e != nil {
+		return e
+	}
+	o, e := openOwner(root, d)
+	if e != nil {
+		return e
+	}
+	o.Reason = "adoption_in_progress"
+	// A durable host status must exist before any launcher or supervisor change.
+	b, e := json.Marshal(o.snapshot())
+	if e != nil {
+		return e
+	}
+	if e = atomicFile(filepath.Join(root, "status.json"), b); e != nil {
+		return e
+	}
+	if e = integrate(root, rec.Installation); e != nil {
+		return e
+	}
+	if o.S.Current == nil {
+		if _, e = o.submit(Message{Key: token(), Target: rec.AdoptionTarget}); e != nil {
+			return e
+		}
+	}
+	rec.Integrated = true
+	if e = save(filepath.Join(root, "registration.json"), rec); e != nil {
+		return e
+	}
+	return startSupervisor(root, rec.Installation)
 }
 
 func main() {

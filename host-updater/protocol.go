@@ -17,7 +17,9 @@ import (
 )
 
 const mailbox = "/run/vectoraiz-owner-mailbox"
-var mailboxCandidates=[]string{mailbox,"/var/lib/vectoraiz-owner-mailbox","/opt/vectoraiz-owner-mailbox"}
+
+var mailboxCandidates = []string{mailbox, "/var/lib/vectoraiz-owner-mailbox", "/opt/vectoraiz-owner-mailbox"}
+
 const repository = "ghcr.io/aidotmarket/vectoraiz"
 
 var tagPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$`)

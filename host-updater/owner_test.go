@@ -32,6 +32,7 @@ type fakeDocker struct {
 	app, dep                                                                         Identity
 	boxes                                                                            map[string]map[string][]byte
 	calls                                                                            [][]string
+	mutations                                                                        []bool
 	pulled                                                                           bool
 	up, pulls, starts                                                                int
 	wrongImage, wrongVersion, unhealthy, noWriter, pullFail, partialFail, daemonDown bool
@@ -55,6 +56,7 @@ func ownedIdentity(id, image, service string) Identity {
 }
 func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, mutate bool) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{}, args...))
+	f.mutations = append(f.mutations, mutate)
 	if args[0] != "/installed/docker" {
 		f.t.Fatalf("product required RTK or unexpected binary: %v", args)
 	}
@@ -97,6 +99,10 @@ func (f *fakeDocker) Run(args []string, input []byte, deadline int64, max int, m
 		}
 		return jsonBytes([]any{map[string]any{"Id": targetImage, "RepoDigests": []string{repository + "@" + indexDigest, repository + "@" + targetDigest}, "Os": "linux", "Architecture": "arm64", "Config": map[string]any{"Labels": map[string]string{"version": "v2.0.0"}}}}), nil
 	case "pull":
+		var visible Snapshot
+		if load(filepath.Join(f.root, "status.json"), &visible) != nil || visible.Current == nil || visible.Current.Phase != "downloading" {
+			f.t.Fatal("host status did not publish download intent before long pull")
+		}
 		f.pulls++
 		if f.pullFail {
 			return nil, errors.New("pull_failed")
@@ -705,4 +711,171 @@ func TestForwardRepairOrderingAndNoSchemaDowngrade(t *testing.T) {
 	}
 }
 
-func TestRegisteredAlternativeUnderPreservedRunMount(t *testing.T){c:=ownedIdentity("container",oldImage,"vectoraiz");c.HostConfig.Tmpfs=map[string]string{"/run":"rw"};p,e:=chooseMailbox(c);if e!=nil||p!="/var/lib/vectoraiz-owner-mailbox"{t.Fatal("arbitrary /run-only refusal",p,e)};c.Mounts=append(c.Mounts,map[string]any{"Destination":"/var"});p,e=chooseMailbox(c);if e!=nil||p!="/opt/vectoraiz-owner-mailbox"{t.Fatal("did not retain custom mounts with alternate image path",p,e)};c.HostConfig.ReadonlyRootfs=true;if _,e=chooseMailbox(c);e==nil{t.Fatal("advertised writable layer on read-only root")}}
+func TestRegisteredAlternativeUnderPreservedRunMount(t *testing.T) {
+	c := ownedIdentity("container", oldImage, "vectoraiz")
+	c.HostConfig.Tmpfs = map[string]string{"/run": "rw"}
+	p, e := chooseMailbox(c)
+	if e != nil || p != "/var/lib/vectoraiz-owner-mailbox" {
+		t.Fatal("arbitrary /run-only refusal", p, e)
+	}
+	c.Mounts = append(c.Mounts, map[string]any{"Destination": "/var"})
+	p, e = chooseMailbox(c)
+	if e != nil || p != "/opt/vectoraiz-owner-mailbox" {
+		t.Fatal("did not retain custom mounts with alternate image path", p, e)
+	}
+	c.HostConfig.ReadonlyRootfs = true
+	if _, e = chooseMailbox(c); e == nil {
+		t.Fatal("advertised writable layer on read-only root")
+	}
+}
+
+func TestReadOnlyInspectionDoesNotEnterMutationHandoff(t *testing.T) {
+	o, f, now := fixture(t)
+	submitTest(t, o)
+	drive(t, o, now)
+	for n, args := range f.calls {
+		a := args[3:]
+		expected := a[0] == "pull" || a[0] == "cp" && a[1] == "-"
+		if a[0] == "compose" {
+			for _, v := range a {
+				if v == "up" && a[len(a)-1] != "--help" || v == "start" {
+					expected = true
+				}
+			}
+		}
+		if f.mutations[n] != expected {
+			t.Fatalf("wrong mutation handoff: %v mutate=%v", a, f.mutations[n])
+		}
+	}
+}
+func TestReplacementMustAnswerBeforeReadyAdvertisement(t *testing.T) {
+	o, f, _ := fixture(t)
+	f.app.ID = "replacement-container-00000000"
+	f.noWriter = true
+	if e := o.tick(); e != nil {
+		t.Fatal(e)
+	}
+	if o.snapshot().Ready {
+		t.Fatal("replacement advertised ready before signed reader/writer challenge")
+	}
+}
+func TestOrphanRecoveryRequiresHelperLockAndAbsentProcessGroup(t *testing.T) {
+	for _, alive := range []bool{true, false} {
+		t.Run(fmt.Sprint(alive), func(t *testing.T) {
+			root := t.TempDir()
+			r := Command{ID: token(), Started: true, ProcessGroup: 12345, Deadline: time.Now().Unix() - 10, Args: []string{"private-command"}, Env: []string{"SECRET=private"}}
+			save(filepath.Join(root, "child.json"), r)
+			p := Processes{Root: root, GroupAlive: func(pid int) bool {
+				if pid != 12345 {
+					t.Fatal("wrong tracked group")
+				}
+				return alive
+			}}
+			guard, e := lock(filepath.Join(root, "child.lock"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e = p.Reconcile(); e == nil || e.Error() != "child_may_be_running" {
+				t.Fatal("ignored live helper lock", e)
+			}
+			unlock(guard)
+			e = p.Reconcile()
+			var got Command
+			load(filepath.Join(root, "child.json"), &got)
+			if alive {
+				if e == nil || got.Done {
+					t.Fatal("unresolved live descendants cleared")
+				}
+			} else {
+				if e == nil || e.Error() != "child_outcome_unknown" || !got.Done || got.Args != nil || got.Env != nil {
+					t.Fatal("dead helper not recoverable/redacted", e, got)
+				}
+				if e = p.Reconcile(); e != nil {
+					t.Fatal("explicit forward recovery permanently blocked", e)
+				}
+			}
+		})
+	}
+}
+func TestActualForwardRepairRetainsFailedHistoryAndVerifiesTarget(t *testing.T) {
+	o, f, now := fixture(t)
+	submitTest(t, o)
+	f.partialFail = true
+	drive(t, o, now)
+	failedID := o.S.Current.ID
+	if o.S.Current.Phase != "recovery_required" {
+		t.Fatal("expected partial replacement failure")
+	}
+	if e := o.forwardRepair("v1.0.0"); e == nil {
+		t.Fatal("schema downgrade accepted")
+	}
+	f.partialFail = false
+	if e := o.forwardRepair("v2.0.0"); e != nil {
+		t.Fatal(e)
+	}
+	if o.S.Current.ID == failedID || o.S.LastVerified != nil {
+		t.Fatal("reused failed outcome")
+	}
+	drive(t, o, now)
+	if o.S.Current.Phase != "succeeded" || f.up != 1 || f.pulls != 1 || len(o.S.History) != 1 || o.S.History[0].ID != failedID {
+		t.Fatal("forward reconciliation duplicated activation or lost history")
+	}
+}
+
+func TestMissingHelperBeforeCommandStartIsRecoverableWithoutNativeObservation(t *testing.T) {
+	root := t.TempDir()
+	save(filepath.Join(root, "child.json"), Command{ID: token(), Deadline: time.Now().Unix() - 10})
+	p := Processes{Root: root, GroupAlive: func(int) bool { t.Fatal("not-started helper must not inspect native identity"); return true }}
+	if e := p.Reconcile(); e == nil || e.Error() != "child_outcome_unknown" {
+		t.Fatal("lost pre-start handoff blocked all future recovery", e)
+	}
+	if e := p.Reconcile(); e != nil {
+		t.Fatal(e)
+	}
+}
+func TestWrongProjectAndConfigHashCannotVerifyEvenHealthyTarget(t *testing.T) {
+	for _, kind := range []string{"project", "config"} {
+		t.Run(kind, func(t *testing.T) {
+			o, f, now := fixture(t)
+			submitTest(t, o)
+			for o.S.Current.Phase != "verifying" {
+				if e := o.tick(); e != nil {
+					t.Fatal(e)
+				}
+				*now++
+			}
+			if kind == "project" {
+				f.app.Config.Labels["com.docker.compose.project"] = "unrelated"
+			} else {
+				f.app.Config.Labels["com.docker.compose.config-hash"] = "unrelated"
+			}
+			drive(t, o, now)
+			if o.S.Current.Phase == "succeeded" || o.S.LastVerified != nil {
+				t.Fatal("healthy but unrelated configuration falsely succeeded")
+			}
+		})
+	}
+}
+
+func TestTerminalNotificationCannotPrecedeDurableIndependentStatus(t *testing.T) {
+	o, f, now := fixture(t)
+	notifications := 0
+	o.Notify = func(root string) {
+		notifications++
+		var state State
+		var visible Snapshot
+		if load(filepath.Join(root, "journal.json"), &state) != nil || load(filepath.Join(root, "status.json"), &visible) != nil || visible.Current == nil || visible.Current.active() || state.NotificationID != visible.Current.ID {
+			t.Fatal("notification before durable terminal status")
+		}
+	}
+	submitTest(t, o)
+	f.partialFail = true
+	drive(t, o, now)
+	if notifications != 1 {
+		t.Fatal("terminal notice not attempted once")
+	}
+	o.persist()
+	if notifications != 1 {
+		t.Fatal("notification replayed instead of retaining independent status")
+	}
+}

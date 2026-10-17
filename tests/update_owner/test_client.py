@@ -1,4 +1,5 @@
 """Run directly with python3 -I; never pytest/conftest or application imports."""
+import ast
 import importlib.abc
 import importlib.util
 import json
@@ -157,6 +158,52 @@ class OwnerClientTest(unittest.TestCase):
         (self.box / "status.json").symlink_to(self.box / "bootstrap.json")
         self.assertFalse(client.available())
 
+    def test_registered_mailbox_wins_over_stale_other_bootstrap(self):
+        # Real environment selector is an allowlisted path, never arbitrary input.
+        with patch.object(client, "MAILBOX", client._DEFAULT_MAILBOX):
+            original = os.environ.get("VECTORAIZ_OWNER_MAILBOX")
+            try:
+                os.environ["VECTORAIZ_OWNER_MAILBOX"] = "/opt/vectoraiz-owner-mailbox"
+                self.assertEqual(client._location(), Path("/opt/vectoraiz-owner-mailbox"))
+                os.environ["VECTORAIZ_OWNER_MAILBOX"] = "/customer/path"
+                with self.assertRaises(client.OwnerError):
+                    client._location()
+            finally:
+                if original is None:
+                    os.environ.pop("VECTORAIZ_OWNER_MAILBOX", None)
+                else:
+                    os.environ["VECTORAIZ_OWNER_MAILBOX"] = original
+
+    def test_actual_route_authorization_without_importing_app(self):
+        # Execute only the actual leaf scope decision from its AST. Do not load
+        # FastAPI, auth, settings, database models or any application package.
+        tree = ast.parse((ROOT / "app/routers/version.py").read_text())
+        decision = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_authorize_update")
+        class Denied(Exception):
+            def __init__(self, status, detail):
+                self.status = status
+        class User:
+            def __init__(self, scopes):
+                self.scopes = scopes
+        env = {"AuthenticatedUser": User, "HTTPException": Denied}
+        exec(compile(ast.Module(body=[decision], type_ignores=[]), "actual-scope-decision", "exec"), env)
+        for scopes in (["admin"], ["read", "write", "admin"], ["update:submit"]):
+            env["_authorize_update"](User(scopes))
+        for scopes in ([], ["read"], ["read", "write"], ["host:exec"]):
+            with self.assertRaises(Denied) as refused:
+                env["_authorize_update"](User(scopes))
+            self.assertEqual(refused.exception.status, 403)
+        for name in ("post_update", "update_operation"):
+            route = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == name)
+            self.assertTrue(any(isinstance(default, ast.Call) and isinstance(default.func, ast.Name)
+                                and default.func.id == "Depends" and ast.unparse(default.args[0]) == "get_current_user"
+                                for default in route.args.defaults))
+        # Check the existing auth model's actual field names without importing it.
+        auth = ast.parse((ROOT / "app/auth/api_key_auth.py").read_text())
+        model = next(n for n in auth.body if isinstance(n, ast.ClassDef) and n.name == "AuthenticatedUser")
+        names = {n.target.id for n in model.body if isinstance(n, ast.AnnAssign)}
+        self.assertTrue({"user_id", "scopes"} <= names)
+
     def test_guards_close_application_and_native_paths(self):
         with self.assertRaises(RuntimeError):
             __import__("app")
@@ -170,4 +217,6 @@ class OwnerClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     print("ISOLATION: direct-file stdlib load; native/network/application import guards active", flush=True)
-    unittest.main(verbosity=2)
+    result = unittest.main(verbosity=2, exit=False)
+    print("GUARD_EVENTS: " + json.dumps(EVENTS), flush=True)
+    sys.exit(not result.result.wasSuccessful())

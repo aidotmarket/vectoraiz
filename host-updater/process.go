@@ -46,13 +46,25 @@ type Command struct {
 	Code          string
 	Output        []byte
 	Max           int
+	ProcessGroup  int // Persisted helper identity before any external command starts.
 }
 type Runner interface {
 	Run(args []string, input []byte, deadline int64, max int, mutate bool) ([]byte, error)
 }
 type Processes struct {
-	Root, Cwd string
-	Env       []string
+	Root, Cwd  string
+	Env        []string
+	GroupAlive func(int) bool // Tests inject observation without native adapters.
+}
+
+func (p *Processes) groupAlive(pid int) bool {
+	if p.GroupAlive != nil {
+		return p.GroupAlive(pid)
+	}
+	if !allowNativeExecution {
+		return true
+	}
+	return commandGroupAlive(pid)
 }
 
 func execute(r *Command) error {
@@ -68,8 +80,10 @@ func execute(r *Command) error {
 	c.Dir = r.Cwd
 	c.Env = r.Env
 	c.Stdin = bytes.NewReader(r.Input)
-	childGroup(c)
-	c.Cancel = func() error { killTree(c); return nil }
+	if r.ProcessGroup == 0 {
+		childGroup(c)
+	}
+	c.Cancel = func() error { killCommand(c, r.ProcessGroup); return nil }
 	c.WaitDelay = 2 * time.Second
 	out := &boundedBuffer{max: r.Max}
 	errout := &boundedBuffer{max: 32768}
@@ -160,6 +174,27 @@ func (p *Processes) Reconcile() error {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+	// A dead helper can leave an unknown outcome, rather than a permanent dead
+	// end. Its process group (Unix) or kill-on-close job (Windows) must also be
+	// gone. Never kill an unverified/reused identity or replay this command.
+	guard, le := lock(filepath.Join(p.Root, "child.lock"))
+	if le == nil {
+		defer unlock(guard)
+		if e = load(filepath.Join(p.Root, "child.json"), &r); e != nil {
+			return e
+		}
+		if r.Done {
+			return nil
+		}
+		if !r.Started || r.ProcessGroup > 0 && !p.groupAlive(r.ProcessGroup) {
+			r.Done, r.Code = true, "child_outcome_unknown"
+			r.Args, r.Env, r.Input = nil, nil, nil
+			if e = save(filepath.Join(p.Root, "child.json"), &r); e != nil {
+				return e
+			}
+			return errors.New("child_outcome_unknown")
+		}
+	}
 	return errors.New("child_may_be_running")
 }
 func commandMain(root, id string) error {
@@ -177,8 +212,15 @@ func commandMain(root, id string) error {
 		return errors.New("child_identity")
 	}
 	r.Started = true
+	r.ProcessGroup = os.Getpid()
 	if e = save(path, &r); e != nil {
 		return e
+	}
+	if e = helperJob(); e != nil {
+		r.Code = "child_supervision_unavailable"
+		r.Done = true
+		r.Args, r.Env, r.Input = nil, nil, nil
+		return save(path, &r)
 	}
 	if e = execute(&r); e != nil {
 		r.Code = e.Error()

@@ -48,14 +48,14 @@ func integrate(root, id string) error {
 		if e = os.MkdirAll(dir, 0700); e != nil {
 			return e
 		}
-		body := `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>` + label + `</string><key>ProgramArguments</key><array><string>` + xmlText(exe) + `</string><string>serve</string><string>--root</string><string>` + xmlText(root) + `</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>5</integer></dict></plist>`
+		body := `<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>` + label + `</string><key>ProgramArguments</key><array><string>` + xmlText(exe) + `</string><string>serve</string><string>--root</string><string>` + xmlText(root) + `</string></array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>AbandonProcessGroup</key><true/><key>ThrottleInterval</key><integer>5</integer></dict></plist>`
 		return atomicFile(filepath.Join(dir, label+".plist"), []byte(body))
 	case "linux":
 		dir := filepath.Join(home, ".config", "systemd", "user")
 		if e = os.MkdirAll(dir, 0700); e != nil {
 			return e
 		}
-		body := "[Unit]\nDescription=vectorAIz update owner\n[Service]\nType=simple\nExecStart=" + unitText(exe) + " serve --root " + unitText(root) + "\nRestart=always\nRestartSec=5\n[Install]\nWantedBy=default.target\n"
+		body := "[Unit]\nDescription=vectorAIz update owner\n[Service]\nType=simple\nExecStart=" + unitText(exe) + " serve --root " + unitText(root) + "\nRestart=always\nRestartSec=5\nKillMode=process\n[Install]\nWantedBy=default.target\n"
 		return atomicFile(filepath.Join(dir, label+".service"), []byte(body))
 	case "windows":
 		// A per-user logon task, no elevation, existing Docker credentials only.
@@ -86,8 +86,16 @@ func launcherWrite(p string, b []byte, mode os.FileMode) error {
 }
 func installLaunchers(root, exe, home string) error {
 	install := filepath.Dir(root)
-	belongs:=func(b []byte)bool{return strings.Contains(string(b),install)||install==filepath.Join(home,"vectoraiz")&&(strings.Contains(string(b),`$HOME/vectoraiz`)||strings.Contains(string(b),`~/vectoraiz`))}
-	shell := []byte("#!/bin/sh\n" + quoted(exe) + " launch --root " + quoted(root) + " --open\nresult=$?\nif [ \"$result\" -ne 0 ]; then\n  cat " + quoted(filepath.Join(root, "status.json")) + "\nfi\nexit \"$result\"\n")
+	belongs := func(b []byte) bool {
+		return strings.Contains(string(b), install) || install == filepath.Join(home, "vectoraiz") && (strings.Contains(string(b), `$HOME/vectoraiz`) || strings.Contains(string(b), `~/vectoraiz`))
+	}
+	statusAction := "  cat " + quoted(filepath.Join(root, "status.json")) + "\n"
+	if runtime.GOOS == "darwin" {
+		// LaunchServices does not display stdout. The OS-authorized status file
+		// remains usable even when the owner/daemon/app cannot start.
+		statusAction += "  /usr/bin/open -a TextEdit " + quoted(filepath.Join(root, "status.json")) + "\n"
+	}
+	shell := []byte("#!/bin/sh\n" + quoted(exe) + " launch --root " + quoted(root) + " --open\nresult=$?\nif [ \"$result\" -ne 0 ]; then\n" + statusAction + "fi\nexit \"$result\"\n")
 	if runtime.GOOS != "windows" {
 		if e := launcherWrite(filepath.Join(install, "launch-owner.sh"), shell, 0700); e != nil {
 			return e
@@ -106,7 +114,7 @@ func installLaunchers(root, exe, home string) error {
 		}
 	}
 	if runtime.GOOS == "linux" {
-		body := "[Desktop Entry]\nType=Application\nName=vectorAIz\nTerminal=true\nExec=" + unitText(exe) + " launch --root " + unitText(root) + " --open\n"
+		body := "[Desktop Entry]\nType=Application\nName=vectorAIz\nTerminal=true\nExec=" + unitText(filepath.Join(install, "launch-owner.sh")) + "\n"
 		for _, p := range []string{filepath.Join(home, ".local", "share", "applications", "vectoraiz.desktop"), filepath.Join(home, "Desktop", "vectoraiz.desktop")} {
 			if b, e := os.ReadFile(p); e == nil && belongs(b) {
 				if !strings.Contains(string(b), "vectorAIz") {
@@ -131,8 +139,10 @@ func installLaunchers(root, exe, home string) error {
 	if runtime.GOOS == "windows" {
 		psquote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 		body := "& " + psquote(exe) + " launch --root " + psquote(root) + " --open\nif ($LASTEXITCODE -ne 0) { Get-Content -LiteralPath " + psquote(filepath.Join(root, "status.json")) + "; Read-Host 'Read host status above; press Enter to close' }\n"
-		path:=filepath.Join(install,"launch-vectoraiz.ps1")
-		if old,e:=os.ReadFile(path);e==nil&&!strings.Contains(string(old),"vectorAIz")&&!strings.Contains(string(old)," launch --root "){return errors.New("unknown_windows_launcher")}
+		path := filepath.Join(install, "launch-vectoraiz.ps1")
+		if old, e := os.ReadFile(path); e == nil && !strings.Contains(string(old), "vectorAIz") && !strings.Contains(string(old), " launch --root ") {
+			return errors.New("unknown_windows_launcher")
+		}
 		if e := launcherWrite(path, []byte(body), 0600); e != nil {
 			return e
 		}
@@ -157,8 +167,10 @@ func startSupervisor(root, id string) error {
 	label := "com.vectoraiz.owner." + id[:16]
 	switch runtime.GOOS {
 	case "darwin":
-		job:="gui/"+itoa(os.Getuid())+"/"+label
-		if native("launchctl","print",job)==nil{return native("launchctl","kickstart",job)}
+		job := "gui/" + itoa(os.Getuid()) + "/" + label
+		if native("launchctl", "print", job) == nil {
+			return native("launchctl", "kickstart", job)
+		}
 		return native("launchctl", "bootstrap", "gui/"+itoa(os.Getuid()), filepath.Join(home, "Library", "LaunchAgents", label+".plist"))
 	case "linux":
 		if e = native("systemctl", "--user", "daemon-reload"); e != nil {
@@ -166,7 +178,9 @@ func startSupervisor(root, id string) error {
 		}
 		return native("systemctl", "--user", "enable", "--now", label+".service")
 	case "windows":
-		if native("schtasks.exe","/Query","/TN",label)==nil{return native("schtasks.exe","/Run","/TN",label)}
+		if native("schtasks.exe", "/Query", "/TN", label) == nil {
+			return native("schtasks.exe", "/Run", "/TN", label)
+		}
 		if e = native("schtasks.exe", "/Create", "/TN", label, "/XML", filepath.Join(root, "task.xml"), "/F"); e != nil {
 			return e
 		}
@@ -184,4 +198,22 @@ func browser(u string) error {
 		return native("rundll32.exe", "url.dll,FileProtocolHandler", u)
 	}
 	return errors.New("browser_unavailable")
+}
+
+// Best-effort session notification. Denial/absence never changes the operation
+// outcome or removes the already durable file/CLI fallback.
+func notifyTerminal(root string) {
+	if !allowNativeExecution {
+		return
+	}
+	message := "Update finished. Read the recorded outcome in " + filepath.Join(root, "status.json")
+	switch runtime.GOOS {
+	case "darwin":
+		native("osascript", "-e", "on run argv\ndisplay notification (item 1 of argv) with title \"vectorAIz update\"\nend run", message)
+	case "linux":
+		native("notify-send", "vectorAIz update", message)
+	case "windows":
+		r := Command{Args: []string{"powershell.exe", "-NoProfile", "-NonInteractive", "-Command", `Add-Type -AssemblyName System.Windows.Forms; $n=New-Object System.Windows.Forms.NotifyIcon; $n.Icon=[System.Drawing.SystemIcons]::Information; $n.Visible=$true; $n.ShowBalloonTip(4000,'vectorAIz update',$env:VECTORAIZ_OWNER_NOTICE,[System.Windows.Forms.ToolTipIcon]::Info); Start-Sleep -Seconds 4; $n.Dispose()`}, Env: append(os.Environ(), "VECTORAIZ_OWNER_NOTICE="+message), Deadline: time.Now().Unix() + 10, Max: 4096}
+		execute(&r)
+	}
 }

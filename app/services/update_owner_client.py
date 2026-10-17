@@ -34,6 +34,11 @@ def _location() -> Path:
     # No arbitrary path arrives from HTTP or bootstrap material.
     if MAILBOX != _DEFAULT_MAILBOX:
         return MAILBOX  # Explicit injection used by the isolated filesystem tests.
+    selected = os.environ.get("VECTORAIZ_OWNER_MAILBOX")
+    if selected:
+        if Path(selected) not in _CANDIDATES:
+            raise OwnerError("invalid_mailbox")
+        return Path(selected)
     for candidate in _CANDIDATES:
         if (candidate / "bootstrap.json").exists():
             return candidate
@@ -183,7 +188,7 @@ def submit(target: str, key: str, principal: str) -> dict:
                    "nonce": secrets.token_hex(24), "expires": int(time.time()) + 90}
         try:
             _write("request.json", _sign(p, "request", message))
-        except OSError:
+        except (OSError, OwnerError):
             raise OwnerError("acceptance_unknown", 504) from None
         deadline = time.monotonic() + 20
         while time.monotonic() < deadline:

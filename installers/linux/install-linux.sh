@@ -569,11 +569,11 @@ cat > "$DESKTOP_DIR/vectoraiz.desktop" <<EOF
 [Desktop Entry]
 Name=vectorAIz
 Comment=Self-hosted data processing & search
-Exec="$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
+Exec="$INSTALL_DIR/launch-owner.sh"
 Icon=applications-science
 Type=Application
 Categories=Development;Database;Science;
-Terminal=false
+Terminal=true
 StartupNotify=true
 EOF
 

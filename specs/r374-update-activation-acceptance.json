@@ -14,7 +14,7 @@
       "status(operation_id, existing_OS_read_authorization_or_app_auth) -> bounded_redacted_snapshot (no mutation capability)"
     ],
     "adapter_contracts": {
-      "ProcessRunner": "accept literal argv + explicit cwd + private environment, return exit code/stdout/stderr bounded internally; preserve full durable redacted receipt. No shell interpolation. Every subprocess argv begins rtk proxy, including future Docker/git/platform adapters.",
+      "ProcessRunner": "accept literal argv + explicit cwd + private environment, return exit code/stdout/stderr bounded internally; preserve full durable redacted receipt. No shell interpolation. Operator validation subprocess argv begins rtk proxy. Customer product adapters invoke installed Docker/platform binaries directly, with no RTK dependency.",
       "ComposeAdapter": "construct original docker context, project directory/name, ordered -f and env files plus last owner override; privately resolve and compare config; capture compose up exit directly; inspect project/service/image/mounts after action. No global cleanup.",
       "ImageAdapter": "Resolve authenticated allowed tag and index/platform/config identities; pull exact platform reference and compare existing version label or equivalent immutable evidence. No mandatory new manifest.",
       "JournalAndLock": "stdlib fake uses TemporaryDirectory and injected clock; native adapter uses real OS locks/fsync/atomic replace and process-tree supervision. Expose fault hook at each durable boundary.",
@@ -204,7 +204,7 @@
       "setup": "Original Compose/env source or mounts change after preflight or owner restart.",
       "trigger": "Attempt activation under same recorded generation.",
       "assertions": [
-        "Fingerprint mismatch stops before activation; active original context untouched; require concrete recapture evidence rather than guessing or generic approval loop."
+        "Material effective configuration or source ownership/access mismatch stops before activation; active original context untouched. Re-resolve privately and accept harmless comments/formatting/optional metadata changes when effective configuration, ownership and release identity remain equivalent. Require concrete recapture evidence for material changes rather than guessing or a generic approval loop."
       ],
       "result": "NOT_RUN; acceptance specification only"
     },

@@ -29,6 +29,7 @@ type Operation struct {
 	Generation        int     `json:"generation"`
 	Release           Release `json:"release"`
 	Prior             string  `json:"prior"`
+	PriorImage        string  `json:"prior_image"`
 	ObservedImage     string  `json:"observed_image,omitempty"`
 	ObservedContainer string  `json:"observed_container,omitempty"`
 	Samples           int     `json:"samples"`
@@ -48,14 +49,15 @@ type Ack struct {
 	Code   int    `json:"code"`
 }
 type State struct {
-	Generation   int
-	Current      *Operation
-	History      []*Operation
-	Keys         map[string]Ack
-	LastRefusal  Ack
-	LastVerified *Release
-	Desired      *Release
-	Limits       Limits
+	Generation     int
+	Current        *Operation
+	History        []*Operation
+	Keys           map[string]Ack
+	LastRefusal    Ack
+	LastVerified   *Release
+	Desired        *Release
+	Limits         Limits
+	NotificationID string
 }
 type Snapshot struct {
 	Installation string         `json:"installation"`
@@ -78,6 +80,7 @@ type Owner struct {
 	Now           func() int64
 	LastPublished int64
 	Reason        string
+	Notify        func(string)
 }
 
 func openOwner(root string, d *Docker) (*Owner, error) {
@@ -92,12 +95,33 @@ func openOwner(root string, d *Docker) (*Owner, error) {
 	}
 	return o, e
 }
-func (o *Owner) persist() error { return save(filepath.Join(o.Root, "journal.json"), &o.S) }
+func (o *Owner) persist() error {
+	notify := o.S.Current != nil && !o.S.Current.active() && o.S.NotificationID != o.S.Current.ID
+	if notify {
+		o.S.NotificationID = o.S.Current.ID
+	}
+	if e := save(filepath.Join(o.Root, "journal.json"), &o.S); e != nil {
+		return e
+	}
+	// Publish each durable phase before the next potentially long command. The
+	// host file remains useful even if the app disappears or the owner crashes.
+	if e := o.hostStatus(); e != nil {
+		return e
+	}
+	if notify {
+		if o.Notify != nil {
+			o.Notify(o.Root)
+		} else {
+			notifyTerminal(o.Root)
+		}
+	}
+	return nil
+}
 func (o *Owner) snapshot() Snapshot {
 	p := o.D.Rec.Pair
 	return Snapshot{Installation: o.D.Rec.Installation, Epoch: p.Epoch, Container: p.Container, Generation: p.Generation, Heartbeat: o.Now(), Ready: o.D.Rec.Integrated && o.Reason == "", Reason: o.Reason, Current: o.S.Current, History: o.S.History, Keys: o.S.Keys, LastVerified: o.S.LastVerified, Recovery: "On the original Compose client: vectoraiz-owner status --root <installation>/.vectoraiz-owner. The status.json file remains readable without the app, owner or Docker. Original restart policy is retained; a failed app may keep restarting. No automatic rollback or database downgrade."}
 }
-func (o *Owner) publish() error {
+func (o *Owner) hostStatus() error {
 	s := o.snapshot()
 	b, e := json.Marshal(s)
 	if e != nil {
@@ -110,7 +134,16 @@ func (o *Owner) publish() error {
 		return e
 	}
 	o.LastPublished = o.Now()
+	return nil
+}
+func (o *Owner) publish() error {
+	if e := o.hostStatus(); e != nil {
+		return e
+	}
+	s := o.snapshot()
+	var e error
 	if o.D.Rec.Pair.Container != "" {
+		var b []byte
 		b, e = sign(o.D.Rec.Pair.Key, "status", s)
 		if e == nil {
 			e = o.D.writeBox(o.D.Rec.Pair.Container, "status.json", b)
@@ -266,6 +299,7 @@ func (o *Owner) step() error {
 			return o.fail("original_app_unresolved")
 		}
 		c.Prior = old.ID
+		c.PriorImage = old.Image
 		return o.phase("downloading", c.Limits.Pull)
 	case "downloading":
 		// Inspect cached immutable image before replaying a pull after a crash.
@@ -354,7 +388,7 @@ func (o *Owner) step() error {
 		current, e := o.D.container(o.D.Rec.Invocation.Service)
 		if e != nil {
 			c.Samples = 0
-			return nil
+			return o.persist()
 		}
 		c.ObservedContainer = current.ID
 		c.ObservedImage = current.Image
@@ -371,7 +405,7 @@ func (o *Owner) step() error {
 			c.NextSample = o.Now() + c.Limits.Interval
 			return o.persist()
 		}
-		_, e = o.D.observed(c.Release, c.Prior)
+		_, e = o.D.observed(c.Release, c.Prior, c.PriorImage)
 		if e != nil {
 			c.Samples = 0
 			c.Code = e.Error()
@@ -414,6 +448,10 @@ func (o *Owner) tick() error {
 		} else if o.D.Rec.Pair.Container != c.ID {
 			if e = o.D.pair(c, o.S.Generation); e != nil {
 				o.Reason = e.Error()
+			} else if o.D.challenge() != nil {
+				o.Reason = "channel_not_integrated"
+			} else {
+				o.Reason = ""
 			}
 		} else if o.D.challenge() != nil {
 			o.Reason = "channel_not_integrated"
@@ -444,4 +482,33 @@ func (o *Owner) tick() error {
 	}
 	o.D.Until = 0
 	return o.publish()
+}
+
+func (o *Owner) forwardRepair(target string) error {
+	var e error
+	if !tagPattern.MatchString(target) {
+		return errors.New("exact_forward_repair_target_required")
+	}
+	if o.S.Current == nil || o.S.Current.Phase != "recovery_required" {
+		return errors.New("no_recovery_operation")
+	}
+	if !forwardTag(o.S.Current.Target, target) {
+		return errors.New("automatic_or_backward_downgrade_refused")
+	}
+	if e = o.D.revalidate(); e != nil {
+		return e
+	}
+	c, e := o.D.container(o.D.Rec.Invocation.Service)
+	if e != nil {
+		return e
+	}
+	if !sameRuntime(o.D.Rec.Containers[o.D.Rec.Invocation.Service], c) || (c.Image != o.D.Rec.Containers[o.D.Rec.Invocation.Service].Image && (o.S.Desired == nil || c.Image != o.S.Desired.ImageID)) {
+		return errors.New("actual_state_unresolved")
+	}
+	o.S.Current.ObservedImage = c.Image
+	o.S.Current.ObservedContainer = c.ID
+	o.S.History = append(o.S.History, o.S.Current)
+	o.S.Current = nil
+	_, e = o.submit(Message{Key: token(), Target: target})
+	return e
 }

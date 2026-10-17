@@ -134,5 +134,25 @@
     "CC LOW-5": "failure_policy + A09: bounded observation, recovery_required, original restart policy retained, no automatic downgrade/stop",
     "One-click preservation/adoption": "outcome + host_installation_record/version_selection/owner_runtime + all nineteen cases: exact release, durable ack, original configuration/data, one-time adoption then full one-click"
   },
-  "remaining_limits": "No native permission, archive transport, supervision, supply-chain, browser, migration or retained-data proof. Source proposal is optional equivalent architectural direction. R289/R328/R339 and Vulcan13893 holds unchanged; full sixteen ACTIVE/incomplete. Pair delta review remains future, not dispatched."
+  "remaining_limits": "No native permission, archive transport, supervision, supply-chain, browser, migration or retained-data proof. Source proposal is optional equivalent architectural direction. R289/R328/R339 and Vulcan13893 holds unchanged; full sixteen ACTIVE/incomplete. Pair delta review remains future, not dispatched.",
+  "implementation_continuation": {
+    "preserved_source": "e65547b3a878ec1d7631de1d04f81bdceb24f3d2",
+    "preserved_diff": "32 files, 4068 additions, reused without restart from design",
+    "private_evidence_directory": "/var/tmp/r374-completion-657985-evidence",
+    "final_identity_receipt": "final-receipt.json in that private directory records the committed candidate/tree, complete source manifests, full diffs and normal remote publication",
+    "validation": "Actual guarded Go owner/fake Docker/state/recovery tests; direct-file stdlib Python client and AST-extracted actual route scope decision; permission-restricted Node actual frontend auth helper plus source contracts. Five installed-local-Go offline cross-compiles; seven individual shell syntax checks. Full logs and prior failures retained.",
+    "causal_failure": "The added actual forward-repair test initially failed: a same-image repair was wrongly required to replace the container again. Per-attempt prior image identity corrects that requirement; the same test now passes without duplicate activation. Old image, old HTTP version, unhealthy target, wrong project/config and missing writer cannot succeed.",
+    "guard_events": [
+      "Go native process adapter denied before spawn; all Docker behavior uses injected Runner",
+      "Python DENIED_IMPORT:app and DENIED_EVENT:os.system; network/process/app imports remain absent",
+      "Node network/child permissions denied; attempted child spawn rejected before execution"
+    ],
+    "not_run": [
+      "Docker/Desktop/two-host archive transport and destination permissions",
+      "Native supervisor/process-tree/job/reboot/notification lifecycle on macOS/Linux/Windows",
+      "Real FastAPI authentication, browser UI, PowerShell runtime",
+      "Registry/provider/customer/network lifecycle, image pull/build, migrations, retained-data preservation and distribution trust"
+    ],
+    "limits": "Source implementation and isolated evidence only; fake tests and cross-compilation do not establish native proof. R289/R328/R339 holds strict; full sixteen audit active/incomplete. No PR/merge/release/install."
+  }
 }

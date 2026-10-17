@@ -590,55 +590,13 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cat > "$APP_BUNDLE/Contents/MacOS/vectorAIz" <<'LAUNCHER'
 #!/bin/bash
 INSTALL_DIR="$HOME/vectoraiz"
-exec "$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
-
-cd "$INSTALL_DIR" || exit 1
-
-# Read channel from .env to pick the correct compose file
-CHANNEL=$(grep "^VECTORAIZ_CHANNEL=" .env 2>/dev/null | cut -d'=' -f2 | tr -d ' "'"'"'')
-case "$CHANNEL" in
-    aim-data) COMPOSE_FILE="docker-compose.aim-data.yml" ;;
-    *) COMPOSE_FILE="docker-compose.customer.yml" ;;
-esac
-
-# Read port from .env
-PORT=$(grep "^VECTORAIZ_PORT=" .env 2>/dev/null | cut -d'=' -f2 | tr -d ' "'"'"'')
-PORT="${PORT:-80}"
-
-if [ "$PORT" = "80" ]; then
-    URL="http://localhost"
-else
-    URL="http://localhost:${PORT}"
+"$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
+result=$?
+if [ "$result" -ne 0 ]; then
+    cat "$INSTALL_DIR/.vectoraiz-owner/status.json"
+    /usr/bin/open -a TextEdit "$INSTALL_DIR/.vectoraiz-owner/status.json"
 fi
-
-# Start Docker if not running
-if ! docker info &>/dev/null 2>&1; then
-    if [ -d "/Applications/OrbStack.app" ]; then
-        open -a OrbStack
-    elif [ -d "/Applications/Docker.app" ]; then
-        open -a Docker
-    fi
-    # Wait up to 60s for Docker
-    for i in $(seq 1 20); do
-        docker info &>/dev/null 2>&1 && break
-        sleep 3
-    done
-fi
-
-# Start containers
-docker compose -f "$COMPOSE_FILE" up -d 2>/dev/null
-
-# Wait for health then open browser
-for i in $(seq 1 40); do
-    if curl -sf "${URL}/api/health" >/dev/null 2>&1; then
-        open "$URL"
-        exit 0
-    fi
-    sleep 3
-done
-
-# Open anyway after timeout
-open "$URL"
+exit "$result"
 LAUNCHER
 chmod +x "$APP_BUNDLE/Contents/MacOS/vectorAIz"
 

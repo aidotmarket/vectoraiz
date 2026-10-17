@@ -41,20 +41,20 @@ type Identity struct {
 	}
 }
 type Record struct {
-	Invocation   Invocation
-	Installation string
-	Sources      map[string]string
-	Credentials  map[string]string
-	Original     json.RawMessage
-	Effective    json.RawMessage
-	Endpoint     json.RawMessage
-	Containers   map[string]Identity
-	Hashes       map[string]string
-	Platform     string
-	Pair         Pair
-	Integrated   bool
+	Invocation     Invocation
+	Installation   string
+	Sources        map[string]string
+	Credentials    map[string]string
+	Original       json.RawMessage
+	Effective      json.RawMessage
+	Endpoint       json.RawMessage
+	Containers     map[string]Identity
+	Hashes         map[string]string
+	Platform       string
+	Pair           Pair
+	Integrated     bool
 	AdoptionTarget string
-	Mailbox string
+	Mailbox        string
 }
 type Release struct{ Tag, IndexDigest, Digest, ImageID, Platform string }
 type Docker struct {
@@ -79,7 +79,7 @@ func (d *Docker) args(a ...string) []string {
 	return append(prefix, a...)
 }
 func (d *Docker) run(mutate bool, input []byte, max int, a ...string) ([]byte, error) {
-	return d.R.Run(d.args(a...), input, d.deadline(), max, true)
+	return d.R.Run(d.args(a...), input, d.deadline(), max, mutate)
 }
 func (d *Docker) compose(selected bool, a ...string) []string {
 	i := d.Rec.Invocation
@@ -292,9 +292,19 @@ func (d *Docker) copyDeadline() int64 {
 	}
 	return n
 }
-func (d *Docker) mailboxPath()string{if d.Rec.Mailbox!=""{for _,p:=range mailboxCandidates{if d.Rec.Mailbox==p{return p}};panic("invalid registered mailbox")};return mailbox}
+func (d *Docker) mailboxPath() string {
+	if d.Rec.Mailbox != "" {
+		for _, p := range mailboxCandidates {
+			if d.Rec.Mailbox == p {
+				return p
+			}
+		}
+		panic("invalid registered mailbox")
+	}
+	return mailbox
+}
 func (d *Docker) readBox(cid, name string, max int) ([]byte, error) {
-	b, e := d.R.Run(d.args("cp", cid+":"+d.mailboxPath()+"/"+name, "-"), nil, d.copyDeadline(), 65536, true)
+	b, e := d.R.Run(d.args("cp", cid+":"+d.mailboxPath()+"/"+name, "-"), nil, d.copyDeadline(), 65536, false)
 	if e != nil {
 		return nil, e
 	}
@@ -309,10 +319,17 @@ func (d *Docker) writeBox(cid, name string, b []byte) error {
 	return e
 }
 func mailboxPossible(c Identity) error {
-	return mailboxAt(c,mailbox)
+	return mailboxAt(c, mailbox)
 }
-func chooseMailbox(c Identity)(string,error){for _,p:=range mailboxCandidates{if mailboxAt(c,p)==nil{return p,nil}};return "",errors.New("no_writable_nonmounted_mailbox")}
-func mailboxAt(c Identity,parent string)error{
+func chooseMailbox(c Identity) (string, error) {
+	for _, p := range mailboxCandidates {
+		if mailboxAt(c, p) == nil {
+			return p, nil
+		}
+	}
+	return "", errors.New("no_writable_nonmounted_mailbox")
+}
+func mailboxAt(c Identity, parent string) error {
 	if c.HostConfig.ReadonlyRootfs {
 		return errors.New("mailbox_read_only")
 	}
@@ -335,7 +352,7 @@ func mailboxAt(c Identity,parent string)error{
 	return nil
 }
 func (d *Docker) pair(c Identity, generation int) error {
-	if e := mailboxAt(c,d.mailboxPath()); e != nil {
+	if e := mailboxAt(c, d.mailboxPath()); e != nil {
 		return e
 	}
 	p := Pair{Installation: d.Rec.Installation, Epoch: token(), Container: c.ID, Generation: generation, Key: token()}
@@ -483,13 +500,13 @@ func (d *Docker) dependencies() error {
 	return nil
 }
 func (d *Docker) selectRelease(r Release, generation int) error {
-	v := map[string]any{"services": map[string]any{d.Rec.Invocation.Service: map[string]any{"image": repository + "@" + r.Digest, "environment": map[string]string{"VECTORAIZ_VERSION": r.Tag,"VECTORAIZ_OWNER_MAILBOX":d.mailboxPath()}}}}
+	v := map[string]any{"services": map[string]any{d.Rec.Invocation.Service: map[string]any{"image": repository + "@" + r.Digest, "environment": map[string]string{"VECTORAIZ_VERSION": r.Tag, "VECTORAIZ_OWNER_MAILBOX": d.mailboxPath()}}}}
 	if e := save(filepath.Join(d.Root, "selection.compose.json"), v); e != nil {
 		return e
 	}
 	return save(filepath.Join(d.Root, "selection.json"), map[string]any{"release": r, "generation": generation})
 }
-func (d *Docker) observed(r Release, prior string) (Identity, error) {
+func (d *Docker) observed(r Release, prior, priorImage string) (Identity, error) {
 	c, e := d.container(d.Rec.Invocation.Service)
 	if e != nil {
 		return c, e
@@ -498,7 +515,7 @@ func (d *Docker) observed(r Release, prior string) (Identity, error) {
 	if !sameRuntime(base, c) {
 		return c, errors.New("app_runtime_changed")
 	}
-	if c.Image != r.ImageID || base.Image != r.ImageID && c.ID == prior {
+	if c.Image != r.ImageID || priorImage != r.ImageID && c.ID == prior {
 		return c, errors.New("wrong_image")
 	}
 	if !c.State.Running || c.State.Health.Status != "healthy" {
@@ -613,8 +630,22 @@ func register(root string, i Invocation, r Runner) (*Record, error) {
 	}
 	sources := append(append([]string{}, i.Files...), i.EnvFiles...)
 	if i.DefaultEnv {
-		originalEnv:=map[string]string{};for _,s:=range i.Environment{k,v,ok:=strings.Cut(s,"=");if ok{originalEnv[k]=v}}
-		if paths:=originalEnv["COMPOSE_ENV_FILES"];paths!=""{for _,p:=range strings.Split(paths,","){sources=append(sources,absolute(i.Cwd,p))}}else if originalEnv["COMPOSE_DISABLE_ENV_FILE"]!="1"&&originalEnv["COMPOSE_DISABLE_ENV_FILE"]!="true"{if _,e=os.Stat(filepath.Join(i.Cwd,".env"));e==nil{sources=append(sources,filepath.Join(i.Cwd,".env"))}}
+		originalEnv := map[string]string{}
+		for _, s := range i.Environment {
+			k, v, ok := strings.Cut(s, "=")
+			if ok {
+				originalEnv[k] = v
+			}
+		}
+		if paths := originalEnv["COMPOSE_ENV_FILES"]; paths != "" {
+			for _, p := range strings.Split(paths, ",") {
+				sources = append(sources, absolute(i.Cwd, p))
+			}
+		} else if originalEnv["COMPOSE_DISABLE_ENV_FILE"] != "1" && originalEnv["COMPOSE_DISABLE_ENV_FILE"] != "true" {
+			if _, e = os.Stat(filepath.Join(i.Cwd, ".env")); e == nil {
+				sources = append(sources, filepath.Join(i.Cwd, ".env"))
+			}
+		}
 		if i.Cwd != i.ProjectDirectory {
 			if _, e = os.Stat(filepath.Join(i.ProjectDirectory, ".env")); e == nil {
 				sources = append(sources, filepath.Join(i.ProjectDirectory, ".env"))
@@ -697,7 +728,7 @@ func register(root string, i Invocation, r Runner) (*Record, error) {
 		}
 		rec.Containers[name] = c
 	}
-	if rec.Mailbox,e = chooseMailbox(rec.Containers[i.Service]); e != nil {
+	if rec.Mailbox, e = chooseMailbox(rec.Containers[i.Service]); e != nil {
 		return nil, e
 	}
 	// Check only activation flags actually needed, not an arbitrary version gate.

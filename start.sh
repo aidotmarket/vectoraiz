@@ -19,7 +19,12 @@ set -eo pipefail
 # Owner selection/context outranks incidental launcher environment on every rerun.
 OWNER_START_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$OWNER_START_DIR/.vectoraiz-owner/registration.json" ]; then
-    exec "$OWNER_START_DIR/.vectoraiz-owner/owner" launch --root "$OWNER_START_DIR/.vectoraiz-owner" --open
+    "$OWNER_START_DIR/.vectoraiz-owner/owner" launch --root "$OWNER_START_DIR/.vectoraiz-owner" --open || {
+        result=$?
+        cat "$OWNER_START_DIR/.vectoraiz-owner/status.json"
+        exit "$result"
+    }
+    exit 0
 fi
 
 # --- Configuration ---

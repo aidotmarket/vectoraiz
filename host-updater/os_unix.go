@@ -68,3 +68,17 @@ func killTree(c *exec.Cmd) {
 		syscall.Kill(-c.Process.Pid, syscall.SIGKILL)
 	}
 }
+func helperJob() error { return nil }
+func commandGroupAlive(pid int) bool {
+	e := syscall.Kill(-pid, 0)
+	return e != syscall.ESRCH
+}
+func killCommand(c *exec.Cmd, group int) {
+	if group > 0 {
+		// The tracked helper and its children share this group. A deadline kill
+		// can also end the helper; the durable unknown outcome is reconciled.
+		syscall.Kill(-group, syscall.SIGKILL)
+		return
+	}
+	killTree(c)
+}

@@ -66,6 +66,7 @@ import {
 } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { getApiUrl, systemApi, apiFetch } from "@/lib/api";
+import { updateAuthHeaders } from "@/lib/updateProtocol";
 import { useAuth } from "@/contexts/AuthContext";
 import { useBrand } from "@/contexts/BrandContext";
 import { useMode } from "@/contexts/ModeContext";
@@ -180,14 +181,15 @@ const SettingsPage = () => {
   const unreachableSince = useRef<string | null>(null);
   const [ownerNotice, setOwnerNotice] = useState("");
 
+
   const observeUpdate = useCallback(async () => {
-    const storedKey = localStorage.getItem("vectoraiz_api_key");
-    if (!storedKey) return;
+    const headers = updateAuthHeaders();
+    if (!Object.keys(headers).length) return;
     const correlation = updateCorrelation.current;
     const identifier = correlation?.id || correlation?.key || "current";
     try {
       const res = await fetch(`${getApiUrl()}/api/version/update/operations/${encodeURIComponent(identifier)}`, {
-        headers: { "X-API-Key": storedKey }, signal: AbortSignal.timeout(10000),
+        headers, signal: AbortSignal.timeout(10000),
       });
       if (!res.ok) throw new Error(`Owner observation unavailable (${res.status})`);
       const data = await res.json();
@@ -198,7 +200,7 @@ const SettingsPage = () => {
       if (!op) return;
       // Never reuse a historical success for a pending request with no matching ack.
       if (correlation && op.target !== correlation.target) return;
-      if (correlation && !correlation.id && !data.keys?.[correlation.key]) return;
+      if (correlation && !correlation.id && data.keys?.[correlation.key]?.code !== 202) return;
       if (correlation && !correlation.id) {
         correlation.id = op.id;
         localStorage.setItem("vectoraiz_update_request", JSON.stringify(correlation));
@@ -213,6 +215,12 @@ const SettingsPage = () => {
       } else if (["recovery_required", "failed_download", "failed_resolution"].includes(op.phase)) {
         setUpdateStatus("error");
         setUpdateMessage(`${lastOwnerMessage.current} ${op.code}. Keep configuration and volumes. Read host status for forward recovery; the original restart policy remains active.`);
+        if (["failed_download", "failed_resolution"].includes(op.phase) && correlation?.id === op.id) {
+          // A confirmed failure before activation permits an explicit new attempt.
+          // Unknown acceptance and startup recovery always retain the original key.
+          updateCorrelation.current = null;
+          localStorage.removeItem("vectoraiz_update_request");
+        }
       } else {
         setUpdateStatus("updating");
         setUpdateMessage(lastOwnerMessage.current);
@@ -238,8 +246,8 @@ const SettingsPage = () => {
   const triggerUpdate = async () => {
     const target = versionInfo?.latest;
     if (!target) return;
-    const storedKey = localStorage.getItem("vectoraiz_api_key");
-    if (!storedKey) { setUpdateStatus("error"); setUpdateMessage("Authentication required."); return; }
+    const headers = updateAuthHeaders();
+    if (!Object.keys(headers).length) { setUpdateStatus("error"); setUpdateMessage("Authentication required."); return; }
     // Persist before sending; a missing response is acceptance_unknown.
     const previous = updateCorrelation.current;
     const correlation = previous?.target === target ? previous : { key: crypto.randomUUID(), target };
@@ -249,7 +257,7 @@ const SettingsPage = () => {
     setUpdateMessage(`Submitting ${target}. If the app disconnects, use vectoraiz-owner status on the original Compose client; its status.json remains readable without Docker or the app.`);
     try {
       const res = await fetch(`${getApiUrl()}/api/version/update`, {
-        method: "POST", headers: { "X-API-Key": storedKey, "Content-Type": "application/json" },
+        method: "POST", headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({ target, idempotency_key: correlation.key }), signal: AbortSignal.timeout(25000),
       });
       const data = await res.json();
@@ -1128,7 +1136,7 @@ client = QdrantClient(host="localhost", port=6333)`}
             {versionInfo?.update_available && versionInfo?.can_auto_update && (
               <Button
                 className="gap-2"
-                disabled={updateStatus === "updating" || updateStatus === "done"}
+                disabled={updateStatus === "updating" || (updateStatus === "done" && updateCorrelation.current?.target === versionInfo.latest)}
                 onClick={triggerUpdate}
               >
                 {updateStatus === "updating" ? (

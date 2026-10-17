@@ -81,7 +81,57 @@ func secureDirectory(p string) error {
 func ownership(p string) (string, error) { return acl(p, false) }
 func childGroup(c *exec.Cmd)             { c.SysProcAttr = &syscall.SysProcAttr{CreationFlags: 0x00000200} }
 func killTree(c *exec.Cmd) {
+	if !allowNativeExecution {
+		return
+	}
 	if c.Process != nil { // taskkill targets only the tracked child tree.
 		exec.Command("taskkill.exe", "/PID", itoa(c.Process.Pid), "/T", "/F").Run()
 	}
+}
+func killCommand(c *exec.Cmd, group int) { killTree(c) }
+func commandGroupAlive(pid int) bool {
+	h, e := syscall.OpenProcess(0x00100000, false, uint32(pid)) // SYNCHRONIZE
+	if e != nil {
+		return e != syscall.Errno(87) // ERROR_INVALID_PARAMETER: PID no longer exists.
+	}
+	defer syscall.CloseHandle(h)
+	result, e := syscall.WaitForSingleObject(h, 0)
+	return e != nil || result != 0
+}
+func helperJob() error {
+	if !allowNativeExecution {
+		return errors.New("ISOLATION_GUARD: native job denied")
+	}
+	// The helper owns this handle for its complete lifetime. On normal or abrupt
+	// exit Windows kills remaining descendants before orphan reconciliation.
+	var limits struct {
+		Basic struct {
+			ProcessTime, JobTime   int64
+			Flags                  uint32
+			MinWorking, MaxWorking uintptr
+			Active                 uint32
+			Affinity               uintptr
+			Priority, Scheduling   uint32
+		}
+		IO     [6]uint64
+		Memory [4]uintptr
+	}
+	limits.Basic.Flags = 0x2000 // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	h, _, e := kernel.NewProc("CreateJobObjectW").Call(0, 0)
+	if h == 0 {
+		return e
+	}
+	ok, _, e := kernel.NewProc("SetInformationJobObject").Call(h, 9, uintptr(unsafe.Pointer(&limits)), unsafe.Sizeof(limits))
+	if ok == 0 {
+		syscall.CloseHandle(syscall.Handle(h))
+		return e
+	}
+	self, _ := syscall.GetCurrentProcess()
+	ok, _, e = kernel.NewProc("AssignProcessToJobObject").Call(h, uintptr(self))
+	if ok == 0 {
+		syscall.CloseHandle(syscall.Handle(h))
+		return e
+	}
+	// Deliberately retained until process exit, after the durable result is saved.
+	return nil
 }
