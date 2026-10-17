@@ -17,9 +17,16 @@ cannot establish the source provenance of an arbitrary supplied binary.
 
 Do not execute these commands under the current source-only authorization.
 Without `--native`, the driver describes/refuses native execution with exit 2.
-It requires Linux `/proc`, Python 3.11+ with pidfd APIs, and existing `rtk` whose
-`proxy` transparently execs the specified argv. Darwin and wrapping proxies are
-unsupported; the driver refuses to substitute numeric PID/group signals.
+It requires Linux `/proc`, Python 3.11+ with pidfd APIs, and existing `rtk`.
+Official RTK v0.34.3 source (`src/main.rs`, `Commands::Proxy`) spawns a child,
+streams output, and waits; it does not exec transparently. The driver pins the
+retained wrapper, then discovers only its sole actual child through that
+wrapper's kernel child lists. Darwin and other proxy topologies are unsupported;
+no numeric PID/group signals are substituted. This topology is source-derived,
+not natively verified against the installed binary.
+
+Source: https://github.com/rtk-ai/rtk/blob/v0.34.3/src/main.rs#L1932-L2035
+(`src/core/utils.rs::resolved_command` constructs a direct `Command`).
 
 After separate explicit native authorization, use an existing owner binary and
 an existing, owned, private (0700 or equivalent), disposable output directory:
@@ -56,10 +63,16 @@ internal child calls use ordinary direct argv without shell interpolation.
   and grandchild termination within two seconds and before the original deadline.
   A missing durable result is recorded honestly, without reconciliation/replay.
 * **Original deadline:** send no intervention signal during observation. Sample
-  actual termination against the original absolute deadline. Each role's first
-  observed exit has its own timestamp. A late sample is UNKNOWN even if all
-  processes are subsequently dead; scheduling and sampling cannot prove an exact
-  boundary. A strict deadline result may therefore remain inconclusive.
+  actual termination against the unchanged original absolute deadline, retaining
+  the predeadline-live control. Each role records its first dead sample, latency
+  relative to that deadline, and measurement interval from the start of its last
+  live sample to the end of its first dead sample. OBSERVED means all four owned
+  targets were observed exited within the existing `deadline + 0.25` polling
+  allowance, with the sentinel alive. This small existing window accommodates
+  timer delivery and polling; it grants no new command budget and asserts no
+  exact-boundary termination. Samples at +5ms or +200ms qualify this bounded
+  claim; beyond +250ms, missing targets, sentinel death, or unknown ownership
+  remain UNKNOWN. The exact deadline instant remains unproved.
 
 An independently launched, pinned sentinel in its own session/group must be
 alive at the observation point in every case. It is killed only during cleanup.
@@ -68,13 +81,17 @@ from `/proc`. Direct Popen children are reaped; orphan reaping is not asserted.
 
 The driver holds the real child lock before helper launch, establishes a pinned
 helper/sentinel cleanup guardian before unlocking, and then replaces it with a
-guardian holding all five pidfds before any experimental signal. Guardians are
-external processes with a 30-second cap; EOF or timeout kills only pinned owned
+guardian holding all role and retained-wrapper pidfds before any experimental
+signal. Guardians are external processes with a 30-second cap; EOF or timeout kills only pinned owned
 processes. Live ancestry, exact argv, UID, process group, stable kernel start
 identity and pidfd liveness are verified before accepting ownership. The helper
-PID must match the retained Popen PID and the product record. Kernel child-list
-reads are scoped to verified owned processes, never a host process scan. No
-persisted numeric identity is used for signaling. No group kill, pkill, process
+PID must match the pinned wrapper child and the product record. A minimal
+Python bootstrap makes that child a private group leader before exec of the
+helper, preserving the product watchdog's helper-PID/group contract. The wrapper
+remains in its own launch group. Sentinel ownership likewise follows its pinned
+wrapper's sole child. Wrapper identity and exact ancestry are checked again after
+child pinning. Kernel child-list reads are scoped to verified owned processes,
+never a host process scan. No persisted numeric identity is used for signaling. No group kill, pkill, process
 prune, shell command, or retry of a case is performed. Short polling for initial
 exec/readiness does not relaunch anything or manufacture an outcome.
 
