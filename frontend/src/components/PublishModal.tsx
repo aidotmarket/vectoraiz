@@ -29,7 +29,7 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
 import { type Dataset } from "@/types/mockDatasets";
-import { piiApi, getApiUrl, type PIIScanResponse } from "@/lib/api";
+import { piiApi, getApiUrl } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "@/hooks/use-toast";
 
@@ -47,6 +47,45 @@ interface PIIWarning {
   count?: number;
 }
 
+// Validate only the fields used by this view; cached successes have no scan_status.
+type ScanColumn = {
+  column: string;
+  pii_types: string[];
+  risk_level: "none" | "low" | "medium" | "high";
+  sample_matches?: unknown[];
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const isScanColumn = (value: unknown): value is ScanColumn =>
+  isRecord(value) && typeof value.column === "string" && value.column.trim().length > 0 &&
+  Array.isArray(value.pii_types) && value.pii_types.every(type => typeof type === "string" && type.trim().length > 0) &&
+  (value.pii_types.length === 0
+    ? value.risk_level === "none"
+    : ["low", "medium", "high"].includes(value.risk_level as string)) &&
+  (value.sample_matches === undefined || Array.isArray(value.sample_matches));
+
+const readPrivacyObservation = (value: unknown): { columns: ScanColumn[] | null; skipped: boolean } => {
+  if (!isRecord(value)) return { columns: null, skipped: false };
+  if (value.status === "scan_failed" || value.scan_status === "scan_failed") {
+    return { columns: null, skipped: false };
+  }
+  if (value.status === "skipped" || value.scan_status === "skipped") {
+    return { columns: null, skipped: true };
+  }
+  // Unknown explicit states cannot establish a completed observation.
+  if ([value.status, value.scan_status].some(status =>
+    status !== undefined && !["completed", "complete", "success"].includes(status as string))) {
+    return { columns: null, skipped: false };
+  }
+  const columns = value.column_results;
+  return {
+    columns: Array.isArray(columns) && columns.every(isScanColumn) ? columns : null,
+    skipped: false,
+  };
+};
+
 const suggestedTags = ["sales", "ecommerce", "transactions", "customers", "orders", "revenue"];
 
 const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: PublishModalProps) => {
@@ -56,7 +95,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
   const [privacyConfirmed, setPrivacyConfirmed] = useState(false);
   
   // PII scan state
-  const [piiData, setPiiData] = useState<PIIScanResponse | null>(null);
+  const [piiData, setPiiData] = useState<unknown>(null);
   const [piiLoading, setPiiLoading] = useState(true);
   const [piiError, setPiiError] = useState<string | null>(null);
   
@@ -80,28 +119,42 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   // Fetch PII scan when modal opens
   useEffect(() => {
+    let active = true;
     if (open && dataset?.id) {
       setPiiLoading(true);
       setPiiError(null);
       piiApi.getScan(dataset.id)
         .then((data) => {
+          if (!active) return;
           setPiiData(data);
           setPiiLoading(false);
         })
         .catch((err) => {
+          if (!active) return;
           console.error('PII scan error:', err);
           setPiiError(err instanceof Error ? err.message : 'Failed to scan for PII');
           setPiiLoading(false);
         });
     }
+    return () => { active = false; };
   }, [open, dataset?.id]);
 
-  // Convert API response to PIIWarning array
-  const piiWarnings: PIIWarning[] = piiData?.column_results
-    ?.filter(col => col.pii_types && col.pii_types.length > 0)
-    ?.map(col => ({
+  const observation = readPrivacyObservation(piiData);
+  const hasObservation = !piiLoading && piiError === null && observation.columns !== null;
+  const observationMessage = piiLoading
+    ? "Checking privacy scan results…"
+    : piiError !== null
+    ? "Privacy scan results are unavailable. Privacy risk is unknown."
+    : observation.skipped
+    ? "Privacy scan was skipped. Privacy risk is unknown."
+    : "No usable privacy scan results are available. Privacy risk is unknown.";
+
+  // Only validated observations can produce findings or a numeric score.
+  const piiWarnings: PIIWarning[] = (hasObservation ? observation.columns : [])
+    ?.filter(col => col.pii_types.length > 0)
+    .map(col => ({
       column: col.column,
-      riskLevel: (col.risk_level as "low" | "medium" | "high") || "medium",
+      riskLevel: col.risk_level as PIIWarning["riskLevel"],
       message: `Contains ${col.pii_types.join(", ")}`,
       count: col.sample_matches?.length,
     })) || [];
@@ -116,7 +169,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   // Calculate privacy score based on real data
   const calculatePrivacyScore = (): number => {
-    if (!piiData || piiWarnings.length === 0) return 10;
+    if (piiWarnings.length === 0) return 10;
     
     let score = 10;
     piiWarnings.forEach(warning => {
@@ -128,7 +181,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
     return Math.max(0, score);
   };
 
-  const privacyScore = calculatePrivacyScore();
+  const privacyScore = hasObservation ? calculatePrivacyScore() : null;
 
   const handleAddTag = () => {
     if (tagInput.trim() && !tags.includes(tagInput.trim().toLowerCase())) {
@@ -266,20 +319,22 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                         <Skeleton className="h-16 w-full" />
                         <Skeleton className="h-16 w-full" />
                       </div>
-                    ) : piiError ? (
+                    ) : piiError !== null ? (
                       <div className="p-3 bg-destructive/10 border border-destructive/30 rounded-lg">
                         <p className="text-sm text-destructive">{piiError}</p>
                         <p className="text-xs text-muted-foreground mt-1">
                           Unable to scan for PII. Proceed with caution.
                         </p>
                       </div>
+                    ) : !hasObservation ? (
+                      <p className="text-sm text-muted-foreground">{observationMessage}</p>
                     ) : piiWarnings.length === 0 ? (
                       <div className="flex items-center gap-3 p-4 bg-[hsl(var(--haven-success))]/10 border border-[hsl(var(--haven-success))]/30 rounded-lg">
                         <ShieldCheck className="w-5 h-5 text-[hsl(var(--haven-success))]" />
                         <div>
                           <p className="text-sm font-medium text-foreground">No privacy concerns detected</p>
                           <p className="text-xs text-muted-foreground">
-                            This dataset appears to be free of personally identifiable information.
+                            No PII was found in the scanned sample. A scan may not detect all PII.
                           </p>
                         </div>
                       </div>
@@ -324,8 +379,12 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                     )}
                   </div>
 
+                  {!hasObservation && (piiLoading || piiError !== null) && (
+                    <p className="text-sm text-muted-foreground">{observationMessage}</p>
+                  )}
+
                   {/* Privacy Score */}
-                  <div className="p-4 bg-secondary/50 rounded-lg">
+                  {privacyScore !== null && <div className="p-4 bg-secondary/50 rounded-lg">
                     <div className="flex items-center justify-between mb-2">
                       <Label className="text-sm">Privacy Score</Label>
                       <span className={`text-sm font-medium ${
@@ -344,7 +403,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                         ? "Some PII detected - consider excluding sensitive columns"
                         : "High privacy risk - please exclude sensitive columns"}
                     </p>
-                  </div>
+                  </div>}
 
                   {/* Confirmation */}
                   <div className="flex items-center gap-2 pt-2">
