@@ -244,8 +244,10 @@ it.each([true, false])("retains uncertain threshold draft after confirming enabl
   expect(mutations()).toHaveLength(1);
   state.toast.mockClear(); save = async (init) => response(JSON.parse(String(init.body)));
   fireEvent.click(screen.getByRole("button", { name: "Save" })); await settledSave();
-  expect(mutations().map(({ init }) => JSON.parse(String(init.body)))).toEqual([config(true, 13), config(true, 13)]);
-  expect(screen.getByText("Reload to $25 when balance reaches $13")).toBeTruthy();
+  expect(mutations().map(({ init }) => JSON.parse(String(init.body)))).toEqual([config(true, 13), config(enabled, 13)]);
+  expect(toggle()).toHaveAttribute("aria-checked", String(enabled));
+  if (enabled) expect(screen.getByText("Reload to $25 when balance reaches $13")).toBeTruthy();
+  else expect(screen.queryByText("Reload to $25 when balance reaches $13")).toBeNull();
 });
 it.each(["unreadable success", "malformed success", "server failure", "request timeout"])("reconciles ambiguous %s without repeating POST", async (failure) => {
   await mount();

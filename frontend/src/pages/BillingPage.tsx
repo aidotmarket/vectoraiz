@@ -663,7 +663,7 @@ const BillingPage = () => {
                       return;
                     }
                     saveAutoReload({
-                      enabled: true,
+                      enabled: autoReload.enabled,
                       threshold_usd: threshold,
                       reload_amount_usd: 25,
                     });
