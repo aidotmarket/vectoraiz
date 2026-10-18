@@ -9,7 +9,6 @@ import {
   Info,
   Loader2,
   ShieldCheck,
-  Sparkles,
   Tag,
   X,
 } from "lucide-react";
@@ -106,7 +105,6 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
   );
   const [tags, setTags] = useState<string[]>([]);
   const [tagInput, setTagInput] = useState("");
-  const [enhancing, setEnhancing] = useState(false);
   
   // Step 3 state
   const [price, setPrice] = useState("450");
@@ -192,17 +190,6 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   const handleRemoveTag = (tag: string) => {
     setTags(tags.filter(t => t !== tag));
-  };
-
-  const handleEnhanceWithAI = () => {
-    setEnhancing(true);
-    setTimeout(() => {
-      setDescription(
-        `Comprehensive e-commerce sales dataset with ${dataset.rows.toLocaleString()} transaction records. Includes detailed order information, customer demographics, product catalog references, pricing data, and fulfillment status. Ideal for sales analytics, customer segmentation, demand forecasting, and revenue optimization.`
-      );
-      setTags(["sales", "ecommerce", "transactions", "customers", "orders", "revenue", "analytics"]);
-      setEnhancing(false);
-    }, 1500);
   };
 
   const searchabilityScore = Math.min(100, 50 + tags.length * 8 + (description.length > 200 ? 20 : 10));
@@ -453,24 +440,10 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                   </div>
 
                   <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <Label htmlFor="description">Description</Label>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        onClick={handleEnhanceWithAI}
-                        disabled={enhancing}
-                        className="gap-2 text-xs"
-                      >
-                        {enhancing ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <Sparkles className="w-3 h-3" />
-                        )}
-                        Enhance with AI
-                        <span className="text-muted-foreground">~$0.03</span>
-                      </Button>
-                    </div>
+                    <Label htmlFor="description">Description</Label>
+                    <p className="text-sm text-muted-foreground">
+                      AI description enhancement is unavailable here. Describe the actual dataset.
+                    </p>
                     <Textarea
                       id="description"
                       value={description}
