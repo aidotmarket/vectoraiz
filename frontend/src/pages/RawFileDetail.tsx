@@ -55,7 +55,7 @@ interface MetadataForm {
   tags: string;
 }
 
-function ListingReadiness({ file, isConnected }: { file: RawFile; isConnected: boolean }) {
+function ListingReadiness({ file, isConnected, isModeLoading }: { file: RawFile; isConnected: boolean; isModeLoading: boolean }) {
   const meta = file.metadata as Record<string, unknown> | null;
   const hasTitle = !!(meta?.title);
   const hasDescription = !!(meta?.description);
@@ -67,7 +67,7 @@ function ListingReadiness({ file, isConnected }: { file: RawFile; isConnected: b
     { label: "File registered", passed: true },
     { label: "Metadata complete (title, description, tags)", passed: metadataComplete },
     { label: "Price set (if paid listing)", passed: hasPriceOrFree },
-    { label: "Connected to ai.market (trust channel active)", passed: isConnected },
+    { label: isModeLoading ? "Checking mode configuration..." : "Connected mode configured", passed: !isModeLoading && isConnected },
   ];
 
   return (
@@ -213,7 +213,7 @@ function RawFileVisit({ id }: { id: string | undefined }) {
     active.current = true;
     return () => { active.current = false; };
   }, []);
-  const { isConnected } = useMode();
+  const { isConnected, isLoading: isModeLoading } = useMode();
   const [file, setFile] = useState<RawFile | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -432,7 +432,7 @@ function RawFileVisit({ id }: { id: string | undefined }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Listing Readiness */}
-        <ListingReadiness file={file} isConnected={isConnected} />
+        <ListingReadiness file={file} isConnected={isConnected} isModeLoading={isModeLoading} />
 
         {/* Vectorize CTA */}
         <Card>

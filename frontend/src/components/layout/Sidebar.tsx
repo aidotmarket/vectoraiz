@@ -95,7 +95,7 @@ interface SidebarProps {
 
 const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
   const location = useLocation();
-  const { hasFeature, isStandalone } = useMode();
+  const { hasFeature, isStandalone, isLoading } = useMode();
   const channel = useChannel();
   const brand = useBrand();
 
@@ -172,7 +172,14 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
               collapsed ? "justify-center" : ""
             )}
           >
-            {isStandalone ? (
+            {isLoading ? (
+              <>
+                <Monitor className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                {!collapsed && (
+                  <span className="text-xs text-muted-foreground">Checking mode...</span>
+                )}
+              </>
+            ) : isStandalone ? (
               <>
                 <Monitor className="w-4 h-4 text-muted-foreground flex-shrink-0" />
                 {!collapsed && (
@@ -183,7 +190,7 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
               <>
                 <Globe className="w-4 h-4 text-primary flex-shrink-0" />
                 {!collapsed && (
-                  <span className="text-xs text-primary">Connected to ai.market</span>
+                  <span className="text-xs text-primary">Connected mode configured</span>
                 )}
               </>
             )}
