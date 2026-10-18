@@ -23,7 +23,7 @@ class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   }
 }
 
-const click = (name: string) => fireEvent.click(screen.getByRole("button", { name, exact: true }));
+const click = (name: string) => fireEvent.click(screen.getByRole("button", { name }));
 const tour = (channel: "direct" | "marketplace" | "aim-data", onComplete: () => void) => (
   <Boundary><BrandProvider><OnboardingWizard channel={channel} onComplete={onComplete} /></BrandProvider></Boundary>
 );
