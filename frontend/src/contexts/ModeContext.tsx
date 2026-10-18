@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from "react";
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from "react";
 import { getApiUrl } from "@/lib/api";
 import { setMarketplaceApiUrl } from "@/lib/data-requests-api";
 
@@ -21,6 +21,8 @@ interface ModeContextType {
   isConnected: boolean;
   hasFeature: (name: keyof Features) => boolean;
   isLoading: boolean;
+  readStatus: "pending" | "confirmed" | "failed";
+  retryConfiguration: () => Promise<void>;
 }
 
 const DEFAULT_FEATURES: Features = { allai: false, marketplace: false, earnings: false, local_auth: true };
@@ -32,34 +34,53 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [channel, setChannel] = useState<Channel>("direct");
   const [version, setVersion] = useState("0.0.0");
   const [features, setFeatures] = useState<Features>(DEFAULT_FEATURES);
-  const [isLoading, setIsLoading] = useState(true);
+  const [readStatus, setReadStatus] = useState<"pending" | "confirmed" | "failed">("pending");
+  const owner = useRef<object | null>(null);
+  const inFlight = useRef<object | null>(null);
+
+  const retryConfiguration = useCallback(async () => {
+    if (!owner.current || inFlight.current) return;
+    const currentOwner = owner.current;
+    const request = {};
+    inFlight.current = request;
+    const ownsRead = () => owner.current === currentOwner && inFlight.current === request;
+    setReadStatus("pending");
+    try {
+      const res = await fetch(`${getApiUrl()}/api/system/info`);
+      if (!res.ok) throw new Error("Configuration read failed");
+      const data = await res.json();
+      if (data?.mode !== "standalone" && data?.mode !== "connected") {
+        throw new Error("Configuration mode unavailable");
+      }
+      if (!ownsRead()) return;
+      setMode(data.mode);
+      setChannel(
+        data.channel === "marketplace"
+          ? "marketplace"
+          : data.channel === "aim-data"
+            ? "aim-data"
+            : "direct"
+      );
+      setVersion(data.version ?? "0.0.0");
+      setFeatures({ ...DEFAULT_FEATURES, ...data.features });
+      setMarketplaceApiUrl(data.marketplace_api_url || null);
+      setReadStatus("confirmed");
+    } catch {
+      // Keep functional defaults or the last valid observations, without confirming them.
+      if (ownsRead()) setReadStatus("failed");
+    } finally {
+      if (ownsRead()) inFlight.current = null;
+    }
+  }, []);
 
   useEffect(() => {
-    const fetchInfo = async () => {
-      try {
-        const res = await fetch(`${getApiUrl()}/api/system/info`);
-        if (res.ok) {
-          const data = await res.json();
-          setMode(data.mode ?? "standalone");
-          setChannel(
-            data.channel === "marketplace"
-              ? "marketplace"
-              : data.channel === "aim-data"
-                ? "aim-data"
-                : "direct"
-          );
-          setVersion(data.version ?? "0.0.0");
-          setFeatures({ ...DEFAULT_FEATURES, ...data.features });
-          setMarketplaceApiUrl(data.marketplace_api_url || null);
-        }
-      } catch {
-        // Offline — keep defaults
-      } finally {
-        setIsLoading(false);
-      }
+    owner.current = {};
+    void retryConfiguration();
+    return () => {
+      owner.current = null;
+      inFlight.current = null;
     };
-    fetchInfo();
-  }, []);
+  }, [retryConfiguration]);
 
   const hasFeature = useCallback((name: keyof Features) => !!features[name], [features]);
 
@@ -73,7 +94,9 @@ export const ModeProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isStandalone: mode === "standalone",
         isConnected: mode === "connected",
         hasFeature,
-        isLoading,
+        isLoading: readStatus === "pending",
+        readStatus,
+        retryConfiguration,
       }}
     >
       {children}

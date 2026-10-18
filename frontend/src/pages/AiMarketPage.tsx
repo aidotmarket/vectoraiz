@@ -8,19 +8,23 @@ import {
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useMode } from "@/contexts/ModeContext";
 import { useCoPilot } from "@/contexts/CoPilotContext";
+import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Link } from "react-router-dom";
 
 const AiMarketPage = () => {
-  const { isStandalone, isLoading, hasFeature } = useMode();
+  const { isStandalone, isLoading, hasFeature, readStatus, retryConfiguration } = useMode();
   const { allieAvailable, isStandalone: allieStandalone, connectionStatus } = useCoPilot();
   const modesAgree = isStandalone === allieStandalone;
-  const isConfirmedStandalone = !isLoading && modesAgree && isStandalone;
-  const isConnectedMode = !isLoading && modesAgree && !isStandalone
+  const isConfirmed = readStatus === "confirmed" && !isLoading && modesAgree;
+  const isConfirmedStandalone = isConfirmed && isStandalone;
+  const isConnectedMode = isConfirmed && !isStandalone
     && connectionStatus === "connected" && allieAvailable;
   const assistantStatus = isLoading
     ? "Checking allAI availability…"
-    : !modesAgree
+    : readStatus !== "confirmed"
+      ? "allAI availability is unknown because configuration is unavailable."
+      : !modesAgree
       ? "allAI availability is unknown while configuration updates."
       : connectionStatus === "connecting"
         ? "Connecting to the local assistant…"
@@ -50,9 +54,9 @@ const AiMarketPage = () => {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {isLoading || !modesAgree ? (
+          {!isConfirmed ? (
             <div className="p-4 bg-muted/50 border border-border rounded-lg text-sm text-muted-foreground" role="status">
-              {isLoading ? "Checking ai.market configuration…" : "ai.market configuration is updating. Connection status is unknown."}
+              {isLoading ? "Checking ai.market configuration…" : readStatus === "failed" ? "ai.market configuration is unavailable. Connection status is unknown." : "ai.market configuration is updating. Connection status is unknown."}
             </div>
           ) : !isStandalone ? (
             <div className="p-4 bg-muted/50 border border-border rounded-lg space-y-3">
@@ -86,6 +90,9 @@ const AiMarketPage = () => {
               </pre>
             </div>
           )}
+          <Button variant="outline" disabled={isLoading} onClick={() => void retryConfiguration()}>
+            Retry configuration
+          </Button>
         </CardContent>
       </Card>
 
@@ -143,7 +150,7 @@ const AiMarketPage = () => {
             <div className="flex-1">
               <div className="flex items-center gap-2">
                 <CardTitle className="text-foreground">Marketplace</CardTitle>
-                {(isStandalone || !hasFeature("marketplace")) && (
+                {isConfirmed && (isStandalone || !hasFeature("marketplace")) && (
                   <span className="text-xs px-2 py-0.5 rounded-full bg-primary/10 text-primary border border-primary/20 font-medium">
                     Coming Soon
                   </span>
@@ -156,6 +163,12 @@ const AiMarketPage = () => {
           </div>
         </CardHeader>
         <CardContent>
+          {!isConfirmed && (
+            <p className="text-sm text-muted-foreground" role="status">
+              {isLoading ? "Checking marketplace configuration…" : "Marketplace configuration is unknown. Availability has not been confirmed."}
+              {!isStandalone && hasFeature("marketplace") && " The earnings link uses the last known configuration."}
+            </p>
+          )}
           {!isStandalone && hasFeature("marketplace") ? (
             <Link
               to="/earnings"
@@ -164,14 +177,16 @@ const AiMarketPage = () => {
               View Earnings Dashboard
               <span aria-hidden="true">&rarr;</span>
             </Link>
-          ) : (
+          ) : isConfirmed ? (
             <div className="flex items-center gap-2 p-3 bg-muted/50 border border-border rounded-lg">
               <Info className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               <span className="text-sm text-muted-foreground">
-                Connect to ai.market to access the data marketplace and start earning from your datasets.
+                {isStandalone
+                  ? "Connect to ai.market to access the data marketplace and start earning from your datasets."
+                  : "The data marketplace is not enabled for this configuration."}
               </span>
             </div>
-          )}
+          ) : null}
         </CardContent>
       </Card>
     </div>
