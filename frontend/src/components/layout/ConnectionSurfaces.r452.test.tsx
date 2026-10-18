@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 import type { RawFile } from '@/lib/api';
 
 const h = vi.hoisted(() => ({
-  mode: { isStandalone: false, isConnected: true, isLoading: false, hasFeature: (_name: string): boolean => true },
+  mode: { isStandalone: false, isConnected: true, isLoading: false, readStatus: "confirmed" as "pending" | "confirmed" | "failed", retryConfiguration: async () => {}, hasFeature: (_name: string): boolean => true },
   cp: { connectionStatus: 'connected' as 'connected' | 'connecting' | 'disconnected' },
   backend: 'connected',
   channel: 'direct',
@@ -48,7 +48,7 @@ const row = (view: ReturnType<typeof render>, label: string) => view.getByText(l
 const passed = (element: Element) => element.querySelector('svg')?.classList.contains('text-green-500');
 
 beforeEach(() => {
-  Object.assign(h.mode, { isStandalone: false, isConnected: true, isLoading: false, hasFeature: (_name: string): boolean => true });
+  Object.assign(h.mode, { isStandalone: false, isConnected: true, isLoading: false, readStatus: "confirmed" as "pending" | "confirmed" | "failed", retryConfiguration: async () => {}, hasFeature: (_name: string): boolean => true });
   h.cp.connectionStatus = 'connected';
   h.backend = 'connected';
   h.channel = 'direct';

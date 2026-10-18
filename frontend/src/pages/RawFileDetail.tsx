@@ -55,7 +55,8 @@ interface MetadataForm {
   tags: string;
 }
 
-function ListingReadiness({ file, isConnected, isModeLoading }: { file: RawFile; isConnected: boolean; isModeLoading: boolean }) {
+function ListingReadiness({ file }: { file: RawFile }) {
+  const { isConnected, isLoading: isModeLoading, readStatus, retryConfiguration } = useMode();
   const meta = file.metadata as Record<string, unknown> | null;
   const hasTitle = !!(meta?.title);
   const hasDescription = !!(meta?.description);
@@ -67,7 +68,7 @@ function ListingReadiness({ file, isConnected, isModeLoading }: { file: RawFile;
     { label: "File registered", passed: true },
     { label: "Metadata complete (title, description, tags)", passed: metadataComplete },
     { label: "Price set (if paid listing)", passed: hasPriceOrFree },
-    { label: isModeLoading ? "Checking mode configuration..." : "Connected mode configured", passed: !isModeLoading && isConnected },
+    { label: isModeLoading ? "Checking mode configuration..." : readStatus !== "confirmed" ? "Mode configuration unavailable" : "Connected mode configured", passed: readStatus === "confirmed" && !isModeLoading && isConnected },
   ];
 
   return (
@@ -91,6 +92,9 @@ function ListingReadiness({ file, isConnected, isModeLoading }: { file: RawFile;
             </li>
           ))}
         </ul>
+        {readStatus === "failed" && (
+          <Button variant="outline" className="mt-3" onClick={() => void retryConfiguration()}>Retry configuration</Button>
+        )}
       </CardContent>
     </Card>
   );
@@ -213,7 +217,6 @@ function RawFileVisit({ id }: { id: string | undefined }) {
     active.current = true;
     return () => { active.current = false; };
   }, []);
-  const { isConnected, isLoading: isModeLoading } = useMode();
   const [file, setFile] = useState<RawFile | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -432,7 +435,7 @@ function RawFileVisit({ id }: { id: string | undefined }) {
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Listing Readiness */}
-        <ListingReadiness file={file} isConnected={isConnected} isModeLoading={isModeLoading} />
+        <ListingReadiness file={file} />
 
         {/* Vectorize CTA */}
         <Card>

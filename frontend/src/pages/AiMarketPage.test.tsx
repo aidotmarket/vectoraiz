@@ -4,7 +4,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import AiMarketPage from "./AiMarketPage";
 
 const state = vi.hoisted(() => ({
-  mode: { isStandalone: false, isLoading: false, hasFeature: () => true },
+  mode: { isStandalone: false, isLoading: false, readStatus: "confirmed" as "pending" | "confirmed" | "failed", retryConfiguration: async () => {}, hasFeature: () => true },
   assistant: { isStandalone: false, connectionStatus: "connected", allieAvailable: true },
   network: vi.fn(() => { throw new Error("NETWORK DENIED"); }),
 }));
@@ -13,7 +13,7 @@ vi.mock("@/contexts/ModeContext", () => ({ useMode: () => state.mode }));
 vi.mock("@/contexts/CoPilotContext", () => ({ useCoPilot: () => state.assistant }));
 
 beforeEach(() => {
-  state.mode = { isStandalone: false, isLoading: false, hasFeature: () => true };
+  state.mode = { isStandalone: false, isLoading: false, readStatus: "confirmed" as "pending" | "confirmed" | "failed", retryConfiguration: async () => {}, hasFeature: () => true };
   state.assistant = { isStandalone: false, connectionStatus: "connected", allieAvailable: true };
   state.network.mockClear();
   vi.stubGlobal("fetch", state.network);
@@ -118,6 +118,7 @@ it("preserves the marketplace feature gate and earnings destination", () => {
   expect(view.container.textContent).toContain("Coming Soon");
   state.mode.hasFeature = () => true;
   state.mode.isStandalone = true;
+  state.assistant.isStandalone = true;
   view.rerender(page());
   expect(view.queryByRole("link", { name: /View Earnings Dashboard/ })).toBeNull();
   expect(view.container.textContent).toContain("Coming Soon");

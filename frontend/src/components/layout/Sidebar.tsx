@@ -95,7 +95,7 @@ interface SidebarProps {
 
 const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
   const location = useLocation();
-  const { hasFeature, isStandalone, isLoading } = useMode();
+  const { hasFeature, isStandalone, isLoading, readStatus, retryConfiguration } = useMode();
   const channel = useChannel();
   const brand = useBrand();
 
@@ -179,6 +179,11 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
                   <span className="text-xs text-muted-foreground">Checking mode...</span>
                 )}
               </>
+            ) : readStatus !== "confirmed" ? (
+              <>
+                <Monitor className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                {!collapsed && <span className="text-xs text-muted-foreground">Mode configuration unavailable</span>}
+              </>
             ) : isStandalone ? (
               <>
                 <Monitor className="w-4 h-4 text-muted-foreground flex-shrink-0" />
@@ -195,6 +200,16 @@ const Sidebar = ({ collapsed, onToggle }: SidebarProps) => {
               </>
             )}
           </div>
+          {readStatus === "failed" && (
+            <button
+              onClick={() => void retryConfiguration()}
+              className="w-full px-3 py-2 text-xs text-sidebar-foreground hover:underline"
+              aria-label="Retry configuration"
+              title="Retry configuration"
+            >
+              {collapsed ? "Retry" : "Retry configuration"}
+            </button>
+          )}
           <button
             onClick={onToggle}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sidebar-foreground hover:text-sidebar-accent-foreground hover:bg-sidebar-accent transition-colors"
