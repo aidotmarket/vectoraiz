@@ -1,0 +1,1 @@
+export const Button=({children,...p}:any)=><button {...p}>{children}</button>;

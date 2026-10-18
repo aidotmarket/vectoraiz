@@ -1,0 +1,8 @@
+All subprocesses invoked with rtk proxy.
+Existing dependencies: /Users/max/specs/athena-runbook-system-audit-s1799/s1804-ops-audit-dependencies/node_modules
+Vitest: node <dependencies>/vitest/vitest.mjs run --reporter=json --outputFile=<evidence report>; cwd=<evidence>/probe
+Baseline used exact base TSX; candidate used exact checkout TSX; original root test file copied unchanged for original runs. Expanded tests live only in private evidence.
+ESLint: node <dependencies>/eslint/bin/eslint.js src/pages/DataTypesPage.tsx; cwd=checkout/frontend
+TypeScript: node <dependencies>/typescript/bin/tsc --project <evidence>/page-tsconfig.json --noEmit
+Static contract: stdlib ast.parse/literal_eval four canonical literal sets; TSX extension regex union compared for exact equality; supported base names preserved. Snapshot byte checks in static-contract.json.
+Temporary frontend/node_modules symlink removed after checks. No dependency installation.
