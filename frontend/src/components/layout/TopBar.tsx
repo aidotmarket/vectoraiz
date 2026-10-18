@@ -70,7 +70,7 @@ const TopBar = ({ onOpenCommandPalette }: TopBarProps) => {
         {/* Notifications */}
         <NotificationBell />
 
-        {/* ai.market connection status (customer-facing). Local backend health is in the tooltip. */}
+        {/* Local assistant socket status. This does not establish remote service health. */}
         <Tooltip>
           <TooltipTrigger asChild>
             <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-secondary border border-border">
@@ -78,7 +78,7 @@ const TopBar = ({ onOpenCommandPalette }: TopBarProps) => {
                 <>
                   <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
                   <span className="text-xs font-medium text-muted-foreground">
-                    Connecting...
+                    Local assistant connecting...
                   </span>
                 </>
               )}
@@ -86,7 +86,7 @@ const TopBar = ({ onOpenCommandPalette }: TopBarProps) => {
                 <>
                   <Wifi className="w-3 h-3 text-[hsl(var(--haven-success))]" />
                   <span className="text-xs font-medium text-[hsl(var(--haven-success))]">
-                    ai.market
+                    Local assistant connected
                   </span>
                 </>
               )}
@@ -94,7 +94,7 @@ const TopBar = ({ onOpenCommandPalette }: TopBarProps) => {
                 <>
                   <WifiOff className="w-3 h-3 text-muted-foreground" />
                   <span className="text-xs font-medium text-muted-foreground">
-                    Not connected
+                    Local assistant disconnected
                   </span>
                 </>
               )}
@@ -102,10 +102,11 @@ const TopBar = ({ onOpenCommandPalette }: TopBarProps) => {
           </TooltipTrigger>
           <TooltipContent>
             {connectionStatus === 'connected'
-              ? "Connected to ai.market"
+              ? "Local assistant connection established."
               : connectionStatus === 'disconnected'
-                ? `Not connected to ai.market. Backend: ${backendStatus === 'connected' ? 'OK' : backendStatus}.`
-                : "Connecting to ai.market..."}
+                ? "Local assistant connection disconnected."
+                : "Connecting to the local assistant..."}
+            {` Local backend: ${backendStatus === 'connected' ? 'OK' : backendStatus}. Remote ai.market health is not checked.`}
           </TooltipContent>
         </Tooltip>
 
