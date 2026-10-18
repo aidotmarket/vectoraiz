@@ -230,6 +230,10 @@ const FileUploadModal = () => {
 
   const [unsupportedMessage, setUnsupportedMessage] = useState("");
 
+  useEffect(() => {
+    if (!isModalOpen) setUnsupportedMessage("");
+  }, [isModalOpen]);
+
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   // Resizable dialog state (local — pure presentation concern)
@@ -276,7 +280,8 @@ const FileUploadModal = () => {
     addFiles(valid, folder || paths.some((path) => path !== undefined) ? paths : undefined);
   }, [addFiles]);
 
-  const onDrop = useCallback((acceptedFiles: File[], rejections: FileRejection[]) => {
+  const onDrop = useCallback((acceptedFiles: File[], rejections: FileRejection[] = []) => {
+    // Current dropzone rejections are type-only; preserve any future size/count limits.
     admitFiles(acceptedFiles, rejections.map(({ file }) => file));
   }, [admitFiles]);
 
@@ -413,7 +418,7 @@ const FileUploadModal = () => {
             </div>
           )}
 
-          {unsupportedMessage && (
+          {!isUploading && !allDone && !isImporting && unsupportedMessage && (
             <p role="alert" className="text-sm text-destructive break-words">
               {unsupportedMessage}
             </p>
