@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import { useDropzone } from "react-dropzone";
+import { useDropzone, type FileRejection } from "react-dropzone";
 import {
   Dialog,
   DialogContent,
@@ -70,7 +70,7 @@ const ACCEPT_MAP = {
   "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
   "application/vnd.ms-powerpoint": [".ppt"],
   "text/plain": [".txt", ".md", ".ics", ".vcf"],
-  "text/html": [".html"],
+  "text/html": [".html", ".htm"],
   "application/rtf": [".rtf"],
   "application/vnd.oasis.opendocument.text": [".odt"],
   "application/vnd.oasis.opendocument.spreadsheet": [".ods"],
@@ -80,12 +80,18 @@ const ACCEPT_MAP = {
   "application/vnd.ms-outlook": [".msg"],
   "application/mbox": [".mbox"],
   "application/xml": [".xml", ".rss"],
-  "application/vnd.apple.pages": [".pages"],
-  "application/vnd.apple.numbers": [".numbers"],
-  "application/vnd.apple.keynote": [".key"],
-  "application/vnd.ms-works": [".wps"],
-  "application/wordperfect": [".wpd"],
 };
+
+// Picker MIME types are hints; admission follows the backend filename suffix contract.
+const SUPPORTED_SUFFIXES = new Set(Object.values(ACCEPT_MAP).flat());
+const validateFilename = (file: File) => {
+  const dot = file.name.lastIndexOf(".");
+  return dot > 0 && SUPPORTED_SUFFIXES.has(file.name.slice(dot).toLowerCase())
+    ? null
+    : { code: "file-invalid-type", message: "Unsupported file format" };
+};
+// Match UploadContext's silent directory-metadata filtering.
+const JUNK_FILES = new Set([".DS_Store", "Thumbs.db", ".gitkeep", ".gitignore", "desktop.ini"]);
 
 /** Tracks processing status for a single dataset after upload */
 function useProcessingTracker(datasetId: string | null, onReady: () => void, onError: (msg: string) => void) {
@@ -222,6 +228,8 @@ const FileUploadModal = () => {
     onSuccess,
   } = useUpload();
 
+  const [unsupportedMessage, setUnsupportedMessage] = useState("");
+
   const folderInputRef = useRef<HTMLInputElement>(null);
 
   // Resizable dialog state (local — pure presentation concern)
@@ -250,32 +258,39 @@ const FileUploadModal = () => {
     window.addEventListener("mouseup", onMouseUp);
   }, []);
 
-  const onDrop = useCallback((acceptedFiles: File[]) => {
-    const paths = acceptedFiles.map((f) => {
-      const wrp = (f as any).webkitRelativePath;
-      return wrp || undefined;
-    });
-    const hasPaths = paths.some((p) => p !== undefined);
-    addFiles(acceptedFiles, hasPaths ? paths : undefined);
+  const admitFiles = useCallback((files: File[], rejectedFiles: File[] = [], folder = false) => {
+    const valid: File[] = [];
+    const unsupported: File[] = [];
+    for (const file of [...files, ...rejectedFiles]) {
+      if (JUNK_FILES.has(file.name)) continue;
+      if (validateFilename(file)) unsupported.push(file);
+      else valid.push(file);
+    }
+    const names = unsupported.slice(0, 3).map((file) => file.name.length > 80
+      ? `${file.name.slice(0, 77)}…` : file.name);
+    setUnsupportedMessage(unsupported.length
+      ? `Unsupported file format: ${names.join(", ")}${unsupported.length > 3 ? ` and ${unsupported.length - 3} more` : ""}. These files were not added. Choose a supported file format.`
+      : "");
+    if (valid.length === 0) return;
+    const paths = valid.map((file) => (file as File & { webkitRelativePath?: string }).webkitRelativePath || (folder ? file.name : undefined));
+    addFiles(valid, folder || paths.some((path) => path !== undefined) ? paths : undefined);
   }, [addFiles]);
+
+  const onDrop = useCallback((acceptedFiles: File[], rejections: FileRejection[]) => {
+    admitFiles(acceptedFiles, rejections.map(({ file }) => file));
+  }, [admitFiles]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: ACCEPT_MAP,
+    validator: validateFilename,
     multiple: true,
   });
 
   const handleFolderSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const fileList = e.target.files;
     if (!fileList || fileList.length === 0) return;
-    const files: File[] = [];
-    const paths: string[] = [];
-    for (let i = 0; i < fileList.length; i++) {
-      const f = fileList[i];
-      files.push(f);
-      paths.push((f as any).webkitRelativePath || f.name);
-    }
-    addFiles(files, paths);
+    admitFiles(Array.from(fileList), [], true);
     e.target.value = "";
   };
 
@@ -370,7 +385,7 @@ const FileUploadModal = () => {
                   </p>
                   {!hasFiles && (
                     <p className="text-xs text-muted-foreground">
-                      Supports 28+ formats
+                      Supports CSV, spreadsheets, documents and text
                     </p>
                   )}
                 </div>
@@ -396,6 +411,12 @@ const FileUploadModal = () => {
                 )}
               </div>
             </div>
+          )}
+
+          {unsupportedMessage && (
+            <p role="alert" className="text-sm text-destructive break-words">
+              {unsupportedMessage}
+            </p>
           )}
 
           {/* Limits indicator */}
