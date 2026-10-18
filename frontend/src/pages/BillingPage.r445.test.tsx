@@ -74,9 +74,10 @@ it("retains confirmed off after HTTP-rejected enable", async () => {
   save = async () => response({ detail: "Synthetic rejection" }, false);
   await mount(); fireEvent.click(toggle()); await settledSave();
   expect(toggle()).toHaveAttribute("aria-checked", "false");
+  expect(reads()).toHaveLength(1);
   expect(state.toast).toHaveBeenCalledWith({ title: "Error", description: "Synthetic rejection", variant: "destructive" });
 });
-it("retains confirmed on after transport-failed disable", async () => {
+it("reconciles confirmed on after transport-failed disable", async () => {
   saved = config(true); save = async () => { throw new Error("Synthetic network failure"); };
   await mount(); fireEvent.click(toggle()); await settledSave();
   expect(toggle()).toHaveAttribute("aria-checked", "true");
@@ -183,4 +184,90 @@ it("preserves threshold validation, fixed amount and cancel draft reset", async 
   }
   expect(mutations()).toHaveLength(0); fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
   fireEvent.click(screen.getByRole("button", { name: "Edit" })); expect(screen.getByLabelText("Reload when balance drops below")).toHaveValue(6);
+});
+
+
+it.each([false, true])("reconciles a committed %s toggle after response loss with one POST", async (enabled) => {
+  saved = config(enabled);
+  save = async (init) => { saved = JSON.parse(String(init.body)); throw new Error("Response lost after commit"); };
+  await mount(); fireEvent.click(toggle());
+  await waitFor(() => expect(toggle()).toHaveAttribute("aria-checked", String(!enabled)));
+  expect(toggle()).not.toBeDisabled(); expect(reads()).toHaveLength(2); expect(mutations()).toHaveLength(1);
+});
+it("locks actions and labels last confirmation while read-back is pending", async () => {
+  saved = config(true); await mount();
+  const pending = deferred(); read = () => pending.promise;
+  save = async () => { saved = config(false); throw new Error("Lost response"); };
+  const callback = state.toggle!; fireEvent.click(toggle());
+  await screen.findByText("Checking current auto-reload settings...");
+  expect(screen.getByText("Current auto-reload setting unknown.")).toBeTruthy();
+  expect(screen.getByText(/Last confirmed: on/)).toBeTruthy();
+  expect(screen.queryByRole("switch")).toBeNull();
+  expect(screen.queryByText("Reload to $25 when balance reaches $5")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Edit" })).toBeNull();
+  act(() => { callback(true); callback(false); }); expect(mutations()).toHaveLength(1);
+  await act(async () => pending.resolve(response(saved)));
+  expect(toggle()).toHaveAttribute("aria-checked", "false"); expect(toggle()).not.toBeDisabled();
+});
+it.each(["network", "malformed"])("keeps %s-failed reconciliation unknown until a guarded manual GET confirms it", async (failure) => {
+  await mount(); const callback = state.toggle!;
+  save = async () => { saved = config(true); throw new Error("Lost response"); };
+  read = async () => { if (failure === "malformed") return response({}); throw new Error("Read unavailable"); };
+  fireEvent.click(toggle());
+  const retry = await screen.findByRole("button", { name: "Retry auto-reload settings" });
+  await waitFor(() => expect(retry).not.toBeDisabled());
+  expect(screen.getByText("Current auto-reload setting unknown.")).toBeTruthy();
+  expect(screen.queryByRole("switch")).toBeNull();
+  act(() => callback(true)); expect(mutations()).toHaveLength(1); expect(reads()).toHaveLength(2);
+  const pending = deferred(); read = () => pending.promise;
+  fireEvent.click(retry); fireEvent.click(retry); expect(reads()).toHaveLength(3); expect(retry).toBeDisabled();
+  await act(async () => pending.resolve(response(saved)));
+  expect(toggle()).toHaveAttribute("aria-checked", "true"); expect(toggle()).not.toBeDisabled();
+  expect(mutations()).toHaveLength(1);
+});
+it.each([true, false])("retains uncertain threshold draft after confirming enabled:%s until explicit Save", async (enabled) => {
+  saved = config(true); await mount(); fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  const input = screen.getByLabelText("Reload when balance drops below");
+  fireEvent.change(input, { target: { value: "13" } });
+  save = async () => { saved = config(enabled, 12); throw new Error("Lost normalized response"); };
+  read = async () => response({}, false);
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  const retry = await screen.findByRole("button", { name: "Retry auto-reload settings" });
+  await waitFor(() => expect(retry).not.toBeDisabled());
+  expect(input).toHaveValue(13); expect(input).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeDisabled();
+  read = async () => response(saved); fireEvent.click(retry);
+  await waitFor(() => expect(input).not.toBeDisabled());
+  expect(input).toHaveValue(13); expect(toggle()).toHaveAttribute("aria-checked", String(enabled));
+  if (enabled) expect(screen.getByText("Reload to $25 when balance reaches $12")).toBeTruthy();
+  expect(mutations()).toHaveLength(1);
+  state.toast.mockClear(); save = async (init) => response(JSON.parse(String(init.body)));
+  fireEvent.click(screen.getByRole("button", { name: "Save" })); await settledSave();
+  expect(mutations().map(({ init }) => JSON.parse(String(init.body)))).toEqual([config(true, 13), config(true, 13)]);
+  expect(screen.getByText("Reload to $25 when balance reaches $13")).toBeTruthy();
+});
+it.each(["unreadable success", "malformed success", "server failure", "request timeout"])("reconciles ambiguous %s without repeating POST", async (failure) => {
+  await mount();
+  save = async () => {
+    saved = config(true, 8);
+    if (failure === "malformed success") return response(null);
+    if (failure === "server failure" || failure === "request timeout") {
+      return { ...response({}), ok: false, status: failure === "server failure" ? 503 : 408 } as Response;
+    }
+    return { ...response({}), json: async () => { throw new Error("Unreadable body"); } } as Response;
+  };
+  fireEvent.click(toggle());
+  await screen.findByText("Reload to $25 when balance reaches $8");
+  expect(mutations()).toHaveLength(1); expect(reads()).toHaveLength(2);
+  expect(toggle()).not.toBeDisabled();
+});
+it("does not replace an unsaved threshold draft when a route-triggered GET completes", async () => {
+  saved = config(true); const view = render(<BillingPage />);
+  await screen.findByRole("switch"); fireEvent.click(screen.getByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Reload when balance drops below"), { target: { value: "14" } });
+  saved = config(true, 9); state.params = new URLSearchParams("unrelated=1"); view.rerender(<BillingPage />);
+  await screen.findByText("Reload to $25 when balance reaches $9");
+  expect(screen.getByLabelText("Reload when balance drops below")).toHaveValue(14);
+  expect(mutations()).toHaveLength(0);
 });
