@@ -1,1 +1,0 @@
-export const Card=({children,...p}:any)=><div {...p}>{children}</div>;export const CardContent=Card;export const CardHeader=Card;export const CardDescription=Card;export const CardTitle=Card;
