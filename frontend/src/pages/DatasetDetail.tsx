@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useLayoutEffect, useRef } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   ArrowLeft,
@@ -128,7 +128,18 @@ const mapApiDatasetToFrontend = (apiDataset: ApiDataset): Dataset => ({
 
 const DatasetDetail = () => {
   const { id } = useParams<{ id: string }>();
+  // A route change creates a fresh visit, even when returning A → B → A.
+  return <DatasetDetailVisit key={id} id={id} />;
+};
+
+const DatasetDetailVisit = ({ id }: { id: string | undefined }) => {
   const navigate = useNavigate();
+  const ownsVisit = useRef(false);
+  useLayoutEffect(() => {
+    ownsVisit.current = true;
+    return () => { ownsVisit.current = false; };
+  }, []);
+  const [retry, setRetry] = useState(0);
   const { isPublished, getPublishedData, unpublishDataset } = useMarketplace();
   const { hasFeature } = useMode();
   const channel = useChannel();
@@ -149,6 +160,11 @@ const DatasetDetail = () => {
 
   // Fetch dataset from API
   useEffect(() => {
+    let active = true;
+    setApiDataset(null);
+    setSampleData([]);
+    setStatistics(null);
+    setReadiness(null);
     if (!id) {
       setError("No dataset ID provided");
       setLoading(false);
@@ -160,6 +176,8 @@ const DatasetDetail = () => {
       setError(null);
       try {
         const data = await datasetsApi.get(id);
+        if (!active) return;
+        if (data.id !== id) throw new Error("The returned dataset does not match the requested dataset.");
         setApiDataset(data);
 
         // Fetch sample data and statistics in parallel
@@ -169,6 +187,7 @@ const DatasetDetail = () => {
           datasetsApi.getReadiness(id),
         ]);
 
+        if (!active) return;
         if (sampleRes.status === "fulfilled") {
           setSampleData(sampleRes.value.sample);
         }
@@ -179,14 +198,15 @@ const DatasetDetail = () => {
           setReadiness(readinessRes.value);
         }
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to load dataset");
+        if (active) setError(e instanceof Error ? e.message : "Failed to load dataset");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
 
     fetchDataset();
-  }, [id]);
+    return () => { active = false; };
+  }, [id, retry]);
 
   // Show loading skeleton
   if (loading) {
@@ -210,20 +230,21 @@ const DatasetDetail = () => {
   }
 
   // Show error / not found
-  if (error || !apiDataset) {
+  if (error || !apiDataset || apiDataset.id !== id) {
     return (
       <div className="flex flex-col items-center justify-center py-16 space-y-4">
         <Database className="w-16 h-16 text-muted-foreground" />
         <h2 className="text-xl font-semibold text-foreground">
-          Dataset not found
+          Unable to load dataset
         </h2>
-        <p className="text-muted-foreground">
+        <p role="alert" className="text-muted-foreground">
           {error || "The dataset you're looking for doesn't exist."}
         </p>
         <Button variant="secondary" onClick={() => navigate("/datasets")}>
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Datasets
         </Button>
+        {id && <Button onClick={() => setRetry((value) => value + 1)}>Retry</Button>}
       </div>
     );
   }
@@ -265,6 +286,7 @@ const DatasetDetail = () => {
   const marketplacePrice = marketplaceData?.price == null ? "Unavailable" : `$${marketplaceData.price}`;
 
   const handlePublishSuccess = () => {
+    if (!ownsVisit.current) return;
     toast({
       title: "Dataset published",
       description: "Your dataset is now live on the marketplace",
@@ -272,6 +294,7 @@ const DatasetDetail = () => {
   };
 
   const handleUnpublish = () => {
+    if (!ownsVisit.current) return;
     unpublishDataset(dataset.id);
     toast({
       title: "Dataset unpublished",
@@ -280,25 +303,29 @@ const DatasetDetail = () => {
   };
 
   const handleDelete = async () => {
+    if (!ownsVisit.current || isDeleting) return;
     if (!window.confirm("Are you sure you want to delete this dataset? This action cannot be undone.")) {
       return;
     }
+    if (!ownsVisit.current) return;
     setIsDeleting(true);
     try {
       await datasetsApi.delete(dataset.id);
+      if (!ownsVisit.current) return;
       toast({
         title: "Dataset deleted",
         description: "The dataset has been permanently removed",
       });
       navigate("/datasets");
     } catch (e) {
+      if (!ownsVisit.current) return;
       toast({
         title: "Delete failed",
         description: "Failed to delete dataset. Please try again or check system health.",
         variant: "destructive",
       });
     } finally {
-      setIsDeleting(false);
+      if (ownsVisit.current) setIsDeleting(false);
     }
   };
 
