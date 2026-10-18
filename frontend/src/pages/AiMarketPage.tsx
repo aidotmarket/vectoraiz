@@ -181,7 +181,9 @@ const AiMarketPage = () => {
             <div className="flex items-center gap-2 p-3 bg-muted/50 border border-border rounded-lg">
               <Info className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               <span className="text-sm text-muted-foreground">
-                Connect to ai.market to access the data marketplace and start earning from your datasets.
+                {isStandalone
+                  ? "Connect to ai.market to access the data marketplace and start earning from your datasets."
+                  : "The data marketplace is not enabled for this configuration."}
               </span>
             </div>
           ) : null}

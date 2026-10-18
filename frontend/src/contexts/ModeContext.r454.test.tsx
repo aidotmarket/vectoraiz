@@ -109,6 +109,15 @@ it.each(["standalone", "connected"])("confirms minimal %s without optional metad
   expect(observed.hasFeature("local_auth")).toBe(true); expect(observed.hasFeature("marketplace")).toBe(false);
   expect(view.container.textContent).toContain(mode === "standalone" ? "Standalone Mode" : "Connected mode configured");
   expect(view.container.textContent?.includes("./start.sh --setup-allie")).toBe(mode === "standalone");
+  expect(view.queryByRole("link", { name: /View Earnings Dashboard/ })).toBeNull();
+  expect(view.queryByRole("link", { name: "Earnings" })).toBeNull();
+  expect(view.container.textContent).toContain("Coming Soon");
+  if (mode === "connected") {
+    expect(view.container.textContent).toContain("The data marketplace is not enabled for this configuration.");
+    expect(view.container.textContent).not.toContain("Connect to ai.market to access the data marketplace");
+  } else {
+    expect(view.container.textContent).toContain("Connect to ai.market to access the data marketplace");
+  }
   expect(h.marketplace).toHaveBeenCalledExactlyOnceWith(null);
 });
 it("keeps loading truthful and coalesces attempts during the initial read", async () => {
