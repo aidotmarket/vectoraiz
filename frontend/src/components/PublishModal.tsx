@@ -119,20 +119,24 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   // Fetch PII scan when modal opens
   useEffect(() => {
+    let active = true;
     if (open && dataset?.id) {
       setPiiLoading(true);
       setPiiError(null);
       piiApi.getScan(dataset.id)
         .then((data) => {
+          if (!active) return;
           setPiiData(data);
           setPiiLoading(false);
         })
         .catch((err) => {
+          if (!active) return;
           console.error('PII scan error:', err);
           setPiiError(err instanceof Error ? err.message : 'Failed to scan for PII');
           setPiiLoading(false);
         });
     }
+    return () => { active = false; };
   }, [open, dataset?.id]);
 
   const observation = readPrivacyObservation(piiData);

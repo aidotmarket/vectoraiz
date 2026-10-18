@@ -184,3 +184,93 @@ describe("R457 privacy observation display", () => {
     await waitFor(() => expect(screen.getByText("10.0/10")).toBeVisible());
   });
 });
+
+// Each request is owned and settled explicitly so completion order is deterministic.
+function deferredRead() {
+  let resolve!: (value: never) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<never>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
+
+function replacePendingRead(change: "reopen" | "identity") {
+  const retired = deferredRead();
+  const current = deferredRead();
+  vi.mocked(piiApi.getScan).mockReturnValueOnce(retired.promise).mockReturnValueOnce(current.promise);
+  const view = (open: boolean, selected = dataset) =>
+    <PublishModal open={open} onOpenChange={onOpenChange} dataset={selected} onPublishSuccess={onPublishSuccess} />;
+  const page = render(view(true));
+  if (change === "reopen") {
+    page.rerender(view(false));
+    expect(piiApi.getScan).toHaveBeenCalledTimes(1);
+    page.rerender(view(true));
+  } else {
+    page.rerender(view(true, { ...dataset, id: "synthetic-r457-next" }));
+  }
+  expect(piiApi.getScan).toHaveBeenCalledTimes(2);
+  expect(vi.mocked(piiApi.getScan).mock.calls.map(([id]) => id)).toEqual([
+    dataset.id, change === "reopen" ? dataset.id : "synthetic-r457-next",
+  ]);
+  expectUnknown();
+  return { retired, current };
+}
+
+const currentFinding = { column_results: [finding("current_email", "high")] };
+function expectCurrentFinding() {
+  expect(screen.getByText("current_email")).toBeVisible();
+  expect(screen.getByText("7.0/10")).toBeVisible();
+  expect(screen.queryByText("10.0/10")).not.toBeInTheDocument();
+  expect(screen.queryByText("No privacy concerns detected")).not.toBeInTheDocument();
+  expect(screen.queryByText("Unable to scan for PII. Proceed with caution.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Checking privacy scan results…")).not.toBeInTheDocument();
+}
+
+describe("R457 retired deferred reads", () => {
+  it.each(["reopen", "identity"] as const)("ignores retired success while current read is pending after %s", async change => {
+    const { retired, current } = replacePendingRead(change);
+    await act(async () => retired.resolve(clean as never));
+    expectUnknown();
+    expect(screen.getByText("Checking privacy scan results…")).toBeVisible();
+    await act(async () => current.resolve(currentFinding as never));
+    expectCurrentFinding();
+  });
+
+  it.each(["reopen", "identity"] as const)("retains current finding after retired failure on %s", async change => {
+    const { retired, current } = replacePendingRead(change);
+    await act(async () => current.resolve(currentFinding as never));
+    expectCurrentFinding();
+    await act(async () => retired.reject(new Error("Synthetic retired failure")));
+    expectCurrentFinding();
+    expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it.each(["reopen", "identity"] as const)("retains current finding after retired clean success on %s", async change => {
+    const { retired, current } = replacePendingRead(change);
+    await act(async () => current.resolve(currentFinding as never));
+    expectCurrentFinding();
+    await act(async () => retired.resolve(clean as never));
+    expectCurrentFinding();
+  });
+
+  it("retires a pending failure when closed before another read starts", async () => {
+    const retired = deferredRead();
+    vi.mocked(piiApi.getScan).mockReturnValueOnce(retired.promise);
+    const page = render(<PublishModal open onOpenChange={onOpenChange} dataset={dataset} onPublishSuccess={onPublishSuccess} />);
+    page.rerender(<PublishModal open={false} onOpenChange={onOpenChange} dataset={dataset} onPublishSuccess={onPublishSuccess} />);
+    await act(async () => retired.reject(new Error("Synthetic closed failure")));
+    expect(console.error).not.toHaveBeenCalled();
+    expect(piiApi.getScan).toHaveBeenCalledExactlyOnceWith(dataset.id);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("retires a pending failure on unmount without processing its error", async () => {
+    const retired = deferredRead();
+    vi.mocked(piiApi.getScan).mockReturnValueOnce(retired.promise);
+    const page = render(<PublishModal open onOpenChange={onOpenChange} dataset={dataset} onPublishSuccess={onPublishSuccess} />);
+    page.unmount();
+    await act(async () => retired.reject(new Error("Synthetic unmounted failure")));
+    expect(console.error).not.toHaveBeenCalled();
+    expect(piiApi.getScan).toHaveBeenCalledExactlyOnceWith(dataset.id);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
