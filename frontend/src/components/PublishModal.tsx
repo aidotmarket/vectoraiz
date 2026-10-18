@@ -156,7 +156,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   const priceNum = parseFloat(price) || 0;
   const platformFee = priceNum * 0.05;
-  const youReceive = priceNum * 0.85;
+  const youReceive = priceNum * 0.95;
 
   const handlePublish = async () => {
     setIsPublishing(true);
