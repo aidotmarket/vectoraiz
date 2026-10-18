@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Loader2,
@@ -58,11 +58,11 @@ const BillingPage = () => {
   const [purchaseError, setPurchaseError] = useState<string | null>(null);
 
   // Auto-reload state
-  const [autoReload, setAutoReload] = useState<AutoReloadConfig>({
-    enabled: false,
-    threshold_usd: 5,
-    reload_amount_usd: 25,
-  });
+  const [autoReload, setAutoReload] = useState<AutoReloadConfig | null>(null);
+  const [autoReloadReadLoading, setAutoReloadReadLoading] = useState(true);
+  const [autoReloadReadError, setAutoReloadReadError] = useState(false);
+  const autoReloadReading = useRef(false);
+  const autoReloadSaving = useRef(false);
   const [autoReloadLoading, setAutoReloadLoading] = useState(false);
   const [editingAutoReload, setEditingAutoReload] = useState(false);
   const [editThreshold, setEditThreshold] = useState("5");
@@ -117,25 +117,32 @@ const BillingPage = () => {
   }, [accessToken]);
 
   const fetchAutoReload = useCallback(async () => {
+    if (autoReloadReading.current || autoReloadSaving.current) return;
+    autoReloadReading.current = true;
+    setAutoReloadReadLoading(true);
     try {
-      if (!accessToken) return;
+      if (!accessToken) throw new Error("Settings unavailable");
       const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload`, {
         headers: { ...getAuthHeader() },
       });
-      if (res.ok) {
-        const data: AutoReloadConfig = await res.json();
-        setAutoReload(data);
-        setEditThreshold(String(data.threshold_usd));
-      }
+      if (!res.ok) throw new Error("Settings unavailable");
+      const data: AutoReloadConfig = await res.json();
+      setAutoReload(data);
+      setAutoReloadReadError(false);
+      setEditThreshold(String(data.threshold_usd));
     } catch {
-      // Silently fail — auto-reload is optional
+      setAutoReloadReadError(true);
+    } finally {
+      autoReloadReading.current = false;
+      setAutoReloadReadLoading(false);
     }
   }, [accessToken]);
 
   const saveAutoReload = async (config: AutoReloadConfig) => {
+    if (!accessToken || !autoReload || autoReloadReading.current || autoReloadSaving.current) return;
+    autoReloadSaving.current = true;
     setAutoReloadLoading(true);
     try {
-      if (!accessToken) return;
       const res = await fetch(`${getApiUrl()}/api/allai/credits/auto-reload`, {
         method: "POST",
         headers: { ...getAuthHeader(), "Content-Type": "application/json" },
@@ -144,6 +151,7 @@ const BillingPage = () => {
       if (res.ok) {
         const data: AutoReloadConfig = await res.json();
         setAutoReload(data);
+        setEditThreshold(String(data.threshold_usd));
         setEditingAutoReload(false);
         toast({ title: "Auto-reload saved" });
       } else {
@@ -153,6 +161,7 @@ const BillingPage = () => {
     } catch {
       toast({ title: "Error", description: "Failed to save auto-reload config", variant: "destructive" });
     } finally {
+      autoReloadSaving.current = false;
       setAutoReloadLoading(false);
     }
   };
@@ -543,26 +552,33 @@ const BillingPage = () => {
             <div>
               <p className="font-medium text-foreground">Auto-Reload</p>
               <p className="text-sm text-muted-foreground">
-                {autoReload.enabled
+                {!autoReload
+                  ? (autoReloadReadLoading ? "Loading auto-reload settings..." : "Auto-reload settings unavailable.")
+                  : autoReload.enabled
                   ? `Reload to $${autoReload.reload_amount_usd} when balance reaches $${autoReload.threshold_usd}`
                   : "Automatically add credits when your balance is low"}
               </p>
             </div>
             <div className="flex items-center gap-3">
-              <Switch
+              {autoReload && <Switch
+                aria-label="Auto-reload"
                 checked={autoReload.enabled}
                 onCheckedChange={(checked) => {
                   const updated = { ...autoReload, enabled: checked };
-                  setAutoReload(updated);
                   saveAutoReload(updated);
                 }}
-                disabled={!!error}
-              />
-              {autoReload.enabled && !editingAutoReload && (
+                disabled={!!error || autoReloadLoading || autoReloadReadLoading}
+              />}
+              {autoReload?.enabled && !editingAutoReload && (
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setEditingAutoReload(true)}
+                  disabled={autoReloadLoading || autoReloadReadLoading}
+                  onClick={() => {
+                    if (autoReloadSaving.current || autoReloadReading.current) return;
+                    setEditThreshold(String(autoReload.threshold_usd));
+                    setEditingAutoReload(true);
+                  }}
                 >
                   Edit
                 </Button>
@@ -570,7 +586,17 @@ const BillingPage = () => {
             </div>
           </div>
 
-          {editingAutoReload && autoReload.enabled && (
+          {autoReloadReadError && (
+            <div className="space-y-2">
+              <p role="status" className="text-sm text-muted-foreground">Unable to load auto-reload settings. Try again.</p>
+              <Button variant="outline" size="sm" disabled={autoReloadReadLoading || autoReloadLoading} onClick={fetchAutoReload}>
+                Retry auto-reload settings
+              </Button>
+            </div>
+          )}
+          {autoReloadLoading && <p role="status" className="text-sm text-muted-foreground">Saving auto-reload settings...</p>}
+
+          {editingAutoReload && autoReload?.enabled && (
             <div className="space-y-3 pt-2 border-t border-border">
               <div className="space-y-2">
                 <Label htmlFor="threshold" className="text-foreground">
@@ -584,6 +610,7 @@ const BillingPage = () => {
                     min="1"
                     step="1"
                     value={editThreshold}
+                    disabled={autoReloadLoading || autoReloadReadLoading}
                     onChange={(e) => setEditThreshold(e.target.value)}
                     className="w-24"
                   />
@@ -596,7 +623,7 @@ const BillingPage = () => {
               <div className="flex gap-2">
                 <Button
                   size="sm"
-                  disabled={autoReloadLoading}
+                  disabled={autoReloadLoading || autoReloadReadLoading}
                   onClick={() => {
                     const threshold = parseFloat(editThreshold);
                     if (isNaN(threshold) || threshold < 1) {
@@ -615,7 +642,9 @@ const BillingPage = () => {
                 <Button
                   variant="outline"
                   size="sm"
+                  disabled={autoReloadLoading || autoReloadReadLoading}
                   onClick={() => {
+                    if (autoReloadSaving.current || autoReloadReading.current) return;
                     setEditingAutoReload(false);
                     setEditThreshold(String(autoReload.threshold_usd));
                   }}
