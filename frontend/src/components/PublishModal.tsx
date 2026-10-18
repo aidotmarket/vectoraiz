@@ -154,9 +154,9 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
 
   const searchabilityScore = Math.min(100, 50 + tags.length * 8 + (description.length > 200 ? 20 : 10));
 
-  const priceNum = parseFloat(price) || 0;
-  const platformFee = priceNum * 0.05;
-  const youReceive = priceNum * 0.85;
+  const priceCents = Math.round((parseFloat(price) || 0) * 100);
+  const platformFeeCents = Math.floor(priceCents * 500 / 10000);
+  const youReceiveCents = priceCents - platformFeeCents;
 
   const handlePublish = async () => {
     setIsPublishing(true);
@@ -561,18 +561,21 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                     <Label className="text-sm mb-3 block">Revenue Split</Label>
                     <div className="grid grid-cols-2 gap-4 text-center">
                       <div className="p-3 bg-[hsl(var(--haven-success))]/10 rounded-lg">
-                        <p className="text-xs text-muted-foreground mb-1">You Receive (95%)</p>
+                        <p className="text-xs text-muted-foreground mb-1">Your share before Stripe fees (95%)</p>
                         <p className="text-xl font-bold text-[hsl(var(--haven-success))]">
-                          ${youReceive.toFixed(2)}
+                          ${(youReceiveCents / 100).toFixed(2)}
                         </p>
                       </div>
                       <div className="p-3 bg-secondary/50 rounded-lg">
                         <p className="text-xs text-muted-foreground mb-1">Platform Fee (5%)</p>
                         <p className="text-xl font-bold text-muted-foreground">
-                          ${platformFee.toFixed(2)}
+                          ${(platformFeeCents / 100).toFixed(2)}
                         </p>
                       </div>
                     </div>
+                    <p className="text-xs text-muted-foreground mt-3">
+                      Actual Stripe fees are deducted from this amount.
+                    </p>
                   </div>
                 </div>
 
