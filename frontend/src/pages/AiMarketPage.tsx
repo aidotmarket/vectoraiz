@@ -12,9 +12,21 @@ import { Progress } from "@/components/ui/progress";
 import { Link } from "react-router-dom";
 
 const AiMarketPage = () => {
-  const { isStandalone, hasFeature } = useMode();
+  const { isStandalone, isLoading, hasFeature } = useMode();
   const { allieAvailable, isStandalone: allieStandalone, connectionStatus } = useCoPilot();
-  const isConnectedMode = !allieStandalone && allieAvailable;
+  const modesAgree = isStandalone === allieStandalone;
+  const isConfirmedStandalone = !isLoading && modesAgree && isStandalone;
+  const isConnectedMode = !isLoading && modesAgree && !isStandalone
+    && connectionStatus === "connected" && allieAvailable;
+  const assistantStatus = isLoading
+    ? "Checking allAI availability…"
+    : !modesAgree
+      ? "allAI availability is unknown while configuration updates."
+      : connectionStatus === "connecting"
+        ? "Connecting to the local assistant…"
+        : connectionStatus === "disconnected"
+          ? "Local assistant disconnected. allAI availability is unknown."
+          : "allAI is currently unavailable.";
 
   return (
     <div className="space-y-6 max-w-3xl pb-20">
@@ -38,18 +50,23 @@ const AiMarketPage = () => {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!isStandalone ? (
-            <div className="p-4 bg-[hsl(var(--haven-success))]/10 border border-[hsl(var(--haven-success))]/30 rounded-lg space-y-3">
+          {isLoading || !modesAgree ? (
+            <div className="p-4 bg-muted/50 border border-border rounded-lg text-sm text-muted-foreground" role="status">
+              {isLoading ? "Checking ai.market configuration…" : "ai.market configuration is updating. Connection status is unknown."}
+            </div>
+          ) : !isStandalone ? (
+            <div className="p-4 bg-muted/50 border border-border rounded-lg space-y-3">
               <div className="flex items-center gap-2">
-                <CheckCircle className="w-5 h-5 text-[hsl(var(--haven-success))]" />
-                <span className="text-sm font-medium text-[hsl(var(--haven-success))]">
-                  Connected to ai.market
+                <Info className="w-5 h-5 text-muted-foreground" />
+                <span className="text-sm font-medium text-foreground">
+                  Configured for ai.market
                 </span>
               </div>
+              <p className="text-sm text-muted-foreground">
+                Connected mode is configured. The remote ai.market connection has not been verified here.
+              </p>
               <div className="grid grid-cols-2 gap-2 text-sm">
-                <span className="text-muted-foreground">API Key</span>
-                <span className="font-mono text-foreground">am_****...****</span>
-                <span className="text-muted-foreground">Status</span>
+                <span className="text-muted-foreground">Local assistant connection</span>
                 <span className="text-foreground capitalize">{connectionStatus}</span>
               </div>
             </div>
@@ -107,7 +124,9 @@ const AiMarketPage = () => {
             <div className="flex items-center gap-2 p-3 bg-muted/50 border border-border rounded-lg">
               <Info className="w-4 h-4 text-muted-foreground flex-shrink-0" />
               <span className="text-sm text-muted-foreground">
-                allAI requires an ai.market connection. Run <code className="text-xs bg-muted px-1 py-0.5 rounded">./start.sh --setup-allie</code> to enable.
+                {isConfirmedStandalone ? (
+                  <>allAI requires an ai.market connection. Run <code className="text-xs bg-muted px-1 py-0.5 rounded">./start.sh --setup-allie</code> to enable.</>
+                ) : assistantStatus}
               </span>
             </div>
           )}
