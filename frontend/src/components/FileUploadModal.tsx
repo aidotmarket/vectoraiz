@@ -86,7 +86,7 @@ const ACCEPT_MAP = {
 const SUPPORTED_SUFFIXES = new Set(Object.values(ACCEPT_MAP).flat());
 const validateFilename = (file: File) => {
   const dot = file.name.lastIndexOf(".");
-  return dot > 0 && SUPPORTED_SUFFIXES.has(file.name.slice(dot).toLowerCase())
+  return dot > 0 && SUPPORTED_SUFFIXES.has(file.name.slice(dot).toLowerCase().trim())
     ? null
     : { code: "file-invalid-type", message: "Unsupported file format" };
 };
