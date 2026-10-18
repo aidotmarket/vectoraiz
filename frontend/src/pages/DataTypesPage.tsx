@@ -6,7 +6,6 @@ import {
   Presentation,
   Code,
   CheckCircle,
-  Lock,
   Sparkles,
   Mail,
   BookOpen,
@@ -14,8 +13,6 @@ import {
   Contact,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Link } from "react-router-dom";
 
 interface FormatCard {
   name: string;
@@ -31,8 +28,8 @@ const includedFormats: FormatCard[] = [
   { name: "JSON", extensions: ".json", description: "JavaScript Object Notation", icon: FileJson, category: "Data" },
   { name: "Excel", extensions: ".xlsx / .xls", description: "Microsoft Excel spreadsheets", icon: FileSpreadsheet, category: "Data" },
   { name: "Parquet", extensions: ".parquet", description: "Columnar storage format", icon: FileType, category: "Data" },
-  { name: "Apple Numbers", extensions: ".numbers", description: "Apple Numbers spreadsheets", icon: FileSpreadsheet, category: "Data" },
-  // Documents (10)
+  { name: "TSV", extensions: ".tsv", description: "Tab-separated values", icon: FileSpreadsheet, category: "Data" },
+  // Documents (7)
   { name: "PDF", extensions: ".pdf", description: "Portable Document Format", icon: FileText, category: "Documents" },
   { name: "Word", extensions: ".doc / .docx", description: "Microsoft Word documents", icon: FileText, category: "Documents" },
   { name: "PowerPoint", extensions: ".ppt / .pptx", description: "Presentation files", icon: Presentation, category: "Documents" },
@@ -40,9 +37,6 @@ const includedFormats: FormatCard[] = [
   { name: "OpenDocument Text", extensions: ".odt", description: "OpenDocument text files", icon: FileText, category: "Documents" },
   { name: "OpenDocument Sheet", extensions: ".ods", description: "OpenDocument spreadsheets", icon: FileSpreadsheet, category: "Documents" },
   { name: "OpenDocument Slides", extensions: ".odp", description: "OpenDocument presentations", icon: Presentation, category: "Documents" },
-  { name: "Apple Pages", extensions: ".pages", description: "Apple Pages documents", icon: FileText, category: "Documents" },
-  { name: "Apple Keynote", extensions: ".key", description: "Apple Keynote presentations", icon: Presentation, category: "Documents" },
-  { name: "WPS Writer", extensions: ".wps", description: "WPS Office documents", icon: FileText, category: "Documents" },
   // Email (3)
   { name: "Email Message", extensions: ".eml", description: "Email message files", icon: Mail, category: "Email" },
   { name: "Outlook Email", extensions: ".msg", description: "Microsoft Outlook messages", icon: Mail, category: "Email" },
@@ -52,22 +46,12 @@ const includedFormats: FormatCard[] = [
   // Plain Text (3)
   { name: "Text", extensions: ".txt", description: "Plain text files", icon: FileText, category: "Plain Text" },
   { name: "Markdown", extensions: ".md", description: "Markdown documents", icon: FileType, category: "Plain Text" },
-  { name: "HTML", extensions: ".html", description: "Web page documents", icon: Code, category: "Plain Text" },
-  // Other (6)
+  { name: "HTML", extensions: ".html / .htm", description: "Web page documents", icon: Code, category: "Plain Text" },
+  // Other (4)
   { name: "XML", extensions: ".xml", description: "Extensible Markup Language", icon: Code, category: "Other" },
   { name: "RSS Feed", extensions: ".rss", description: "RSS syndication feeds", icon: Code, category: "Other" },
-  { name: "WordPerfect", extensions: ".wpd", description: "WordPerfect documents", icon: FileText, category: "Other" },
   { name: "Calendar", extensions: ".ics", description: "iCalendar event files", icon: Calendar, category: "Other" },
   { name: "vCard", extensions: ".vcf", description: "Contact card files", icon: Contact, category: "Other" },
-];
-
-const premiumFormats = [
-  "Scanned PDFs (OCR)",
-  "Images with Text",
-  "CAD Drawings",
-  "Salesforce Exports",
-  "SharePoint Documents",
-  "LLM-Enhanced Extraction",
 ];
 
 const DataTypesPage = () => {
@@ -75,11 +59,11 @@ const DataTypesPage = () => {
     <div className="space-y-6 max-w-4xl pb-20">
       <div>
         <p className="text-muted-foreground">
-          Supported file formats and document processing capabilities
+          Supported upload formats. Processing availability depends on your installation and the file contents.
         </p>
       </div>
 
-      {/* Section A: Included Formats — grouped by category */}
+      {/* Supported upload formats grouped by category */}
       {["Data", "Documents", "Email", "Publishing", "Plain Text", "Other"].map((category) => {
         const formats = includedFormats.filter((f) => f.category === category);
         if (formats.length === 0) return null;
@@ -96,7 +80,7 @@ const DataTypesPage = () => {
                       </div>
                       <span className="flex items-center gap-1 text-xs text-[hsl(var(--haven-success))]">
                         <CheckCircle className="w-3.5 h-3.5" />
-                        Included
+                        Supported
                       </span>
                     </div>
                     <div>
@@ -112,48 +96,26 @@ const DataTypesPage = () => {
         );
       })}
 
-      <p className="text-xs text-muted-foreground">
-        Document formats powered by <span className="font-medium">Apache Tika</span> and <span className="font-medium">Unstructured</span>
-      </p>
-
-      {/* Section B: Premium Formats */}
-      <Card className="bg-card border-border overflow-hidden">
-        <div className="absolute inset-0 bg-gradient-to-br from-primary/5 via-transparent to-primary/5 pointer-events-none" />
-        <CardHeader className="relative">
+      <Card className="bg-card border-border">
+        <CardHeader>
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-primary/10 border border-primary/20 flex items-center justify-center">
               <Sparkles className="w-5 h-5 text-primary" />
             </div>
             <div>
-              <CardTitle className="text-foreground">Unlock Premium Document Processing</CardTitle>
+              <CardTitle className="text-foreground">Document Processing</CardTitle>
               <CardDescription>
-                Process complex enterprise documents with AI-powered extraction. Handles scanned PDFs, OCR, complex table layouts, and more.
+                Available extraction tools vary by installation. A supported file extension does not guarantee that all content can be extracted.
               </CardDescription>
             </div>
           </div>
         </CardHeader>
-        <CardContent className="relative space-y-4">
-          <div className="flex flex-wrap gap-2">
-            {premiumFormats.map((format) => (
-              <span
-                key={format}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-secondary border border-border text-xs text-muted-foreground"
-              >
-                <Lock className="w-3 h-3" />
-                {format}
-              </span>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-4 pt-2">
-            <Link to="/ai-market">
-              <Button className="gap-2">
-                Upgrade via ai.market
-                <span aria-hidden="true">&rarr;</span>
-              </Button>
-            </Link>
-            <span className="text-xs text-muted-foreground">Powered by Unstructured.io</span>
-          </div>
+        <CardContent>
+          <p className="text-sm text-muted-foreground">
+            Document processing uses built-in extractors and, where available, Unstructured.
+            Hosted Unstructured processing is available only when configured for your installation.
+            Scanned PDFs and complex layouts may need additional processing that is not available in every installation.
+          </p>
         </CardContent>
       </Card>
     </div>
