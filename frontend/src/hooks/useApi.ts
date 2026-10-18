@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { 
   datasetsApi, 
   searchApi, 
@@ -103,9 +103,18 @@ export function useSearch() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Cleanup only retires ownership; effect replay must not revive old work.
+  const requestOwner = useRef(0);
+  useEffect(() => () => {
+    requestOwner.current += 1;
+  }, []);
+
   const search = async (query: string, options?: { dataset_id?: string; limit?: number }) => {
+    const owner = ++requestOwner.current;
     if (!query.trim()) {
       setResults(null);
+      setError(null);
+      setLoading(false);
       return;
     }
     
@@ -114,16 +123,19 @@ export function useSearch() {
     
     try {
       const res = await searchApi.search(query, options);
-      setResults(res);
+      if (owner === requestOwner.current) setResults(res);
       return res;
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Search failed');
+      if (owner === requestOwner.current) {
+        setError(e instanceof Error ? e.message : 'Search failed');
+      }
     } finally {
-      setLoading(false);
+      if (owner === requestOwner.current) setLoading(false);
     }
   };
 
   const reset = () => {
+    requestOwner.current += 1;
     setResults(null);
     setError(null);
     setLoading(false);
