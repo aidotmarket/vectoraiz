@@ -14,10 +14,6 @@ const shortcuts = [
   { keys: ["⌘", "K"], description: "Open command palette" },
   { keys: ["⌘", "U"], description: "Upload new dataset" },
   { keys: ["?"], description: "Show keyboard shortcuts" },
-  { keys: ["G", "D"], description: "Go to Dashboard" },
-  { keys: ["G", "S"], description: "Go to Datasets" },
-  { keys: ["G", "E"], description: "Go to Earnings" },
-  { keys: ["G", "Q"], description: "Go to SQL Query" },
   { keys: ["Esc"], description: "Close modal / Cancel" },
 ];
 
@@ -54,7 +50,7 @@ const KeyboardShortcutsModal = ({
           ))}
         </div>
         <p className="text-xs text-muted-foreground mt-4">
-          Press <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">?</kbd> anytime to show this help.
+          Press <kbd className="px-1 py-0.5 bg-muted rounded text-[10px]">?</kbd> when not typing to show this help.
         </p>
       </DialogContent>
     </Dialog>
