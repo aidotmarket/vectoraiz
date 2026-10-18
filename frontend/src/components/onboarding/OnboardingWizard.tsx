@@ -176,6 +176,11 @@ interface OnboardingWizardProps {
 }
 
 export default function OnboardingWizard({ channel, onComplete }: OnboardingWizardProps) {
+  // Progress belongs to this channel; reset before rendering a different tour.
+  return <ChannelOnboardingWizard key={channel} channel={channel} onComplete={onComplete} />;
+}
+
+function ChannelOnboardingWizard({ channel, onComplete }: OnboardingWizardProps) {
   const [step, setStep] = useState(0);
   const brand = useBrand();
   const steps = getStepsForChannel(channel, brand);
