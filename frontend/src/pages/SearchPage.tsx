@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search,
@@ -58,15 +58,25 @@ const SearchPage = () => {
     ?.filter(d => d.status === 'ready')
     ?.map(d => ({ id: d.id, name: d.original_filename, status: d.status })) || [];
 
-  // Auto-select dataset from URL parameter
+  // Apply the URL default once per parameter visit, including after a late list
+  // load. A manual choice settles that visit too, so refreshes cannot undo it.
+  const datasetDefault = useRef({ param: datasetParam, settled: false });
+  const datasetParamAvailable = datasets.some(d => d.id === datasetParam);
   useEffect(() => {
-    if (datasetParam && datasets.length > 0) {
-      const dataset = datasets.find(d => d.id === datasetParam);
-      if (dataset) {
-        setSelectedDatasetId(datasetParam);
-      }
+    if (datasetDefault.current.param !== datasetParam) {
+      datasetDefault.current = { param: datasetParam, settled: false };
     }
-  }, [datasetParam, datasets]);
+    if (!datasetDefault.current.settled && datasetParam && datasetParamAvailable) {
+      datasetDefault.current.settled = true;
+      setSelectedDatasetId(datasetParam);
+    }
+  }, [datasetParam, datasetParamAvailable]);
+
+  const handleDatasetChange = (id: string) => {
+    datasetDefault.current = { param: datasetParam, settled: true };
+    setSelectedDatasetId(id);
+  };
+  const originDataset = datasets.find(d => d.id === datasetParam);
 
   const isAllDatasets = selectedDatasetId === "__all__";
   const selectedDataset = isAllDatasets
@@ -118,7 +128,7 @@ const SearchPage = () => {
   return (
     <div className="space-y-6">
       {/* Back button if accessed from dataset */}
-      {datasetParam && selectedDataset && (
+      {originDataset && (
         <Button
           variant="ghost"
           size="sm"
@@ -126,7 +136,7 @@ const SearchPage = () => {
           onClick={() => navigate(`/datasets/${datasetParam}`)}
         >
           <ArrowLeft className="w-4 h-4 mr-2" />
-          Back to {selectedDataset.name}
+          Back to {originDataset.name}
         </Button>
       )}
 
@@ -153,7 +163,7 @@ const SearchPage = () => {
             No datasets available. Upload a dataset first.
           </div>
         ) : (
-          <Select value={selectedDatasetId} onValueChange={setSelectedDatasetId}>
+          <Select value={selectedDatasetId} onValueChange={handleDatasetChange}>
             <SelectTrigger className="bg-secondary border-border">
               <SelectValue placeholder="Choose a dataset..." />
             </SelectTrigger>
