@@ -575,15 +575,15 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
                     </div>
                   </div>
 
-                  {/* Pricing Suggestions */}
+                  {/* Pricing Guidance */}
                   <div className="p-4 bg-secondary/50 rounded-lg space-y-2">
-                    <Label className="text-sm">Pricing Suggestions</Label>
+                    <Label className="text-sm">Pricing Guidance</Label>
                     <div className="text-sm space-y-1">
                       <p className="text-muted-foreground">
-                        Similar datasets: <span className="text-foreground">$200 - $800</span>
+                        Market price comparisons and recommendations are unavailable here.
                       </p>
                       <p className="text-muted-foreground">
-                        Recommended: <span className="text-primary font-medium">$450</span>
+                        Choose your price based on the actual dataset and the use rights you offer.
                       </p>
                     </div>
                   </div>
