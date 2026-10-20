@@ -2,17 +2,15 @@
 
 - Checks GHCR for the latest published image tag
 - Compares against current APP_VERSION
-- Can trigger docker pull + container restart via Docker socket
+- Hands an exact release to the independently supervised original-user owner
 - Caches GHCR results for 6 hours
 """
 from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
-from pathlib import Path
 
 import httpx
 
@@ -108,7 +106,7 @@ async def check_for_updates(force: bool = False) -> dict:
 
     if not force and _cache["latest_version"] and (now - _cache["checked_at"]) < CACHE_TTL_S:
         latest = _cache["latest_version"]
-        return _build_response(current, latest, _cache["latest_published_at"])
+        return _build_response(current, latest, _cache["latest_published_at"], _cache.get("error"))
 
     # Fetch from GHCR
     try:
@@ -116,32 +114,32 @@ async def check_for_updates(force: bool = False) -> dict:
         _cache["latest_version"] = latest
         _cache["latest_published_at"] = None  # GHCR tags/list doesn't include dates
         _cache["checked_at"] = now
+        _cache.pop("error", None)
         logger.info("GHCR version check: current=%s latest=%s", current, latest)
     except Exception as e:
         logger.warning("GHCR version check failed: %s", e)
         latest = _cache.get("latest_version")
-        if latest is None:
-            return {
-                "current": current,
-                "latest": None,
-                "update_available": False,
-                "error": str(e),
-                "changelog_url": "https://github.com/aidotmarket/vectoraiz/releases",
-                "can_auto_update": _docker_available(),
-            }
+        # Cached tags remain context, but must not hide a failed refresh on later reads.
+        _cache["error"] = str(e) or "Registry version check failed."
 
-    return _build_response(current, latest, _cache.get("latest_published_at"))
+    return _build_response(current, latest, _cache.get("latest_published_at"), _cache.get("error"))
 
 
-def _build_response(current: str, latest: str | None, published_at: str | None) -> dict:
+def _build_response(
+    current: str, latest: str | None, published_at: str | None, error: str | None = None
+) -> dict:
     update_available = False
-    if latest:
+    if not latest:
+        error = error or "No recognized latest version tag was found."
+    else:
         cur = _parse_semver(current)
         lat = _parse_semver(latest)
         if cur and lat:
             update_available = lat > cur
+        else:
+            error = error or "Cannot compare current and latest versions: unrecognized version format."
 
-    return {
+    response = {
         "current": current,
         "latest": latest,
         "update_available": update_available,
@@ -149,85 +147,26 @@ def _build_response(current: str, latest: str | None, published_at: str | None) 
         "changelog_url": "https://github.com/aidotmarket/vectoraiz/releases",
         "can_auto_update": _docker_available(),
     }
+    if error:
+        response["error"] = error
+    return response
 
 
-# ---------------------------------------------------------------------------
-# Docker socket availability
-# ---------------------------------------------------------------------------
+# Host owner capability is independent of the app's Docker socket.
+from app.services import update_owner_client as _owner
+
+
 def _docker_available() -> bool:
-    return os.path.exists("/var/run/docker.sock")
+    # Retained name for older callers; socket existence conveys no readiness.
+    return _owner.available()
 
 
-# ---------------------------------------------------------------------------
-# Docker-based auto-update
-# ---------------------------------------------------------------------------
-async def trigger_update() -> dict:
-    """Pull the latest image and signal for restart."""
-    if not _docker_available():
-        return {
-            "status": "docker_not_available",
-            "message": (
-                "Docker socket not mounted. To update manually:\n"
-                "1. cd to your vectoraiz directory\n"
-                "2. docker compose -f docker-compose.customer.yml pull vectoraiz\n"
-                "3. docker compose -f docker-compose.customer.yml up -d vectoraiz"
-            ),
-        }
-
-    current = _get_current_version()
-    latest_info = await check_for_updates(force=True)
-    if not latest_info.get("update_available"):
-        return {"status": "up_to_date", "message": f"Already running the latest version ({current})."}
-
-    latest = latest_info.get("latest", "latest")
-
-    # Run the Docker pull in a thread to avoid blocking the event loop
-    try:
-        result = await asyncio.to_thread(_docker_pull_and_signal, latest)
-        return result
-    except Exception as e:
-        logger.error("Auto-update failed: %s", e, exc_info=True)
-        return {"status": "error", "message": f"Update failed: {e}"}
+async def trigger_update(target: str, idempotency_key: str, principal: str) -> dict:
+    return await asyncio.to_thread(_owner.submit, target, idempotency_key, principal)
 
 
-def _docker_pull_and_signal(tag: str) -> dict:
-    """Synchronous Docker operations: pull image and write update-pending marker."""
-    import docker
-
-    client = docker.from_env()
-
-    # 1. Pull the latest image
-    image_name = f"{GHCR_REGISTRY}/{GHCR_IMAGE}"
-    logger.info("Pulling %s:%s ...", image_name, tag)
-    client.images.pull(image_name, tag=tag)
-    # Also pull :latest to keep it in sync
-    client.images.pull(image_name, tag="latest")
-    logger.info("Pull complete for %s:%s", image_name, tag)
-
-    # 2. Write update-pending marker so the entrypoint can detect a restart is needed
-    update_marker = Path("/data/.update-pending")
-    update_marker.write_text(tag)
-    logger.info("Wrote update marker: %s", update_marker)
-
-    # 3. Find our own container and restart it
-    hostname = os.environ.get("HOSTNAME", "")
-    try:
-        container = client.containers.get(hostname)
-        logger.info("Restarting container %s ...", container.name)
-        container.restart(timeout=30)
-    except Exception as e:
-        # If we can't find by hostname, try by label or just signal via the marker
-        logger.warning(
-            "Could not restart container by hostname (%s): %s. "
-            "The update marker has been written — restart the container manually or "
-            "run: docker compose -f docker-compose.customer.yml up -d vectoraiz",
-            hostname, e,
-        )
-
-    return {
-        "status": "updating",
-        "message": f"Pulled {image_name}:{tag}. Container is restarting...",
-    }
+async def owner_status(identifier: str = "current") -> dict:
+    return await asyncio.to_thread(_owner.status, identifier)
 
 
 # ---------------------------------------------------------------------------
@@ -235,18 +174,26 @@ def _docker_pull_and_signal(tag: str) -> dict:
 # ---------------------------------------------------------------------------
 async def background_update_check_loop():
     """Check for updates on startup, then every 6 hours."""
-    # Initial delay to let the app fully start
-    await asyncio.sleep(30)
+    # Pairing must keep working even when a registry check fails or stalls.
+    async def mailbox_loop():
+        while True:
+            await asyncio.to_thread(_owner.heartbeat)
+            await asyncio.sleep(1)
 
-    while True:
-        try:
-            info = await check_for_updates()
-            if info.get("update_available"):
-                logger.info(
-                    "Update available: current=%s latest=%s",
-                    info["current"], info.get("latest"),
-                )
-        except Exception as e:
-            logger.warning("Background update check failed: %s", e)
+    mailbox_task = asyncio.create_task(mailbox_loop())
 
-        await asyncio.sleep(CACHE_TTL_S)
+    try:
+        while True:
+            try:
+                info = await check_for_updates()
+                if info.get("update_available"):
+                    logger.info(
+                        "Update available: current=%s latest=%s",
+                        info["current"], info.get("latest"),
+                    )
+            except Exception as e:
+                logger.warning("Background update check failed: %s", e)
+
+            await asyncio.sleep(CACHE_TTL_S)
+    finally:
+        mailbox_task.cancel()

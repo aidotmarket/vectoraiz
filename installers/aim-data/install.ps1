@@ -3,7 +3,7 @@ $ErrorActionPreference = "Stop"
 $InstallDir = if ($env:AIM_DATA_INSTALL_DIR) { $env:AIM_DATA_INSTALL_DIR } else { Join-Path $HOME "aim-data" }
 $ComposeFile = "docker-compose.aim-data.yml"
 $ComposeUrl = "https://raw.githubusercontent.com/aidotmarket/vectoraiz/main/docker-compose.aim-data.yml"
-$Image = "ghcr.io/aidotmarket/vectoraiz:latest"
+$Image = "ghcr.io/aidotmarket/aim-data:latest"
 
 function Write-Banner {
     Write-Host ""
@@ -55,6 +55,10 @@ try {
     Write-Fail "Docker Desktop is not installed. Install it from https://docs.docker.com/desktop/setup/install/windows-install/ and re-run."
 }
 Write-Success "Docker is ready"
+
+if ((Test-Path (Join-Path $InstallDir $ComposeFile)) -or (Test-Path (Join-Path $InstallDir '.env'))) {
+    Write-Fail 'channel_not_integrated: retain the original AIM-Data context. Its own release-to-build owner adapter is unavailable; no files or containers changed.'
+}
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
 Set-Location $InstallDir

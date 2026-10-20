@@ -9,7 +9,7 @@
 #   chmod +x install-mac.sh && ./install-mac.sh
 # =============================================================================
 
-set -e
+set -eo pipefail
 
 # Ensure common macOS tool paths are available (curl|bash subshells may have minimal PATH)
 for p in /usr/local/bin /opt/homebrew/bin; do
@@ -54,6 +54,35 @@ if [ "$CHANNEL" = "aim-data" ]; then
     COMPOSE_FILE="docker-compose.aim-data.yml"
 else
     COMPOSE_FILE="docker-compose.customer.yml"
+fi
+# Adopted reruns never download/overwrite Compose or rewrite the original env.
+if [ -f "$INSTALL_DIR/.vectoraiz-owner/registration.json" ]; then
+    exec "$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
+fi
+owner_setup() {
+    local release="${VECTORAIZ_OWNER_RELEASE:-${VECTORAIZ_VERSION:-${LATEST_TAG:-}}}"
+    if [ -z "$release" ]; then
+        release=$(curl -fsSL --max-time 15 'https://api.github.com/repos/aidotmarket/vectoraiz/releases/latest' | sed -n 's/.*"tag_name": *"\([^" ]*\)".*/\1/p' | head -1)
+    fi
+    # The setup helper is shipped with the exact release, never fetched from main.
+    local helper
+    helper=$(mktemp)
+    if [ -n "${VECTORAIZ_OWNER_PACKAGE_DIR:-}" ]; then
+        cp "$VECTORAIZ_OWNER_PACKAGE_DIR/setup-owner.sh" "$helper"
+    else
+        curl -fsSL --max-time 30 "https://github.com/aidotmarket/vectoraiz/releases/download/$release/setup-owner.sh" -o "$helper"
+    fi
+    bash "$helper" "$INSTALL_DIR" "$COMPOSE_FILE" "$release" "${VECTORAIZ_APP_URL:-$URL}" "$CHANNEL"
+    local result=$?
+    rm -f "$helper"
+    return "$result"
+}
+if [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || [ -f "$INSTALL_DIR/.env" ]; then
+    [ -f "$INSTALL_DIR/$COMPOSE_FILE" ] || { echo 'Restore the original Compose file before adoption.' >&2; exit 1; }
+    OWNER_PORT=$(sed -n 's/^VECTORAIZ_PORT=//p' "$INSTALL_DIR/.env" | head -1 | tr -d '\r')
+    URL="http://localhost:${OWNER_PORT:-8080}"
+    owner_setup
+    exit $?
 fi
 # --- Versioned compose download (Council S197: no main branch race) ---
 INSTALL_REF="${INSTALL_REF:-}"
@@ -547,6 +576,8 @@ for SVC in postgres qdrant vectoraiz; do
     fi
 done
 
+owner_setup
+
 # ─── Step 9: Create .app bundle ──────────────────────────────────
 info "Creating vectorAIz.app..."
 
@@ -559,54 +590,13 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cat > "$APP_BUNDLE/Contents/MacOS/vectorAIz" <<'LAUNCHER'
 #!/bin/bash
 INSTALL_DIR="$HOME/vectoraiz"
-
-cd "$INSTALL_DIR" || exit 1
-
-# Read channel from .env to pick the correct compose file
-CHANNEL=$(grep "^VECTORAIZ_CHANNEL=" .env 2>/dev/null | cut -d'=' -f2 | tr -d ' "'"'"'')
-case "$CHANNEL" in
-    aim-data) COMPOSE_FILE="docker-compose.aim-data.yml" ;;
-    *) COMPOSE_FILE="docker-compose.customer.yml" ;;
-esac
-
-# Read port from .env
-PORT=$(grep "^VECTORAIZ_PORT=" .env 2>/dev/null | cut -d'=' -f2 | tr -d ' "'"'"'')
-PORT="${PORT:-80}"
-
-if [ "$PORT" = "80" ]; then
-    URL="http://localhost"
-else
-    URL="http://localhost:${PORT}"
+"$INSTALL_DIR/.vectoraiz-owner/owner" launch --root "$INSTALL_DIR/.vectoraiz-owner" --open
+result=$?
+if [ "$result" -ne 0 ]; then
+    cat "$INSTALL_DIR/.vectoraiz-owner/status.json"
+    /usr/bin/open -a TextEdit "$INSTALL_DIR/.vectoraiz-owner/status.json"
 fi
-
-# Start Docker if not running
-if ! docker info &>/dev/null 2>&1; then
-    if [ -d "/Applications/OrbStack.app" ]; then
-        open -a OrbStack
-    elif [ -d "/Applications/Docker.app" ]; then
-        open -a Docker
-    fi
-    # Wait up to 60s for Docker
-    for i in $(seq 1 20); do
-        docker info &>/dev/null 2>&1 && break
-        sleep 3
-    done
-fi
-
-# Start containers
-docker compose -f "$COMPOSE_FILE" up -d 2>/dev/null
-
-# Wait for health then open browser
-for i in $(seq 1 40); do
-    if curl -sf "${URL}/api/health" >/dev/null 2>&1; then
-        open "$URL"
-        exit 0
-    fi
-    sleep 3
-done
-
-# Open anyway after timeout
-open "$URL"
+exit "$result"
 LAUNCHER
 chmod +x "$APP_BUNDLE/Contents/MacOS/vectorAIz"
 
