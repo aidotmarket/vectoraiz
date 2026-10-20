@@ -210,7 +210,7 @@ const PublishModal = ({ open, onOpenChange, dataset, onPublishSuccess }: Publish
         price_cents: Math.round(parseFloat(price) * 100),
         row_count: dataset.rows || null,
         column_names: null,
-        file_format: null,
+        file_format: dataset.type || null,
         file_size_bytes: null,
         vz_dataset_id: dataset.id,
       };
