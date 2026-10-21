@@ -1,0 +1,73 @@
+name: Native CI
+on:
+  pull_request:
+    branches: [native]
+  push:
+    branches: [native, 'build/vz-native-*']
+permissions:
+  contents: read
+concurrency:
+  group: native-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+      - name: Test branch routing
+        run: node scripts/native-guard.mjs --test
+      - name: Enforce native PR base
+        if: github.event_name == 'pull_request'
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_REF: ${{ github.base_ref }}
+        run: node scripts/native-guard.mjs
+      - name: Install UI dependencies
+        working-directory: app
+        run: npm ci
+      - name: UI tests
+        working-directory: app
+        run: npm test
+      - name: Build UI assets
+        working-directory: app
+        run: npm run build
+      - name: Rust format
+        run: cargo fmt --all --check
+      - name: Rust lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Rust tests
+        run: cargo test --locked --workspace
+      - name: Self-test
+        run: cargo run --locked -p vz-cli --bin vectoraiz-cli -- self-test
+      - name: Tauri debug build
+        working-directory: app
+        run: npm run tauri -- build --debug --no-bundle --features smoke-test
+      - name: Launch app and click self-test
+        run: python scripts/native-smoke.py
+      - name: Install notice generator
+        run: cargo install cargo-about --version 0.8.2 --locked
+      - name: Generate third-party notices
+        run: |
+          cargo about generate --locked about.hbs > THIRD_PARTY_NOTICES
+          cd app
+          npm run --silent licenses >> ../THIRD_PARTY_NOTICES
+      - uses: actions/upload-artifact@v4
+        with:
+          name: THIRD_PARTY_NOTICES-${{ matrix.os }}
+          path: THIRD_PARTY_NOTICES
+          if-no-files-found: error
