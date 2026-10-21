@@ -1,0 +1,3 @@
+Orbital archive retention
+
+The orbital archive retains signed telemetry for thirty days. Operators verify SHA256 checksums before deletion. The retention owner is the Flight Records team.

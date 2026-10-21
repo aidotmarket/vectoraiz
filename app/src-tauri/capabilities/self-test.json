@@ -1,12 +1,15 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "self-test",
-  "description": "Only the local main window may invoke the scaffold diagnostic.",
+  "description": "Local main window diagnostic and indexing search and chat commands only.",
   "local": true,
   "windows": [
     "main"
   ],
   "permissions": [
-    "allow-self-test"
+    "allow-self-test",
+    "allow-pipeline-index",
+    "allow-pipeline-search",
+    "allow-pipeline-ask"
   ]
 }

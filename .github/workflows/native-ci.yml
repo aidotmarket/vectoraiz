@@ -16,6 +16,11 @@ jobs:
       matrix:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '3'
     defaults:
       run:
         shell: bash
@@ -26,6 +31,32 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.2'
+          cache: false
+      - name: Install protocol compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+      - name: Install pipeline example dependencies
+        run: python -m pip install numpy==2.2.6 pyarrow==19.0.1 boto3==1.40.45
+      - uses: actions/cache@v4
+        with:
+          path: .assets
+          key: assets-${{ runner.os }}-${{ hashFiles('spike/fixtures/models.json', 'scripts/fetch-assets.py') }}
+      - name: Fetch verified models and PDFium
+        run: python scripts/fetch-assets.py
+      - name: Build Apple Vision helper
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p target/debug
+          swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
+      - name: Build pinned MinIO
+        run: python scripts/minio-test-server.py
       - name: Install pinned Rust
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
@@ -52,6 +83,12 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Rust tests
         run: cargo test --locked --workspace
+      - name: Build pipeline binaries (CPU)
+        run: cargo build --locked -p vz-cli -p vz-parser-worker
+      - name: Pipeline and MinIO acceptance (CPU)
+        env:
+          VZ_MINIO_ENDPOINT: local-test-server
+        run: python scripts/pipeline-e2e.py
       - name: Self-test
         run: cargo run --locked -p vz-cli --bin vectoraiz-cli -- self-test
       - name: Tauri debug build
@@ -71,3 +108,10 @@ jobs:
           name: THIRD_PARTY_NOTICES-${{ matrix.os }}
           path: THIRD_PARTY_NOTICES
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-evidence-${{ matrix.os }}
+          path: |
+            minio-test.log
+          if-no-files-found: ignore

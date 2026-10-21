@@ -15,5 +15,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 vz-core.workspace = true
 
+serde_json.workspace = true
+anyhow = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

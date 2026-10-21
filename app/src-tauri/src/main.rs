@@ -7,6 +7,9 @@ fn self_test<R: tauri::Runtime>(_app: tauri::AppHandle<R>) -> vz_core::SelfTestR
     if smoke_test_requested() {
         assert_eq!(result.status, "OK");
         println!("VECTORAIZ_SMOKE_TEST_OK");
+        if std::env::args().any(|arg| arg == "--pipeline-smoke-test") {
+            println!("VECTORAIZ_PIPELINE_SMOKE_TEST_OK");
+        }
         // Let the IPC response render before closing the smoke-test process.
         let app = _app.clone();
         std::thread::spawn(move || {
@@ -21,17 +24,24 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
     #[cfg(feature = "smoke-test")]
     let builder = builder.on_page_load(|webview, payload| {
         if smoke_test_requested() && payload.event() == tauri::webview::PageLoadEvent::Finished {
-            webview.eval(
+            if std::env::args().any(|arg|arg == "--pipeline-smoke-test") {
+                webview.eval(include_str!("../../../scripts/pipeline-smoke.js")).expect("pipeline smoke clicks");
+            } else { webview.eval(
                 "const timer = setInterval(() => { const button = document.querySelector('button'); if (button) { clearInterval(timer); button.click(); } }, 50);"
-            ).expect("start smoke-test button click");
+            ).expect("start smoke-test button click"); }
         }
     });
-    builder.invoke_handler(tauri::generate_handler![self_test])
+    builder.invoke_handler(tauri::generate_handler![
+        self_test,
+        pipeline_index,
+        pipeline_search,
+        pipeline_ask
+    ])
 }
 
 #[cfg(feature = "smoke-test")]
 fn smoke_test_requested() -> bool {
-    std::env::args().any(|arg| arg == "--smoke-test")
+    std::env::args().any(|arg| arg == "--smoke-test" || arg == "--pipeline-smoke-test")
 }
 
 #[cfg(not(test))]
@@ -75,4 +85,96 @@ mod tests {
         assert!(tauri::test::get_ipc_response(&other, request("self_test")).is_err());
         assert!(tauri::test::get_ipc_response(&main, request("plugin:app|version")).is_err());
     }
+}
+
+fn pipeline_paths<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), String> {
+    use tauri::Manager;
+    let state = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("phase0-index");
+    let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
+    Ok((
+        state,
+        cwd.join(".assets"),
+        cwd.join("spike/fixtures/models.json"),
+    ))
+}
+#[tauri::command]
+async fn pipeline_index<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    folder: String,
+    progress: tauri::ipc::Channel<vz_core::index::Progress>,
+) -> Result<serde_json::Value, String> {
+    let (root, assets, pins) = pipeline_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let run = || -> anyhow::Result<serde_json::Value> {
+            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let mut state = vz_core::storage::State::open(&root)?;
+            let result = tokio::runtime::Runtime::new()?.block_on(vz_core::index::index(
+                &mut state,
+                std::path::Path::new(&folder),
+                &engines,
+                &assets,
+                |value| {
+                    let _ = progress.send(value.clone());
+                },
+            ))?;
+            Ok(serde_json::to_value(result)?)
+        };
+        run().map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn pipeline_search<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let (root, assets, pins) = pipeline_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let run = || -> anyhow::Result<serde_json::Value> {
+            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let state = vz_core::storage::State::open(&root)?;
+            let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
+                &query,
+                &engines.vector(&query, true)?,
+                5,
+            ))?;
+            Ok(serde_json::to_value(hits)?)
+        };
+        run().map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+async fn pipeline_ask<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    question: String,
+    tokens: tauri::ipc::Channel<String>,
+) -> Result<serde_json::Value, String> {
+    let (root, assets, pins) = pipeline_paths(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let run = || -> anyhow::Result<serde_json::Value> {
+            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let state = vz_core::storage::State::open(&root)?;
+            let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
+                &question,
+                &engines.vector(&question, true)?,
+                3,
+            ))?;
+            let answer = vz_core::index::ask(&engines, &question, &hits, |token| {
+                let _ = tokens.send(token.to_owned());
+            })?;
+            Ok(serde_json::to_value(answer)?)
+        };
+        run().map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

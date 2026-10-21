@@ -21,7 +21,12 @@ fn main() {
             .windows_attributes(
                 tauri_build::WindowsAttributes::new().window_icon_path("gen/icon.ico"),
             )
-            .app_manifest(tauri_build::AppManifest::new().commands(&["self_test"])),
+            .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "self_test",
+                "pipeline_index",
+                "pipeline_search",
+                "pipeline_ask",
+            ])),
     )
     .expect("failed to build Tauri app");
 }

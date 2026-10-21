@@ -1,0 +1,3 @@
+Ocean monitoring
+
+Ocean buoys measure salinity and wave height. Satellite telemetry is sent every hour. Inspect moorings after severe storms.
