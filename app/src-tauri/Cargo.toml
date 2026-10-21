@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "vectoraiz"
+path = "src/main.rs"
+# Native backend initialization can block before libtest starts on Windows.
+# Capability tests live in vz-ipc-policy; native-smoke exercises real app IPC.
+test = false
+bench = false
+
 [features]
 smoke-test = []
 custom-protocol = ["tauri/custom-protocol"]
@@ -20,6 +28,3 @@ vz-core.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
-
-[dev-dependencies]
-tauri = { version = "2", features = ["test"] }
