@@ -58,8 +58,20 @@ fn smoke_test_requested() -> bool {
 
 #[cfg(not(test))]
 fn main() {
+    let context = tauri::generate_context!();
+    #[cfg(feature = "smoke-test")]
+    let mut context = context;
+    #[cfg(feature = "smoke-test")]
+    if smoke_test_requested() {
+        // Hosted/occluded WebViews must keep driving the real controls. Keep
+        // this test-only setting out of normal desktop battery behavior.
+        for window in &mut context.config_mut().app.windows {
+            window.background_throttling =
+                Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
+        }
+    }
     configure(tauri::Builder::default())
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("failed to run vectorAIz");
 }
 

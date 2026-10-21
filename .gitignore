@@ -13,3 +13,6 @@ THIRD_PARTY_NOTICES
 /.vz-index/
 /spike/pack-output/
 /.tools/
+
+**/__pycache__/
+*.pyc

@@ -11,7 +11,7 @@ committed. The version is **chromium/8111**:
 
 PDFium runs through pdfium-render 0.8.35 inside a one-document worker. Office
 containers undergo both central-directory checks and a bounded inflation pass
-before XML/calamine see them. Limits are 512 MiB total, 256 MiB per member,
+before XML/calamine see them. Limits are 512 MB total, 256 MB per member,
 10,000 members, and 100:1 per-member expansion. Refusals become failed SQLite
 jobs with a reason; subsequent files continue. Non-text PDFs use the compiled
 Apple Vision helper on macOS; Windows records a needs-OCR failure if no page has

@@ -93,10 +93,11 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
         if let Some(status) = child.try_wait()? {
             let response = reader
                 .join()
-                .map_err(|_| anyhow::anyhow!("worker reader panic"))??;
+                .map_err(|_| anyhow::anyhow!("worker reader panic"));
             if !status.success() {
                 bail!("worker crashed: {status}");
             }
+            let response = response??;
             if let Some(error) = response.error {
                 bail!("{error}");
             }

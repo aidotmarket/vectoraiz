@@ -1,4 +1,4 @@
-const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { checkpoint });
+const report = checkpoint => { window.__TAURI_INTERNALS__.invoke('self_test', { checkpoint }).catch(console.error); };
 (async () => {
   await report('started');
   const wait = async (predicate) => {

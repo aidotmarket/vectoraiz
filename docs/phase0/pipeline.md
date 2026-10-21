@@ -64,7 +64,7 @@ self-referential hash), exact embedding recipe and counts. Arrow Parquet files
 contain document metadata, chunks, source-page references, headings and
 float32 embeddings. Original archive members have neutral names and are
 verified against indexed source hashes before export. This minimal spike
-refuses originals beyond 2 GiB rather than splitting them; multipart export
+refuses originals beyond 2 GB rather than splitting them; multipart export
 and the full listing journey remain later work. Text files start without
 commas or tabs. `examples/query.py` verifies hashes and citations and runs an
 offline cosine query with a query vector computed by the linked engine using

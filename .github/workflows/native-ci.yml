@@ -40,6 +40,9 @@ jobs:
         with:
           go-version: '1.24.2'
           cache: false
+      - name: Initialize Windows compiler environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
       - name: Install pinned Windows Vulkan SDK
         if: runner.os == 'Windows'
         shell: pwsh
@@ -62,11 +65,24 @@ jobs:
         run: |
           mkdir -p target/debug
           swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
+      - uses: actions/cache/restore@v4
+        id: minio-cache
+        with:
+          path: ${{ runner.os == 'Windows' && '.tools/minio.exe' || '.tools/minio' }}
+          key: minio-${{ runner.os }}-${{ runner.arch }}-go1.24.2-${{ hashFiles('scripts/minio-test-server.py') }}
       - name: Build pinned MinIO
+        if: steps.minio-cache.outputs.cache-hit != 'true'
         run: python scripts/minio-test-server.py
+      - uses: actions/cache/save@v4
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.os == 'Windows' && '.tools/minio.exe' || '.tools/minio' }}
+          key: ${{ steps.minio-cache.outputs.cache-primary-key }}
       - name: Install pinned Rust
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Test branch routing
         run: node scripts/native-guard.mjs --test
       - name: Enforce native PR base

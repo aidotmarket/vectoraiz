@@ -5,8 +5,8 @@ use calamine::{open_workbook_auto, Reader};
 use quick_xml::{events::Event, Reader as XmlReader};
 use std::{fs::File, io::Read};
 
-pub const MAX_TOTAL: u64 = 512 * 1024 * 1024;
-pub const MAX_PART: u64 = 256 * 1024 * 1024;
+pub const MAX_TOTAL: u64 = 512_000_000;
+pub const MAX_PART: u64 = 256_000_000;
 pub const MAX_ENTRIES: usize = 10_000;
 pub const MAX_RATIO: u64 = 100;
 

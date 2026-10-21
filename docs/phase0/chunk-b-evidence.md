@@ -24,10 +24,9 @@ records local evidence separately from hosted CI and hardware claims.
 
 Local commands and their complete output are retained privately under
 `/tmp/vz-b-evidence/`; nothing in that directory is committed. Relevant captures
-include `tests-final.log`, `clippy-final.log`, `pipeline-final.log`,
-`native-smoke-final.log`, `ui-final.log`, `ui-build-final.log`, and the initial
-failures and follow-up runs. Some earlier runs deliberately expose the failures
-that led to fixes; they are not represented as passing final-head evidence.
+include `tests-verified.log`, `clippy-verified.log`, `pipeline-final.log`,
+`native-smoke8.log`, `ui-final.log`, `ui-build-final.log`, and the initial
+failures and follow-up runs. Earlier failing runs are retained for the fixes they motivated; they are not represented as passing final-head evidence.
 
 CI runs these checks on macos-14 and windows-2022. Both CLI runs use `--cpu`.
 The Windows build enables the linked Vulkan backend with a version/hash-pinned
@@ -48,6 +47,6 @@ model answer quality beyond the fixture. macOS memory enforcement is sampled,
 not an allocation-time kernel boundary. Windows network isolation and
 production filesystem confinement are Phase 1; full format coverage, model
 selection, releases and public integrations belong to their separately scoped
-chunks/phases. The minimal pack refuses originals over 2 GiB rather than
+chunks/phases. The minimal pack refuses originals over 2 GB rather than
 implementing later multipart export. See [pipeline.md](pipeline.md) for the
 per-generation BM25 tradeoff and other spike limits.

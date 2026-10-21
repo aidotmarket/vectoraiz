@@ -45,7 +45,7 @@ pub fn write(state: &State, engines: &Engines, output: &Path, query: &str) -> Re
                 bail!("source changed since indexing; re-index before packing");
             }
             original_bytes += bytes.len() as u64;
-            if original_bytes > 2 * 1024 * 1024 * 1024 {
+            if original_bytes > 2_000_000_000 {
                 bail!("Phase 0 pack originals exceed 2 GB; split the collection");
             }
             zip.start_file(

@@ -12,3 +12,4 @@ if (-not (Test-Path "$root\Bin\glslc.exe")) { throw 'Vulkan shader compiler miss
 "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 "$root\Bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 'NATIVE_FEATURES=--features vz-cli/vulkan' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+'CMAKE_GENERATOR=Ninja' | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append

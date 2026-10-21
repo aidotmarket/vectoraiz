@@ -44,7 +44,10 @@ fn timeout_and_crash() {
         .unwrap_err()
         .to_string()
         .contains("timeout"));
-    assert!(run(worker, &request("crash"), Duration::from_secs(5)).is_err());
+    assert!(run(worker, &request("crash"), Duration::from_secs(5))
+        .unwrap_err()
+        .to_string()
+        .contains("crashed"));
     assert!(run(worker, &request("ok"), Duration::from_secs(5)).is_ok());
 }
 #[cfg(target_os = "macos")]
