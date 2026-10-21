@@ -1,0 +1,35 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "vectorAIz",
+  "version": "0.1.0",
+  "identifier": "com.vectoraiz.native",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "vectorAIz",
+        "width": 760,
+        "height": 540
+      }
+    ],
+    "security": {
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src ipc: http://ipc.localhost; base-uri 'none'; form-action 'none'; frame-src 'none'",
+      "capabilities": [
+        "self-test"
+      ]
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "gen/icon.png",
+      "gen/icon.ico"
+    ]
+  }
+}

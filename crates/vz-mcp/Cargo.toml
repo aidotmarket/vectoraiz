@@ -1,0 +1,10 @@
+[package]
+name = "vz-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "vectoraiz-mcp"
+path = "src/main.rs"

@@ -1,0 +1,19 @@
+[package]
+name = "vectoraiz"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+smoke-test = []
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+vz-core.workspace = true
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }

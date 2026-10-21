@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "self-test",
+  "description": "Only the local main window may invoke the scaffold diagnostic.",
+  "local": true,
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "allow-self-test"
+  ]
+}
