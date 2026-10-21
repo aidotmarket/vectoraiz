@@ -107,7 +107,8 @@ jobs:
       - name: Rust lint
         run: cargo clippy --locked --all-targets ${{ env.NATIVE_FEATURES }} -- -D warnings
       - name: Rust tests
-        run: cargo test --locked --workspace ${{ env.NATIVE_FEATURES }}
+        timeout-minutes: 20
+        run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
       - name: Build CLI workers and Tauri debug app
         run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol ${{ env.NATIVE_FEATURES }}
       - name: Pipeline and MinIO acceptance (CPU)

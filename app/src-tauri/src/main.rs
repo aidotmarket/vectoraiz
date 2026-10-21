@@ -77,37 +77,56 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn ipc_allows_only_the_self_test_in_the_main_window() {
-        let app = configure(tauri::test::mock_builder())
-            .build(tauri::generate_context!())
-            .expect("mock app");
-        let main = tauri::WebviewWindowBuilder::new(&app, "main", Default::default())
-            .build()
-            .expect("main window");
-        let other = tauri::WebviewWindowBuilder::new(&app, "other", Default::default())
-            .build()
-            .expect("unprivileged window");
-        let request = |command: &str| tauri::webview::InvokeRequest {
-            cmd: command.into(),
-            callback: tauri::ipc::CallbackFn(0),
-            error: tauri::ipc::CallbackFn(1),
-            url: if cfg!(windows) {
-                "http://tauri.localhost"
-            } else {
-                "tauri://localhost"
-            }
-            .parse()
-            .expect("local URL"),
-            body: tauri::ipc::InvokeBody::default(),
-            headers: Default::default(),
-            invoke_key: tauri::test::INVOKE_KEY.to_string(),
+    fn ipc_permissions_allow_only_pipeline_commands_in_the_local_main_window() {
+        // Resolve the production, build-generated ACL directly. Even MockRuntime
+        // window construction and get_ipc_response can wait on runtime callbacks;
+        // permission checks need neither a window nor an unbounded channel receive.
+        let _builder = super::configure(tauri::test::mock_builder());
+        let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
+        let authority = context.runtime_authority_mut();
+        let local = tauri::ipc::Origin::Local;
+        let remote = tauri::ipc::Origin::Remote {
+            url: "https://example.com".parse().unwrap(),
         };
-        tauri::test::assert_ipc_response(&main, request("self_test"), Ok(vz_core::self_test()));
-        assert!(tauri::test::get_ipc_response(&other, request("self_test")).is_err());
-        assert!(tauri::test::get_ipc_response(&main, request("plugin:app|version")).is_err());
+        for command in [
+            "self_test",
+            "pipeline_index",
+            "pipeline_search",
+            "pipeline_ask",
+        ] {
+            assert!(
+                authority
+                    .resolve_access(command, "main", "main", &local)
+                    .is_some(),
+                "{command} must be allowed in the local main window"
+            );
+            assert!(
+                authority
+                    .resolve_access(command, "other", "other", &local)
+                    .is_none(),
+                "{command} must be denied in other windows"
+            );
+            assert!(
+                authority
+                    .resolve_access(command, "main", "main", &remote)
+                    .is_none(),
+                "{command} must be denied for remote origins"
+            );
+        }
+        for command in [
+            "plugin:app|version",
+            "plugin:fs|read_file",
+            "unknown_command",
+        ] {
+            assert!(
+                authority
+                    .resolve_access(command, "main", "main", &local)
+                    .is_none(),
+                "{command} must not acquire a permission"
+            );
+        }
+        assert_eq!(vz_core::self_test().status, "OK");
     }
 }
 
