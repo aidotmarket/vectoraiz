@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 smoke-test = []
+vulkan = ["vz-core/vulkan"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -30,6 +30,7 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     hits = cli('search', query)
     assert hits and 'thirty days' in hits[0]['chunk']['text'], hits[:1]
     answer = cli('ask', query)
+    assert len(answer['text'].split()) > 3, answer
     assert answer['citations'] and re.search(r'\[[1-3]\]', answer['text']), answer
     manifest = cli('pack', str(pack), '--query', query)
     docs = {doc['doc_id']: doc for doc in pq.read_table(pack / 'documents.parquet').to_pylist()}

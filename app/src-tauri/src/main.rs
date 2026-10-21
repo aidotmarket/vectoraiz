@@ -1,10 +1,22 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 #[tauri::command]
-fn self_test<R: tauri::Runtime>(_app: tauri::AppHandle<R>) -> vz_core::SelfTestResult {
+fn self_test<R: tauri::Runtime>(
+    _app: tauri::AppHandle<R>,
+    checkpoint: Option<String>,
+) -> vz_core::SelfTestResult {
+    #[cfg(not(feature = "smoke-test"))]
+    let _ = checkpoint;
     let result = vz_core::self_test();
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
+        if let Some(checkpoint) = checkpoint {
+            println!("VECTORAIZ_SMOKE_STAGE: {checkpoint}");
+            if checkpoint.starts_with("ERROR:") {
+                _app.exit(1);
+            }
+            return result;
+        }
         assert_eq!(result.status, "OK");
         println!("VECTORAIZ_SMOKE_TEST_OK");
         if std::env::args().any(|arg| arg == "--pipeline-smoke-test") {

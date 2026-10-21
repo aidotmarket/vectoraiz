@@ -31,8 +31,9 @@ llama.cpp **244641955f6146f7e8474afff7772d427593a534** (binding source revision
 no inference subprocess or HTTP endpoint is used. macOS builds include Metal;
 `--cpu` disables layer offload. Windows builds may enable Vulkan with
 `cargo build -p vz-cli --features vulkan` and an installed Vulkan SDK. Failure
-to load an offloaded model retries with zero offloaded layers. CI runs CPU
-inference; Vulkan compilation and actual GPU execution remain unverified.
+to load an offloaded model retries with zero offloaded layers. Windows CI compiles Vulkan with SDK 1.4.321.1 (installer SHA256
+baaa4f7ca11ed3d82aa1c102b21208915485bbaa473068c763daa425cca468bd)
+and runs CPU inference. Actual Windows GPU execution remains unverified.
 
 LanceDB 0.22.2 supplies vector search and BM25. Lance generations are immutable
 and include a per-document FTS index. SQLite FULL-synchronous WAL transactions
@@ -48,6 +49,10 @@ The structure-aware chunker preserves page and Markdown/HTML heading path,
 targets 500 estimated tokens, and overlaps up to 160 bytes. The estimate is
 ceil(UTF-8 bytes / 4), explicitly recorded in the recipe. BGE's tokenizer caps
 model inputs at 512 tokens. These are spike settings to measure in chunk C.
+Chat streams generated text followed by an application-owned numbered source
+footer, so provenance remains available when a provisional model omits inline
+citations. Generated references outside the retrieved source list are refused;
+semantic support for every generated claim remains a chunk C evaluation.
 RRF uses k=60 over vector distance and BM25 rankings. BM25 indexes are per
 generation, so their scores are not collection-global IDF statistics; this
 tradeoff needs measurement before the Phase 1 collection store design.

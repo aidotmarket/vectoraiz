@@ -21,6 +21,8 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_BUILD_JOBS: '3'
+      NATIVE_FEATURES: ''
+      TAURI_FEATURES: smoke-test
     defaults:
       run:
         shell: bash
@@ -38,10 +40,15 @@ jobs:
         with:
           go-version: '1.24.2'
           cache: false
+      - name: Install pinned Windows Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-vulkan.ps1
       - name: Install protocol compiler
         uses: arduino/setup-protoc@v3
         with:
           version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
       - name: Install pipeline example dependencies
         run: python -m pip install numpy==2.2.6 pyarrow==19.0.1 boto3==1.40.45
       - uses: actions/cache@v4
@@ -80,11 +87,11 @@ jobs:
       - name: Rust format
         run: cargo fmt --all --check
       - name: Rust lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets $NATIVE_FEATURES -- -D warnings
       - name: Rust tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace $NATIVE_FEATURES
       - name: Build pipeline binaries (CPU)
-        run: cargo build --locked -p vz-cli -p vz-parser-worker
+        run: cargo build --locked -p vz-cli -p vz-parser-worker $NATIVE_FEATURES
       - name: Pipeline and MinIO acceptance (CPU)
         env:
           VZ_MINIO_ENDPOINT: local-test-server
@@ -93,7 +100,7 @@ jobs:
         run: cargo run --locked -p vz-cli --bin vectoraiz-cli -- self-test
       - name: Tauri debug build
         working-directory: app
-        run: npm run tauri -- build --debug --no-bundle --features smoke-test
+        run: npm run tauri -- build --debug --no-bundle --features "$TAURI_FEATURES"
       - name: Launch app and click self-test
         run: python scripts/native-smoke.py
       - name: Install notice generator

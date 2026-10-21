@@ -208,7 +208,7 @@ pub fn ask(
     engines: &Engines,
     question: &str,
     hits: &[Hit],
-    emit: impl FnMut(&str),
+    mut emit: impl FnMut(&str),
 ) -> Result<Answer> {
     if hits.is_empty() {
         return Ok(Answer {
@@ -232,7 +232,43 @@ pub fn ask(
         .map(|(i, h)| format!("[{}] {}", i + 1, h.chunk.text))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let text = engines.stream(question, &context, emit)?;
+    let mut text = engines.stream(question, &context, &mut emit)?;
+    validate_citations(&text, citations.len())?;
+    // Provenance is application-owned: small provisional models may omit inline
+    // citation syntax. Always stream a source footer for the supplied context.
+    let footer = format!(
+        "\n\nRetrieved sources: {}",
+        citations
+            .iter()
+            .map(|c| format!("[{}]", c.number))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    emit(&footer);
+    text.push_str(&footer);
     // Citation metadata always maps numbered source context to real persisted pages.
     Ok(Answer { text, citations })
+}
+
+fn validate_citations(text: &str, count: usize) -> Result<()> {
+    for part in text.split('[').skip(1) {
+        if let Some((label, _)) = part.split_once(']') {
+            if let Ok(number) = label.parse::<usize>() {
+                if number == 0 || number > count {
+                    bail!("model cited an unknown source [{number}]");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn refuses_unknown_model_citations() {
+        assert!(validate_citations("supported [1]", 1).is_ok());
+        assert!(validate_citations("invented [2]", 1).is_err());
+        assert!(validate_citations("invalid [0]", 3).is_err());
+    }
 }
