@@ -7,7 +7,8 @@ binary = pathlib.Path('target/debug/vectoraiz.exe' if __import__('sys').platform
 
 def run(mode, marker, timeout):
     lines = []
-    child = subprocess.Popen([str(binary.resolve()), mode], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1)
+    # Hosted runners exercise the full pipeline on CPU, including UI IPC.
+    child = subprocess.Popen([str(binary.resolve()), mode, '--cpu'], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", bufsize=1)
     def capture():
         for line in child.stdout:
             lines.append(line)

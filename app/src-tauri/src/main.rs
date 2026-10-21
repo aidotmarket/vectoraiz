@@ -127,6 +127,11 @@ fn pipeline_paths<R: tauri::Runtime>(
         cwd.join("spike/fixtures/models.json"),
     ))
 }
+
+fn pipeline_cpu_requested() -> bool {
+    std::env::args().any(|arg| arg == "--cpu")
+}
+
 #[tauri::command]
 async fn pipeline_index<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -136,7 +141,7 @@ async fn pipeline_index<R: tauri::Runtime>(
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
             let mut state = vz_core::storage::State::open(&root)?;
             let result = tokio::runtime::Runtime::new()?.block_on(vz_core::index::index(
                 &mut state,
@@ -162,7 +167,7 @@ async fn pipeline_search<R: tauri::Runtime>(
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
             let state = vz_core::storage::State::open(&root)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &query,
@@ -187,7 +192,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, false)?;
+            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
             let state = vz_core::storage::State::open(&root)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &question,
