@@ -10,6 +10,8 @@ from pathlib import Path
 import platform
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,9 +26,18 @@ def fetch(url, digest, output):
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + '.part')
     try:
-        with urllib.request.urlopen(url, timeout=120) as response, partial.open('wb') as dest:
-            while data := response.read(1024 * 1024):
-                dest.write(data)
+        for attempt in range(5):
+            try:
+                request = urllib.request.Request(url, headers={'User-Agent': 'vectoraiz-phase0-assets/1'})
+                with urllib.request.urlopen(request, timeout=120) as response, partial.open('wb') as dest:
+                    while data := response.read(1024 * 1024):
+                        dest.write(data)
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                print(f'{output.name}: download attempt {attempt + 1} failed: {type(error).__name__}', flush=True)
+                if attempt == 4:
+                    raise
+                time.sleep(2 ** attempt)
         actual = hashlib.file_digest(partial.open('rb'), 'sha256').hexdigest()
         if actual != digest:
             raise ValueError(f'{output.name}: sha256 mismatch: {actual}')

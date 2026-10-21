@@ -3,7 +3,12 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await report('started');
   const wait = async (predicate) => {
     const deadline = Date.now() + 240000;
+    let logged = Date.now();
     while (!predicate()) {
+      if (Date.now() - logged > 10000) {
+        await report('waiting ' + predicate.toString() + ' DOM: ' + document.querySelector('section')?.textContent.slice(0, 1200));
+        logged = Date.now();
+      }
       if (document.querySelector('[role="alert"]')) throw new Error(document.querySelector('[role="alert"]').textContent);
       if (Date.now() > deadline) throw new Error('Pipeline UI timed out');
       await new Promise(resolve => setTimeout(resolve, 100));

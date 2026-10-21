@@ -92,3 +92,51 @@ fn macos_memory_budget_kills_worker() {
     .unwrap_err();
     assert!(error.to_string().contains("memory"), "{error:#}");
 }
+
+#[test]
+fn pages_without_text_use_platform_ocr_policy() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let library = root.join(".assets").join(if cfg!(windows) {
+        "pdfium/bin/pdfium.dll"
+    } else {
+        "pdfium/lib/libpdfium.dylib"
+    });
+    assert!(library.exists(), "fetch pinned PDFium before cargo test");
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("blank.pdf");
+    // A valid page with no text objects exercises render-to-Vision on macOS,
+    // and the explicit needs-OCR marker on Windows. No image is committed.
+    let objects = [
+        "<</Type/Catalog/Pages 2 0 R>>",
+        "<</Type/Pages/Kids[3 0 R]/Count 1>>",
+        "<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<<>>/Contents 4 0 R>>",
+        "<</Length 0>>\nstream\n\nendstream",
+    ];
+    let mut pdf = String::from("%PDF-1.4\n");
+    let mut offsets = vec![0];
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(pdf.len());
+        pdf.push_str(&format!("{} 0 obj\n{object}\nendobj\n", i + 1));
+    }
+    let xref = pdf.len();
+    pdf.push_str("xref\n0 5\n0000000000 65535 f \n");
+    for offset in offsets.iter().skip(1) {
+        pdf.push_str(&format!("{offset:010} 00000 n \n"));
+    }
+    pdf.push_str(&format!(
+        "trailer\n<</Size 5/Root 1 0 R>>\nstartxref\n{xref}\n%%EOF\n"
+    ));
+    std::fs::write(&path, pdf).unwrap();
+    let pages = run(
+        Path::new(env!("CARGO_BIN_EXE_vz-parser-worker")),
+        &Request {
+            path,
+            pdfium: Some(library.canonicalize().unwrap()),
+        },
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(pages[0].page, 1);
+    assert_eq!(pages[0].needs_ocr, cfg!(windows));
+}

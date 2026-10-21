@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 fetch = SourceFileLoader('assets', str(ROOT / 'scripts/fetch-assets.py')).load_module().fetch
 source = ROOT / '.tools/minio-src'
 archive = ROOT / '.tools/minio-src.tar.gz'
-fetch('https://api.github.com/repos/minio/minio/tarball/f19c534b9f457773dcd043d977433e1a71525c3b', 'c4ded37b44ecd80d795d105653a2ce39a233afb9277e41f2fad91e7551146ba3', archive)
+fetch('https://codeload.github.com/minio/minio/tar.gz/f19c534b9f457773dcd043d977433e1a71525c3b', 'ac3bc23e5d91981a89921800a931a59aad27146434f952e9a79076b919d8a661', archive)
 source.mkdir(parents=True, exist_ok=True)
 with tarfile.open(archive) as bundle:
     bundle.extractall(source, filter='data')

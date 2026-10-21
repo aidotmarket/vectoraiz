@@ -157,7 +157,9 @@ async fn pipeline_search<R: tauri::Runtime>(
                 &engines.vector(&query, true)?,
                 5,
             ))?;
-            Ok(serde_json::to_value(hits)?)
+            Ok(serde_json::Value::Array(hits.into_iter().map(|hit| serde_json::json!({
+                "chunk":{"chunk_id":hit.chunk.chunk_id,"doc_id":hit.chunk.doc_id,"text":hit.chunk.text,"page":hit.chunk.page},"score":hit.score
+            })).collect()))
         };
         run().map_err(|e| format!("{e:#}"))
     })

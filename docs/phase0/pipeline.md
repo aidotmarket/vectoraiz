@@ -86,7 +86,7 @@ checks pack hashes, runs the exported query example, and optionally invokes
 the upload round trip. `minio-test-server.py` builds MinIO at
 f19c534b9f457773dcd043d977433e1a71525c3b
 (RELEASE.2025-04-22T22-12-26Z); its source tarball SHA256 is
-c4ded37b44ecd80d795d105653a2ce39a233afb9277e41f2fad91e7551146ba3.
+ac3bc23e5d91981a89921800a931a59aad27146434f952e9a79076b919d8a661.
 The round trip starts it with ephemeral test data and test-only credentials,
 compares every downloaded byte, then stops it unconditionally. No image is
 built or pulled. The desktop uses a private app-data index and the same
