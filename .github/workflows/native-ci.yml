@@ -25,7 +25,9 @@ jobs:
       NATIVE_FEATURES: ''
     defaults:
       run:
-        shell: bash
+        # Git Bash prepends /usr/bin, whose link.exe shadows the MSVC linker.
+        # Preserve the developer environment's PATH for every Windows Rust step.
+        shell: ${{ matrix.os == 'windows-2022' && 'pwsh' || 'bash' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -103,11 +105,11 @@ jobs:
       - name: Rust format
         run: cargo fmt --all --check
       - name: Rust lint
-        run: cargo clippy --locked --all-targets $NATIVE_FEATURES -- -D warnings
+        run: cargo clippy --locked --all-targets ${{ env.NATIVE_FEATURES }} -- -D warnings
       - name: Rust tests
-        run: cargo test --locked --workspace $NATIVE_FEATURES
+        run: cargo test --locked --workspace ${{ env.NATIVE_FEATURES }}
       - name: Build CLI workers and Tauri debug app
-        run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol $NATIVE_FEATURES
+        run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol ${{ env.NATIVE_FEATURES }}
       - name: Pipeline and MinIO acceptance (CPU)
         env:
           VZ_MINIO_ENDPOINT: local-test-server
