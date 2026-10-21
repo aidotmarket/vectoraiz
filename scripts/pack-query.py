@@ -27,7 +27,7 @@ docs = {d['doc_id']: d for d in pq.read_table(pack / 'documents.parquet').to_pyl
 query = np.asarray(example['query_embedding'], dtype=np.float32)
 if len(sys.argv) > 2:
     # Recompute from the exact recorded GGUF recipe with the same linked engine.
-    result = json.loads(subprocess.check_output([sys.argv[2], '--cpu', 'embed', example['query']], text=True))
+    result = json.loads(subprocess.check_output([sys.argv[2], '--cpu', 'embed', example['query']], text=True, encoding="utf-8"))
     assert result['recipe'] == manifest['embedding_recipe']
     recomputed = np.asarray(result['embedding'], dtype=np.float32)
     np.testing.assert_allclose(query, recomputed, rtol=1e-4, atol=1e-5)

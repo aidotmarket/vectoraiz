@@ -234,6 +234,65 @@ mod tests {
             .contains("ratio"));
         assert!(check_expansion(1, 100, 100, 1).is_ok());
     }
+    fn forged_archive(
+        parts: usize,
+        compressed_size: u64,
+        declared_size: u32,
+    ) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+        for i in 0..parts {
+            zip.start_file(
+                format!("part-{i}.xml"),
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+            std::io::copy(&mut std::io::repeat(b'a').take(compressed_size), &mut zip).unwrap();
+        }
+        zip.finish().unwrap();
+        // Forge size declarations only. The compressed ranges and offsets remain
+        // real, so this exercises preflight refusal without allocating a bomb.
+        let mut bytes = std::fs::read(file.path()).unwrap();
+        for i in 0..bytes.len().saturating_sub(46) {
+            if &bytes[i..i + 4] == b"PK\x01\x02" {
+                bytes[i + 24..i + 28].copy_from_slice(&declared_size.to_le_bytes());
+            }
+            if &bytes[i..i + 4] == b"PK\x03\x04" {
+                bytes[i + 22..i + 26].copy_from_slice(&declared_size.to_le_bytes());
+            }
+        }
+        file.reopen().unwrap().write_all(&bytes).unwrap();
+        file
+    }
+    #[test]
+    fn real_archive_entry_refusal() {
+        let file = forged_archive(MAX_ENTRIES + 1, 0, 0);
+        assert!(validate_zip(file.path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("entry count"));
+    }
+    #[test]
+    fn real_archive_part_refusal() {
+        let file = forged_archive(1, 100, (MAX_PART + 1) as u32);
+        assert!(validate_zip(file.path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("part"));
+    }
+    #[test]
+    fn real_archive_total_refusal() {
+        let file = forged_archive(3, 2 * 1024 * 1024, 200 * 1024 * 1024);
+        assert!(validate_zip(file.path())
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("total"));
+    }
     #[test]
     fn real_archive_ratio_refusal() {
         use std::io::Write;

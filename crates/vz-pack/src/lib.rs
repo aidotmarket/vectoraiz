@@ -55,7 +55,7 @@ pub fn write(state: &State, engines: &Engines, output: &Path, query: &str) -> Re
             zip.write_all(&bytes)?;
         }
         zip.finish()?.sync_all()?;
-        std::fs::write(stage.join("README.md"), "# vectorAIz vector pack\n\nLoad documents.parquet and chunks.parquet with Apache Arrow.\nThe manifest records the exact embedding and chunker recipe.\nOriginal file names are neutral. Documents retain their source licences.\nSee examples/query.py for a verified offline cosine query using the recorded query embedding.\nInstall numpy and pyarrow then run python examples/query.py PACK_DIRECTORY.\n")?;
+        std::fs::write(stage.join("README.md"), "# vectorAIz vector pack\n\nLoad documents.parquet and chunks.parquet with Apache Arrow.\nThe manifest records the exact embedding and chunker recipe.\nOriginal file names are neutral. Documents retain their source licences.\nPhase 0 fixture licence inventory: https://github.com/aidotmarket/vectoraiz/blob/native/spike/fixtures/SOURCES.md\nSee examples/query.py for a verified offline cosine query using the recorded query embedding.\nInstall numpy and pyarrow then run python examples/query.py PACK_DIRECTORY.\n")?;
         std::fs::write(
             stage.join("examples/query.py"),
             include_str!("../../../scripts/pack-query.py"),

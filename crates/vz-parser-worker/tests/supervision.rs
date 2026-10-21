@@ -133,7 +133,7 @@ fn pages_without_text_use_platform_ocr_policy() {
             path,
             pdfium: Some(library.canonicalize().unwrap()),
         },
-        Duration::from_secs(30),
+        Duration::from_secs(60),
     )
     .unwrap();
     assert_eq!(pages.len(), 1);

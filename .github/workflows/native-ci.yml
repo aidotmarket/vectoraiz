@@ -17,12 +17,12 @@ jobs:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     env:
+      PYTHONUTF8: '1'
       CARGO_INCREMENTAL: '0'
       CARGO_PROFILE_DEV_DEBUG: '0'
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_BUILD_JOBS: '3'
       NATIVE_FEATURES: ''
-      TAURI_FEATURES: smoke-test
     defaults:
       run:
         shell: bash
@@ -90,24 +90,22 @@ jobs:
         run: cargo clippy --locked --all-targets $NATIVE_FEATURES -- -D warnings
       - name: Rust tests
         run: cargo test --locked --workspace $NATIVE_FEATURES
-      - name: Build pipeline binaries (CPU)
-        run: cargo build --locked -p vz-cli -p vz-parser-worker $NATIVE_FEATURES
+      - name: Build CLI workers and Tauri debug app
+        run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol $NATIVE_FEATURES
       - name: Pipeline and MinIO acceptance (CPU)
         env:
           VZ_MINIO_ENDPOINT: local-test-server
         run: python scripts/pipeline-e2e.py
       - name: Self-test
-        run: cargo run --locked -p vz-cli --bin vectoraiz-cli -- self-test
-      - name: Tauri debug build
-        working-directory: app
-        run: npm run tauri -- build --debug --no-bundle --features "$TAURI_FEATURES"
-      - name: Launch app and click self-test
+        run: ./target/debug/vectoraiz-cli self-test
+      - name: Launch app and exercise pipeline IPC
         run: python scripts/native-smoke.py
       - name: Install notice generator
         run: cargo install cargo-about --version 0.8.2 --locked
       - name: Generate third-party notices
         run: |
           cargo about generate --locked about.hbs > THIRD_PARTY_NOTICES
+          python scripts/native-notices.py >> THIRD_PARTY_NOTICES
           cd app
           npm run --silent licenses >> ../THIRD_PARTY_NOTICES
       - uses: actions/upload-artifact@v4

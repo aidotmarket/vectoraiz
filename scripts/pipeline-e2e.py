@@ -16,7 +16,7 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     state = Path(temp) / 'state'
     pack = Path(temp) / 'pack'
     def cli(*args):
-        result = subprocess.run([str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, capture_output=True, timeout=600)
+        result = subprocess.run([str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=600)
         print(result.stderr, file=sys.stderr)
         if result.returncode:
             print(result.stdout)
@@ -49,4 +49,7 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     subprocess.run([sys.executable, str(pack / 'examples/query.py'), str(pack), str(CLI)], check=True)
     if os.environ.get('VZ_MINIO_ENDPOINT'):
         subprocess.run([sys.executable, str(ROOT / 'scripts/upload-e2e.py'), str(pack)], check=True)
-    print(json.dumps({'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'pack_hashes': 'OK', 'example_query': 'OK'}))
+    missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
+    assert missing.returncode != 0 and 'source unavailable' in missing.stderr
+    assert cli('search', query) == [], 'unavailable source must revoke cached content'
+    print(json.dumps({'source_revocation': 'OK', 'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'pack_hashes': 'OK', 'example_query': 'OK'}))

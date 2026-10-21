@@ -7,6 +7,7 @@ publish.workspace = true
 
 [features]
 smoke-test = []
+custom-protocol = ["tauri/custom-protocol"]
 vulkan = ["vz-core/vulkan"]
 
 [build-dependencies]

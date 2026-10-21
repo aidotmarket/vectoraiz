@@ -26,7 +26,18 @@ pub async fn index(
     assets: &Path,
     mut progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let folder = folder.canonicalize().context("source unavailable")?;
+    let unavailable = |state: &State| -> Result<()> {
+        state.db.execute("DELETE FROM documents", [])?;
+        state.recover()?;
+        Ok(())
+    };
+    let folder = match folder.canonicalize() {
+        Ok(folder) if folder.is_dir() => folder,
+        _ => {
+            unavailable(state)?;
+            bail!("source unavailable");
+        }
+    };
     let recipe_path = state.root.join("recipe.json");
     if recipe_path.exists() {
         let recipe: crate::engine::Recipe = serde_json::from_slice(&std::fs::read(&recipe_path)?)?;
@@ -43,7 +54,13 @@ pub async fn index(
     ];
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(&folder).follow_links(false) {
-        let entry = entry.context("source unavailable during scan")?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                unavailable(state)?;
+                return Err(error).context("source unavailable during scan");
+            }
+        };
         if entry.file_type().is_file()
             && supported.contains(
                 &entry

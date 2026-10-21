@@ -41,7 +41,8 @@ choose the current generation. A process lock excludes concurrent readers and
 writers for this single-source spike. At startup unreferenced generations are
 removed and interrupted jobs become failed. The recovery test kills a process
 after its real Lance write and before its SQLite flip, then verifies the old
-content is still visible. Deletions are removed after a successful scan.
+content is still visible. Deletions are removed after a successful scan. An unavailable source or failed
+directory traversal revokes the single-source index before reporting the error.
 Metadata is recorded and content hashes confirm changes, including same-size
 edits. An individual failed replacement removes old searchable content.
 
