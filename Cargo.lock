@@ -9278,14 +9278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "vz-ipc-policy"
-version = "0.1.0"
-dependencies = [
- "tauri",
- "tauri-build",
-]
-
-[[package]]
 name = "vz-mcp"
 version = "0.1.0"
 
