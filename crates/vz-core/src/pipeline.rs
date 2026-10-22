@@ -45,6 +45,9 @@ pub struct Document {
     pub bytes: u64,
     pub pages: u32,
     pub kind: String,
+    // Added to generation metadata; old Phase 0 generations deserialize as empty.
+    #[serde(default)]
+    pub needs_ocr_pages: Vec<u32>,
     pub chunks: Vec<Chunk>,
 }
 

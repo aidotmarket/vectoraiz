@@ -51,6 +51,30 @@ impl State {
         state.recover()?;
         Ok(state)
     }
+    /// All query/export entry points open through this recipe gate before inference.
+    pub fn open_index(
+        root: &Path,
+        selected: &crate::engine::Recipe,
+    ) -> Result<(Self, crate::engine::Recipe)> {
+        let state = Self::open(root)?;
+        let recipe = state.validate_recipe(selected)?;
+        Ok((state, recipe))
+    }
+    pub fn validate_recipe(
+        &self,
+        selected: &crate::engine::Recipe,
+    ) -> Result<crate::engine::Recipe> {
+        let recipe: crate::engine::Recipe = serde_json::from_slice(
+            &std::fs::read(self.root.join("recipe.json"))
+                .context("index recipe missing; re-index required")?,
+        )
+        .context("index recipe invalid; re-index required")?;
+        anyhow::ensure!(
+            recipe == *selected,
+            "embedding recipe mismatch; re-index required (use a new index)"
+        );
+        Ok(recipe)
+    }
     pub fn recover(&self) -> Result<()> {
         let active: HashSet<String> = self
             .db
@@ -314,5 +338,50 @@ impl crate::Store for State {
         self.documents()
             .map(|docs| docs.into_iter().find(|doc| doc.doc_id == id))
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_recipe_gate_refuses_same_dimension_model_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let recipe: crate::engine::Recipe = serde_json::from_value(serde_json::json!({
+            "model":"model-A", "sha256":"hash-A", "dimensions":4,
+            "dtype":"float32", "pooling":"cls", "normalization":"l2",
+            "tokenizer":"embedded", "max_tokens":512, "document_prefix":"",
+            "query_prefix":"query: ", "chunker":{"version":"vz-1"},
+            "llama_commit":crate::engine::LLAMA_COMMIT
+        }))
+        .unwrap();
+        std::fs::write(
+            root.path().join("recipe.json"),
+            serde_json::to_vec(&recipe).unwrap(),
+        )
+        .unwrap();
+        let (state, stored) = State::open_index(root.path(), &recipe).unwrap();
+        assert_eq!(stored, recipe);
+        drop(state);
+        for field in ["model", "sha256"] {
+            let mut changed = serde_json::to_value(&recipe).unwrap();
+            changed[field] = "different-model".into();
+            let changed = serde_json::from_value(changed).unwrap();
+            let error = State::open_index(root.path(), &changed).err().unwrap();
+            assert!(error.to_string().contains("re-index required"));
+        }
+        std::fs::write(root.path().join("recipe.json"), "invalid").unwrap();
+        assert!(format!(
+            "{:#}",
+            State::open_index(root.path(), &recipe).err().unwrap()
+        )
+        .contains("re-index required"));
+        std::fs::remove_file(root.path().join("recipe.json")).unwrap();
+        assert!(format!(
+            "{:#}",
+            State::open_index(root.path(), &recipe).err().unwrap()
+        )
+        .contains("re-index required"));
     }
 }

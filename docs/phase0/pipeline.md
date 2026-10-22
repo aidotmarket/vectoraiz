@@ -45,6 +45,13 @@ content is still visible. Deletions are removed after a successful scan. An unav
 directory traversal revokes the single-source index before reporting the error.
 Metadata is recorded and content hashes confirm changes, including same-size
 edits. An individual failed replacement removes old searchable content.
+Search, ask and pack (including desktop search/chat) open through the same full
+persisted-recipe check; any mismatch requires re-indexing. Packs export that
+validated stored recipe. Generation metadata records `needs_ocr_pages` alongside
+chunks, so mixed PDFs retain searchable text and page-level omissions atomically.
+Progress and CLI JSON report these pages and the skipped-page reason, including
+on unchanged rescans. Existing Phase 0 generation JSON defaults the new field to
+empty when reopened; rebuild old indexes to recover previously omitted markers.
 
 The structure-aware chunker preserves page and Markdown/HTML heading path,
 targets 500 estimated tokens, and overlaps up to 160 bytes. The estimate is
@@ -53,7 +60,11 @@ model inputs at 512 tokens. These are spike settings to measure in chunk C.
 Chat streams generated text followed by an application-owned numbered source
 footer, so provenance remains available when a provisional model omits inline
 citations. Generated references outside the retrieved source list are refused;
-semantic support for every generated claim remains a chunk C evaluation.
+the CPU model does not reliably emit inline `[n]`. The acceptance check therefore
+asserts the retention fact in the model body before the footer, and verifies every
+footer number against citation metadata and an exported chunk, document and page.
+It does not claim to test model-emitted inline citations; semantic support for every
+generated claim remains a chunk C evaluation.
 RRF uses k=60 over vector distance and BM25 rankings. BM25 indexes are per
 generation, so their scores are not collection-global IDF statistics; this
 tradeoff needs measurement before the Phase 1 collection store design.

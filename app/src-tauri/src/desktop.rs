@@ -129,7 +129,7 @@ async fn pipeline_search<R: tauri::Runtime>(
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let run = || -> anyhow::Result<serde_json::Value> {
             let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
-            let state = vz_core::storage::State::open(&root)?;
+            let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &query,
                 &engines.vector(&query, true)?,
@@ -154,7 +154,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let run = || -> anyhow::Result<serde_json::Value> {
             let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
-            let state = vz_core::storage::State::open(&root)?;
+            let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &question,
                 &engines.vector(&question, true)?,

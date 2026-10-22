@@ -9,7 +9,8 @@ use vz_core::{
     storage::{chunks_batch, documents_batch, State},
 };
 
-pub fn write(state: &State, engines: &Engines, output: &Path, query: &str) -> Result<Value> {
+pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Result<Value> {
+    let (state, recipe) = State::open_index(root, &engines.recipe)?;
     if output.exists() {
         bail!("pack output already exists; choose an empty destination");
     }
@@ -75,7 +76,7 @@ pub fn write(state: &State, engines: &Engines, output: &Path, query: &str) -> Re
             })
             .collect::<Vec<_>>();
         scores.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let example = json!({"query":query,"query_embedding":vector,"expected_top":scores.iter().take(3).map(|v| &v.0).collect::<Vec<_>>(),"method":"cosine on L2-normalized float32 embeddings; ties by chunk_id","embedding_recipe_sha256":sha256(&serde_json::to_vec(&serde_json::to_value(&engines.recipe)?)?)});
+        let example = json!({"query":query,"query_embedding":vector,"expected_top":scores.iter().take(3).map(|v| &v.0).collect::<Vec<_>>(),"method":"cosine on L2-normalized float32 embeddings; ties by chunk_id","embedding_recipe_sha256":sha256(&serde_json::to_vec(&serde_json::to_value(&recipe)?)?)});
         std::fs::write(
             stage.join("examples/query.json"),
             serde_json::to_string_pretty(&example)? + "\n",
@@ -94,7 +95,7 @@ pub fn write(state: &State, engines: &Engines, output: &Path, query: &str) -> Re
                 );
             }
         }
-        let manifest = json!({"format_version":1,"pack_id":format!("pack-{}",&sha256(serde_json::to_string(&hashes)?.as_bytes())[..24]),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":engines.recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
+        let manifest = json!({"format_version":1,"pack_id":format!("pack-{}",&sha256(serde_json::to_string(&hashes)?.as_bytes())[..24]),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
         std::fs::write(
             stage.join("manifest.json"),
             serde_json::to_string_pretty(&manifest)? + "\n",

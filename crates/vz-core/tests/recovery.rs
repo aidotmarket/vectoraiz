@@ -15,6 +15,7 @@ fn document(text: &str) -> Document {
         bytes: 1,
         pages: 1,
         kind: "txt".into(),
+        needs_ocr_pages: vec![],
         chunks: vec![Chunk {
             chunk_id: "doc-0".into(),
             doc_id: "doc".into(),
@@ -88,4 +89,37 @@ fn kill_between_lance_write_and_sqlite_flip_preserves_old_generation() {
             .count(),
         1
     );
+}
+
+#[test]
+fn ocr_status_commits_with_generation_and_old_metadata_reopens() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut state = State::open(temp.path()).unwrap();
+    let mut doc = document("searchable text page");
+    doc.pages = 2;
+    doc.needs_ocr_pages = vec![2];
+    let generation = runtime.block_on(state.stage(&doc)).unwrap();
+    state.commit(&doc, "1", &generation).unwrap();
+    let mut replacement = doc.clone();
+    replacement.needs_ocr_pages.clear();
+    runtime.block_on(state.stage(&replacement)).unwrap();
+    drop(state);
+    let state = State::open(temp.path()).unwrap();
+    let reopened = state.documents().unwrap().remove(0);
+    assert_eq!(reopened.needs_ocr_pages, [2]);
+    assert_eq!(reopened.chunks[0].page, 1);
+    let mut old = serde_json::to_value(&reopened).unwrap();
+    old.as_object_mut().unwrap().remove("needs_ocr_pages");
+    std::fs::write(
+        temp.path()
+            .join("generations")
+            .join(generation)
+            .join("document.json"),
+        serde_json::to_vec(&old).unwrap(),
+    )
+    .unwrap();
+    drop(state);
+    let state = State::open(temp.path()).unwrap();
+    assert!(state.documents().unwrap()[0].needs_ocr_pages.is_empty());
 }

@@ -16,6 +16,7 @@ pub struct Progress {
     pub failed: usize,
     pub skipped: usize,
     pub total: usize,
+    pub needs_ocr_pages: Vec<u32>,
     pub path: String,
     pub reason: Option<String>,
 }
@@ -40,10 +41,7 @@ pub async fn index(
     };
     let recipe_path = state.root.join("recipe.json");
     if recipe_path.exists() {
-        let recipe: crate::engine::Recipe = serde_json::from_slice(&std::fs::read(&recipe_path)?)?;
-        if recipe != engines.recipe {
-            bail!("embedding recipe changed; use a new index and re-index the source");
-        }
+        state.validate_recipe(&engines.recipe)?;
     } else {
         let file = std::fs::File::create(&recipe_path)?;
         serde_json::to_writer_pretty(&file, &engines.recipe)?;
@@ -89,6 +87,7 @@ pub async fn index(
         seen.insert(path_text.clone());
         stats.path = path_text.clone();
         stats.reason = None;
+        stats.needs_ocr_pages.clear();
         state.db.execute(
             "INSERT INTO jobs(path,status) VALUES(?1,'running')",
             [&path_text],
@@ -114,6 +113,9 @@ pub async fn index(
                             "UPDATE documents SET size=?1,mtime=?2 WHERE path=?3",
                             params![metadata.len(), mtime, path_text],
                         )?;
+                    }
+                    if let Some(doc) = state.documents()?.iter().find(|d| d.path == path_text) {
+                        stats.needs_ocr_pages = doc.needs_ocr_pages.clone();
                     }
                     return Ok(false);
                 }
@@ -158,10 +160,16 @@ pub async fn index(
                 bytes: metadata.len(),
                 pages: pages.len() as u32,
                 kind: path.extension().unwrap().to_string_lossy().to_lowercase(),
+                needs_ocr_pages: pages
+                    .iter()
+                    .filter(|p| p.needs_ocr)
+                    .map(|p| p.page)
+                    .collect(),
                 chunks,
             };
             let generation = state.stage(&doc).await?;
             crate::Store::put(state, &doc, &mtime, &generation).map_err(anyhow::Error::msg)?;
+            stats.needs_ocr_pages = doc.needs_ocr_pages.clone();
             Ok(true)
         }
         .await;
@@ -172,9 +180,16 @@ pub async fn index(
                 } else {
                     stats.skipped += 1;
                 }
-                state
-                    .db
-                    .execute("UPDATE jobs SET status='done' WHERE id=?1", [job])?;
+                if !stats.needs_ocr_pages.is_empty() {
+                    stats.reason = Some(format!(
+                        "needs OCR: pages {:?} skipped",
+                        stats.needs_ocr_pages
+                    ));
+                }
+                state.db.execute(
+                    "UPDATE jobs SET status='done',reason=?1 WHERE id=?2",
+                    params![stats.reason, job],
+                )?;
             }
             Err(error) => {
                 stats.failed += 1;

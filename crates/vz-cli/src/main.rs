@@ -68,12 +68,12 @@ fn main() -> Result<()> {
         return vz_pack::upload(pack, endpoint, bucket, region, prefix);
     }
     let engines = Engines::load(&args.assets, &args.models, args.cpu)?;
-    let mut state = State::open(&args.state)?;
     let runtime = tokio_runtime()?;
     runtime.block_on(async {
         match args.command {
             Operation::Embed { text } => { println!("{}",serde_json::to_string(&serde_json::json!({"embedding":engines.vector(&text,true)?,"recipe":engines.recipe}))?); }
             Operation::Index { folder } => {
+                let mut state = State::open(&args.state)?;
                 let result =
                     vz_core::index::index(&mut state, &folder, &engines, &args.assets, |p| {
                         eprintln!("{}", serde_json::to_string(p).unwrap())
@@ -82,12 +82,14 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&result)?);
             }
             Operation::Search { query, top_k } => {
+                let (state, _) = State::open_index(&args.state, &engines.recipe)?;
                 let hits = state
                     .search(&query, &engines.vector(&query, true)?, top_k.clamp(1, 100))
                     .await?;
                 println!("{}", serde_json::to_string(&hits)?);
             }
             Operation::Ask { question } => {
+                let (state, _) = State::open_index(&args.state, &engines.recipe)?;
                 let hits = state
                     .search(&question, &engines.vector(&question, true)?, 3)
                     .await?;
@@ -99,7 +101,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&answer)?);
             }
             Operation::Pack { output, query } => {
-                let manifest = vz_pack::write(&state, &engines, &output, &query)?;
+                let manifest = vz_pack::write(&args.state, &engines, &output, &query)?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
             Operation::SelfTest | Operation::Upload { .. } => unreachable!(),
