@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -27,7 +28,16 @@ class VersionGate(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
         (self.root / 'app/src-tauri').mkdir(parents=True)
-        (self.root / 'Cargo.toml').write_text('[workspace.package]\nversion = "0.0.1"\n')
+        self.workspace_manifest = '[workspace]\nmembers = ["crates/*", "app/src-tauri"]\n[workspace.package]\nversion = "0.0.1"\n'
+        (self.root / 'Cargo.toml').write_text(self.workspace_manifest)
+        (self.root / 'crates/example').mkdir(parents=True)
+        for member, name in [('crates/example', 'example'), ('app/src-tauri', 'app')]:
+            (self.root / member / 'Cargo.toml').write_text(f'[package]\nname = "{name}"\nversion.workspace = true\n')
+        self.lockfile = ('# Preserve lockfile formatting and registry versions.\nversion = 4\n'
+                         '[[package]]\nname = "example"\nversion = "0.0.1"\n'
+                         '[[package]]\nname = "app"\nversion = "0.0.1"\n'
+                         '[[package]]\nname = "example"\nversion = "0.0.1"\nsource = "registry+https://example.test"\n')
+        (self.root / 'Cargo.lock').write_text(self.lockfile)
         self.files = ['app/package.json', 'app/src-tauri/tauri.conf.json', 'app/package-lock.json']
         for name in self.files:
             value = {'version': '0.0.1', 'packages': {'': {'version': '0.0.1'}}}
@@ -55,15 +65,73 @@ class VersionGate(unittest.TestCase):
                 path.write_text(original)
 
     def test_write_derives_versions_and_lockfile(self):
-        (self.root / 'Cargo.toml').write_text('[workspace.package]\nversion = "0.0.7"\n')
+        (self.root / 'Cargo.toml').write_text(self.workspace_manifest.replace('0.0.1', '0.0.7'))
         self.invoke('--write')
         self.invoke()
         for name in self.files:
             self.assertEqual(json.loads((self.root / name).read_text())['version'], '0.0.7')
 
+        packages = tomllib.loads((self.root / 'Cargo.lock').read_text())['package']
+        self.assertEqual([p['version'] for p in packages], ['0.0.7', '0.0.7', '0.0.1'])
+
+    def test_cargo_lock_workspace_mismatch_fails_and_write_repairs_only_members(self):
+        path = self.root / 'Cargo.lock'
+        for name in ['example', 'app']:
+            with self.subTest(member=name):
+                drift = self.lockfile.replace(f'name = "{name}"\nversion = "0.0.1"',
+                                              f'name = "{name}"\nversion = "0.0.2"', 1)
+                path.write_text(drift)
+                with self.assertRaisesRegex(SystemExit, f'Cargo.lock: {name} version differs'):
+                    self.invoke()
+                self.invoke('--write')
+                self.assertEqual(path.read_text(), self.lockfile)
+                self.invoke()
+
+    def test_cargo_lock_missing_member_fails(self):
+        (self.root / 'Cargo.lock').write_text(self.lockfile.replace(
+            '[[package]]\nname = "app"\nversion = "0.0.1"\n', ''))
+        for args in [(), ('--write',)]:
+            with self.assertRaisesRegex(SystemExit, 'missing workspace members: app'):
+                self.invoke(*args)
+
     def test_placeholder_cannot_release(self):
         with self.assertRaisesRegex(SystemExit, 'placeholder updater public key'):
             self.invoke('--release')
+
+
+class ProtocInstaller(unittest.TestCase):
+    def installer(self):
+        spec = importlib.util.spec_from_file_location('protoc', Path(__file__).with_name('install-protoc.py'))
+        protoc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(protoc)
+        return protoc
+
+    def test_download_retry_is_bounded_and_preserves_failure(self):
+        protoc = self.installer()
+        failure = OSError('download fixture failure')
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(protoc.urllib.request, 'urlopen', side_effect=failure) as request, \
+                patch.object(protoc.time, 'sleep') as sleep:
+            with self.assertRaisesRegex(OSError, 'download fixture failure'):
+                protoc.download('https://example.test/archive.zip', Path(temporary) / 'archive.zip')
+            self.assertEqual(request.call_count, 4)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [2, 4, 8])
+
+    def test_checksum_mismatch_stops_before_extraction(self):
+        protoc = self.installer()
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(protoc, 'download', side_effect=lambda url, path: path.write_bytes(b'corrupt archive')), \
+                patch.object(protoc.zipfile, 'ZipFile') as unzip:
+            with self.assertRaisesRegex(SystemExit, 'SHA-256 mismatch'):
+                protoc.install(Path(temporary), 'Windows', 'AMD64')
+            unzip.assert_not_called()
+
+    def test_unsupported_platform_fails_before_download(self):
+        protoc = self.installer()
+        with patch.object(protoc, 'download') as download:
+            with self.assertRaisesRegex(SystemExit, 'Unsupported protoc platform'):
+                protoc.install(Path('unused'), 'Windows', 'ARM64')
+            download.assert_not_called()
 
 
 class PublisherGate(unittest.TestCase):

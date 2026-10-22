@@ -1,6 +1,6 @@
 # Phase 0 chunk D test builds
 
-The workspace Cargo version is authoritative; `scripts/native-version.py --write` derives the UI, lockfile and Tauri versions. CI rejects drift. Stage 1 starts at `0.0.1`.
+The workspace Cargo version is authoritative; `scripts/native-version.py --write` derives the UI, npm lockfile, Cargo.lock workspace-member and Tauri versions. CI rejects drift. Stage 1 starts at `0.0.1`.
 
 `native-ci.yml` builds on hosted `macos-14` and `windows-2022`. Artifacts contain the ad-hoc signed macOS DMG and `.app.tar.gz`, unsigned per-machine Windows MSI (including the silent offline WebView2 installer), notices and provenance/hash/size manifests. All macOS Mach-O leaves and the app container are signed and verified. The Windows MSI itself is the updater artifact.
 
