@@ -3,7 +3,7 @@
 Apple Silicon, macOS 13 or later. These builds use an ad-hoc signature and are for testers.
 
 1. Open the DMG and drag vectorAIz into Applications. Eject the DMG.
-2. Open vectorAIz. macOS says it was not opened; choose **Done**. Open System Settings → Privacy & Security, scroll to Security and choose **Open Anyway**, choose **Open Anyway** again in the dialog, then enter an administrator user name and password. Only do this for a build supplied by the project.
+2. Open vectorAIz. On macOS 15 (the sequence verified so far), macOS says it was not opened; choose **Done**. Open System Settings → Privacy & Security, scroll to Security and choose **Open Anyway**, choose **Open Anyway** again in the dialog, then enter an administrator user name and password. Only do this for a build supplied by the project.
 3. Click **Run self-test**. The result should say `OK` and show the installed version.
 4. After each update the changed ad-hoc signature can trigger a keychain prompt. Choose **Always Allow** when vectorAIz asks to read its stored secrets.
 

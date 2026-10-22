@@ -1,6 +1,39 @@
+Operator-captured command output from the VM (S1817, 2026-10-22). Where only a summary is
+given, the result was observed by the operator in the session and not preserved verbatim.
+
+== SHA-256 of every file under ~/vectorAIz, before the update (after first run of 0.0.1)
 db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+== same, after the update to 0.0.2 and first run of 0.0.2
 db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+== same, after Move to Trash of /Applications/vectorAIz.app
 db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+(The folder held only this file: the app had created no collections or indexes.)
+
+== Downloaded DMG (shasum -a 256 in the VM) and the release SHA256SUMS line
+fd63bf17b5165afdba1151f2691af0caab6d1448bcc1aada1b72ef502511a9c6  /Users/admin/Downloads/vectorAIz_0.0.1_aarch64.dmg
+fd63bf17b5165afdba1151f2691af0caab6d1448bcc1aada1b72ef502511a9c6  vectorAIz_0.0.1_aarch64.dmg
+
+== xattr on the downloaded DMG
+com.apple.metadata:kMDItemDownloadedDate
+com.apple.metadata:kMDItemWhereFroms
+com.apple.quarantine
+quarantine value: 0083;6ada8144;Safari;BBCDE34F-8CF1-4D4B-B5AC-72890032F79B
+
+== After drag install: ls -ld /Applications/vectorAIz.app; xattr; du -sh
+drwxr-xr-x@ 3 admin  admin  96 Oct 22 15:47 /Applications/vectorAIz.app
+com.apple.quarantine
+584M	/Applications/vectorAIz.app
+
+== Update: VZ_UPDATE_TO_VERSION=0.0.2 vectoraiz --update-test; echo rc; Info.plist version; xattr; codesign -dv
+rc=0
+0.0.2
+com.apple.metadata:_kMDItemLastOutOfSpotlightEngagementDate
+com.apple.provenance
+Identifier=com.vectoraiz.native
+Signature=adhoc
+TeamIdentifier=not set
+
+== VM
 ProductName:		macOS
 ProductVersion:		15.7.7
 BuildVersion:		24G720

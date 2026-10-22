@@ -1,6 +1,6 @@
 # By-hand macOS run: native-v0.0.1 → native-v0.0.2 (2026-10-22, Minerva S1817)
 
-Phase 0 exit item 2, by-hand macOS run (Gate 2 spec 4.4, Amendment 1). Windows 10/11 runs follow on a physical PC (Max decision, Event Ledger 2ec1164d).
+Phase 0 exit item 2, by-hand macOS run (Gate 2 spec 4.4, Amendment 1). **Coverage: PARTIAL.** Install from the downloaded file, first-run self-test and uninstall are covered by hand; the update was covered by the app's signed updater, not by a by-hand update procedure (finding 1), so the by-hand update stays pending. Windows 10/11 runs follow on a physical PC (Max decision, Event Ledger 2ec1164d).
 
 ## Machine
 
@@ -16,9 +16,10 @@ Phase 0 exit item 2, by-hand macOS run (Gate 2 spec 4.4, Amendment 1). Windows 1
 | First open | Opened the app | Blocked: "vectorAIz Not Opened" (Done / Move to Trash), as expected for an ad-hoc build | 04 |
 | Allow | System Settings → Privacy & Security → **Open Anyway** → dialog **Open Anyway** → **administrator user name and password** → OK | PASS. App opened, "Version 0.0.1" | 05–08 |
 | Self-test | Run self-test | PASS. `status: OK`, `version: 0.0.1`, `os: macos`, `arch: aarch64` | 09 |
-| Update | App quit; signed updater run against the published feed (`VZ_UPDATE_TO_VERSION=0.0.2 vectoraiz --update-test`) | PASS. Exit 0; bundle version 0.0.2; signature ad-hoc; no Gatekeeper block afterwards (quarantine gone) | — |
+| Update (signed updater) | App quit; signed updater run against the published feed (`VZ_UPDATE_TO_VERSION=0.0.2 vectoraiz --update-test`) | PASS. Exit 0; bundle version 0.0.2; signature ad-hoc; no Gatekeeper block afterwards (quarantine gone) | `vm-facts.txt` |
+| Update (by hand) | Download the 0.0.2 DMG and replace the app (the procedure now in the install notes) | **PENDING: not run** | — |
 | Self-test after update | Opened the app, Run self-test | PASS. `status: OK`, `version: 0.0.2`. No keychain prompt appeared | 10, 11 |
-| Data kept by update | SHA-256 of every file under `~/vectorAIz` before and after | PASS. Identical (`models/pdfium/lib/libpdfium.dylib`) | `vm-facts.txt` |
+| Data kept by update | SHA-256 of every file under `~/vectorAIz` before and after | PASS for what the folder held: one file (`models/pdfium/lib/libpdfium.dylib`), identical. No collections or indexes existed, so their preservation is not shown | `vm-facts.txt` |
 | Uninstall | Finder → Applications → vectorAIz → File → Move to Trash | PASS. App in Trash; `~/vectorAIz` still present and byte-identical. The install notes are what tell the user the folder is kept; the app shows nothing on a drag-to-Trash uninstall | 12, 13 |
 
 ## Findings (not fixed in this record)
@@ -30,4 +31,4 @@ Phase 0 exit item 2, by-hand macOS run (Gate 2 spec 4.4, Amendment 1). Windows 1
 
 ## Method notes
 
-Driven over VNC (tart `--vnc-experimental`) with vncdotool and checked by OCR; the downloads, drag, Gatekeeper and Settings steps were done through the GUI, and `open` from a shell stood in for a double-click. Screenshots are scaled to 1280 px. Earlier screenshots were taken with incremental framebuffer updates, so screen areas below an active window can show stale content; 05 onwards were cross-checked with full refreshes.
+Command results in the table are recorded in `vm-facts.txt` as captured in the session. Driven over VNC (tart `--vnc-experimental`) with vncdotool and checked by OCR; the downloads, drag, Gatekeeper and Settings steps were done through the GUI, and `open` from a shell stood in for a double-click. Screenshots are scaled to 1280 px. Earlier screenshots were taken with incremental framebuffer updates, so screen areas below an active window can show stale content; 05 onwards were cross-checked with full refreshes.
