@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
@@ -74,6 +76,8 @@ class PublisherGate(unittest.TestCase):
         embedded = base64.b64encode(b'untrusted comment: test\n' + base64.b64encode(b'A' * 42) + b'\n').decode()
         secret = base64.b64encode(b'fixture secret').decode()
         def recreate(*args, **kwargs):
+            if os.name != 'nt':
+                self.assertEqual(Path(args[args.index('-s') + 1]).stat().st_mode & 0o777, 0o600)
             Path(args[args.index('-p') + 1]).write_bytes(b'untrusted comment: test\n' + base64.b64encode(b'B' * 42) + b'\n')
         with tempfile.TemporaryDirectory() as temporary, \
                 patch.object(publisher, 'rotated_secrets', return_value=(secret, '')), \
@@ -129,7 +133,104 @@ class PublisherGate(unittest.TestCase):
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
 
 
+class NoticeGenerators(unittest.TestCase):
+    def test_generator_failure_stops_before_combining_and_keeps_prior_output(self):
+        spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        for failing in range(3):
+            with self.subTest(generator=failing), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                output = root / 'THIRD_PARTY_NOTICES'
+                output.write_text('prior output')
+                calls = []
+
+                def generate(argv, **kwargs):
+                    calls.append(argv)
+                    if len(calls) - 1 == failing:
+                        raise subprocess.CalledProcessError(1, argv)
+                    if '-o' in argv:
+                        Path(argv[argv.index('-o') + 1]).write_text('Rust licence')
+                    else:
+                        kwargs['stdout'].write(b'licence')
+
+                with patch.object(notices, 'ROOT', root), \
+                        patch.object(notices.subprocess, 'run', side_effect=generate), \
+                        self.assertRaises(subprocess.CalledProcessError):
+                    notices.main()
+                self.assertEqual(len(calls), failing + 1)
+                self.assertEqual(output.read_text(), 'prior output')
+
+
+class HelperDiagnostics(unittest.TestCase):
+    def test_failed_helper_retains_private_stderr_without_printing_values(self):
+        def fail(*args, **kwargs):
+            kwargs['stderr'].write(b'private diagnostic fixture')
+            raise subprocess.CalledProcessError(9, args, output=b'secret stdout fixture')
+        with patch.object(publisher, 'command', side_effect=fail):
+            with self.assertRaises(SystemExit) as caught:
+                publisher.rotated_secrets()
+        message = str(caught.exception)
+        self.assertNotIn('fixture', message)
+        path = Path(message.split('private stderr: ', 1)[1])
+        self.addCleanup(path.unlink)
+        self.assertEqual(path.read_bytes(), b'private diagnostic fixture')
+        if os.name != 'nt':
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+
 class PackageGate(unittest.TestCase):
+    notices = ('THIRD_PARTY_NOTICES — Rust dependencies\nRust licence\n'
+               'llama.cpp revision\nNative licence\n'
+               'PDFium chromium/8111:\nPDFium licence\n'
+               'Provisional model licences and source notices:\nModel licence\n'
+               'UI npm dependencies\nnpm licence\n')
+
+    def package_module(self):
+        spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
+        package = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(package)
+        return package
+
+    def test_prepare_refuses_missing_or_empty_notice_sections(self):
+        package = self.package_module()
+        headers = ['THIRD_PARTY_NOTICES — Rust dependencies', 'llama.cpp ',
+                   'PDFium chromium/8111:', 'Provisional model licences and source notices:',
+                   'UI npm dependencies']
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
+            notices = root / 'THIRD_PARTY_NOTICES'
+            notices.write_text(self.notices, encoding='utf-8')
+            package.validate_notices(notices)
+            for header in headers:
+                with self.subTest(missing=header):
+                    notices.write_text(self.notices.replace(header, ''), encoding='utf-8')
+                    with patch.object(package, 'ROOT', root), \
+                            patch.object(sys, 'argv', ['native-package.py', 'prepare']), \
+                            self.assertRaisesRegex(SystemExit, 'Incomplete third-party notices'):
+                        package.main()
+            for body in ['Rust licence', 'PDFium licence', 'Model licence', 'npm licence']:
+                with self.subTest(empty=body):
+                    notices.write_text(self.notices.replace(body, ''), encoding='utf-8')
+                    with self.assertRaisesRegex(SystemExit, 'empty'):
+                        package.validate_notices(notices)
+
+    def test_dmg_retry_is_bounded_and_preserves_failure(self):
+        package = self.package_module()
+        failure = subprocess.CalledProcessError(1, ['hdiutil', 'create'])
+        with patch.object(package, 'run', side_effect=[failure, None]) as run, \
+                patch.object(package.time, 'sleep') as sleep:
+            package.create_dmg('stage', 'image.dmg')
+            self.assertEqual(run.call_count, 2)
+            sleep.assert_called_once_with(2)
+        with patch.object(package, 'run', side_effect=failure) as run, \
+                patch.object(package.time, 'sleep') as sleep:
+            with self.assertRaises(subprocess.CalledProcessError):
+                package.create_dmg('stage', 'image.dmg')
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(sleep.call_count, 3)
+
     def test_prepare_drops_cached_models_and_stale_resources(self):
         module_spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
         package = importlib.util.module_from_spec(module_spec)
@@ -145,6 +246,7 @@ class PackageGate(unittest.TestCase):
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b'fixture')
             (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
+            (root / 'THIRD_PARTY_NOTICES').write_text(self.notices, encoding='utf-8')
             (root / 'app/src-tauri/tauri.stage1.conf.json').write_text('{"bundle":{}}')
             with patch.object(package, 'ROOT', root), patch.object(package.platform, 'system', return_value='Windows'), \
                     patch.object(sys, 'argv', ['native-package.py', 'prepare']):

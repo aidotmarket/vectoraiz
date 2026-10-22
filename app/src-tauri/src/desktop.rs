@@ -150,11 +150,8 @@ fn installed_assets<R: tauri::Runtime>(
         "pdfium/lib/libpdfium.dylib"
     };
     let library = assets.join(relative);
-    if !library.exists() {
-        std::fs::create_dir_all(library.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::copy(resources.join("assets").join(relative), library)
-            .map_err(|e| e.to_string())?;
-    }
+    crate::bundled_library::refresh(&resources.join("assets").join(relative), &library)
+        .map_err(|e| e.to_string())?;
     Ok(assets)
 }
 

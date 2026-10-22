@@ -8,12 +8,46 @@ import platform
 import shutil
 import subprocess
 import tomllib
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def run(*argv, **kwargs):
     return subprocess.run(list(map(str, argv)), check=True, **kwargs)
+
+
+def validate_notices(path):
+    text = path.read_text(encoding='utf-8-sig')
+    headers = ['THIRD_PARTY_NOTICES — Rust dependencies', 'llama.cpp ',
+               'PDFium chromium/8111:', 'Provisional model licences and source notices:',
+               'UI npm dependencies']
+    positions = [text.find(header) for header in headers]
+    if any(position < 0 for position in positions) or positions != sorted(positions):
+        raise SystemExit('Incomplete third-party notices: missing or unordered dependency section')
+    # PDFium may have several subheaders; each generator must supply actual content.
+    for index, header in enumerate(headers):
+        start = positions[index] + len(header)
+        end = positions[index + 1] if index + 1 < len(headers) else len(text)
+        if not text[start:end].strip():
+            raise SystemExit(f'Incomplete third-party notices: empty {header} section')
+
+
+def create_dmg(staging, output):
+    for attempt in range(4):
+        try:
+            run('hdiutil', 'create', '-volname', 'vectorAIz', '-srcfolder', staging,
+                '-ov', '-format', 'UDZO', output)
+            return
+        except subprocess.CalledProcessError:
+            if attempt == 3:
+                raise
+            time.sleep(2 * (attempt + 1))
+
+
+def sha256(path):
+    with path.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def main():
@@ -27,6 +61,7 @@ def main():
     bundle = generated / 'bundle'
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
     if args.phase == 'prepare':
+        validate_notices(ROOT / 'THIRD_PARTY_NOTICES')
         # Never copy the CI model cache into an installer (including stale inputs).
         shutil.rmtree(bundle, ignore_errors=True)
         bundle.mkdir(parents=True)
@@ -72,14 +107,13 @@ def main():
         staging.mkdir()
         shutil.copytree(app, staging / app.name, symlinks=True, dirs_exist_ok=True)
         (staging / 'Applications').symlink_to('/Applications', target_is_directory=True)
-        run('hdiutil', 'create', '-volname', 'vectorAIz', '-srcfolder', staging,
-            '-ov', '-format', 'UDZO', output / f'vectorAIz_{version}_aarch64.dmg')
+        create_dmg(staging, output / f'vectorAIz_{version}_aarch64.dmg')
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', output / f'THIRD_PARTY_NOTICES-{triple}.txt')
     manifest = {'source_sha': __import__('os').environ['SOURCE_SHA'], 'version': version,
                 'target': triple, 'profile': 'debug', 'updater_signed': False,
                 'updater_public_key': json.loads((ROOT / 'app/src-tauri/tauri.conf.json').read_text())['plugins']['updater']['pubkey'],
                 'sizes_bytes': {p.name: p.stat().st_size for p in sorted(output.iterdir()) if p.is_file()},
-                'files': {p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
+                'files': {p.name: sha256(p)
                           for p in sorted(output.iterdir()) if p.is_file()}}
     for name, size in manifest['sizes_bytes'].items():
         print(f'Packaged {name}: {size:,} bytes', flush=True)

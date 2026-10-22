@@ -129,10 +129,7 @@ jobs:
         run: cargo install cargo-about --version 0.8.2 --locked
       - name: Generate third-party notices
         run: |
-          cargo about generate --locked about.hbs > THIRD_PARTY_NOTICES
-          python scripts/native-notices.py >> THIRD_PARTY_NOTICES
-          cd app
-          npm run --silent licenses >> ../THIRD_PARTY_NOTICES
+          python scripts/native-generate-notices.py
       - name: Prepare stage 1 bundle inputs
         run: python scripts/native-package.py prepare
       # Phase 0 intentionally packages the tested debug profile, with smoke-test

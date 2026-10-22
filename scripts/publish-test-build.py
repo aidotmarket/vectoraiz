@@ -40,17 +40,22 @@ def docker_checks():
 
 
 def rotated_secrets():
-    # Run the approved Cloud helper in isolated Python. Suppress upstream errors
-    # and never include credentials in exception diagnostics or command arguments.
+    # Keep helper diagnostics in a private file, never in console output.
+    # Neither credentials nor captured stderr belong in exception diagnostics.
     helper = Path('/Users/max/koskadeux-state/s1811/infisical_endpoint_841ebac.py')
     environment = dict(os.environ)
     environment.pop('INFISICAL_PROJECT_ID', None)
     environment.pop('INFISICAL_API_URL', None)
     values = []
     for name in ['VECTORAIZ_TAURI_UPDATER_PRIVATE_KEY', 'VECTORAIZ_TAURI_UPDATER_KEY_PASSWORD']:
-        result = command('env', '-u', 'INFISICAL_PROJECT_ID', '-u', 'INFISICAL_API_URL',
-                         'python3', '-I', helper, 'get', name, 'prod', '/koskadeux',
-                         env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        with tempfile.NamedTemporaryFile(prefix='vz-cloud-helper-', suffix='.stderr', delete=False) as diagnostics:
+            try:
+                result = command('env', '-u', 'INFISICAL_PROJECT_ID', '-u', 'INFISICAL_API_URL',
+                                 'python3', '-I', helper, 'get', name, 'prod', '/koskadeux',
+                                 env=environment, stdout=subprocess.PIPE, stderr=diagnostics)
+            except subprocess.CalledProcessError as error:
+                raise SystemExit(f'Cloud helper failed (exit {error.returncode}); private stderr: {diagnostics.name}') from None
+        Path(diagnostics.name).unlink()
         values.append(result.stdout.decode())
     if not values[0]:
         raise SystemExit('Cloud updater key is empty')
@@ -77,8 +82,8 @@ def signing_environment(dry_run, embedded, temporary):
         key, password = rotated_secrets()
         # Recreate the public key from the actual secret, not from a sibling
         # public secret or caller-supplied assertion. TemporaryDirectory is 0700.
-        with secret.open('wb') as stream:
-            os.chmod(secret, 0o600)
+        descriptor = os.open(secret, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'wb') as stream:
             stream.write(base64.b64decode(key, validate=True))
         command('minisign', '-R', '-s', secret, '-p', public_file,
                 input=(password + '\n').encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

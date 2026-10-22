@@ -9,4 +9,4 @@ Windows 10 22H2 or Windows 11, x64. The unsigned MSI installs for all users and 
 
 Data lives in `%USERPROFILE%\vectorAIz`, with the Phase 0 index in `phase0-index`. Uninstall from Settings → Apps → Installed apps → vectorAIz → Uninstall and approve UAC. Uninstall keeps the data folder. Delete it separately only if you want to erase the data.
 
-Updates remain disabled while the updater signing key is being rotated. No real updater release is published by chunk D. CI uses fresh `windows-2022` Windows Server runners as stand-ins, not Windows 10/11 client evidence. Client VM checks and screenshots follow Gate 3.
+The updater is configured with the rotated signing public key and the test-build release endpoint. No real updater release is published by chunk D. CI uses fresh `windows-2022` Windows Server runners as stand-ins, not Windows 10/11 client evidence. Client VM checks and screenshots follow Gate 3.

@@ -9,4 +9,4 @@ Apple Silicon, macOS 13 or later. These builds use an ad-hoc signature and are f
 
 Collections, indexes and settings use `~/vectorAIz` (the Phase 0 index is in `phase0-index`). To uninstall, quit the app and move `/Applications/vectorAIz.app` to Trash. Uninstall preserves `~/vectorAIz`; remove that folder yourself only if you want to delete the data.
 
-Updates remain disabled while the updater signing key is being rotated. No real updater release is published by chunk D. Clean macOS VM tests and screenshots follow Gate 3; hosted `macos-14` install checks are stand-ins.
+The updater is configured with the rotated signing public key and the test-build release endpoint. No real updater release is published by chunk D. Clean macOS VM tests and screenshots follow Gate 3; hosted `macos-14` install checks are stand-ins.
