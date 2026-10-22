@@ -1,0 +1,8 @@
+db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+db696f0cf57c1a640181c7bc0fa948ced1eed6f01a744aa71fafa991d228b7ae  /Users/admin/vectorAIz/models/pdfium/lib/libpdfium.dylib
+ProductName:		macOS
+ProductVersion:		15.7.7
+BuildVersion:		24G720
+assessments enabled
+System Integrity Protection status: enabled.
