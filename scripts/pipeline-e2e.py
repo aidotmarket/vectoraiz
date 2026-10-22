@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """CPU-only acceptance: all fixture formats, real citations, pack hashes and query."""
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -106,7 +107,7 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     mixed_hits = cli('search', 'Searchable mixed document')
     assert mixed_hits and mixed_hits[0]['chunk']['page'] == 1, mixed_hits
     import sqlite3
-    with sqlite3.connect(state / 'state.sqlite') as db:
+    with closing(sqlite3.connect(state / 'state.sqlite')) as db:
         generation = db.execute('SELECT generation FROM documents').fetchone()[0]
     stored = json.loads((state / 'generations' / generation / 'document.json').read_text())
     assert stored['pages'] == 2 and stored['needs_ocr_pages'] == reopened['needs_ocr_pages'], stored
