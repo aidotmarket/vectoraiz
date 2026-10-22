@@ -48,7 +48,10 @@ def main():
         (generated / 'stage1.conf.json').write_text(json.dumps(config, indent=2) + '\n')
         return
     output = ROOT / 'target/stage1'
-    output.mkdir(parents=True, exist_ok=True)
+    # target/ is restored by rust-cache, including prior packaging outputs.
+    # Never reuse stale installers/manifests or DMG symlinks.
+    shutil.rmtree(output, ignore_errors=True)
+    output.mkdir(parents=True)
     if windows:
         installers = list((ROOT / 'target/debug/bundle/msi').glob('*.msi'))
         assert len(installers) == 1, installers
@@ -65,7 +68,8 @@ def main():
         run('codesign', '--verify', '--deep', '--strict', '--verbose=2', app)
         run('tar', '-czf', output / f'vectorAIz_{version}_aarch64.app.tar.gz', '-C', app.parent, app.name)
         staging = ROOT / 'target/dmg-stage'
-        staging.mkdir(exist_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir()
         shutil.copytree(app, staging / app.name, symlinks=True, dirs_exist_ok=True)
         (staging / 'Applications').symlink_to('/Applications', target_is_directory=True)
         run('hdiutil', 'create', '-volname', 'vectorAIz', '-srcfolder', staging,

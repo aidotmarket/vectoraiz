@@ -153,6 +153,32 @@ class PackageGate(unittest.TestCase):
             self.assertEqual(list(bundle.rglob('*.gguf')), [])
             self.assertTrue((bundle / 'assets/pdfium/bin/pdfium.dll').is_file())
 
+    def test_collect_replaces_cached_installers_and_provenance(self):
+        module_spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
+        package = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(package)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ['target/stage1/old.msi', 'target/stage1/build-stale.json',
+                         'target/debug/bundle/msi/current.msi', 'THIRD_PARTY_NOTICES']:
+                file = root / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b'fixture')
+            (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
+            config = root / 'app/src-tauri/tauri.conf.json'
+            config.parent.mkdir(parents=True)
+            config.write_text('{"plugins":{"updater":{"pubkey":"public-fixture"}}}')
+            with patch.object(package, 'ROOT', root), patch.object(package.platform, 'system', return_value='Windows'), \
+                    patch.dict(__import__('os').environ, {'SOURCE_SHA': 'a' * 40}), \
+                    patch.object(sys, 'argv', ['native-package.py', 'collect']):
+                package.main()
+                package.main()
+            output = root / 'target/stage1'
+            self.assertFalse((output / 'old.msi').exists())
+            self.assertFalse((output / 'build-stale.json').exists())
+            manifest = json.loads((output / 'build-x86_64-pc-windows-msvc.json').read_text())
+            self.assertEqual(set(manifest['files']), {'vectorAIz_0.0.1_x64.msi', 'THIRD_PARTY_NOTICES-x86_64-pc-windows-msvc.txt'})
+
 
 if __name__ == '__main__':
     unittest.main()
