@@ -16,9 +16,18 @@ jobs:
       matrix:
         os: [macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
+    env:
+      PYTHONUTF8: '1'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_BUILD_JOBS: '3'
+      NATIVE_FEATURES: ''
     defaults:
       run:
-        shell: bash
+        # Git Bash prepends /usr/bin, whose link.exe shadows the MSVC linker.
+        # Preserve the developer environment's PATH for every Windows Rust step.
+        shell: ${{ matrix.os == 'windows-2022' && 'pwsh' || 'bash' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,9 +35,51 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.2'
+          cache: false
+      - name: Initialize Windows compiler environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install pinned Windows Vulkan SDK
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/install-vulkan.ps1
+      - name: Install protocol compiler
+        uses: arduino/setup-protoc@v3
+        with:
+          version: '29.3'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install pipeline example dependencies
+        run: python -m pip install numpy==2.2.6 pyarrow==19.0.1 boto3==1.40.45
+      - uses: actions/cache@v4
+        with:
+          path: .assets
+          key: assets-${{ runner.os }}-${{ hashFiles('spike/fixtures/models.json', 'scripts/fetch-assets.py') }}
+      - name: Fetch verified models and PDFium
+        run: python scripts/fetch-assets.py
+      - uses: actions/cache/restore@v4
+        id: minio-cache
+        with:
+          path: ${{ runner.os == 'Windows' && '.tools/minio.exe' || '.tools/minio' }}
+          key: minio-${{ runner.os }}-${{ runner.arch }}-go1.24.2-${{ hashFiles('scripts/minio-test-server.py') }}
+      - name: Build pinned MinIO
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        run: python scripts/minio-test-server.py
+      - uses: actions/cache/save@v4
+        if: steps.minio-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ runner.os == 'Windows' && '.tools/minio.exe' || '.tools/minio' }}
+          key: ${{ steps.minio-cache.outputs.cache-primary-key }}
       - name: Install pinned Rust
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Test branch routing
         run: node scripts/native-guard.mjs --test
       - name: Enforce native PR base
@@ -49,21 +100,32 @@ jobs:
       - name: Rust format
         run: cargo fmt --all --check
       - name: Rust lint
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets ${{ env.NATIVE_FEATURES }} -- -D warnings
+      # Restore the Rust cache before placing the non-Cargo OCR helper beside workers.
+      - name: Build Apple Vision helper
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p target/debug
+          swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
       - name: Rust tests
-        run: cargo test --locked --workspace
+        timeout-minutes: 20
+        run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
+      - name: Build CLI workers and Tauri debug app
+        run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol ${{ env.NATIVE_FEATURES }}
+      - name: Pipeline and MinIO acceptance (CPU)
+        env:
+          VZ_MINIO_ENDPOINT: local-test-server
+        run: python scripts/pipeline-e2e.py
       - name: Self-test
-        run: cargo run --locked -p vz-cli --bin vectoraiz-cli -- self-test
-      - name: Tauri debug build
-        working-directory: app
-        run: npm run tauri -- build --debug --no-bundle --features smoke-test
-      - name: Launch app and click self-test
+        run: ./target/debug/vectoraiz-cli self-test
+      - name: Launch app and exercise pipeline IPC
         run: python scripts/native-smoke.py
       - name: Install notice generator
         run: cargo install cargo-about --version 0.8.2 --locked
       - name: Generate third-party notices
         run: |
           cargo about generate --locked about.hbs > THIRD_PARTY_NOTICES
+          python scripts/native-notices.py >> THIRD_PARTY_NOTICES
           cd app
           npm run --silent licenses >> ../THIRD_PARTY_NOTICES
       - uses: actions/upload-artifact@v4
@@ -71,3 +133,11 @@ jobs:
           name: THIRD_PARTY_NOTICES-${{ matrix.os }}
           path: THIRD_PARTY_NOTICES
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pipeline-evidence-${{ matrix.os }}
+          path: |
+            minio-test.log
+            windows-test-dependents.log
+          if-no-files-found: ignore

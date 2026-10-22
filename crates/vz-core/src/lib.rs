@@ -1,12 +1,12 @@
-//! Swappable pipeline boundaries. Implementations arrive after the Phase 0 scaffold.
+//! Swappable offline pipeline boundaries.
 
 /// A component failure with a human-readable reason.
 pub type ComponentResult<T> = Result<T, String>;
 
-/// Extract text from a document's bytes.
+/// Extract structured pages in a supervised worker.
 pub trait Parser {
     /// Parse one document without assuming a filesystem or network.
-    fn parse(&self, document: &[u8]) -> ComponentResult<String>;
+    fn parse(&self, request: &worker::Request) -> ComponentResult<Vec<pipeline::Page>>;
 }
 
 /// Extract text from an encoded page image.
@@ -23,16 +23,19 @@ pub trait Embedder {
 
 /// Answer a question using caller-supplied context.
 pub trait ChatEngine {
-    /// Produce an answer; streaming and citations are deferred to the pipeline spike.
+    /// Produce an answer; concrete engines also provide streaming callbacks.
     fn answer(&self, question: &str, context: &str) -> ComponentResult<String>;
 }
 
-/// Store and retrieve document text by stable identifier.
+/// Atomic visibility boundary for an already staged document generation.
 pub trait Store {
-    /// Replace a document's text.
-    fn put(&mut self, id: &str, text: &str) -> ComponentResult<()>;
-    /// Read a document, returning None when absent.
-    fn get(&self, id: &str) -> ComponentResult<Option<String>>;
+    fn put(
+        &mut self,
+        document: &pipeline::Document,
+        mtime: &str,
+        generation: &str,
+    ) -> ComponentResult<()>;
+    fn get(&self, id: &str) -> ComponentResult<Option<pipeline::Document>>;
 }
 
 /// Portable scaffold diagnostic; this does not probe future pipeline components.
@@ -72,3 +75,10 @@ mod tests {
         assert!(!result.os.is_empty() && !result.arch.is_empty());
     }
 }
+
+pub mod engine;
+pub mod index;
+pub mod parsers;
+pub mod pipeline;
+pub mod storage;
+pub mod worker;

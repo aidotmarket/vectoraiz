@@ -1,0 +1,18 @@
+{
+  "embedding": {
+    "name": "BAAI/bge-small-en-v1.5 (provisional English CI model)",
+    "file": "bge-small-f16.gguf",
+    "sha256": "f0b2fef971e8366438bfd2d9aefea1b0115919389448806d290237f638bae999",
+    "url": "https://huggingface.co/ggml-org/models-moved/resolve/499bc8821c6b12b4e53c5bffcb21ec206f212d81/bert-bge-small/ggml-model-f16.gguf",
+    "license": "MIT",
+    "source": "https://huggingface.co/BAAI/bge-small-en-v1.5"
+  },
+  "chat": {
+    "name": "Qwen/Qwen2.5-0.5B-Instruct Q4_K_M (provisional CI model)",
+    "file": "qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "sha256": "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db",
+    "url": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/9217f5db79a29953eb74d5343926648285ec7e67/qwen2.5-0.5b-instruct-q4_k_m.gguf",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct"
+  }
+}

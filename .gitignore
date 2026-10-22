@@ -8,3 +8,11 @@
 .env
 .env.*
 THIRD_PARTY_NOTICES
+
+/.assets/
+/.vz-index/
+/spike/pack-output/
+/.tools/
+
+**/__pycache__/
+*.pyc
