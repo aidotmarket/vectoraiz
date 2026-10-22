@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "vectorAIz",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "identifier": "com.vectoraiz.native",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -23,6 +23,21 @@
       "capabilities": [
         "self-test"
       ]
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMxRjE3MDQyRkIzQzkwQjEKUldTeGtEejdRbkR4TVdjTWluVjEyV3hNRTlwWmhNK0ZiZ2F2L0UyeXNZOWZMTWEyOEpsN1BlVisK",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://github.com/aidotmarket/vectoraiz-test-builds/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "quiet",
+        "installerArgs": [
+          "/norestart"
+        ]
+      }
     }
   },
   "bundle": {

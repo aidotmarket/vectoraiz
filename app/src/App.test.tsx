@@ -3,14 +3,15 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { invoke } from "@tauri-apps/api/core";
 import App from "./App";
+import { version } from "../package.json";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), Channel: class { onmessage = (_: unknown) => {}; } }));
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 
 it("invokes the self-test only on click and displays its platform result", async () => {
-  vi.mocked(invoke).mockResolvedValue({ status: "OK", version: "0.1.0", os: "macos", arch: "aarch64" });
+  vi.mocked(invoke).mockResolvedValue({ status: "OK", version, os: "macos", arch: "aarch64" });
   render(<App />);
-  expect(screen.getByText(/Version 0.1.0/)).toBeInTheDocument();
+  expect(screen.getByText(new RegExp(`Version ${version.replaceAll('.', '\\.')}`))).toBeInTheDocument();
   expect(invoke).not.toHaveBeenCalled();
   await userEvent.click(screen.getByRole("button", { name: "Run self-test" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent('"status": "OK"'));
@@ -32,7 +33,7 @@ it("disables the button while the command is pending", async () => {
   render(<App />);
   await userEvent.click(screen.getByRole("button", { name: "Run self-test" }));
   expect(screen.getByRole("button", { name: "Running…" })).toBeDisabled();
-  complete({ status: "OK", version: "0.1.0", os: "windows", arch: "x86_64" });
+  complete({ status: "OK", version, os: "windows", arch: "x86_64" });
   await waitFor(() => expect(screen.getByRole("button", { name: "Run self-test" })).toBeEnabled());
 });
 

@@ -3,6 +3,8 @@
 // Keep inference/native backend startup out of the permission-test harness.
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
+mod bundled_library;
+
 #[cfg(not(test))]
 mod desktop;
 

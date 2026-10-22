@@ -16,6 +16,36 @@ fn self_test<R: tauri::Runtime>(
             return result;
         }
         assert_eq!(result.status, "OK");
+        if let Some(report) = std::env::var_os("VZ_INSTALLED_SELF_TEST_REPORT") {
+            use tauri::Manager;
+            let resources = _app.path().resource_dir().expect("installed resources");
+            assert!(resources.join("THIRD_PARTY_NOTICES").is_file());
+            assert!(resources.join("models.json").is_file());
+            assert!(resources.join("assets/pdfium").is_dir());
+            assert!(!resources.join("assets/bge-small-f16.gguf").exists());
+            assert!(!resources
+                .join("assets/qwen2.5-0.5b-instruct-q4_k_m.gguf")
+                .exists());
+            assert!(vz_core::worker::executable()
+                .expect("worker path")
+                .is_file());
+            let data = _app
+                .path()
+                .home_dir()
+                .expect("home directory")
+                .join("vectorAIz");
+            std::fs::create_dir_all(&data).expect("create persistent data folder");
+            std::fs::write(
+                data.join("install-self-test.json"),
+                serde_json::to_vec(&result).unwrap(),
+            )
+            .unwrap();
+            let mut installed_result = serde_json::to_value(&result).unwrap();
+            installed_result["version"] =
+                serde_json::json!(_app.package_info().version.to_string());
+            std::fs::write(report, serde_json::to_vec(&installed_result).unwrap())
+                .expect("installed self-test report");
+        }
         println!("VECTORAIZ_SMOKE_TEST_OK");
         if std::env::args().any(|arg| arg == "--pipeline-smoke-test") {
             println!("VECTORAIZ_PIPELINE_SMOKE_TEST_OK");
@@ -31,6 +61,7 @@ fn self_test<R: tauri::Runtime>(
 }
 
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(feature = "smoke-test")]
     let builder = builder.on_page_load(|webview, payload| {
         if smoke_test_requested() && payload.event() == tauri::webview::PageLoadEvent::Finished {
@@ -67,9 +98,61 @@ pub(crate) fn run() {
                 Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
         }
     }
-    configure(tauri::Builder::default())
-        .run(context)
-        .expect("failed to run vectorAIz");
+    configure(tauri::Builder::default().setup(|app| {
+        #[cfg(feature = "smoke-test")]
+        if std::env::args().any(|arg| arg == "--update-test") {
+            use tauri_plugin_updater::UpdaterExt;
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                let result = async {
+                    let update = handle
+                        .updater_builder()
+                        .restart_after_install(false)
+                        .build()?
+                        .check()
+                        .await?
+                        .ok_or_else(|| anyhow::anyhow!("No update available"))?;
+                    let expected = std::env::var("VZ_UPDATE_TO_VERSION")?;
+                    anyhow::ensure!(update.version == expected, "Unexpected update version");
+                    update.download_and_install(|_, _| {}, || {}).await?;
+                    Ok::<(), anyhow::Error>(())
+                }
+                .await;
+                if let Err(error) = result {
+                    eprintln!("Update test failed: {error:#}");
+                    handle.exit(1);
+                } else {
+                    handle.exit(0);
+                }
+            });
+        }
+        #[cfg(not(feature = "smoke-test"))]
+        let _ = app;
+        Ok(())
+    }))
+    .run(context)
+    .expect("failed to run vectorAIz");
+}
+
+fn installed_assets<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
+    use tauri::Manager;
+    let assets = app
+        .path()
+        .home_dir()
+        .map_err(|e| e.to_string())?
+        .join("vectorAIz/models");
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let relative = if cfg!(windows) {
+        "pdfium/bin/pdfium.dll"
+    } else {
+        "pdfium/lib/libpdfium.dylib"
+    };
+    let library = assets.join(relative);
+    crate::bundled_library::refresh(&resources.join("assets").join(relative), &library)
+        .map_err(|e| e.to_string())?;
+    Ok(assets)
 }
 
 fn pipeline_paths<R: tauri::Runtime>(
@@ -78,9 +161,14 @@ fn pipeline_paths<R: tauri::Runtime>(
     use tauri::Manager;
     let state = app
         .path()
-        .app_data_dir()
+        .home_dir()
         .map_err(|e| e.to_string())?
+        .join("vectorAIz")
         .join("phase0-index");
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    if resources.join("models.json").is_file() {
+        return Ok((state, installed_assets(app)?, resources.join("models.json")));
+    }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     Ok((
         state,

@@ -23,6 +23,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: '0'
       CARGO_BUILD_JOBS: '3'
       NATIVE_FEATURES: ''
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
     defaults:
       run:
         # Git Bash prepends /usr/bin, whose link.exe shadows the MSVC linker.
@@ -38,6 +39,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Check versions and packaging gates
+        run: |
+          python scripts/native-version.py
+          python scripts/native-build-tests.py
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.2'
@@ -124,10 +129,27 @@ jobs:
         run: cargo install cargo-about --version 0.8.2 --locked
       - name: Generate third-party notices
         run: |
-          cargo about generate --locked about.hbs > THIRD_PARTY_NOTICES
-          python scripts/native-notices.py >> THIRD_PARTY_NOTICES
-          cd app
-          npm run --silent licenses >> ../THIRD_PARTY_NOTICES
+          python scripts/native-generate-notices.py
+      - name: Prepare stage 1 bundle inputs
+        run: python scripts/native-package.py prepare
+      # Phase 0 intentionally packages the tested debug profile, with smoke-test
+      # support for first-run UI acceptance. Production optimization is a later gate.
+      - name: Package ad-hoc macOS app (no updater signing key)
+        if: runner.os == 'macOS'
+        working-directory: app
+        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol --bundles app --config src-tauri/gen/stage1.conf.json
+      - name: Package unsigned per-machine Windows MSI
+        if: runner.os == 'Windows'
+        working-directory: app
+        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol --bundles msi --config src-tauri/gen/stage1.conf.json
+      - name: Collect installers and unsigned update archives
+        run: python scripts/native-package.py collect
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-installers-${{ matrix.os }}
+          path: target/stage1/*
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: THIRD_PARTY_NOTICES-${{ matrix.os }}
@@ -141,3 +163,33 @@ jobs:
             minio-test.log
             windows-test-dependents.log
           if-no-files-found: ignore
+  install:
+    name: Install/uninstall stand-in (${{ matrix.os }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-installers-${{ matrix.os }}
+          path: artifacts
+      - name: Install downloaded artifact, first-run UI self-test, uninstall preserving data
+        timeout-minutes: 10
+        run: python scripts/native-install-test.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: installed-app-evidence-${{ matrix.os }}
+          path: |
+            installed-ui.log
+            installed-self-test.json
+            msi-install.log
+            msi-uninstall.log
+          if-no-files-found: warn
