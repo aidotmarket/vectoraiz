@@ -107,18 +107,6 @@ jobs:
         run: |
           mkdir -p target/debug
           swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
-      - name: Install Windows timeout debugger
-        if: runner.os == 'Windows'
-        run: |
-          $debugger = "${env:ProgramFiles(x86)}\Windows Kits\10\Debuggers\x64\cdb.exe"
-          if (-not (Test-Path $debugger)) {
-            $installer = Join-Path $env:RUNNER_TEMP 'winsdksetup.exe'
-            Invoke-WebRequest -Uri 'https://download.microsoft.com/download/2/6/f/26f7aa55-ef6f-4882-b19b-a1be0e7328fe/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe' -OutFile $installer
-            if ((Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne '5535188a9aeea1cebcbf04de3c2c37d76f10600a65867ff65f6153d507b60488') { throw 'Windows SDK installer SHA256 mismatch' }
-            $process = Start-Process $installer -ArgumentList '/features', 'OptionId.WindowsDesktopDebuggers', '/quiet', '/norestart' -Wait -PassThru
-            if ($process.ExitCode -notin @(0, 3010)) { throw "Debugger installer failed: $($process.ExitCode)" }
-          }
-          if (-not (Test-Path $debugger)) { throw 'CDB debugger missing' }
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
@@ -152,5 +140,4 @@ jobs:
           path: |
             minio-test.log
             windows-test-dependents.log
-            windows-test-timeout.log
           if-no-files-found: ignore

@@ -33,6 +33,27 @@ The Windows build enables the linked Vulkan backend with a version/hash-pinned
 SDK; it does not establish GPU execution. Native CI publishes notices and test
 logs only. No tag, release or container image is created.
 
+Windows startup diagnosis: with inherited `SetErrorMode` suppressing loader
+error dialogs, the app test harness still timed out on `--list`. The
+[debugger run](https://github.com/aidotmarket/vectoraiz/actions/runs/39730916608)
+retains `windows-test-timeout.log`: `ucrtbase!initterm` reaches
+`ucrtbased!_free_dbg`, `_CrtDbgReportW`, and `user32!MessageBoxW` before libtest.
+The loaded-module list includes Vulkan and both CRT variants. This is a debug
+heap assertion dialog rather than a missing PDFium/WebView2 DLL. The pinned
+`llama-cpp-sys-2` build script adds `msvcrtd` under `cfg(debug_assertions)` while
+building native C++ in Release mode. Its package-only Cargo profile override
+turns off that build-script condition in dev/test, aligning runtime linkage;
+workspace test assertions and all existing test coverage remain enabled.
+CI keeps `SetErrorMode`, import-table evidence from `dumpbin /dependents`, and
+all compilation/listing/per-test/doctest deadlines. The temporary debugger
+installation and stack-capture wrapper were removed after diagnosis.
+
+The macOS OCR-policy failure was a missing `vz-vision-ocr` helper, with no
+change to the OCR policy or its test. CI now builds the helper after restoring
+the Rust cache, immediately before Rust tests, so cache restoration cannot
+replace it. The original app capability harness is restored; the extra
+`vz-ipc-policy` crate and its invalid binary-only linker directive are removed.
+
 Pins are fully recorded in [models.json](../../spike/fixtures/models.json) and
 [parsers.md](parsers.md). Provisional embeddings are BGE-small-en-v1.5 F16
 (SHA256 f0b2fef971e8366438bfd2d9aefea1b0115919389448806d290237f638bae999).

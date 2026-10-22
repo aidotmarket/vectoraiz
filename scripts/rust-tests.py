@@ -6,50 +6,29 @@ runtime cannot keep the suite alive after a failed timeout.
 """
 import ctypes
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
 
 
 def run(argv, timeout, capture=False):
-    with subprocess.Popen(
-        argv, text=True, stdout=subprocess.PIPE if capture else None,
-    ) as process:
-        try:
-            stdout, _ = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            print(f"TIMEOUT after {timeout}s: {argv!r}", flush=True)
-            if sys.platform == "win32":
-                # Capture the blocked stack before killing the process. This is
-                # diagnostic time only; the test has already failed its deadline.
-                debugger = Path(os.environ["ProgramFiles(x86)"]) / (
-                    "Windows Kits/10/Debuggers/x64/cdb.exe")
-                with Path("windows-test-timeout.log").open("a", encoding="utf-8") as log:
-                    log.write(f"TIMEOUT: {argv!r}\n")
-                    log.flush()
-                    try:
-                        subprocess.run(
-                            [str(debugger), "-pv", "-p", str(process.pid), "-c",
-                             ".symfix; .reload; ~* kb; lm; q"],
-                            stdout=log, stderr=subprocess.STDOUT, timeout=45,
-                            check=False,
-                        )
-                    except (OSError, subprocess.TimeoutExpired) as error:
-                        print(f"Stack capture failed: {error}", flush=True)
-            process.kill()
-            stdout, _ = process.communicate()
-            if stdout:
-                print(stdout, flush=True)
-            raise SystemExit(1)
-        if process.returncode:
-            if stdout:
-                print(stdout, flush=True)
-            if sys.platform == "win32":
-                print(f"FAILED exit status: 0x{process.returncode & 0xffffffff:08X}: {argv!r}",
-                      flush=True)
-            raise subprocess.CalledProcessError(process.returncode, argv, stdout)
-        return stdout
+    try:
+        return subprocess.run(
+            argv, check=True, timeout=timeout, text=True,
+            stdout=subprocess.PIPE if capture else None,
+        ).stdout
+    except subprocess.CalledProcessError as error:
+        if error.stdout:
+            print(error.stdout, flush=True)
+        if sys.platform == "win32":
+            print(f"FAILED exit status: 0x{error.returncode & 0xffffffff:08X}: {argv!r}",
+                  flush=True)
+        raise
+    except subprocess.TimeoutExpired as error:
+        if error.stdout:
+            print(error.stdout, flush=True)
+        print(f"TIMEOUT after {timeout}s: {argv!r}", flush=True)
+        raise SystemExit(1)
 
 
 def main():
