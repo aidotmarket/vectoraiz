@@ -27,9 +27,14 @@ def main():
     bundle = generated / 'bundle'
     version = tomllib.loads((ROOT / 'Cargo.toml').read_text())['workspace']['package']['version']
     if args.phase == 'prepare':
-        bundle.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(ROOT / '.assets', bundle / 'assets', dirs_exist_ok=True,
-                        ignore=shutil.ignore_patterns('*.tgz', '*.part'))
+        # Never copy the CI model cache into an installer (including stale inputs).
+        shutil.rmtree(bundle, ignore_errors=True)
+        bundle.mkdir(parents=True)
+        runtime = bundle / ('assets/pdfium/bin' if windows else 'assets/pdfium/lib')
+        runtime.mkdir(parents=True)
+        library = 'pdfium.dll' if windows else 'libpdfium.dylib'
+        shutil.copy2(ROOT / '.assets/pdfium' / ('bin' if windows else 'lib') / library, runtime / library)
+        assert not list(bundle.rglob('*.gguf')), 'Models must be imported or downloaded separately'
         shutil.copy2(ROOT / 'spike/fixtures/models.json', bundle / 'models.json')
         shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', bundle / 'THIRD_PARTY_NOTICES')
         (generated / 'bin').mkdir(exist_ok=True)
@@ -68,8 +73,11 @@ def main():
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', output / f'THIRD_PARTY_NOTICES-{triple}.txt')
     manifest = {'source_sha': __import__('os').environ['SOURCE_SHA'], 'version': version,
                 'target': triple, 'profile': 'debug', 'updater_signed': False,
+                'sizes_bytes': {p.name: p.stat().st_size for p in sorted(output.iterdir()) if p.is_file()},
                 'files': {p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
                           for p in sorted(output.iterdir()) if p.is_file()}}
+    for name, size in manifest['sizes_bytes'].items():
+        print(f'Packaged {name}: {size:,} bytes', flush=True)
     (output / f'build-{triple}.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
 

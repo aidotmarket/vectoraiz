@@ -39,7 +39,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Check versions and release freeze
+      - name: Check versions and packaging gates
         run: |
           python scripts/native-version.py
           python scripts/native-build-tests.py
@@ -191,6 +191,7 @@ jobs:
         with:
           name: installed-app-evidence-${{ matrix.os }}
           path: |
+            installed-ui.log
             installed-self-test.json
             msi-install.log
             msi-uninstall.log

@@ -1,0 +1,52 @@
+name: Native update stand-in
+on:
+  workflow_dispatch:
+    inputs:
+      from_version:
+        description: Installed stage 1 version (0.0.N)
+        required: true
+        default: '0.0.1'
+      to_version:
+        description: Expected latest stage 1 version (0.0.N)
+        required: true
+        default: '0.0.2'
+      dry_check:
+        description: Validate inputs and updater URL without installing
+        type: boolean
+        default: true
+  pull_request:
+    branches: [native]
+  push:
+    branches: [native, 'build/vz-native-*']
+permissions:
+  contents: read
+jobs:
+  update:
+    name: Update stand-in (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      FROM_VERSION: ${{ inputs.from_version || '0.0.1' }}
+      TO_VERSION: ${{ inputs.to_version || '0.0.2' }}
+      DRY_CHECK: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_check }}
+      GH_TOKEN: ${{ github.token }}
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate or exercise published in-app update
+        run: python scripts/native-update-test.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: update-evidence-${{ matrix.os }}
+          path: |
+            update-*.json
+            update-*.log
+          if-no-files-found: warn

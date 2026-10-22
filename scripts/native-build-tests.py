@@ -69,15 +69,19 @@ class PublisherGate(unittest.TestCase):
         with patch.object(sys, 'argv', ['publish-test-build.py', *args]), contextlib.redirect_stdout(io.StringIO()):
             publisher.main()
 
-    def test_publish_freeze_blocks_before_any_api_or_secret_access(self):
-        with patch.object(publisher, 'api') as api, patch.object(publisher, 'rotated_secrets') as secrets:
-            with self.assertRaisesRegex(SystemExit, 'rotation freeze'):
-                self.invoke('--publish', '--version', '0.0.1', '--commit', 'a' * 40,
-                            '--run-id', '42', '--output', '/unused')
-            api.assert_not_called()
-            secrets.assert_not_called()
+    def test_signing_key_mismatch_refuses_publish(self):
+        import base64
+        embedded = base64.b64encode(b'untrusted comment: test\n' + base64.b64encode(b'A' * 42) + b'\n').decode()
+        secret = base64.b64encode(b'fixture secret').decode()
+        def recreate(*args, **kwargs):
+            Path(args[args.index('-p') + 1]).write_bytes(b'untrusted comment: test\n' + base64.b64encode(b'B' * 42) + b'\n')
+        with tempfile.TemporaryDirectory() as temporary, \
+                patch.object(publisher, 'rotated_secrets', return_value=(secret, '')), \
+                patch.object(publisher, 'command', side_effect=recreate):
+            with self.assertRaisesRegex(SystemExit, 'does not match Cloud signing key'):
+                publisher.signing_environment(False, embedded, Path(temporary))
 
-    def test_dry_run_assembles_artifacts_without_signing_or_writes_to_github(self):
+    def test_dry_run_assembles_artifacts_with_verified_throwaway_signatures_and_no_github_writes(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'out'
 
@@ -107,19 +111,47 @@ class PublisherGate(unittest.TestCase):
             with patch.object(publisher, 'api', side_effect=api), \
                     patch.object(publisher, 'docker_checks', return_value={'latest': 'v1.2.3'}), \
                     patch.object(publisher, 'command', side_effect=download) as command, \
+                    patch.object(publisher, 'signing_environment', return_value=({}, 'throwaway-public')) as signing, \
+                    patch.object(publisher, 'sign_and_verify', side_effect=lambda f, *args: (f.with_name(f.name + '.sig').write_text('verified-fixture'), 'verified-fixture')[1]), \
                     patch.object(publisher, 'rotated_secrets') as secrets:
                 self.invoke('--dry-run', '--version', '0.0.1', '--commit', 'a' * 40,
                             '--run-id', '42', '--output', str(output))
                 self.assertEqual(command.call_count, 1)
+                self.assertTrue(signing.call_args.args[0])
                 secrets.assert_not_called()
             manifest = json.loads((output / 'latest.json').read_text())
             self.assertEqual(manifest['version'], '0.0.1')
             for value in manifest['platforms'].values():
-                self.assertEqual(value['signature'], publisher.PLACEHOLDER)
-            self.assertFalse(json.loads((output / 'publish-evidence.json').read_text())['signatures_verified'])
+                self.assertEqual(value['signature'], 'verified-fixture')
+            self.assertTrue(json.loads((output / 'publish-evidence.json').read_text())['signatures_verified'])
             for line in (output / 'SHA256SUMS').read_text().splitlines():
                 digest, name = line.split('  ', 1)
                 self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
+
+
+class PackageGate(unittest.TestCase):
+    def test_prepare_drops_cached_models_and_stale_resources(self):
+        module_spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
+        package = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(package)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ['.assets/pdfium/bin/pdfium.dll', '.assets/huge.gguf',
+                         'app/src-tauri/gen/bundle/assets/stale.gguf',
+                         'spike/fixtures/models.json', 'THIRD_PARTY_NOTICES',
+                         'target/debug/vz-parser-worker.exe', 'target/debug/vectoraiz-mcp.exe',
+                         'target/debug/vectoraiz-cli.exe']:
+                file = root / name
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_bytes(b'fixture')
+            (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
+            (root / 'app/src-tauri/tauri.stage1.conf.json').write_text('{"bundle":{}}')
+            with patch.object(package, 'ROOT', root), patch.object(package.platform, 'system', return_value='Windows'), \
+                    patch.object(sys, 'argv', ['native-package.py', 'prepare']):
+                package.main()
+            bundle = root / 'app/src-tauri/gen/bundle'
+            self.assertEqual(list(bundle.rglob('*.gguf')), [])
+            self.assertTrue((bundle / 'assets/pdfium/bin/pdfium.dll').is_file())
 
 
 if __name__ == '__main__':

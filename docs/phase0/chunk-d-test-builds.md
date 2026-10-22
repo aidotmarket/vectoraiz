@@ -1,35 +1,31 @@
-# Chunk D: stage 1 build and release contract
+# Phase 0 chunk D test builds
 
-The 2026-10-22 chunk D dispatch amends Gate 2 sections 2 and 4.4: publishing runs on Koskadeux, not Actions. The existing Native CI builds workflow artifacts on pushes to `native`, on feature pushes, and on PRs into `native`. It has read-only repository permissions and no updater secrets. There is no release workflow, tag trigger, GHCR build or new Actions secret.
+The workspace Cargo version is authoritative; `scripts/native-version.py --write` derives the UI, lockfile and Tauri versions. CI rejects drift. Stage 1 starts at `0.0.1`.
 
-`Cargo.toml` workspace version is authoritative. Run `python3 scripts/native-version.py --write` after changing it, then commit the derived UI, Tauri and lockfile versions. CI checks consistency and runs negative tests that reject drift and reject real release checks with the placeholder public key. The initial stage 1 version is `0.0.1`.
+`native-ci.yml` builds on hosted `macos-14` and `windows-2022`. Artifacts contain the ad-hoc signed macOS DMG and `.app.tar.gz`, unsigned per-machine Windows MSI (including the silent offline WebView2 installer), notices and provenance/hash/size manifests. All macOS Mach-O leaves and the app container are signed and verified. The Windows MSI itself is the updater artifact.
 
-## CI artifacts and hosted stand-ins
+Models are excluded. Packaging clears stale generated resources and copies only the platform PDFium runtime library, model metadata and notices. Parser worker, CLI and MCP binaries are included; macOS includes the Vision OCR helper. CI's `.assets` model cache is never copied. For this spike, import the pinned GGUF files named in `spike/fixtures/models.json` into `~/vectorAIz/models/` (Windows: `%USERPROFILE%\vectorAIz\models`). The installed app uses this user-owned directory and copies PDFium there as needed. Automatic model download/import UI is Phase 1 work.
 
-`native-installers-macos-14` contains an ad-hoc-signed Apple Silicon app in a DMG and `.app.tar.gz`, notices and a provenance/hash manifest. Every Mach-O leaf is signed before signing and verifying the app container. `native-installers-windows-2022` contains the unsigned per-machine MSI with offline WebView2, notices and its provenance/hash manifest. The MSI itself is the Windows updater artifact for Tauri 2; no legacy `.msi.zip` is used. Both include the provisional models, PDFium, parser worker and MCP/CLI binaries; macOS also includes the Vision OCR helper. llama.cpp is statically linked in this configuration; any Mach-O libraries in the bundle are signed by the same walk.
+Fresh-runner stand-ins install the downloaded artifacts, drive the installed WebView self-test and uninstall while checking a persistent data sentinel. Every external step has a deadline and prints progress immediately. Windows uses the native System32 `msiexec.exe` with `/qn /norestart /l*v`; MSI and UI logs are retained even on failure. WebView2 test profiles use a writable user data directory. Windows Server is explicitly a stand-in for Windows 10/11.
 
-Phase 0 installers intentionally package the tested **debug** profile with the `smoke-test` feature, keeping the existing CPU pipeline evidence and avoiding a second full native compilation. These are test builds, not optimized distribution candidates. A production-profile build remains a later validation item.
+Notices include Rust licence text, bundled npm licence text, PDFium, llama.cpp and provisional model notices. `LICENSE` is unchanged.
 
-Separate fresh `macos-14` and `windows-2022` jobs download the installer artifact, install it, launch the installed WebView from a temporary directory outside the checkout, click its real self-test control, require an `OK` report, and uninstall. The self-test checks installed resources and creates a persistent marker under the actual user data folder (`~/vectorAIz` / `%USERPROFILE%\vectorAIz`). Uninstall must remove the executable and leave that marker unchanged. MSI logs and the self-test result are uploaded as evidence. These are **hosted-runner stand-ins**, and Windows Server does not prove Windows 10/11 behavior.
+## Signed publish dry run
 
-Rust licence text comes from cargo-about. npm production dependencies are enumerated transitively with license-checker, but the output contains each package's actual licence text, name and version, not its JSON metadata or runner paths. Missing npm licence files fail the build. PDFium licence files, the llama.cpp licence and provisional model source/licence notices are appended. The complete notices are bundled and uploaded separately.
-
-## Key freeze and dry run
-
-The pre-rotation updater pair is treated as exposed. The checked-in public key is deliberately invalid and the app does not initialize the updater while it is present. No signing key is read, used, generated or stored by CI or dry-run. No Infisical access happens on these paths.
-
-After CI on the selected commit is green, run on Koskadeux:
+Install UI dependencies with `cd app && npm ci`; install Minisign on Koskadeux. Then run:
 
 ```sh
 scripts/publish-test-build.sh --dry-run --version 0.0.1 \
-  --commit <full-PR-head-SHA> --run-id <Native-CI-run-id> \
+  --commit <full-PR-head-SHA> --run-id <successful-native-ci-run-id> \
   --output /var/tmp/vectoraiz-dry-run-<unique-suffix>
 ```
 
-The output directory must not already exist. The script verifies the completed workflow and exact source commit, both artifact provenance manifests and hashes, and agreement with the requested version. It reads the Docker repository's latest release and first non-draft prerelease and requires `v*` tags. It writes `latest.json`, explicit `UNSIGNED-DRY-RUN-NO-KEY-ACCESSED` `.sig` placeholders, `SHA256SUMS` and a machine-readable evidence file, and lists the proposed upload. This succeeds as an **unsigned assembly dry run**. It does **not** satisfy cryptographic signing/verification acceptance: that is deferred under the dispatch's prohibition on any signing key.
+The output directory must be new. The script checks workflow/commit provenance, both platform manifests and hashes, and Docker release-stream invariants through GitHub's API. It generates a throwaway Tauri key pair, signs both updater artifacts with version-bound signatures, verifies with Minisign, and writes `latest.json`, `.sig` files, `SHA256SUMS` and evidence containing the verification public key. It lists assets without uploading. It never reads the real private key. Temporary key files are deleted when the command exits.
 
-The future `--publish` path fails before network/secret access while the placeholder remains. After Gate 3 and incident unfreeze, Minerva must supply the rotated public key and replacement secret names, verify the names against the rotation dispatch, and authorize publishing. The script refuses the old exposed names. That path reads only those two secrets from Infisical `koskadeux-mcp`/`prod` using the sysadmin token, passes key material only through the signer's environment with output suppressed, signs version-bound Tauri signatures and verifies them with minisign before uploading. It only accepts successful push runs from `native`; it creates a full release with a tag on the test-build repository's default branch, names the source commit in its notes, and checks both repositories' release streams afterward. No source-repository tag or release is created.
+The embedded public key is the 2026-10-22 replacement. A future explicitly authorized `--publish` run accepts only successful `native` push builds and reads the two approved updater secrets from Infisical Cloud (`ai-market`, project `4a79065b-76db-4c4a-917d-ae6dc93f2686`, `prod`, `/koskadeux`) through the isolated Cloud helper with legacy environment overrides removed. It derives the signing public key and refuses any mismatch with the embedded key before signing or uploading. Key material is passed through process environment or private temporary files with signer output suppressed. No retired vault is used. The release target is exclusively `aidotmarket/vectoraiz-test-builds`; Docker latest and first prerelease tags are checked through the API. No `/rc` HTTP probe is made.
 
-## Acceptance still requiring evidence
+## Update acceptance
 
-Record final PR head, both CI run URLs, artifact names and the unsigned assembly dry-run output in the PR. Real signature verification, first real releases (`native-v0.0.1` then `native-v0.0.2`), update proof, and clean macOS/Windows client VM runs with screenshots remain for Minerva after Gate 3 and key rotation. No real release is authorized in chunk D. `LICENSE` stays unchanged.
+`native-update-test.yml` accepts `from_version`, `to_version` and `dry_check` via `workflow_dispatch`. Its default dry check also runs on PRs and native build-branch pushes on both hosted platforms, validating ascending stage 1 versions and the exact configured latest.json endpoint without requiring unpublished releases. A real run installs the published from-version, invokes the app's signed updater, verifies the expected to-version/self-test and preserved data, then uninstalls and checks persistence again. Reports and logs are uploaded.
+
+The first real releases (`native-v0.0.1`, then `native-v0.0.2`), real update execution, and clean macOS/Windows client VM screenshots remain release-validation work after Gate 3. No real publication is authorized in this chunk.

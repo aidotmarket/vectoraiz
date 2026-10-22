@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Assemble CI artifacts; publishing stays blocked until the replacement key is configured."""
+"""Sign and verify CI artifacts locally; publish only when explicitly requested."""
 import argparse
 import base64
 from datetime import datetime, timezone
@@ -17,7 +17,6 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'aidotmarket/vectoraiz'
 DEST = 'aidotmarket/vectoraiz-test-builds'
-PLACEHOLDER = 'UNSIGNED-DRY-RUN-NO-KEY-ACCESSED'
 
 
 def command(*args, **kwargs):
@@ -32,30 +31,73 @@ def docker_checks():
     latest = api(f'repos/{SOURCE}/releases/latest')
     assert latest['tag_name'].startswith('v'), 'Docker latest is no longer a v* release'
     releases = api(f'repos/{SOURCE}/releases?per_page=100')
-    # Match the first page consumed by the existing /rc Worker.
     first = next((r for r in releases if r['prerelease'] and not r['draft']), None)
-    assert first is None or first['tag_name'].startswith('v'), 'Docker /rc prerelease tag changed'
+    assert first is None or first['tag_name'].startswith('v'), 'Docker prerelease tag changed'
     return {'latest': latest['tag_name'], 'first_prerelease': first['tag_name'] if first else None}
 
 
-def rotated_secrets(key_name, password_name):
-    # This path is unreachable in dry-run and while the placeholder is configured.
-    # Names must come from the post-incident rotation dispatch, never the exposed pair.
-    old = {'VECTORAIZ_TAURI_UPDATER_PRIVATE_KEY', 'VECTORAIZ_TAURI_UPDATER_KEY_PASSWORD'}
-    if not key_name or not password_name or {key_name, password_name} & old:
-        raise SystemExit('Supply replacement secret names from the rotation dispatch')
-    token = (Path.home() / '.config/infisical/sysadmin-token').read_text().strip()
+def rotated_secrets():
+    # Run the approved Cloud helper in isolated Python. Suppress upstream errors
+    # and never include credentials in exception diagnostics or command arguments.
+    helper = Path('/Users/max/koskadeux-state/s1811/infisical_endpoint_841ebac.py')
+    environment = dict(os.environ)
+    environment.pop('INFISICAL_PROJECT_ID', None)
+    environment.pop('INFISICAL_API_URL', None)
     values = []
-    for name in [key_name, password_name]:
-        query = urllib.parse.urlencode({'workspaceId': '0943f641-faee-4324-b337-0d50c276e4a9',
-                                       'environment': 'prod', 'secretPath': '/'})
-        request = urllib.request.Request(
-            f'https://secrets.ai.market/api/v3/secrets/raw/{urllib.parse.quote(name, safe="")}?{query}',
-            headers={'Authorization': f'Bearer {token}', 'User-Agent': 'vectoraiz-test-build-publisher/1'})
-        with urllib.request.urlopen(request, timeout=30) as response:
-            values.append(json.load(response)['secret']['secretValue'])
-    assert values[0], 'Replacement key is empty'
+    for name in ['VECTORAIZ_TAURI_UPDATER_PRIVATE_KEY', 'VECTORAIZ_TAURI_UPDATER_KEY_PASSWORD']:
+        result = command('env', '-u', 'INFISICAL_PROJECT_ID', '-u', 'INFISICAL_API_URL',
+                         'python3', '-I', helper, 'get', name, 'prod', '/koskadeux',
+                         env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        values.append(result.stdout.decode())
+    if not values[0]:
+        raise SystemExit('Cloud updater key is empty')
     return values
+
+
+def public_packet(public):
+    lines = base64.b64decode(public, validate=True).decode().splitlines()
+    return base64.b64decode(lines[1], validate=True)
+
+
+def signing_environment(dry_run, embedded, temporary):
+    secret = temporary / 'signing.key'
+    public_file = temporary / 'signing.pub'
+    if dry_run:
+        command('node', ROOT / 'app/node_modules/.bin/tauri', 'signer', 'generate',
+                '--ci', '--password', '', '--write-keys', secret,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        key = secret.read_text().strip()
+        public_file.write_bytes(base64.b64decode(secret.with_suffix('.key.pub').read_text().strip(), validate=True))
+        secret.with_suffix('.key.pub').unlink()
+        password = ''
+    else:
+        key, password = rotated_secrets()
+        # Recreate the public key from the actual secret, not from a sibling
+        # public secret or caller-supplied assertion. TemporaryDirectory is 0700.
+        with secret.open('wb') as stream:
+            os.chmod(secret, 0o600)
+            stream.write(base64.b64decode(key, validate=True))
+        command('minisign', '-R', '-s', secret, '-p', public_file,
+                input=(password + '\n').encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    public = base64.b64encode(public_file.read_bytes()).decode()
+    if not dry_run and public_packet(public) != public_packet(embedded):
+        raise SystemExit('Release blocked: embedded updater public key does not match Cloud signing key')
+    secret.unlink()
+    return dict(os.environ, TAURI_SIGNING_PRIVATE_KEY=key,
+                TAURI_SIGNING_PRIVATE_KEY_PASSWORD=password), public
+
+
+def sign_and_verify(file, environment, public, version):
+    signature = file.with_name(file.name + '.sig')
+    command('node', ROOT / 'app/node_modules/.bin/tauri', 'signer', 'sign',
+            '--app-version', version, file, env=environment, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    with tempfile.TemporaryDirectory(prefix='vz-verify-') as verification:
+        sigfile = Path(verification) / 'artifact.sig'
+        pubfile = Path(verification) / 'updater.pub'
+        sigfile.write_bytes(base64.b64decode(signature.read_text().strip(), validate=True))
+        pubfile.write_bytes(base64.b64decode(public, validate=True))
+        command('minisign', '-Vm', file, '-x', sigfile, '-p', pubfile)
+    return signature.read_text().strip()
 
 
 def main():
@@ -67,8 +109,6 @@ def main():
     parser.add_argument('--commit', required=True)
     parser.add_argument('--run-id', required=True, type=int)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--key-secret-name')
-    parser.add_argument('--password-secret-name')
     args = parser.parse_args()
     if not re.fullmatch(r'0\.0\.[1-9][0-9]*', args.version):
         parser.error('Expected stage 1 version 0.0.N (N > 0)')
@@ -112,35 +152,21 @@ def main():
     dmg, = output.glob('*.dmg')
     platforms = {}
     tag = f'native-v{args.version}'
-    environment = None
-    if args.publish:
-        key, password = rotated_secrets(args.key_secret_name, args.password_secret_name)
-        environment = dict(os.environ, TAURI_SIGNING_PRIVATE_KEY=key, TAURI_SIGNING_PRIVATE_KEY_PASSWORD=password)
-    for target, file in [('darwin-aarch64', mac), ('windows-x86_64', windows)]:
-        signature = file.with_name(file.name + '.sig')
-        if args.dry_run:
-            signature.write_text(PLACEHOLDER + '\n')
-        else:
-            # Tauri prints signing-key hints; suppress all signer output, including on failure.
-            command('node', ROOT / 'app/node_modules/.bin/tauri', 'signer', 'sign',
-                    '--app-version', args.version, file, env=environment,
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # Tauri signatures/public keys are base64-encoded minisign text.
-            with tempfile.TemporaryDirectory(prefix='vz-verify-') as verification:
-                sigfile = Path(verification) / 'artifact.sig'
-                pubfile = Path(verification) / 'updater.pub'
-                sigfile.write_bytes(base64.b64decode(signature.read_text().strip(), validate=True))
-                pubfile.write_bytes(base64.b64decode(public, validate=True))
-                command('minisign', '-Vm', file, '-x', sigfile, '-p', pubfile)
-        platforms[target] = {'signature': signature.read_text().strip(),
-                             'url': f'https://github.com/{DEST}/releases/download/{tag}/{file.name}'}
+    with tempfile.TemporaryDirectory(prefix='vz-signing-') as signing:
+        environment, verification_public = signing_environment(args.dry_run, public, Path(signing))
+        for target, file in [('darwin-aarch64', mac), ('windows-x86_64', windows)]:
+            signature = sign_and_verify(file, environment, verification_public, args.version)
+            platforms[target] = {'signature': signature,
+                                 'url': f'https://github.com/{DEST}/releases/download/{tag}/{file.name}'}
+    del environment
     manifest = {'version': args.version, 'notes': f'Source: {SOURCE}@{args.commit}',
                 'pub_date': datetime.now(timezone.utc).isoformat(), 'platforms': platforms}
     (output / 'latest.json').write_text(json.dumps(manifest, indent=2) + '\n')
     (output / 'publish-evidence.json').write_text(json.dumps({
         'run_url': run['html_url'], 'source_sha': args.commit, 'docker_checks': checks,
-        'dry_run': args.dry_run, 'signatures_verified': not args.dry_run,
-        'signature_status': PLACEHOLDER if args.dry_run else 'verified'}, indent=2) + '\n')
+        'dry_run': args.dry_run, 'signatures_verified': True,
+        'verification_public_key': verification_public,
+        'signature_status': 'verified with throwaway key' if args.dry_run else 'verified with embedded key'}, indent=2) + '\n')
     assets = sorted(p for p in output.iterdir() if p.is_file())
     (output / 'SHA256SUMS').write_text(''.join(
         f'{hashlib.file_digest(p.open("rb"), "sha256").hexdigest()}  {p.name}\n' for p in assets))
@@ -149,7 +175,7 @@ def main():
     for file in assets:
         print(f'  {file.name}')
     if args.dry_run:
-        print('UNSIGNED dry run: no signing key accessed; signature verification NOT performed; no GitHub writes.')
+        print('Signed dry run: throwaway key signatures verified; no real key accessed; no GitHub writes.')
         return
     branch = api(f'repos/{DEST}')['default_branch']
     with tempfile.NamedTemporaryFile(mode='w', suffix='.md') as notes:
