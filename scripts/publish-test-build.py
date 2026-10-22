@@ -11,8 +11,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-import urllib.parse
-import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = 'aidotmarket/vectoraiz'
@@ -21,6 +19,11 @@ DEST = 'aidotmarket/vectoraiz-test-builds'
 
 def command(*args, **kwargs):
     return subprocess.run(list(map(str, args)), check=True, **kwargs)
+
+
+def sha256(file):
+    with file.open('rb') as stream:
+        return hashlib.file_digest(stream, 'sha256').hexdigest()
 
 
 def api(path):
@@ -139,11 +142,12 @@ def main():
             build = json.loads(path.read_text())
             assert build['version'] == args.version and build['source_sha'] == args.commit, 'Artifact provenance/version mismatch'
             assert build['updater_signed'] is False
+            assert build['updater_public_key'] == public, 'Artifact embedded public key differs from app configuration'
             targets.add(build['target'])
             for name, digest in build['files'].items():
                 assert Path(name).name == name, 'Unsafe artifact filename'
                 file = path.parent / name
-                assert hashlib.file_digest(file.open('rb'), 'sha256').hexdigest() == digest, f'Artifact hash mismatch: {name}'
+                assert sha256(file) == digest, f'Artifact hash mismatch: {name}'
                 assert not (output / name).exists(), f'Duplicate asset: {name}'
                 shutil.copy2(file, output / name)
         assert targets == {'aarch64-apple-darwin', 'x86_64-pc-windows-msvc'}
@@ -169,7 +173,7 @@ def main():
         'signature_status': 'verified with throwaway key' if args.dry_run else 'verified with embedded key'}, indent=2) + '\n')
     assets = sorted(p for p in output.iterdir() if p.is_file())
     (output / 'SHA256SUMS').write_text(''.join(
-        f'{hashlib.file_digest(p.open("rb"), "sha256").hexdigest()}  {p.name}\n' for p in assets))
+        f'{sha256(p)}  {p.name}\n' for p in assets))
     assets.append(output / 'SHA256SUMS')
     print(f'{"Would upload" if args.dry_run else "Uploading"} full release {DEST}:{tag}')
     for file in assets:

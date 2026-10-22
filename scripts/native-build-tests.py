@@ -106,7 +106,7 @@ class PublisherGate(unittest.TestCase):
                         hashes[name] = hashlib.sha256(payload).hexdigest()
                     (dest / f'build-{target}.json').write_text(json.dumps({
                         'source_sha': 'a' * 40, 'version': '0.0.1', 'target': target,
-                        'updater_signed': False, 'files': hashes}))
+                        'updater_signed': False, 'updater_public_key': json.loads((publisher.ROOT / 'app/src-tauri/tauri.conf.json').read_text())['plugins']['updater']['pubkey'], 'files': hashes}))
 
             with patch.object(publisher, 'api', side_effect=api), \
                     patch.object(publisher, 'docker_checks', return_value={'latest': 'v1.2.3'}), \

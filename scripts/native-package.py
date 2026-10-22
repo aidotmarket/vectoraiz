@@ -73,6 +73,7 @@ def main():
     shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', output / f'THIRD_PARTY_NOTICES-{triple}.txt')
     manifest = {'source_sha': __import__('os').environ['SOURCE_SHA'], 'version': version,
                 'target': triple, 'profile': 'debug', 'updater_signed': False,
+                'updater_public_key': json.loads((ROOT / 'app/src-tauri/tauri.conf.json').read_text())['plugins']['updater']['pubkey'],
                 'sizes_bytes': {p.name: p.stat().st_size for p in sorted(output.iterdir()) if p.is_file()},
                 'files': {p.name: hashlib.file_digest(p.open('rb'), 'sha256').hexdigest()
                           for p in sorted(output.iterdir()) if p.is_file()}}
