@@ -4,7 +4,9 @@ Compilation is separate from execution so a cold build does not consume a test's
 120 second budget. Each test process exits before the next starts; a deadlocked
 runtime cannot keep the suite alive after a failed timeout.
 """
+import ctypes
 import json
+from pathlib import Path
 import subprocess
 import sys
 
@@ -18,6 +20,9 @@ def run(argv, timeout, capture=False):
     except subprocess.CalledProcessError as error:
         if error.stdout:
             print(error.stdout, flush=True)
+        if sys.platform == "win32":
+            print(f"FAILED exit status: 0x{error.returncode & 0xffffffff:08X}: {argv!r}",
+                  flush=True)
         raise
     except subprocess.TimeoutExpired as error:
         if error.stdout:
@@ -27,6 +32,11 @@ def run(argv, timeout, capture=False):
 
 
 def main():
+    if sys.platform == "win32":
+        # Child processes inherit this mode, including during loader startup before
+        # libtest/main. Missing DLLs must return NTSTATUS rather than open a dialog.
+        # SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX
+        ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x0002 | 0x8000)
     options = ["--locked", "--workspace", *sys.argv[1:]]
     artifacts = run(
         ["cargo", "test", *options, "--no-run", "--message-format=json"],
@@ -41,6 +51,17 @@ def main():
             executables.add(message["executable"])
     if not executables:
         raise RuntimeError("cargo produced no test executables")
+    if sys.platform == "win32":
+        # Keep the complete import tables as CI evidence even if --list fails.
+        with Path("windows-test-dependents.log").open("w", encoding="utf-8") as log:
+            for executable in sorted(executables):
+                heading = f"DLL dependencies: {executable}"
+                print(heading, flush=True)
+                dependencies = run(["dumpbin", "/dependents", executable],
+                                   timeout=30, capture=True)
+                log.write(f"{heading}\n{dependencies}\n")
+                log.flush()
+                print(dependencies, flush=True)
     for executable in sorted(executables):
         listing = run([executable, "--list"], timeout=30, capture=True)
         for line in listing.splitlines():

@@ -62,11 +62,6 @@ jobs:
           key: assets-${{ runner.os }}-${{ hashFiles('spike/fixtures/models.json', 'scripts/fetch-assets.py') }}
       - name: Fetch verified models and PDFium
         run: python scripts/fetch-assets.py
-      - name: Build Apple Vision helper
-        if: runner.os == 'macOS'
-        run: |
-          mkdir -p target/debug
-          swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
       - uses: actions/cache/restore@v4
         id: minio-cache
         with:
@@ -106,6 +101,12 @@ jobs:
         run: cargo fmt --all --check
       - name: Rust lint
         run: cargo clippy --locked --all-targets ${{ env.NATIVE_FEATURES }} -- -D warnings
+      # Restore the Rust cache before placing the non-Cargo OCR helper beside workers.
+      - name: Build Apple Vision helper
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p target/debug
+          swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
@@ -138,4 +139,5 @@ jobs:
           name: pipeline-evidence-${{ matrix.os }}
           path: |
             minio-test.log
+            windows-test-dependents.log
           if-no-files-found: ignore
