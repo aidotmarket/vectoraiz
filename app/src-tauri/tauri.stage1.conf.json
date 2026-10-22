@@ -1,0 +1,24 @@
+{
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "resources": {
+      "gen/bundle/assets/": "assets/",
+      "gen/bundle/models.json": "models.json",
+      "gen/bundle/THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES"
+    },
+    "externalBin": [
+      "gen/bin/vz-parser-worker",
+      "gen/bin/vectoraiz-mcp",
+      "gen/bin/vectoraiz-cli"
+    ],
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "webviewInstallMode": { "type": "offlineInstaller", "silent": true },
+      "wix": { "upgradeCode": "987DE98A-AFD7-40EA-B8D2-90F23745FC91" }
+    }
+  }
+}

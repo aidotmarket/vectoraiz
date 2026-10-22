@@ -20,6 +20,7 @@ vz-core.workspace = true
 serde_json.workspace = true
 anyhow = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
+tauri-plugin-updater = "2.14.0"
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

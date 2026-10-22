@@ -16,6 +16,29 @@ fn self_test<R: tauri::Runtime>(
             return result;
         }
         assert_eq!(result.status, "OK");
+        if let Some(report) = std::env::var_os("VZ_INSTALLED_SELF_TEST_REPORT") {
+            use tauri::Manager;
+            let resources = _app.path().resource_dir().expect("installed resources");
+            assert!(resources.join("THIRD_PARTY_NOTICES").is_file());
+            assert!(resources.join("models.json").is_file());
+            assert!(resources.join("assets/pdfium").is_dir());
+            assert!(vz_core::worker::executable()
+                .expect("worker path")
+                .is_file());
+            let data = _app
+                .path()
+                .home_dir()
+                .expect("home directory")
+                .join("vectorAIz");
+            std::fs::create_dir_all(&data).expect("create persistent data folder");
+            std::fs::write(
+                data.join("install-self-test.json"),
+                serde_json::to_vec(&result).unwrap(),
+            )
+            .unwrap();
+            std::fs::write(report, serde_json::to_vec(&result).unwrap())
+                .expect("installed self-test report");
+        }
         println!("VECTORAIZ_SMOKE_TEST_OK");
         if std::env::args().any(|arg| arg == "--pipeline-smoke-test") {
             println!("VECTORAIZ_PIPELINE_SMOKE_TEST_OK");
@@ -31,6 +54,18 @@ fn self_test<R: tauri::Runtime>(
 }
 
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    // Rotation freeze: no updater can run with the deliberately invalid public key.
+    let config: serde_json::Value =
+        serde_json::from_str(include_str!("../tauri.conf.json")).expect("Tauri configuration");
+    let builder = if config["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .expect("updater public key")
+        .starts_with("PLACEHOLDER-")
+    {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_updater::Builder::new().build())
+    };
     #[cfg(feature = "smoke-test")]
     let builder = builder.on_page_load(|webview, payload| {
         if smoke_test_requested() && payload.event() == tauri::webview::PageLoadEvent::Finished {
@@ -78,9 +113,18 @@ fn pipeline_paths<R: tauri::Runtime>(
     use tauri::Manager;
     let state = app
         .path()
-        .app_data_dir()
+        .home_dir()
         .map_err(|e| e.to_string())?
+        .join("vectorAIz")
         .join("phase0-index");
+    let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    if resources.join("models.json").is_file() {
+        return Ok((
+            state,
+            resources.join("assets"),
+            resources.join("models.json"),
+        ));
+    }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     Ok((
         state,
