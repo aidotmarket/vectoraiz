@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Negative acceptance tests: version drift and release freeze must fail closed."""
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -13,6 +14,9 @@ from unittest.mock import patch
 spec = importlib.util.spec_from_file_location('version', Path(__file__).with_name('native-version.py'))
 version = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(version)
+publish_spec = importlib.util.spec_from_file_location('publisher', Path(__file__).with_name('publish-test-build.py'))
+publisher = importlib.util.module_from_spec(publish_spec)
+publish_spec.loader.exec_module(publisher)
 
 
 class VersionGate(unittest.TestCase):
@@ -58,6 +62,64 @@ class VersionGate(unittest.TestCase):
     def test_placeholder_cannot_release(self):
         with self.assertRaisesRegex(SystemExit, 'placeholder updater public key'):
             self.invoke('--release')
+
+
+class PublisherGate(unittest.TestCase):
+    def invoke(self, *args):
+        with patch.object(sys, 'argv', ['publish-test-build.py', *args]), contextlib.redirect_stdout(io.StringIO()):
+            publisher.main()
+
+    def test_publish_freeze_blocks_before_any_api_or_secret_access(self):
+        with patch.object(publisher, 'api') as api, patch.object(publisher, 'rotated_secrets') as secrets:
+            with self.assertRaisesRegex(SystemExit, 'rotation freeze'):
+                self.invoke('--publish', '--version', '0.0.1', '--commit', 'a' * 40,
+                            '--run-id', '42', '--output', '/unused')
+            api.assert_not_called()
+            secrets.assert_not_called()
+
+    def test_dry_run_assembles_artifacts_without_signing_or_writes_to_github(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'out'
+
+            def api(path):
+                self.assertEqual(path, f'repos/{publisher.SOURCE}/actions/runs/42')
+                return {'head_sha': 'a' * 40, 'path': '.github/workflows/native-ci.yml',
+                        'conclusion': 'success', 'html_url': 'https://example.test/run/42'}
+
+            def download(*args, **kwargs):
+                self.assertEqual(args[:3], ('gh', 'run', 'download'))
+                folder = Path(args[-1])
+                for target, names in [
+                    ('aarch64-apple-darwin', ['test.app.tar.gz', 'test.dmg', 'mac-notices.txt']),
+                    ('x86_64-pc-windows-msvc', ['test.msi', 'windows-notices.txt']),
+                ]:
+                    dest = folder / target
+                    dest.mkdir()
+                    hashes = {}
+                    for name in names:
+                        payload = f'fixture:{name}'.encode()
+                        (dest / name).write_bytes(payload)
+                        hashes[name] = hashlib.sha256(payload).hexdigest()
+                    (dest / f'build-{target}.json').write_text(json.dumps({
+                        'source_sha': 'a' * 40, 'version': '0.0.1', 'target': target,
+                        'updater_signed': False, 'files': hashes}))
+
+            with patch.object(publisher, 'api', side_effect=api), \
+                    patch.object(publisher, 'docker_checks', return_value={'latest': 'v1.2.3'}), \
+                    patch.object(publisher, 'command', side_effect=download) as command, \
+                    patch.object(publisher, 'rotated_secrets') as secrets:
+                self.invoke('--dry-run', '--version', '0.0.1', '--commit', 'a' * 40,
+                            '--run-id', '42', '--output', str(output))
+                self.assertEqual(command.call_count, 1)
+                secrets.assert_not_called()
+            manifest = json.loads((output / 'latest.json').read_text())
+            self.assertEqual(manifest['version'], '0.0.1')
+            for value in manifest['platforms'].values():
+                self.assertEqual(value['signature'], publisher.PLACEHOLDER)
+            self.assertFalse(json.loads((output / 'publish-evidence.json').read_text())['signatures_verified'])
+            for line in (output / 'SHA256SUMS').read_text().splitlines():
+                digest, name = line.split('  ', 1)
+                self.assertEqual(hashlib.sha256((output / name).read_bytes()).hexdigest(), digest)
 
 
 if __name__ == '__main__':
