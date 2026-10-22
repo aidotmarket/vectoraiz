@@ -45,8 +45,11 @@ if windows:
     msiexec = Path(os.environ['SystemRoot']) / 'System32/msiexec.exe'
     log = Path('msi-install.log').resolve()
     log.touch()
+    # Use the MSI's per-machine default destination. Python quotes a spaced
+    # INSTALLDIR=... argument as a whole; msiexec requires quoting its value
+    # and can otherwise open its usage dialog even when /qn was supplied.
     run(msiexec, '/i', installer, '/qn', '/norestart', '/l*v', log,
-        'ALLUSERS=1', f'INSTALLDIR={installed}', timeout=240)
+        'ALLUSERS=1', timeout=240)
     binary = installed / 'vectoraiz.exe'
 else:
     installer, = artifacts.rglob('*.dmg')

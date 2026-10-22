@@ -31,7 +31,13 @@
       "requireSignedVersion": true,
       "endpoints": [
         "https://github.com/aidotmarket/vectoraiz-test-builds/releases/latest/download/latest.json"
-      ]
+      ],
+      "windows": {
+        "installMode": "quiet",
+        "installerArgs": [
+          "/norestart"
+        ]
+      }
     }
   },
   "bundle": {

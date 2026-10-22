@@ -56,7 +56,7 @@ def exercise(before, after):
         msiexec = Path(os.environ['SystemRoot']) / 'System32/msiexec.exe'
         installed = Path(os.environ['ProgramFiles']) / 'vectorAIz'
         run(msiexec, '/i', installer, '/qn', '/norestart', '/l*v',
-            Path('update-install.log').resolve(), 'ALLUSERS=1', f'INSTALLDIR={installed}')
+            Path('update-install.log').resolve(), 'ALLUSERS=1')
         binary = installed / 'vectoraiz.exe'
     else:
         installer, = artifacts.glob('*.dmg')

@@ -106,7 +106,9 @@ pub(crate) fn run() {
             tauri::async_runtime::spawn(async move {
                 let result = async {
                     let update = handle
-                        .updater()?
+                        .updater_builder()
+                        .restart_after_install(false)
+                        .build()?
                         .check()
                         .await?
                         .ok_or_else(|| anyhow::anyhow!("No update available"))?;
