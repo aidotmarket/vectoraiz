@@ -26,6 +26,8 @@ fn main() {
                 "pipeline_index",
                 "pipeline_search",
                 "pipeline_ask",
+                "update_check",
+                "update_install",
             ])),
     )
     .expect("failed to build Tauri app");
