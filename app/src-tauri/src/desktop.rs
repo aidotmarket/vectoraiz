@@ -1,3 +1,84 @@
+// Keep the checked Update, including its version and signature, until consent.
+#[derive(Default)]
+struct PendingUpdate(tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
+
+#[tauri::command]
+async fn update_check<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    pending: tauri::State<'_, PendingUpdate>,
+    startup: Option<bool>,
+) -> Result<serde_json::Value, String> {
+    use tauri_plugin_updater::UpdaterExt;
+    if startup.unwrap_or(false)
+        && std::env::args().any(|arg| {
+            matches!(
+                arg.as_str(),
+                "--smoke-test" | "--pipeline-smoke-test" | "--update-test"
+            )
+        })
+    {
+        return Ok(serde_json::json!({"available": false}));
+    }
+    let mut stored = pending.0.lock().await;
+    *stored = None;
+    let update = app
+        .updater_builder()
+        .restart_after_install(true)
+        .build()
+        .map_err(|error| error.to_string())?
+        .check()
+        .await
+        .map_err(|error| error.to_string())?;
+    let result = match &update {
+        Some(update) => serde_json::json!({"available": true, "version": update.version}),
+        None => serde_json::json!({"available": false}),
+    };
+    *stored = update;
+    Ok(result)
+}
+
+#[tauri::command]
+async fn update_install<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    pending: tauri::State<'_, PendingUpdate>,
+    progress: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<(), serde_json::Value> {
+    // Serialize checks and installs so another check cannot replace this consented version.
+    let stored = pending.0.lock().await;
+    let update = stored.as_ref().ok_or_else(
+        || serde_json::json!({"detail": "Check for updates again", "checkAgain": true}),
+    )?;
+    let mut downloaded = 0;
+    let bytes = update
+        .download(
+            |chunk, total| {
+                downloaded += chunk;
+                let _ = progress.send(serde_json::json!({
+                    "stage": "downloading", "downloaded": downloaded, "total": total
+                }));
+            },
+            || {},
+        )
+        .await
+        .map_err(|error| {
+            // Download includes signature verification and has not replaced anything.
+            serde_json::json!({"detail": error.to_string(), "currentVersionUnchanged": true})
+        })?;
+    let _ = progress.send(serde_json::json!({"stage": "installing"}));
+    update.install(bytes).map_err(|error| {
+        // A macOS replacement may already have happened, including PreviousAppNotRestored.
+        // Do not claim that the installed app is unchanged for an install-stage error.
+        serde_json::json!({"detail": error.to_string(), "currentVersionUnchanged": false})
+    })?;
+    #[cfg(target_os = "macos")]
+    app.restart();
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        Ok(())
+    }
+}
+
 #[tauri::command]
 fn self_test<R: tauri::Runtime>(
     _app: tauri::AppHandle<R>,
@@ -61,7 +142,9 @@ fn self_test<R: tauri::Runtime>(
 }
 
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
-    let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+    let builder = builder
+        .manage(PendingUpdate::default())
+        .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(feature = "smoke-test")]
     let builder = builder.on_page_load(|webview, payload| {
         if smoke_test_requested() && payload.event() == tauri::webview::PageLoadEvent::Finished {
@@ -76,7 +159,9 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         self_test,
         pipeline_index,
         pipeline_search,
-        pipeline_ask
+        pipeline_ask,
+        update_check,
+        update_install
     ])
 }
 

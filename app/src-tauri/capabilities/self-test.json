@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "self-test",
-  "description": "Local main window diagnostic and indexing search and chat commands only.",
+  "description": "Local main window diagnostic and indexing, search, chat and consented update commands only.",
   "local": true,
   "windows": [
     "main"
@@ -10,6 +10,8 @@
     "allow-self-test",
     "allow-pipeline-index",
     "allow-pipeline-search",
-    "allow-pipeline-ask"
+    "allow-pipeline-ask",
+    "allow-update-check",
+    "allow-update-install"
   ]
 }
