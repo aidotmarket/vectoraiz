@@ -1,0 +1,30 @@
+By-hand Windows run, 2026-10-23 (times CEST), Minerva S1817
+
+Device: winmax, Windows 11, x64, Claude desktop app 3.6556.2
+
+10:02 vectorAIz_0.0.1_x64.msi downloaded to Downloads, 357707776 bytes
+      sha256 d3d6d9302925d5730d0a1df49bd504c16b1add937d48f80a05d0a6ac04dc936c
+      release digest (native-v0.0.1 page) sha256:d3d6d9302925d5730d0a1df49bd504c16b1add937d48f80a05d0a6ac04dc936c  -> equal
+10:04 msiexec started by Explorer double-click; Max completed the wizard; desktop shortcut "vectorAIz" appeared
+10:06 launch blocked: taskbar window title "Smart App Control blocke..."
+10:08 Max: Smart App Control turned off
+10:08 app opened; 10:10 self-test {"status":"OK","version":"0.0.1","os":"windows","arch":"x86_64"}
+C:\Program Files\vectorAIz (0.0.1): models.json, THIRD_PARTY_NOTICES, vectoraiz.exe 190459392,
+      vectoraiz-cli.exe 239895040, vectoraiz-mcp.exe 133632, vz-parser-worker.exe 71835136, assets\, Uninstall vectorAIz.lnk
+%USERPROFILE%\vectoraiz before: 853 entries, 769 files, 8985236 bytes, all files dated 2026-02-24..27 (old Docker-era source checkout)
+10:16 vectorAIz_0.0.2_x64.msi downloaded, 357715968 bytes
+      sha256 ef9f841a063ff95eb3f4509571458f005cbe60d1ce88c291f9902d99cd165075
+      release digest (native-v0.0.2 page) sha256:ef9f841a063ff95eb3f4509571458f005cbe60d1ce88c291f9902d99cd165075 -> equal
+10:18-10:23 double-click on the 0.0.2 MSI (computer use x2, Max x1): no installer window; Program Files unchanged
+10:27 Max, in PowerShell: msiexec /i "$env:USERPROFILE\Downloads\vectorAIz_0.0.2_x64.msi" /l*v "$env:USERPROFILE\Downloads\vz-0.0.2-install.log"
+      log extracts:
+      MSI_LUA: Elevated credential consent provided. Install will run elevated
+      RESTART MANAGER: Successfully shut down all applications that held files in use.
+      RemoveExistingProducts: Product {B831281B-A1FC-4681-A1B0-955A1D43C24B} REMOVE=ALL UPGRADINGPRODUCTCODE={5059FBAE-91E3-41A1-AA35-4D452592A87B}
+      UpgradeCode = {987DE98A-AFD7-40EA-B8D2-90F23745FC91}; ProductVersion = 0.0.2; ALLUSERS = 1
+      Windows Installer installed the product. Product Name: vectorAIz. Product Version: 0.0.2. ... Installation success or error status: 0.
+      RESTART MANAGER: Previously shut down applications have been restarted.
+10:28 two vectorAIz windows open; self-test {"status":"OK","version":"0.0.2","os":"windows","arch":"x86_64"}
+10:29 Settings > Apps > Installed apps: "vectorAIz 0.0.2 | vectoraiz | 23/10/2026 | 829 MB" -> Uninstall -> Uninstall
+10:30 Installed apps search "vectorAIz": nothing found; C:\Program Files\vectorAIz does not exist
+      %USERPROFILE%\vectoraiz after: same top-level entries, all dated February 2026
