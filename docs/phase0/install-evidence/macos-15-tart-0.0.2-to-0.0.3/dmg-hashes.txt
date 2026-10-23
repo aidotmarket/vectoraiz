@@ -1,0 +1,6 @@
+7fac3da35a74a7f6cfe6bc70e860cc4f6f5e9af960b09c5bba6f6a3561a5c78f  /Users/admin/Downloads/vectorAIz_0.0.2_aarch64.dmg
+0083;6adb7a86;Safari;B16BDBA8-07D9-48D2-B0C2-0337A9787237
+21da3805a74e7d48dc11b394216b8ab99528307ba829b7179be48898ed88bc51  /Users/admin/Downloads/vectorAIz_0.0.3_aarch64.dmg
+0083;6adb7cf8;Safari;951F2D46-493C-4026-B7CE-90C566ADCF6B
+SHA256SUMS-0.0.2:7fac3da35a74a7f6cfe6bc70e860cc4f6f5e9af960b09c5bba6f6a3561a5c78f  vectorAIz_0.0.2_aarch64.dmg
+SHA256SUMS-0.0.3:21da3805a74e7d48dc11b394216b8ab99528307ba829b7179be48898ed88bc51  vectorAIz_0.0.3_aarch64.dmg
