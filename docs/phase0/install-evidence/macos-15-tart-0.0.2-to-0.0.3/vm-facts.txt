@@ -1,0 +1,12 @@
+VM: vz-s1817-003 cloned 2026-10-23T15:14:40Z from ghcr.io/cirruslabs/macos-sequoia-vanilla:latest
+image digest: ghcr.io/cirruslabs/macos-sequoia-vanilla@sha256:57a83b1b52f928f5b11b0963927178fd6c4cac52c315279f227c27cc5ab81587
+tart: 2.41.1 (GitHub release)
+ProductName:		macOS
+ProductVersion:		15.7.7
+BuildVersion:		24G720
+arm64
+assessments enabled
+
+Run facts (2026-10-23, SSH reads in the guest):
+- after Replace: /Applications/vectorAIz.app CFBundleShortVersionString = 0.0.3, com.apple.quarantine present (Safari)
+- VM deleted after the run (tart delete vz-s1817-003); OCI image cache removed
