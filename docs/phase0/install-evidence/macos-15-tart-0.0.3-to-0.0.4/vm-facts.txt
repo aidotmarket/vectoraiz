@@ -1,0 +1,8 @@
+VM: vz-s1817-004 cloned 2026-10-23T18:10:46Z from ghcr.io/cirruslabs/macos-sequoia-vanilla:latest
+image digest: ghcr.io/cirruslabs/macos-sequoia-vanilla@sha256:57a83b1b52f928f5b11b0963927178fd6c4cac52c315279f227c27cc5ab81587
+tart: 2.41.1 (GitHub release)
+ProductName:		macOS
+ProductVersion:		15.7.7
+BuildVersion:		24G720
+arm64
+assessments enabled
