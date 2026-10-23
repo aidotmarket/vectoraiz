@@ -16,7 +16,7 @@ C:\Program Files\vectorAIz (0.0.1): models.json, THIRD_PARTY_NOTICES, vectoraiz.
       sha256 ef9f841a063ff95eb3f4509571458f005cbe60d1ce88c291f9902d99cd165075
       release digest (native-v0.0.2 page) sha256:ef9f841a063ff95eb3f4509571458f005cbe60d1ce88c291f9902d99cd165075 -> equal
 10:18-10:23 double-click on the 0.0.2 MSI (computer use x2, Max x1): no installer window; Program Files unchanged
-10:27 Max: msiexec /i "%USERPROFILE%\Downloads\vectorAIz_0.0.2_x64.msi" /l*v "%USERPROFILE%\Downloads\vz-0.0.2-install.log"
+10:27 Max, in PowerShell: msiexec /i "$env:USERPROFILE\Downloads\vectorAIz_0.0.2_x64.msi" /l*v "$env:USERPROFILE\Downloads\vz-0.0.2-install.log"
       log extracts:
       MSI_LUA: Elevated credential consent provided. Install will run elevated
       RESTART MANAGER: Successfully shut down all applications that held files in use.

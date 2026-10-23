@@ -1,6 +1,6 @@
 # By-hand Windows 11 run: native-v0.0.1 → native-v0.0.2 (2026-10-23, Minerva S1817)
 
-Phase 0 exit item 2, by-hand Windows run (Gate 2 spec 4.4, Amendment 1), on Max's own PC as decided on 2026-10-22 (Event Ledger 2ec1164d). **Coverage: PARTIAL.** Download, checksum, first-run self-test, a by-hand upgrade from 0.0.1 to 0.0.2 with its own self-test, and uninstall are covered. The 0.0.1 installer screens (SmartScreen, UAC, wizard) were not captured because Max clicked through them before the installer window could be approved for computer use. The signed in-app updater was not run on this PC: there is no shell on it for the `--update-test` flag. The `windows-2022` CI update test (run 39834963327) is still only a stand-in.
+Phase 0 exit item 2, by-hand Windows run (Gate 2 spec 4.4, Amendment 1), on Max's own PC as decided on 2026-10-22 (Event Ledger 2ec1164d). **Coverage: PARTIAL.** Download, checksum, first-run self-test, a by-hand upgrade from 0.0.1 to 0.0.2 with its own self-test, and uninstall are covered. The 0.0.1 installer screens (SmartScreen, UAC, wizard) were not captured because Max clicked through them before the installer window could be approved for computer use. The signed in-app updater was not run on this PC: the session cannot type into a shell there, so the `--update-test` flag needs Max to run it. The `windows-2022` CI update test (run 39834963327) is still only a stand-in.
 
 ## Machine
 
