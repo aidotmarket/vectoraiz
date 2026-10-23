@@ -1,6 +1,6 @@
 # By-hand macOS run: native-v0.0.2 → native-v0.0.3, manual DMG replacement (2026-10-23, Minerva S1817)
 
-Phase 0 exit item 2, by-hand macOS run for the D2 release candidate (Gate 2 spec 4.4 and 4.4a, Amendment 2). This closes the by-hand update step left PENDING in `../macos-15-tart-0.0.1-to-0.0.2/`: a tester downloads the newer DMG and replaces the app in Applications. **Coverage: PASS for install, Gatekeeper, manual replacement update, self-tests, the 0.0.3 "Check for updates" control and uninstall; PARTIAL for data preservation** (the data folder held only the extracted PDFium library, because indexing stalled, finding 2). The update prompt itself ("an update is available") is proved at 0.0.4, not here, because 0.0.3 is the latest release.
+Phase 0 exit item 2, by-hand macOS run for the D2 release candidate (Gate 2 spec 4.4 and 4.4a, Amendment 2). This closes the by-hand update step left PENDING in `../macos-15-tart-0.0.1-to-0.0.2/`: a tester downloads the newer DMG and replaces the app in Applications. **Coverage: PASS for install, Gatekeeper, manual replacement update, self-tests, the 0.0.3 "Check for updates" control and uninstall; PARTIAL for data preservation** (the data folder held only the extracted PDFium library, because indexing stalled, finding 2). The update prompt itself ("an update is available") is not exercised here, because 0.0.3 is the latest release; it is planned for the 0.0.3 → 0.0.4 run.
 
 ## Machine
 
@@ -33,7 +33,7 @@ DMG hashes and quarantine attributes: `dmg-hashes.txt`. Folder hashes: `hash-0.0
 
 1. **Every manual update repeats Open Anyway.** Replacing the ad-hoc-signed app with a newer DMG brings back "Not Opened", and the tester has to go through Privacy & Security → Open Anyway → administrator password again. The in-app signed updater does not have this problem (S1817 0.0.1→0.0.2 record). The macOS install notes should say so; Developer ID signing and notarization (stage 2) remove it.
 2. **Index folder stalls on "Scanning…"** (second sighting; the first was in the 0.0.1→0.0.2 run). The process sat at 0% CPU with nothing written for over two minutes. Whether the typed path reached the field is still not shown on screen (finding 3), so this is recorded as reproduced in this VM, not yet as a confirmed defect on real hardware.
-3. **Text in the Folder and Question fields is not visible.** The inputs use `text-slate-950` on the dark window background, so typed text cannot be read (and OCR finds none). The fields work otherwise.
+3. **Text in the Folder and Question fields is not visible.** The inputs use `text-slate-950` on the dark window background, so typed text cannot be read (and OCR finds none). Whether typed input reaches the fields correctly is not verified here (see finding 2).
 4. On both opens the administrator-password sheet needed an **OK** click; pressing Enter after typing the password did not submit it.
 
 ## Method notes
