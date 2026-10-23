@@ -1,0 +1,10 @@
+20:14 CEST 0.0.3 DMG downloaded via Safari (allowed downloads from github.com); sha256 + quarantine above
+20:15 CEST dragged vectorAIz to Applications (0.0.3, quarantined); opened
+20:23 CEST first open blocked (Not Opened); Privacy & Security -> Open Anyway -> Open Anyway -> admin password -> OK
+20:23 CEST app opened: 'Version 0.0.3'; startup banner 'vectorAIz 0.0.4 is available' with Install and restart / Later
+20:24 CEST 'Later' hid the banner, nothing downloaded (no update files, ~/vectorAIz absent); quit via vectorAIz menu; reopened (no Gatekeeper prompt): banner shown again
+20:28 CEST Index folder ~/Documents/vz-test (2 text files; field cleared with End + 30 Backspace, typed path not readable: input text same colour as field background) -> 'Scanning...' >3 min, 0% CPU (0.91 s total), nothing written; process sample shows no pipeline_index/vz_core blocking thread (sample-index-stall.txt)
+20:28 CEST clicked Install and restart while 'Scanning...' still shown: download started ('Downloading update... 83886080 / 172998948 bytes')
+20:29 CEST update installed without any administrator prompt (admin user; so the cancel case could not be exercised on macOS); app restarted itself at 20:28:45 CEST as 'Version 0.0.4'; bundle 0.0.4, no quarantine xattr, no Gatekeeper block; no banner
+20:29 CEST self-test 0.0.4 OK (status OK, version 0.0.4, macos, aarch64); Check for updates -> 'vectorAIz is up to date.'; ~/vectorAIz hashes identical before/after update
+20:30 CEST quit via vectorAIz menu; DMG ejected (hdiutil detach from shell); Applications -> vectorAIz selected -> File -> Move to Trash; app in Trash; ~/vectorAIz unchanged
