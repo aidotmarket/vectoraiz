@@ -94,6 +94,11 @@ def test(binary, cwd=None, env=None, result_path=None):
                     assert permission['pid'] == second.pid and permission['target_pid'] == first.pid, permission
                 if focus_required:
                     assert focused['focused'] is True, focused
+                    if sys.platform == 'win32':
+                        native = focused['native_focus']
+                        assert native['gui_query_ok'] is True and native['keyboard_focus_in_window'] is True, native
+                        assert native['window_hwnd'] == native['foreground_hwnd'] == native['foreground_after_hwnd'], native
+                        assert desktop_after['foreground_hwnd'] == native['window_hwnd'], (desktop_after, native)
                 print(f'PASS: second exit 0, original pid {first.pid} alive, visible, restored, focus requested; '
                       f"real focus {result['real_focus']}; initially minimized={minimized}", flush=True)
             finally:

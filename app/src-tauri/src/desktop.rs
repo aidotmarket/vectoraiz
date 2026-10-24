@@ -199,6 +199,46 @@ fn allow_single_instance_foreground(identifier: &str) {
     }
 }
 
+// Tao's parent-window focus cache is cleared when WebView2 takes keyboard
+// focus. Check the actual foreground queue, including its focused child, rather
+// than treating that normal child focus as a failed single-instance activation.
+#[cfg(windows)]
+fn single_instance_windows_focus<R: tauri::Runtime>(
+    window: &tauri::WebviewWindow<R>,
+) -> serde_json::Value {
+    use windows_sys::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{GetForegroundWindow, GetGUIThreadInfo, IsChild, GUITHREADINFO},
+    };
+    let hwnd: HWND = match window.hwnd() {
+        Ok(hwnd) => hwnd.0,
+        Err(error) => return serde_json::json!({"focused": false, "error": error.to_string()}),
+    };
+    // SAFETY: GUITHREADINFO is zero-initialized with the required cbSize and a
+    // valid writable pointer. HWNDs are only passed back to Win32 for queries.
+    unsafe {
+        let foreground = GetForegroundWindow();
+        let mut gui: GUITHREADINFO = std::mem::zeroed();
+        gui.cbSize = std::mem::size_of::<GUITHREADINFO>() as u32;
+        let queried = GetGUIThreadInfo(0, &mut gui) != 0; // current foreground queue
+        let focus_in_window = queried
+            && !gui.hwndFocus.is_null()
+            && (gui.hwndFocus == hwnd || IsChild(hwnd, gui.hwndFocus) != 0);
+        let foreground_after = GetForegroundWindow();
+        serde_json::json!({
+            "focused": foreground == hwnd && foreground_after == hwnd && focus_in_window,
+            "window_hwnd": hwnd as usize,
+            "foreground_hwnd": foreground as usize,
+            "foreground_after_hwnd": foreground_after as usize,
+            "gui_query_ok": queried,
+            "active_hwnd": gui.hwndActive as usize,
+            "keyboard_focus_hwnd": gui.hwndFocus as usize,
+            "keyboard_focus_in_window": focus_in_window,
+            "framework_focused": window.is_focused().unwrap_or(false),
+        })
+    }
+}
+
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -213,14 +253,21 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
                     loop {
                         let minimized = window.is_minimized().unwrap_or(true);
+                        #[cfg(windows)]
+                        let native_focus = single_instance_windows_focus(&window);
+                        #[cfg(windows)]
+                        let focused = native_focus["focused"].as_bool().unwrap_or(false);
+                        #[cfg(not(windows))]
                         let focused = window.is_focused().unwrap_or(false);
+                        #[cfg(all(feature = "smoke-test", not(windows)))]
+                        let native_focus = serde_json::Value::Null;
                         let visible = window.is_visible().unwrap_or(false);
                         if (!minimized && visible && focused && focus_request_accepted)
                             || std::time::Instant::now() >= deadline
                         {
                             #[cfg(feature = "smoke-test")]
                             if std::env::args().any(|a| a == "--single-instance-test") {
-                                let report = serde_json::json!({"pid": std::process::id(), "minimized": minimized, "visible": visible, "focused": focused, "focus_requested": true, "focus_request_accepted": focus_request_accepted});
+                                let report = serde_json::json!({"pid": std::process::id(), "minimized": minimized, "visible": visible, "focused": focused, "focus_requested": true, "focus_request_accepted": focus_request_accepted, "native_focus": native_focus});
                                 std::fs::write(std::env::var_os("VZ_SINGLE_INSTANCE_REPORT").expect("test report"), report.to_string()).expect("write focus report");
                             }
                             break;
