@@ -195,7 +195,7 @@ fn https_only_refuses_http_redirect_and_caps_chain_at_five() {
 }
 #[test]
 fn stalled_body_times_out() {
-    let server = Server::new(json!([{"body_delay":1}]));
+    let server = Server::new(json!([{"body_delay":5,"prefix":40}]));
     let dir = Temp::new();
     let client = client_builder()
         .no_proxy()
@@ -203,7 +203,9 @@ fn stalled_body_times_out() {
             reqwest::Certificate::from_pem(&fs::read(server.root.0.join("cert.pem")).unwrap())
                 .unwrap(),
         )
-        .read_timeout(Duration::from_millis(50))
+        // Allow TLS/headers on loaded CI runners; the body still stalls well
+        // beyond this budget, after sending a prefix to exercise an idle read.
+        .read_timeout(Duration::from_secs(2))
         .build()
         .unwrap();
     let ops = Operations::default();
@@ -216,6 +218,11 @@ fn stalled_body_times_out() {
     ));
     assert!(format!("{:#}", result.unwrap_err()).contains("timed out"));
     assert_eq!(server.requests().as_array().unwrap().len(), 4);
+    assert_eq!(
+        fs::read(dir.0.join("test.gguf.partial")).unwrap(),
+        [b'x'; 40]
+    );
+    assert!(!dir.0.join("test.gguf").exists());
 }
 #[test]
 fn cancel_keeps_partial_and_refused_overlap_cannot_touch_its_staging() {
@@ -546,14 +553,18 @@ fn invalid_folder_guard_preserves_seeded_rows_generation_files_and_search() {
         .chunk
         .text
         .clone();
+    drop(state);
     for (folder, message) in [
         ("", "Choose a folder to index"),
         ("   ", "Choose a folder to index"),
         (dir.0.join("missing").to_str().unwrap(), "Folder not found"),
     ] {
+        // Snapshot only while SQLite is closed: Windows locks portions of an
+        // open database, and reopening/searching may update its bookkeeping.
         let before = index_snapshot(&dir.0).unwrap();
         assert_eq!(validate_folder(folder).unwrap_err(), message);
         assert_eq!(index_snapshot(&dir.0).unwrap(), before);
+        let state = State::open(&dir.0).unwrap();
         assert_eq!(state.documents().unwrap()[0].doc_id, "doc");
         assert_eq!(
             runtime
@@ -563,5 +574,6 @@ fn invalid_folder_guard_preserves_seeded_rows_generation_files_and_search() {
                 .text,
             search
         );
+        drop(state);
     }
 }
