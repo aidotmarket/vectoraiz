@@ -28,6 +28,8 @@ On Max's PC in `%USERPROFILE%\Downloads\vz-byhand-0.0.4-to-0.0.5` (not committed
 | 9 Download, cancel, resume | PASS | Models panel lists size, licence and source; the source is plain text, not a link. Index/Search/Ask disabled until models arrived. The first download (~80 MB/s) finished before it could be cancelled, so the step was repeated: Cancel kept a qwen `.partial` of 333,216,366 bytes and Download resumed it. All SHA-256 match; search works. |
 | 10 Import from a folder | PASS | A folder with only the embedding file reported "imported / missing" with no disk-space error. Importing the full folder imported and verified both files; search works. Import copies and leaves the source in place. |
 
+**Self-tests (spec 4.4b step 2):** the source summary records the version shown by the app after install and after the update (0.0.4, then 0.0.5) and the search results, but not explicit Run self-test outcomes. Self-test results for this run are **UNVERIFIED** until checked in `notes.md` and the screenshots on the PC.
+
 ## Findings (not fixed in this record)
 
 1. **"Models needed" during the startup check.** On a normal 0.0.5 start with verified models present, the panel shows "Checking models…", the Download/Import buttons and "Models needed: download or import them first." for about 20 seconds while the files are hashed. A user could start an unnecessary download. Worth fixing (show only "Checking models…" until the check completes).
