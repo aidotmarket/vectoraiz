@@ -435,8 +435,8 @@ async fn pipeline_index<R: tauri::Runtime>(
     folder: String,
     progress: tauri::ipc::Channel<vz_core::index::Progress>,
 ) -> Result<serde_json::Value, String> {
-    let guard = operations.acquire()?;
     models::validate_folder(&folder)?;
+    let guard = operations.acquire()?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _guard = guard;
@@ -468,6 +468,13 @@ async fn pipeline_search<R: tauri::Runtime>(
     query: String,
 ) -> Result<serde_json::Value, String> {
     let guard = operations.acquire()?;
+    #[cfg(feature = "smoke-test")]
+    if smoke_test_requested() {
+        tauri::Manager::get_webview_window(&app, "main")
+            .expect("main window")
+            .eval("window.__VZ_SMOKE__.searchLocked = true")
+            .map_err(|e| e.to_string())?;
+    }
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _guard = guard;

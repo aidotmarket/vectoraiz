@@ -192,7 +192,7 @@ export default function App() {
       {!models && !modelError && <p>Checking models…</p>}
       <ul>{models?.files.map(file => <li key={file.file} className="mb-3">
         <p>{file.name} · {file.size.toLocaleString()} bytes · {file.license} · {file.verified ? "Verified" : "Needed"}</p>
-        <a className="text-teal-300 underline" href={file.source}>{file.source}</a>
+        <span className="text-teal-300">{file.source}</span>
       </li>)}</ul>
       <button className={buttonStyle} disabled={modelBusy || running || installing || !models} onClick={() => void acquireModels("download")}>Download models (about 560 MB)</button>
       <button className={buttonStyle} disabled={modelBusy || running || installing} onClick={() => setShowImport(true)}>Import from a folder</button>

@@ -248,6 +248,14 @@ it("shows model pins and disables the pipeline without ever downloading on start
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
+it("shows model sources as plain text without navigating links", async () => {
+  modelsInvoke.mockResolvedValue(missingModels);
+  render(<App />);
+  const panel = await screen.findByLabelText("Models");
+  expect(panel).toHaveTextContent(missingModels.files[0].source);
+  expect(panel.querySelector("a[href]")).toBeNull();
+});
+
 it("downloads only on click, streams progress, cancels, clears failure progress and retries", async () => {
   const pending = deferred();
   let attempts = 0;

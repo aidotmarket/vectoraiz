@@ -298,7 +298,7 @@ fn imports_use_verified_staging_and_failures_leave_valid_model_byte_identical() 
             ops.start(),
         ))
         .unwrap();
-    assert_ne!(result[0]["result"], "imported");
+    assert_eq!(result[0]["result"], "missing");
     fs::write(source.0.join(&pin.file), [b'x'; 100]).unwrap();
     assert_eq!(
         runtime()
@@ -320,6 +320,27 @@ fn imports_use_verified_staging_and_failures_leave_valid_model_byte_identical() 
         ))
         .is_err());
 }
+#[test]
+fn import_space_counts_only_present_regular_pins_and_reports_missing_chat() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let mut embedding = pin("https://unused.invalid");
+    embedding.file = "embedding.gguf".into();
+    let mut chat = embedding.clone();
+    chat.file = "chat.gguf".into();
+    fs::write(source.0.join(&embedding.file), [b'x'; 100]).unwrap();
+    let pins = [embedding, chat];
+    assert_eq!(space_needed(&source.0, &pins, true).unwrap(), pins[0].size);
+    let ops = Operations::default();
+    let results = runtime()
+        .block_on(import(&installed.0, &pins, &source.0, ops.start()))
+        .unwrap();
+    assert_eq!(results[0]["result"], "imported");
+    assert_eq!(results[1]["result"], "missing");
+    assert!(verified(&installed.0, &pins[0]));
+    assert!(!installed.0.join(&pins[1].file).exists());
+}
+
 #[test]
 fn failed_promotion_removes_only_owned_stage() {
     let dir = Temp::new();
@@ -484,7 +505,7 @@ fn status_checks_size_and_hash_and_space_counts_only_remaining_bytes() {
     assert_eq!(status(&dir.0, &[pin.clone()])["ready"], false);
     fs::write(dir.0.join("test.gguf.partial"), [b'x'; 40]).unwrap();
     assert_eq!(space_needed(&dir.0, &[pin.clone()], false).unwrap(), 60);
-    assert_eq!(space_needed(&dir.0, &[pin.clone()], true).unwrap(), 100);
+    assert_eq!(space_needed(&dir.0, &[pin.clone()], true).unwrap(), 0);
     assert!(check_space(&dir.0, u64::MAX)
         .unwrap_err()
         .to_string()

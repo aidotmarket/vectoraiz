@@ -61,7 +61,10 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));
   }
   await report('guard-after');
+  window.__VZ_SMOKE__.searchLocked = false;
   const secondSearch = window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
+  // Observe the backend's post-acquire signal before dispatching competitors.
+  await pipelineWait(() => window.__VZ_SMOKE__.searchLocked);
   const overlaps = await Promise.allSettled([
     window.__TAURI_INTERNALS__.invoke('pipeline_search', { query }),
     window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress }),

@@ -170,6 +170,10 @@ pub fn client() -> Result<Client> {
 pub fn space_needed(dir: &Path, pins: &[Pin], importing: bool) -> Result<u64> {
     let mut needed = 0;
     for pin in pins {
+        // For import, dir is the typed source folder, not the installed models.
+        if importing && regular(&dir.join(&pin.file), false).is_err() {
+            continue;
+        }
         if !importing && verified(dir, pin) {
             continue;
         }
@@ -541,7 +545,7 @@ pub async fn import(
     ensure!(folder.is_absolute(), "Type an absolute folder path");
     ensure!(folder.is_dir(), "Import folder not found");
     fs::create_dir_all(dir)?;
-    check_space(dir, space_needed(dir, pins, true)?)?;
+    check_space(dir, space_needed(folder, pins, true)?)?;
     let mut results = Vec::new();
     for pin in pins {
         cancelled(&cancel)?;
