@@ -1,7 +1,17 @@
 """Launch the real WebView and drive its controls through the smoke-test feature."""
+import os
+import json
+import shutil
 import pathlib
 import subprocess
 import threading
+
+# Other CI jobs still fetch assets; only the install job exercises acquisition.
+assets = pathlib.Path(os.environ.get('VZ_SMOKE_DATA_ROOT', pathlib.Path.home() / 'vectorAIz')) / 'models'
+assets.mkdir(parents=True, exist_ok=True)
+for pin in json.loads(pathlib.Path('spike/fixtures/models.json').read_text()).values():
+    shutil.copyfile(pathlib.Path('.assets') / pin['file'], assets / pin['file'])
+os.environ['VZ_PIPELINE_FIXTURE'] = str(pathlib.Path('spike/fixtures/documents').resolve())
 
 binary = pathlib.Path('target/debug/vectoraiz.exe' if __import__('sys').platform == 'win32' else 'target/debug/vectoraiz')
 

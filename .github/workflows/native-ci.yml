@@ -161,6 +161,7 @@ jobs:
             windows-test-dependents.log
           if-no-files-found: ignore
   install:
+    timeout-minutes: 40
     name: Install/uninstall stand-in (${{ matrix.os }})
     needs: build
     strategy:
@@ -177,8 +178,8 @@ jobs:
         with:
           name: native-installers-${{ matrix.os }}
           path: artifacts
-      - name: Install downloaded artifact, first-run UI self-test, uninstall preserving data
-        timeout-minutes: 10
+      - name: Install downloaded artifact, first-run model acquisition and pipeline, uninstall preserving data
+        timeout-minutes: 35
         run: python scripts/native-install-test.py
       - uses: actions/upload-artifact@v4
         if: always()
@@ -187,6 +188,9 @@ jobs:
           path: |
             installed-ui.log
             installed-self-test.json
+            installed-pipeline.log
+            installed-loaded-models.json
+            installed-single-instance.json
             msi-install.log
             msi-uninstall.log
           if-no-files-found: warn
