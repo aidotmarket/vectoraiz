@@ -127,6 +127,11 @@ jobs:
       - name: Generate third-party notices
         run: |
           python scripts/native-generate-notices.py
+      # Workspace acceptance enables Vulkan, but the stage 1 desktop is built
+      # without it. Sidecars must likewise run on a fresh machine without the SDK.
+      - name: Build standalone CPU sidecars for Windows installer
+        if: runner.os == 'Windows'
+        run: cargo build --locked -p vz-parser-worker -p vz-cli -p vz-mcp
       - name: Prepare stage 1 bundle inputs
         run: python scripts/native-package.py prepare
       # Phase 0 intentionally packages the tested debug profile, with smoke-test
@@ -161,6 +166,7 @@ jobs:
             windows-test-dependents.log
           if-no-files-found: ignore
   install:
+    timeout-minutes: 40
     name: Install/uninstall stand-in (${{ matrix.os }})
     needs: build
     strategy:
@@ -177,8 +183,8 @@ jobs:
         with:
           name: native-installers-${{ matrix.os }}
           path: artifacts
-      - name: Install downloaded artifact, first-run UI self-test, uninstall preserving data
-        timeout-minutes: 10
+      - name: Install downloaded artifact, first-run model acquisition and pipeline, uninstall preserving data
+        timeout-minutes: 35
         run: python scripts/native-install-test.py
       - uses: actions/upload-artifact@v4
         if: always()
@@ -187,6 +193,9 @@ jobs:
           path: |
             installed-ui.log
             installed-self-test.json
+            installed-pipeline.log
+            installed-loaded-models.json
+            installed-single-instance.json
             msi-install.log
             msi-uninstall.log
           if-no-files-found: warn

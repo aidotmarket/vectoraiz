@@ -2,13 +2,22 @@ import { StrictMode } from "react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { invoke } from "@tauri-apps/api/core";
+
 import App from "./App";
 import { version } from "../package.json";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), Channel: class { onmessage = (_: unknown) => {}; } }));
+const { invoke, modelsInvoke } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (command: string, args: unknown) => command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
+  Channel: class { onmessage = (_: unknown) => {}; },
+}));
+const readyModels = { ready: true, files: [] };
+const missingModels = { ready: false, files: [{ name: "Embedding model", file: "test.gguf", size: 100, license: "MIT", source: "https://example.com/model", verified: false }] };
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
-beforeEach(() => { vi.mocked(invoke).mockResolvedValue({ available: false }); });
+beforeEach(() => {
+  invoke.mockResolvedValue({ available: false });
+  modelsInvoke.mockResolvedValue(readyModels);
+});
 const installCalls = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_install");
 const selfTestCalls = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "self_test");
 const updateButton = () => screen.getByRole("button", { name: "Check for updates" });
@@ -33,14 +42,15 @@ it("invokes the self-test only on click and displays its platform result", async
   await userEvent.click(screen.getByRole("button", { name: "Run self-test" }));
   await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent('"status": "OK"'));
   expect(screen.getByRole("status")).toHaveTextContent("aarch64");
-  expect(selfTestCalls()).toEqual([["self_test"]]);
+  expect(selfTestCalls()).toEqual([["self_test", undefined]]);
 });
 
 it("reports an IPC failure and lets the user retry", async () => {
   vi.mocked(invoke).mockRejectedValue("Self-test unavailable");
   render(<App />);
   await userEvent.click(screen.getByRole("button", { name: "Run self-test" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent("Self-test unavailable");
+  expect(await screen.findByText("Self-test unavailable")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Run self-test" })).toBeEnabled();
 });
 
@@ -69,6 +79,7 @@ it("indexes with progress then runs a search and a streaming chat", async () => 
     throw new Error("Unexpected command");
   });
   render(<App />);
+  await userEvent.type(screen.getByLabelText("Folder"), "/documents");
   await userEvent.click(screen.getByRole("button", { name: "Index folder" }));
   expect(screen.getByRole("status")).toHaveTextContent("1/1");
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
@@ -175,6 +186,7 @@ it.each(["Index folder", "Search", "Ask", "Run self-test"])("prevents installing
   const pending = deferred();
   vi.mocked(invoke).mockImplementation(async command => command === "update_check" ? available : pending.promise);
   await renderAvailable();
+  if (name === "Index folder") await userEvent.type(screen.getByLabelText("Folder"), "/documents");
   await userEvent.click(screen.getByRole("button", { name }));
   expect(installButton()).toBeDisabled();
   await userEvent.click(installButton());
@@ -224,4 +236,93 @@ it("asks to check again when no Update is stored", async () => {
   vi.mocked(invoke).mockResolvedValue(available);
   await userEvent.click(updateButton());
   expect(installButton()).toBeEnabled();
+});
+
+it("shows model pins and disables the pipeline without ever downloading on startup", async () => {
+  modelsInvoke.mockResolvedValue(missingModels);
+  render(<StrictMode><App /></StrictMode>);
+  expect(await screen.findByLabelText("Models")).toHaveTextContent("Embedding model · 100 bytes · MIT");
+  expect(screen.getByText("Models needed: download or import them first.")).toBeInTheDocument();
+  for (const name of ["Index folder", "Search", "Ask"]) expect(screen.getByRole("button", { name })).toBeDisabled();
+  expect(modelsInvoke.mock.calls.map(([command]) => command)).toEqual(["models_status"]);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("downloads only on click, streams progress, cancels, clears failure progress and retries", async () => {
+  const pending = deferred();
+  let attempts = 0;
+  modelsInvoke.mockImplementation(async (command, args) => {
+    if (command === "models_status") return attempts > 1 ? readyModels : missingModels;
+    if (command === "models_cancel") { pending.resolve(undefined); return; }
+    if (command === "models_download") {
+      attempts++;
+      args.progress.onmessage({ file: "test.gguf", downloaded: 40, total: 100, attempt: attempts });
+      if (attempts === 1) { await pending.promise; throw "Model acquisition cancelled"; }
+    }
+  });
+  render(<App />);
+  await screen.findByLabelText("Models");
+  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  expect(await screen.findByText(/40 \/ 100 bytes/)).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(await screen.findByText("Model acquisition cancelled")).toBeInTheDocument();
+  expect(screen.queryByText(/40 \/ 100 bytes/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toBeEnabled());
+  expect(attempts).toBe(2);
+});
+
+it("imports the typed folder and displays each result without an alert", async () => {
+  modelsInvoke.mockImplementation(async command => command === "models_status" ? missingModels : [
+    { file: "test.gguf", result: "imported" }, { file: "chat.gguf", result: "missing" },
+  ]);
+  render(<App />);
+  await screen.findByLabelText("Models");
+  await userEvent.click(screen.getByRole("button", { name: "Import from a folder" }));
+  await userEvent.type(screen.getByLabelText("Model folder"), "/offline/models");
+  await userEvent.click(screen.getByRole("button", { name: "Import models" }));
+  expect(await screen.findByText("test.gguf: imported")).toBeInTheDocument();
+  expect(screen.getByText("chat.gguf: missing")).toBeInTheDocument();
+  expect(modelsInvoke).toHaveBeenCalledWith("models_import", { folder: "/offline/models" });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it.each(["", "   "])("keeps Index disabled for Folder %j", async folder => {
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toBeEnabled());
+  expect(screen.getByLabelText("Folder")).toHaveAttribute("placeholder", "Choose a folder to index");
+  if (folder) await userEvent.type(screen.getByLabelText("Folder"), folder);
+  expect(screen.getByRole("button", { name: "Index folder" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("button", { name: "Index folder" }));
+  expect(invoke.mock.calls.some(([command]) => command === "pipeline_index")).toBe(false);
+});
+
+it.each(["pipeline_index", "pipeline_search", "pipeline_ask"])("clears progress on %s error and places the only alert before Folder", async command => {
+  invoke.mockImplementation(async (name, args) => {
+    if (name === command) {
+      if (name === "pipeline_index") args.progress.onmessage({ completed: 0, failed: 0, skipped: 0, total: 20, path: "fixture.txt" });
+      throw "Folder not found";
+    }
+    return { available: false };
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toBeEnabled());
+  await userEvent.type(screen.getByLabelText("Folder"), "/missing");
+  const name = command === "pipeline_index" ? "Index folder" : command === "pipeline_search" ? "Search" : "Ask";
+  await userEvent.click(screen.getByRole("button", { name }));
+  const alert = await screen.findByRole("alert");
+  expect(alert).toHaveTextContent("Folder not found");
+  expect(screen.getByRole("status")).not.toHaveTextContent("Scanning…");
+  expect(alert.compareDocumentPosition(screen.getByLabelText("Folder")) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(screen.getAllByRole("alert")).toHaveLength(1);
+});
+
+it.each([true, false])("shows the administrator hint only on Windows (%s)", async windows => {
+  vi.spyOn(navigator, "userAgent", "get").mockReturnValue(windows ? "Windows NT 10.0" : "Macintosh");
+  invoke.mockResolvedValue(available);
+  await renderAvailable();
+  expect(!!screen.queryByText(/Windows will ask for administrator approval/)).toBe(windows);
+  vi.restoreAllMocks();
 });

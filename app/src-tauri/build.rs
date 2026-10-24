@@ -23,6 +23,10 @@ fn main() {
             )
             .app_manifest(tauri_build::AppManifest::new().commands(&[
                 "self_test",
+                "models_status",
+                "models_download",
+                "models_cancel",
+                "models_import",
                 "pipeline_index",
                 "pipeline_search",
                 "pipeline_ask",
