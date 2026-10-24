@@ -12,6 +12,10 @@
     "allow-pipeline-search",
     "allow-pipeline-ask",
     "allow-update-check",
-    "allow-update-install"
+    "allow-update-install",
+    "allow-models-status",
+    "allow-models-download",
+    "allow-models-cancel",
+    "allow-models-import"
   ]
 }

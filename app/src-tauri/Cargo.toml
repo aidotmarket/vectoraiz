@@ -19,8 +19,13 @@ vz-core.workspace = true
 
 serde_json.workspace = true
 anyhow = "1"
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tauri-plugin-updater = "2.14.0"
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "system-proxy"] }
+tauri-plugin-single-instance = "=2.4.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
