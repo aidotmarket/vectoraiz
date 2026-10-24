@@ -165,22 +165,27 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
-                #[cfg(feature = "smoke-test")]
-                if std::env::args().any(|a| a == "--single-instance-test") {
-                    std::thread::spawn(move || {
-                        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                        loop {
-                            let minimized = window.is_minimized().unwrap_or(true);
-                            let focused = window.is_focused().unwrap_or(false);
-                            if (!minimized && focused) || std::time::Instant::now() >= deadline {
+                // Restoration is asynchronous on macOS. Tao skips set_focus
+                // while still minimized, so retry after the restore animation.
+                std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    loop {
+                        let minimized = window.is_minimized().unwrap_or(true);
+                        let focused = window.is_focused().unwrap_or(false);
+                        if (!minimized && focused) || std::time::Instant::now() >= deadline {
+                            #[cfg(feature = "smoke-test")]
+                            if std::env::args().any(|a| a == "--single-instance-test") {
                                 let report = serde_json::json!({"pid": std::process::id(), "minimized": minimized, "focused": focused});
                                 std::fs::write(std::env::var_os("VZ_SINGLE_INSTANCE_REPORT").expect("test report"), report.to_string()).expect("write focus report");
-                                break;
                             }
-                            std::thread::sleep(std::time::Duration::from_millis(50));
+                            break;
                         }
-                    });
-                }
+                        if !minimized {
+                            let _ = window.set_focus();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                });
             }
         }))
         .manage(models::Operations::default())

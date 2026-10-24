@@ -127,6 +127,11 @@ jobs:
       - name: Generate third-party notices
         run: |
           python scripts/native-generate-notices.py
+      # Workspace acceptance enables Vulkan, but the stage 1 desktop is built
+      # without it. Sidecars must likewise run on a fresh machine without the SDK.
+      - name: Build standalone CPU sidecars for Windows installer
+        if: runner.os == 'Windows'
+        run: cargo build --locked -p vz-parser-worker -p vz-cli -p vz-mcp
       - name: Prepare stage 1 bundle inputs
         run: python scripts/native-package.py prepare
       # Phase 0 intentionally packages the tested debug profile, with smoke-test
