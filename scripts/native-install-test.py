@@ -127,7 +127,8 @@ try:
         spec = importlib.util.spec_from_file_location('single_instance', Path('scripts/native-single-instance-test.py').resolve())
         single_instance = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(single_instance)
-        focus_results = single_instance.test(binary, cwd=cwd, env=env)
+        focus_results = single_instance.test(binary, cwd=cwd, env=env,
+                                             result_path='installed-single-instance.json')
         Path('installed-single-instance.json').write_text(json.dumps(focus_results, indent=2))
     step('Check persistent data sentinel before uninstall')
     sentinel = data / 'install-self-test.json'

@@ -158,13 +158,55 @@ fn self_test<R: tauri::Runtime>(
     result
 }
 
+// The pinned single-instance plugin sends WM_COPYDATA and exits during setup.
+// Hand foreground rights to its existing receiver BEFORE that signal. A launch
+// from Explorer can grant rights that the background first instance lacks.
+#[cfg(windows)]
+fn allow_single_instance_foreground(identifier: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        AllowSetForegroundWindow, FindWindowW, GetWindowThreadProcessId,
+    };
+    let wide = |value: String| value.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+    // These names are the Windows receiver names in pinned plugin 2.4.0
+    // (without its optional semver feature).
+    let class = wide(format!("{identifier}-sic"));
+    let title = wide(format!("{identifier}-siw"));
+    // SAFETY: both strings are NUL-terminated and live through FindWindowW;
+    // GetWindowThreadProcessId writes into a valid local u32.
+    unsafe {
+        let receiver = FindWindowW(class.as_ptr(), title.as_ptr());
+        if !receiver.is_null() {
+            let mut pid = 0;
+            GetWindowThreadProcessId(receiver, &mut pid);
+            if pid != 0 {
+                let granted = AllowSetForegroundWindow(pid) != 0;
+                let error = if granted {
+                    None
+                } else {
+                    Some(std::io::Error::last_os_error().to_string())
+                };
+                #[cfg(feature = "smoke-test")]
+                if std::env::args().any(|a| a == "--single-instance-test") {
+                    if let Some(path) = std::env::var_os("VZ_SINGLE_INSTANCE_HANDOFF") {
+                        std::fs::write(path, serde_json::json!({"pid": std::process::id(), "target_pid": pid, "granted": granted, "error": error}).to_string()).expect("write foreground handoff report");
+                    }
+                }
+                if let Some(error) = error {
+                    eprintln!("Single-instance foreground permission refused: {error}");
+                }
+            }
+        }
+    }
+}
+
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager;
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.unminimize();
-                let _ = window.set_focus();
+                let _ = window.show();
+                let mut focus_request_accepted = window.set_focus().is_ok();
                 // Restoration is asynchronous on macOS. Tao skips set_focus
                 // while still minimized, so retry after the restore animation.
                 std::thread::spawn(move || {
@@ -172,16 +214,19 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                     loop {
                         let minimized = window.is_minimized().unwrap_or(true);
                         let focused = window.is_focused().unwrap_or(false);
-                        if (!minimized && focused) || std::time::Instant::now() >= deadline {
+                        let visible = window.is_visible().unwrap_or(false);
+                        if (!minimized && visible && focused && focus_request_accepted)
+                            || std::time::Instant::now() >= deadline
+                        {
                             #[cfg(feature = "smoke-test")]
                             if std::env::args().any(|a| a == "--single-instance-test") {
-                                let report = serde_json::json!({"pid": std::process::id(), "minimized": minimized, "focused": focused});
+                                let report = serde_json::json!({"pid": std::process::id(), "minimized": minimized, "visible": visible, "focused": focused, "focus_requested": true, "focus_request_accepted": focus_request_accepted});
                                 std::fs::write(std::env::var_os("VZ_SINGLE_INSTANCE_REPORT").expect("test report"), report.to_string()).expect("write focus report");
                             }
                             break;
                         }
                         if !minimized {
-                            let _ = window.set_focus();
+                            focus_request_accepted |= window.set_focus().is_ok();
                         }
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
@@ -247,6 +292,8 @@ pub(crate) fn run() {
                 Some(tauri::utils::config::BackgroundThrottlingPolicy::Disabled);
         }
     }
+    #[cfg(windows)]
+    allow_single_instance_foreground(&context.config().identifier);
     configure(tauri::Builder::default().setup(|app| {
         #[cfg(feature = "smoke-test")]
         if std::env::args().any(|arg| arg == "--update-test") {

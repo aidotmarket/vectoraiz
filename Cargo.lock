@@ -9552,6 +9552,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tokio",
  "vz-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
