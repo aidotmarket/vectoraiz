@@ -69,6 +69,29 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         assert refused.returncode != 0 and 're-index required' in refused.stderr, refused.stderr
     assert manifest['embedding_recipe'] == json.loads((state / 'recipe.json').read_text())
 
+    # Short sources used to make the model stop after a bare citation marker.
+    small = Path(temp) / 'small'
+    small.mkdir()
+    for name, text in {
+        'orbital.txt': 'Orbital archive retention is thirty days, after which the cold storage tier deletes the snapshot.',
+        'invoice.txt': 'Invoice 4471 from Northwind Supplies is due on the fifteenth of next month.',
+        'heron.txt': 'A grey heron was seen fishing at the north pond every morning in October.',
+    }.items():
+        (small / name).write_text(text, encoding='utf-8')
+    state = Path(temp) / 'small-state'
+    small_indexed = cli('index', str(small))
+    assert small_indexed['completed'] == 3 and small_indexed['failed'] == 0, small_indexed
+    small_answers = []
+    for question in ['How long is the orbital archive kept?',
+                     'What is the orbital archive retention policy?']:
+        small_answer = cli('ask', question)
+        body, separator, footer = small_answer['text'].rpartition('\n\nRetrieved sources: ')
+        assert separator and len(body.split()) > 3, small_answer
+        assert 'thirty days' in body.lower(), small_answer
+        numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
+        assert numbers == [1, 2, 3] == [c['number'] for c in small_answer['citations']], small_answer
+        small_answers.append({'question': question, 'answer': small_answer})
+
     # A real two-page PDF: text on page 1, an image XObject only on page 2.
     mixed = Path(temp) / 'mixed'
     mixed.mkdir()
@@ -115,4 +138,4 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert missing.returncode != 0 and 'source unavailable' in missing.stderr
     assert cli('search', query) == [], 'unavailable source must revoke cached content'
-    print(json.dumps({'source_revocation': 'OK', 'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'pack_hashes': 'OK', 'example_query': 'OK'}))
+    print(json.dumps({'source_revocation': 'OK', 'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'small_answers': small_answers, 'pack_hashes': 'OK', 'example_query': 'OK'}))
