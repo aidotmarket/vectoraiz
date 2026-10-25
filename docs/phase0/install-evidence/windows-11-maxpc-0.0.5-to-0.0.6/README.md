@@ -17,7 +17,7 @@ Record of the by-hand check of the chunk D4 fixes (vectorAIz #77) on Max's Windo
 
 ## Ask finding
 
-Not a 0.0.6 regression: vz-core's answer generation is unchanged since 0.0.5, and Ask had not been tried on a real index in earlier by-hand runs. Reproduced by Minerva on Koskadeux (macOS) with `vectoraiz-cli` at native `1579a2f1`, three one-line text files (orbital, invoice, heron) and both questions "How long is the orbital archive kept?" and "What is the orbital archive retention policy?": the answer text was `[1]\n\nRetrieved sources: [1] [2] [3]` with `--cpu` and with Metal, so it is model/prompt behaviour on short sources, not Windows or GPU specific. `scripts/pipeline-e2e.py` passes only on the 20 longer fixture documents. Open defect; fix to be scoped separately.
+Not a 0.0.6 regression: vz-core's answer generation is unchanged since 0.0.5, and Ask had not been tried on a real index in earlier by-hand runs. Reproduced by Minerva on Koskadeux (macOS) with `vectoraiz-cli` at native `1579a2f1`, three one-line text files (orbital, invoice, heron) and both questions "How long is the orbital archive kept?" and "What is the orbital archive retention policy?": the answer text was `[1]\n\nRetrieved sources: [1] [2] [3]` with `--cpu` and with Metal, so Windows and GPU execution are not required to trigger it; suspected cause (not isolated): model/prompt sensitivity with short sources. `scripts/pipeline-e2e.py` passes only on the 20 longer fixture documents. Open defect; fix to be scoped separately.
 
 ## Other notes
 
