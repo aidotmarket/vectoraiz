@@ -62,33 +62,45 @@ mod tests {
         }
     }
 
-    fn snapshot(root: &Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
-        fn visit(path: &Path, out: &mut Vec<(std::path::PathBuf, Vec<u8>)>) {
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    enum SnapshotContents {
+        Bytes(Vec<u8>),
+        SqliteSize(Option<u64>),
+    }
+
+    fn snapshot(root: &Path, writer_open: bool) -> Vec<(std::path::PathBuf, SnapshotContents)> {
+        fn visit(
+            path: &Path,
+            writer_open: bool,
+            out: &mut Vec<(std::path::PathBuf, SnapshotContents)>,
+        ) {
             if !path.exists() {
                 return;
             }
             if path.is_dir() {
-                out.push((path.to_owned(), Vec::new()));
+                out.push((path.to_owned(), SnapshotContents::Bytes(Vec::new())));
                 for entry in std::fs::read_dir(path).unwrap() {
-                    visit(&entry.unwrap().path(), out);
+                    visit(&entry.unwrap().path(), writer_open, out);
                 }
             } else {
-                // An already-open writer shares SQLite's SHM mapping with a
-                // read-only connection; its read-lock markers are coordination,
-                // not persisted data. Still assert that no SHM file is created.
-                let bytes = if path
-                    .file_name()
-                    .is_some_and(|name| name == "state.sqlite-shm")
-                {
-                    Vec::new()
+                // Windows byte-range locks prevent reading open SQLite files;
+                // SHM also contains mutable lock markers. Keep their existence
+                // and readable sizes, and compare all other files byte-for-byte.
+                let contents = if writer_open
+                    && path.file_name().is_some_and(|name| {
+                        name == "state.sqlite"
+                            || name == "state.sqlite-wal"
+                            || name == "state.sqlite-shm"
+                    }) {
+                    SnapshotContents::SqliteSize(std::fs::metadata(path).ok().map(|m| m.len()))
                 } else {
-                    std::fs::read(path).unwrap()
+                    SnapshotContents::Bytes(std::fs::read(path).unwrap())
                 };
-                out.push((path.to_owned(), bytes));
+                out.push((path.to_owned(), contents));
             }
         }
         let mut out = Vec::new();
-        visit(root, &mut out);
+        visit(root, writer_open, &mut out);
         out.sort();
         out
     }
@@ -98,18 +110,22 @@ mod tests {
         for command in ["pipeline_search", "pipeline_ask"] {
             let temp = Temp::new();
             let root = temp.0.join("index");
-            let check = |expected| {
-                let before = snapshot(&root);
+            let check = |expected, writer_open| {
+                let before = snapshot(&root, writer_open);
                 assert_eq!(require_index(&root), expected, "{command}");
-                assert_eq!(snapshot(&root), before, "{command} changed storage");
+                assert_eq!(
+                    snapshot(&root, writer_open),
+                    before,
+                    "{command} changed storage"
+                );
             };
-            check(Err("Index a folder first.".into()));
+            check(Err("Index a folder first.".into()), false);
             std::fs::create_dir(&root).unwrap();
-            check(Err("Index a folder first.".into()));
+            check(Err("Index a folder first.".into()), false);
             let state = State::open(&root).unwrap();
-            check(Err("Index a folder first.".into()));
+            check(Err("Index a folder first.".into()), true);
             drop(state);
-            check(Err("Index a folder first.".into()));
+            check(Err("Index a folder first.".into()), false);
             let state = State::open(&root).unwrap();
             // SQLite document rows remain authoritative even if generation files
             // and the recipe have been lost. Preserve the core recipe diagnostic.
@@ -120,7 +136,7 @@ mod tests {
                     [],
                 )
                 .unwrap();
-            check(Ok(()));
+            check(Ok(()), true);
             let recipe: vz_core::engine::Recipe = serde_json::from_value(serde_json::json!({
                 "model":"test", "sha256":"hash", "dimensions":4,
                 "dtype":"float32", "pooling":"cls", "normalization":"l2",
@@ -133,13 +149,13 @@ mod tests {
             assert!(format!("{original:#}").contains("index recipe missing; re-index required"));
             // Checkpointed data must also be read without recreating WAL/SHM.
             drop(state);
-            check(Ok(()));
+            check(Ok(()), false);
             std::fs::write(
                 root.join("recipe.json"),
                 serde_json::to_vec(&recipe).unwrap(),
             )
             .unwrap();
-            check(Ok(()));
+            check(Ok(()), false);
             let state = State::open(&root).unwrap();
             assert!(state.validate_recipe(&recipe).is_ok());
             assert!(state.documents().is_err());
@@ -150,7 +166,7 @@ mod tests {
     fn filesystem_errors_pass_through_without_creating_state() {
         let temp = Temp::new();
         let root = temp.0.join("absent");
-        let before = snapshot(&temp.0);
+        let before = snapshot(&temp.0, false);
         assert_eq!(
             require_index_with(&root, |_| Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
@@ -158,7 +174,7 @@ mod tests {
             ))),
             Ok(())
         );
-        assert_eq!(snapshot(&temp.0), before);
+        assert_eq!(snapshot(&temp.0, false), before);
     }
 
     #[cfg(any(unix, windows))]
@@ -167,7 +183,7 @@ mod tests {
         let temp = Temp::new();
         let root = temp.0.join("file");
         std::fs::write(&root, b"not a directory").unwrap();
-        let before = snapshot(&temp.0);
+        let before = snapshot(&temp.0, false);
         let exists = root.join("recipe.json").try_exists();
         #[cfg(unix)]
         {
@@ -179,7 +195,7 @@ mod tests {
             assert!(!exists.unwrap()); // Windows maps this to NotFound.
             assert_eq!(require_index(&root), Err("Index a folder first.".into()));
         }
-        assert_eq!(snapshot(&temp.0), before);
+        assert_eq!(snapshot(&temp.0, false), before);
     }
 
     #[test]
@@ -188,9 +204,9 @@ mod tests {
         drop(State::open(&temp.0).unwrap());
         std::fs::write(temp.0.join("state.sqlite-wal"), b"damaged WAL").unwrap();
         assert!(!temp.0.join("state.sqlite-shm").exists());
-        let before = snapshot(&temp.0);
+        let before = snapshot(&temp.0, false);
         assert_eq!(require_index(&temp.0), Ok(()));
-        assert_eq!(snapshot(&temp.0), before);
+        assert_eq!(snapshot(&temp.0, false), before);
     }
 
     #[test]
@@ -198,9 +214,9 @@ mod tests {
         let temp = Temp::new();
         std::fs::create_dir_all(temp.0.join("generations/active")).unwrap();
         std::fs::write(temp.0.join("generations/active/document.json"), b"{}").unwrap();
-        let before = snapshot(&temp.0);
+        let before = snapshot(&temp.0, false);
         assert_eq!(require_index(&temp.0), Ok(()));
-        assert_eq!(snapshot(&temp.0), before);
+        assert_eq!(snapshot(&temp.0, false), before);
     }
 
     #[test]
@@ -261,12 +277,17 @@ mod tests {
         );
         assert_eq!(state.generations().unwrap(), vec![generation]);
         std::fs::remove_file(state.root.join("recipe.json")).unwrap();
-        let before = snapshot(&state.root);
+        // Snapshot only while SQLite is closed: Windows locks open database
+        // bytes, and reopening can update SQLite's bookkeeping.
+        drop(state);
         for command in ["pipeline_search", "pipeline_ask"] {
-            assert_eq!(require_index(&state.root), Ok(()), "{command}");
+            let before = snapshot(&temp.0, false);
+            assert_eq!(require_index(&temp.0), Ok(()), "{command}");
+            assert_eq!(snapshot(&temp.0, false), before);
+            let state = State::open(&temp.0).unwrap();
             assert!(format!("{:#}", state.validate_recipe(&recipe).unwrap_err())
                 .contains("index recipe missing; re-index required"));
-            assert_eq!(snapshot(&state.root), before);
+            drop(state);
         }
     }
 
