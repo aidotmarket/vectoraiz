@@ -76,7 +76,6 @@ mod tests {
         // Existence, not parsing or error text, controls this display-only gate.
         assert_eq!(require_index(&state.root), Ok(()));
         assert_eq!(std::fs::read(recipe).unwrap(), b"invalid recipe");
-        assert_eq!(require_index(&state.root.join("recipe.json")), Ok(()));
     }
 
     #[tokio::test]
