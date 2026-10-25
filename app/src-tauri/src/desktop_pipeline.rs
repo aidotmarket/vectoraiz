@@ -264,6 +264,9 @@ mod tests {
                 exclusive().is_err(),
                 "live State did not block exclusive access"
             );
+            // A failed exclusive attempt can itself obstruct a read-only open
+            // on Windows. Release the control probe before calling the gate.
+            observer.db.execute_batch("DETACH DATABASE probe").unwrap();
             #[cfg(windows)]
             assert_eq!(
                 std::fs::read(temp.0.join("writer.lock"))
@@ -277,6 +280,17 @@ mod tests {
             assert!(std::fs::read(temp.0.join("writer.lock"))
                 .unwrap()
                 .is_empty());
+            observer
+                .db
+                .execute(
+                    "ATTACH DATABASE ?1 AS probe",
+                    [temp.0.join("state.sqlite").to_str().unwrap()],
+                )
+                .unwrap();
+            observer
+                .db
+                .execute_batch("PRAGMA probe.locking_mode=EXCLUSIVE")
+                .unwrap();
             exclusive().expect("preflight leaked a connection after State was dropped");
             observer.db.execute_batch("DETACH DATABASE probe").unwrap();
 
