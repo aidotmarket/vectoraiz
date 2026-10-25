@@ -276,6 +276,8 @@ it("downloads only on click, streams progress, cancels, clears failure progress 
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   expect(await screen.findByText("Model acquisition cancelled")).toBeInTheDocument();
   expect(screen.queryByText(/40 \/ 100 bytes/)).not.toBeInTheDocument();
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
+  expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toBeEnabled());
@@ -460,4 +462,96 @@ it.each(["Search", "Ask"])("clears busy text when %s fails before any result or 
   await act(async () => reject("Query failed"));
   expect(await screen.findByRole("alert")).toHaveTextContent("Query failed");
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
+});
+
+
+it("retains completed files after cancellation until the next status refresh", async () => {
+  const pending = deferred();
+  const status = { ready: false, files: [missingModels.files[0], { ...missingModels.files[0], name: "Chat model", file: "chat.gguf" }] };
+  let attempts = 0;
+  modelsInvoke.mockImplementation(async (command, args) => {
+    if (command === "models_status") return status;
+    if (command === "models_cancel") { pending.resolve(undefined); return; }
+    if (command === "models_download" && ++attempts === 1) {
+      args.progress.onmessage({ file: "test.gguf", downloaded: 100, total: 100, attempt: 1 });
+      args.progress.onmessage({ file: "chat.gguf", downloaded: 20, total: 100, attempt: 1 });
+      await pending.promise;
+      throw "Model acquisition cancelled";
+    }
+  });
+  render(<App />);
+  await screen.findByText(/Embedding model/);
+  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  expect(screen.getByText(/Chat model/)).toHaveTextContent("Downloading");
+  await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  await screen.findByText("Model acquisition cancelled");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
+  expect(screen.getByText(/Chat model/)).toHaveTextContent("Needed");
+  expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(1);
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+});
+
+it.each([false, true])("recovers from import rejection/cancellation (cancel=%s)", async cancel => {
+  const pending = deferred();
+  let attempts = 0;
+  modelsInvoke.mockImplementation(async command => {
+    if (command === "models_status") return attempts > 1 ? readyModels : missingModels;
+    if (command === "models_cancel") { pending.resolve(undefined); return; }
+    if (command === "models_import") {
+      if (++attempts === 1) {
+        await pending.promise;
+        throw cancel ? "Model acquisition cancelled" : "Import failed";
+      }
+      return [{ file: "test.gguf", result: "imported" }];
+    }
+  });
+  render(<App />);
+  await screen.findByText(/Embedding model/);
+  await userEvent.click(screen.getByRole("button", { name: "Import from a folder" }));
+  await userEvent.type(screen.getByLabelText("Model folder"), "/offline/models");
+  await userEvent.click(screen.getByRole("button", { name: "Import models" }));
+  expect(screen.getByRole("button", { name: "Import models" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
+  if (cancel) await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  else await act(async () => pending.resolve(undefined));
+  await screen.findByText(cancel ? "Model acquisition cancelled" : "Import failed");
+  expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Import models" })).toBeEnabled();
+  expect(screen.getByLabelText("Model folder")).toHaveValue("/offline/models");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
+  expect(screen.queryByText("Models imported and verified.")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await screen.findByText("Models imported and verified.");
+  expect(screen.getByRole("button", { name: "Search" })).toBeEnabled();
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_import")).toHaveLength(2);
+});
+
+it("retains Downloaded after download success with a failed status refresh and resets on successful refresh", async () => {
+  let checks = 0;
+  modelsInvoke.mockImplementation(async (command, args) => {
+    if (command === "models_status") {
+      if (++checks === 2) throw "Status refresh failed";
+      return missingModels;
+    }
+    if (command === "models_download") {
+      args.progress.onmessage({ file: "test.gguf", downloaded: 100, total: 100, attempt: 1 });
+    }
+  });
+  render(<App />);
+  await screen.findByText(/Embedding model/);
+  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  await screen.findByText("Status refresh failed");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
+  expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/100 \/ 100 bytes/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
+  expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
+  expect(checks).toBe(3);
 });

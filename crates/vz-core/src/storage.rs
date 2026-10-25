@@ -11,7 +11,7 @@ use lancedb::{
     index::{scalar::FtsIndexBuilder, Index},
     query::{ExecutableQuery, QueryBase},
 };
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -30,6 +30,43 @@ impl Drop for FileLock {
     }
 }
 impl State {
+    /// Inspect persisted visibility without opening/recovering a writable State.
+    /// Unknown or damaged storage is an error, never evidence of an empty index.
+    pub fn has_persisted_documents(root: &Path) -> Result<bool> {
+        let path = root.join("state.sqlite");
+        if !path.try_exists()? {
+            // A lost database must not hide surviving on-disk index data.
+            return match std::fs::read_dir(root.join("generations")) {
+                Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+                Err(error) => Err(error.into()),
+            };
+        }
+        // SQLite's bundled Unix/Windows VFS supports readonly_shm: WAL reads
+        // must not create or initialize shared memory. If unavailable, let the
+        // caller retain the original diagnostic rather than recover this state.
+        let mode = if root.join("state.sqlite-wal").try_exists()? {
+            "readonly_shm=1"
+        } else {
+            // A checkpointed WAL-mode DB also needs no new WAL/SHM files.
+            "immutable=1"
+        };
+        let path = path
+            .to_str()
+            .context("index path must be UTF-8")?
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        let db = Connection::open_with_flags(
+            format!("file:{path}?{mode}"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        Ok(
+            db.query_row("SELECT EXISTS(SELECT 1 FROM documents)", [], |row| {
+                row.get(0)
+            })?,
+        )
+    }
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root.join("generations"))?;
         let lock = std::fs::OpenOptions::new()
