@@ -1,4 +1,4 @@
-use crate::models;
+use crate::{desktop_pipeline, models};
 
 // Keep the checked Update, including its version and signature, until consent.
 #[derive(Default)]
@@ -468,6 +468,7 @@ async fn pipeline_search<R: tauri::Runtime>(
     query: String,
 ) -> Result<serde_json::Value, String> {
     let guard = operations.acquire()?;
+    desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
         tauri::Manager::get_webview_window(&app, "main")
@@ -488,7 +489,9 @@ async fn pipeline_search<R: tauri::Runtime>(
                 &engines.vector(&query, true)?,
                 5,
             ))?;
+            let names = desktop_pipeline::file_names(&state);
             Ok(serde_json::Value::Array(hits.into_iter().map(|hit| serde_json::json!({
+                "file_name": names.get(&hit.chunk.doc_id),
                 "chunk":{"chunk_id":hit.chunk.chunk_id,"doc_id":hit.chunk.doc_id,"text":hit.chunk.text,"page":hit.chunk.page},"score":hit.score
             })).collect()))
         };
@@ -505,6 +508,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
     tokens: tauri::ipc::Channel<String>,
 ) -> Result<serde_json::Value, String> {
     let guard = operations.acquire()?;
+    desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let _guard = guard;
@@ -521,7 +525,17 @@ async fn pipeline_ask<R: tauri::Runtime>(
             let answer = vz_core::index::ask(&engines, &question, &hits, |token| {
                 let _ = tokens.send(token.to_owned());
             })?;
-            Ok(serde_json::to_value(answer)?)
+            let names = desktop_pipeline::file_names(&state);
+            let mut value = serde_json::to_value(answer)?;
+            if let Some(citations) = value["citations"].as_array_mut() {
+                for citation in citations {
+                    citation["file_name"] = citation["doc_id"]
+                        .as_str()
+                        .and_then(|id| names.get(id))
+                        .map_or(serde_json::Value::Null, |name| serde_json::json!(name));
+                }
+            }
+            Ok(value)
         };
         run().map_err(|e| format!("{e:#}"))
     })

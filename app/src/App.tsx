@@ -3,8 +3,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { version } from "../package.json";
 
 interface Progress { completed: number; failed: number; skipped: number; total: number; path: string; reason?: string }
-interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number }
-interface Citation { number: number; doc_id: string; page: number }
+interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
+interface Citation { number: number; doc_id: string; page: number; file_name?: string | null }
 interface SelfTestResult { status: string; version: string; os: string; arch: string }
 
 interface ModelFile { name: string; file: string; size: number; license: string; source: string; verified: boolean }
@@ -20,6 +20,7 @@ export default function App() {
   const [result, setResult] = useState<SelfTestResult>();
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
+  const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
   const [progress, setProgress] = useState("");
@@ -31,6 +32,8 @@ export default function App() {
   const modelBusyRef = useRef(false);
   const [modelError, setModelError] = useState("");
   const [modelProgress, setModelProgress] = useState("");
+  const [downloadStates, setDownloadStates] = useState<Record<string, string>>({});
+  const [modelMessage, setModelMessage] = useState("");
   const [importFolder, setImportFolder] = useState("");
   const [importResults, setImportResults] = useState<ImportResult[]>([]);
   const [showImport, setShowImport] = useState(false);
@@ -105,23 +108,23 @@ export default function App() {
     finally { active = false; setRunning(false); }
   }
   async function search() {
-    setRunning(true); setError("");
+    setRunning(true); setError(""); setProgress("Searching…");
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
     catch (cause) { setError(String(cause)); setProgress(""); }
-    finally { setRunning(false); }
+    finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
-    setRunning(true); setError(""); setAnswer(""); setCitations([]);
+    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…");
     const channel = new Channel<string>();
-    channel.onmessage = token => setAnswer(text => text + token);
+    channel.onmessage = token => { if (token) setProgress(""); setAnswer(text => text + token); };
     try {
       const result = await invoke<{ text: string; citations: Citation[] }>("pipeline_ask", { question: query, tokens: channel });
       setAnswer(result.text); setCitations(result.citations);
     } catch (cause) { setError(String(cause)); setProgress(""); }
-    finally { setRunning(false); }
+    finally { setRunning(false); setProgress(""); }
   }
   async function runSelfTest() {
-    setRunning(true);
+    setRunning(true); setSelfTestRunning(true);
     setResult(undefined);
     setSelfTestError("");
     try {
@@ -129,12 +132,14 @@ export default function App() {
     } catch (cause) {
       setSelfTestError(String(cause));
     } finally {
-      setRunning(false);
+      setRunning(false); setSelfTestRunning(false);
     }
   }
   const refreshModels = useCallback(async () => {
     const status = await invoke<ModelsStatus>("models_status");
     setModels(status);
+    setDownloadStates({});
+    return status;
   }, []);
   useEffect(() => {
     if (modelsChecked.current) return;
@@ -145,19 +150,29 @@ export default function App() {
   async function acquireModels(source: "download" | "import" | "status") {
     if (modelBusyRef.current || running || installing) return;
     modelBusyRef.current = true;
-    setModelBusy(true); setModelError(""); setModelProgress(""); setImportResults([]); setRetry(source);
+    setModelBusy(true); setModelMessage(""); setDownloadStates({}); setModelError(""); setModelProgress(""); setImportResults([]); setRetry(source);
     let active = true;
     try {
       if (source === "download") {
         const channel = new Channel<ModelProgress>();
-        channel.onmessage = p => { if (active) setModelProgress(`${p.file}: ${p.downloaded} / ${p.total} bytes · attempt ${p.attempt}${p.retry ? " · Retrying…" : ""}`); };
+        channel.onmessage = p => {
+          if (!active) return;
+          setModelProgress(`${p.file}: ${p.downloaded} / ${p.total} bytes · attempt ${p.attempt}${p.retry ? " · Retrying…" : ""}`);
+          setDownloadStates(states => ({ ...states, [p.file]: p.downloaded === p.total ? "Downloaded" : "Downloading" }));
+        };
         await invoke("models_download", { progress: channel });
       } else if (source === "import") {
         setImportResults(await invoke<ImportResult[]>("models_import", { folder: importFolder }));
       }
-      await refreshModels();
+      const status = await refreshModels();
+      if (source === "import" && status.ready) {
+        setImportResults([]); setShowImport(false); setModelMessage("Models imported and verified.");
+      }
     } catch (cause) { setModelError(String(cause)); }
-    finally { active = false; modelBusyRef.current = false; setModelBusy(false); setModelProgress(""); }
+    finally {
+      active = false; modelBusyRef.current = false; setModelBusy(false); setModelProgress("");
+      setDownloadStates(states => Object.fromEntries(Object.entries(states).filter(([, status]) => status === "Downloaded")));
+    }
   }
   async function cancelModels() {
     try { await invoke("models_cancel"); }
@@ -167,7 +182,7 @@ export default function App() {
     <h1 className="text-3xl font-semibold">vectorAIz</h1>
     <p className="mt-2 text-slate-300">Version {version} · Native pipeline spike</p>
     <button className="mt-8 rounded bg-teal-300 px-5 py-3 font-medium text-slate-950 disabled:opacity-50" disabled={running || installing || modelBusy} onClick={runSelfTest}>
-      {running ? "Running…" : "Run self-test"}
+      {selfTestRunning ? "Running…" : "Run self-test"}
     </button>
     <aside className="mt-6" aria-label="Updates" aria-live="polite">
       <button className={buttonStyle} disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
@@ -188,10 +203,10 @@ export default function App() {
       {updateMessage && <p>{updateMessage}</p>}
     </aside>
     {(!models?.ready || modelBusy || importResults.length > 0 || modelError) && <aside className="mt-6 grid gap-3" aria-label="Models">
+      {!models && !modelError ? <p>Checking models…</p> : <>
       <h2 className="text-xl font-semibold">Models</h2>
-      {!models && !modelError && <p>Checking models…</p>}
       <ul>{models?.files.map(file => <li key={file.file} className="mb-3">
-        <p>{file.name} · {file.size.toLocaleString()} bytes · {file.license} · {file.verified ? "Verified" : "Needed"}</p>
+        <p>{file.name} · {file.size.toLocaleString()} bytes · {file.license} · {downloadStates[file.file] ?? (file.verified ? "Verified" : "Needed")}</p>
         <span className="text-teal-300">{file.source}</span>
       </li>)}</ul>
       <button className={buttonStyle} disabled={modelBusy || running || installing || !models} onClick={() => void acquireModels("download")}>Download models (about 560 MB)</button>
@@ -207,8 +222,10 @@ export default function App() {
         {importResults.map(result => <p key={result.file}>{result.file}: {result.result}</p>)}
       </div>
       {(modelError || (importResults.length > 0 && !models?.ready)) && <button className={buttonStyle} disabled={modelBusy || running || installing} onClick={() => void acquireModels(retry)}>Retry</button>}
+      </>}
     </aside>}
-    {!models?.ready && <p className="mt-4">Models needed: download or import them first.</p>}
+    {modelMessage && <p>{modelMessage}</p>}
+    {models && !models.ready && <p className="mt-4">Models needed: download or import them first.</p>}
     {selfTestError && <p>{selfTestError}</p>}
     <div role="status" className="mt-6" aria-live="polite">
       {progress && <p>{progress}</p>}
@@ -220,9 +237,9 @@ export default function App() {
       <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
       <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled} onClick={ask}>Ask</button></div>
-      <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · Document {hit.chunk.doc_id.slice(0, 8)} · Page {hit.chunk.page}</small></li>)}</ol>
+      <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
       <p aria-live="polite">{answer}</p>
-      <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] Document {citation.doc_id.slice(0, 8)} · Page {citation.page}</li>)}</ol>
+      <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>
     </section>
   </main>;
 }
