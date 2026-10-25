@@ -75,12 +75,12 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (result.status !== 'rejected' || String(result.reason) !== 'Another model or index operation is running') throw new Error('Overlapping operation was not refused');
   }
   const nextHits = await secondSearch;
-  const rendered = nextHits.map(hit => `${hit.chunk.text} · Document ${hit.chunk.doc_id.slice(0, 8)} · Page ${hit.chunk.page}`);
+  const rendered = nextHits.map(hit => `${hit.chunk.text} · ${hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page ${hit.chunk.page}`);
   if (JSON.stringify(rendered) !== JSON.stringify(previousSearch)) throw new Error('Invalid Folder changed search results');
   await report('searched; empty/blank/missing-folder IPC preserved seeded index');
   await report('shared lock refused pipeline and mutation IPC overlaps');
   button('Ask').click();
-  await pipelineWait(() => document.querySelector('section').textContent.includes('[1] Document') && !button('Ask').disabled);
+  await pipelineWait(() => document.querySelector('section ol:last-of-type li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));

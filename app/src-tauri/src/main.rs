@@ -4,6 +4,7 @@
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
 mod bundled_library;
+mod desktop_pipeline;
 mod models;
 
 #[cfg(not(test))]
