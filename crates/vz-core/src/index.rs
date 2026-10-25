@@ -264,8 +264,20 @@ pub fn ask(
         .map(|(i, h)| format!("[{}] {}", i + 1, h.chunk.text))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let mut text = engines.stream(question, &context, &mut emit)?;
+    let text = engines.stream(question, &context, &mut emit)?;
+    finish_answer(text, citations, emit)
+}
+
+fn finish_answer(
+    mut text: String,
+    citations: Vec<Citation>,
+    mut emit: impl FnMut(&str),
+) -> Result<Answer> {
     validate_citations(&text, citations.len())?;
+    if !has_answer_words(&text) {
+        text = "I couldn't write an answer from these sources. See the sources below.".into();
+        emit(&text);
+    }
     // Provenance is application-owned: small provisional models may omit inline
     // citation syntax. Always stream a source footer for the supplied context.
     let footer = format!(
@@ -280,6 +292,22 @@ pub fn ask(
     text.push_str(&footer);
     // Citation metadata always maps numbered source context to real persisted pages.
     Ok(Answer { text, citations })
+}
+
+fn has_answer_words(mut text: &str) -> bool {
+    while let Some((before, after)) = text.split_once('[') {
+        if before.chars().any(char::is_alphanumeric) {
+            return true;
+        }
+        if let Some((label, rest)) = after.split_once(']') {
+            if !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()) {
+                text = rest;
+                continue;
+            }
+        }
+        return after.chars().any(char::is_alphanumeric);
+    }
+    text.chars().any(char::is_alphanumeric)
 }
 
 fn validate_citations(text: &str, count: usize) -> Result<()> {
@@ -302,5 +330,38 @@ mod tests {
         assert!(validate_citations("supported [1]", 1).is_ok());
         assert!(validate_citations("invented [2]", 1).is_err());
         assert!(validate_citations("invalid [0]", 3).is_err());
+    }
+
+    #[test]
+    fn falls_back_when_model_writes_no_answer_words() {
+        for body in ["[1]", "", " \n[1] [2]\t", "[1] ..."] {
+            let citations = vec![
+                Citation {
+                    number: 1,
+                    doc_id: "orbital".into(),
+                    page: 2,
+                    chunk_id: "first".into(),
+                },
+                Citation {
+                    number: 2,
+                    doc_id: "invoice".into(),
+                    page: 1,
+                    chunk_id: "second".into(),
+                },
+            ];
+            let expected_citations = serde_json::to_value(&citations).unwrap();
+            let mut emitted = String::new();
+            let answer = finish_answer(body.into(), citations, |s| emitted.push_str(s)).unwrap();
+            assert_eq!(answer.text, "I couldn't write an answer from these sources. See the sources below.\n\nRetrieved sources: [1] [2]");
+            assert_eq!(emitted, answer.text);
+            assert_eq!(
+                serde_json::to_value(answer.citations).unwrap(),
+                expected_citations
+            );
+        }
+        for body in ["Thirty days [1].", "三十天 [1]", "30 [1]"] {
+            assert!(has_answer_words(body));
+        }
+        assert!(finish_answer("[3]".into(), vec![], |_| {}).is_err());
     }
 }
