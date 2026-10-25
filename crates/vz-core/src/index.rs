@@ -294,20 +294,20 @@ fn finish_answer(
     Ok(Answer { text, citations })
 }
 
-fn has_answer_words(mut text: &str) -> bool {
-    while let Some((before, after)) = text.split_once('[') {
-        if before.chars().any(char::is_alphanumeric) {
+fn has_answer_words(text: &str) -> bool {
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            // Skip citation digits even in nested or unclosed brackets, then
+            // keep scanning past malformed groups for actual answer content.
+            while chars.peek().is_some_and(char::is_ascii_digit) {
+                chars.next();
+            }
+        } else if c.is_alphanumeric() {
             return true;
         }
-        if let Some((label, rest)) = after.split_once(']') {
-            if !label.is_empty() && label.bytes().all(|b| b.is_ascii_digit()) {
-                text = rest;
-                continue;
-            }
-        }
-        return after.chars().any(char::is_alphanumeric);
     }
-    text.chars().any(char::is_alphanumeric)
+    false
 }
 
 fn validate_citations(text: &str, count: usize) -> Result<()> {
@@ -334,7 +334,17 @@ mod tests {
 
     #[test]
     fn falls_back_when_model_writes_no_answer_words() {
-        for body in ["[1]", "", " \n[1] [2]\t", "[1] ..."] {
+        for body in [
+            "[1]",
+            "",
+            " \n[1] [2]\t",
+            "[1] ...",
+            "[] [1]",
+            "[[1]]",
+            "[1",
+            "]",
+            "[ ] [2]",
+        ] {
             let citations = vec![
                 Citation {
                     number: 1,
