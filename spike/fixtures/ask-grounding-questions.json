@@ -1,0 +1,1020 @@
+[
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How warm should replacement cells be kept?",
+    "source": "batteries.txt",
+    "answer": "fifteen degrees Celsius",
+    "passage": "Battery storage Store spare batteries at fifteen degrees Celsius. Inspect terminals monthly. Recycle swollen cells through the approved collection point.",
+    "passage_overlap": [
+      "cells"
+    ],
+    "id": "Q001"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What temperature is specified for spare batteries?",
+    "source": "batteries.txt",
+    "passage": "Battery storage Store spare batteries at fifteen degrees Celsius. Inspect terminals monthly. Recycle swollen cells through the approved collection point.",
+    "id": "Q002"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How often are footbridges examined?",
+    "source": "bridges.txt",
+    "answer": "annually",
+    "passage": "Bridge checks Pedestrian bridges receive annual structural checks. Inspect joints after floods. Document corrosion with a location and date.",
+    "passage_overlap": [],
+    "id": "Q003"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "When are pedestrian bridges structurally checked?",
+    "source": "bridges.txt",
+    "passage": "Bridge checks Pedestrian bridges receive annual structural checks. Inspect joints after floods. Document corrosion with a location and date.",
+    "id": "Q004"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How frequently do marine instruments transmit their readings?",
+    "source": "oceans.txt",
+    "answer": "every hour",
+    "passage": "Ocean monitoring Ocean buoys measure salinity and wave height. Satellite telemetry is sent every hour. Inspect moorings after severe storms.",
+    "passage_overlap": [],
+    "id": "Q005"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What do ocean buoys measure?",
+    "source": "oceans.txt",
+    "passage": "Ocean monitoring Ocean buoys measure salinity and wave height. Satellite telemetry is sent every hour. Inspect moorings after severe storms.",
+    "id": "Q006"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How long do we hold onto archive snapshots?",
+    "source": "orbital-archive.txt",
+    "answer": "thirty days",
+    "passage": "Orbital archive retention The orbital archive retains signed telemetry for thirty days. Operators verify SHA256 checksums before deletion. The retention owner is the Flight Records team.",
+    "passage_overlap": [
+      "archive"
+    ],
+    "id": "Q007"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "Who owns orbital archive retention?",
+    "source": "orbital-archive.txt",
+    "passage": "Orbital archive retention The orbital archive retains signed telemetry for thirty days. Operators verify SHA256 checksums before deletion. The retention owner is the Flight Records team.",
+    "id": "Q008"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "When does the baking class start?",
+    "source": "bread.md",
+    "answer": "nine",
+    "passage": "# Bread workshop The bread workshop begins at nine. Sourdough starters are fed daily. Cool baked loaves on an open rack.",
+    "passage_overlap": [],
+    "id": "Q009"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How often are sourdough starters fed?",
+    "source": "bread.md",
+    "passage": "# Bread workshop The bread workshop begins at nine. Sourdough starters are fed daily. Cool baked loaves on an open rack.",
+    "id": "Q010"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How often must the chiller be examined?",
+    "source": "cooling.md",
+    "answer": "twelve hours",
+    "passage": "# Cooling inspection The cooling circuit inspection interval is twelve hours. Report a pressure drop to the thermal desk. Record the valve number in the maintenance journal.",
+    "passage_overlap": [],
+    "id": "Q011"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "Where should a pressure drop be reported?",
+    "source": "cooling.md",
+    "passage": "# Cooling inspection The cooling circuit inspection interval is twelve hours. Report a pressure drop to the thermal desk. Record the valve number in the maintenance journal.",
+    "id": "Q012"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Where does the crimson path go?",
+    "source": "trails.md",
+    "answer": "western ridge",
+    "passage": "# Trail markers The blue trail follows the river for four kilometres. The red trail climbs the western ridge. Pack out all rubbish.",
+    "passage_overlap": [],
+    "id": "Q013"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How long is the blue trail?",
+    "source": "trails.md",
+    "passage": "# Trail markers The blue trail follows the river for four kilometres. The red trail climbs the western ridge. Pack out all rubbish.",
+    "id": "Q014"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "When can I enter the allotment?",
+    "source": "gardens.html",
+    "answer": "seven in the morning",
+    "passage": "# Community garden The community garden opens at seven in the morning. Rainwater tanks supply the vegetable beds. Volunteers label each harvest with its date.",
+    "passage_overlap": [],
+    "id": "Q015"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What supplies the vegetable beds?",
+    "source": "gardens.html",
+    "passage": "# Community garden The community garden opens at seven in the morning. Rainwater tanks supply the vegetable beds. Volunteers label each harvest with its date.",
+    "id": "Q016"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How far apart are the contour lines vertically?",
+    "source": "maps.html",
+    "answer": "ten metres",
+    "passage": "# Map conventions Map distances are expressed in kilometres. Contour intervals are ten metres. The legend explains protected habitat boundaries.",
+    "passage_overlap": [
+      "contour"
+    ],
+    "id": "Q017"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What units are map distances in?",
+    "source": "maps.html",
+    "passage": "# Map conventions Map distances are expressed in kilometres. Contour intervals are ten metres. The legend explains protected habitat boundaries.",
+    "id": "Q018"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "What containers keep the seeds?",
+    "source": "seeds.html",
+    "answer": "dry envelopes",
+    "passage": "# Seed bank The seed bank stores samples in dry envelopes. Each accession has a unique catalogue number. Germination checks take place each spring.",
+    "passage_overlap": [],
+    "id": "Q019"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "When do germination checks take place?",
+    "source": "seeds.html",
+    "passage": "# Seed bank The seed bank stores samples in dry envelopes. Each accession has a unique catalogue number. Germination checks take place each spring.",
+    "id": "Q020"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "On which weekday do we take water specimens?",
+    "source": "water.docx",
+    "answer": "Tuesday",
+    "passage": "Water quality Water samples are collected every Tuesday. Measure turbidity before filtering. Deliver sealed samples to the laboratory within four hours.",
+    "passage_overlap": [
+      "water"
+    ],
+    "id": "Q021"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How soon must sealed samples reach the laboratory?",
+    "source": "water.docx",
+    "passage": "Water quality Water samples are collected every Tuesday. Measure turbidity before filtering. Deliver sealed samples to the laboratory within four hours.",
+    "id": "Q022"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How often do we recalibrate the thermometers?",
+    "source": "sensors.xlsx",
+    "answer": "ninety days",
+    "passage": "# Sensor calibration Temperature sensors are calibrated every ninety days. Use a certified reference thermometer. Record the measured offset in degrees Celsius.",
+    "passage_overlap": [],
+    "id": "Q023"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What reference is used to calibrate temperature sensors?",
+    "source": "sensors.xlsx",
+    "passage": "# Sensor calibration Temperature sensors are calibrated every ninety days. Use a certified reference thermometer. Record the measured offset in degrees Celsius.",
+    "id": "Q024"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How long can I keep borrowed books?",
+    "source": "library.docx",
+    "answer": "twenty one days",
+    "passage": "Library loans Library book loans last twenty one days. Reference atlases remain in the reading room. Renewals are available once per loan.",
+    "passage_overlap": [],
+    "id": "Q025"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How many renewals are allowed per loan?",
+    "source": "library.docx",
+    "passage": "Library loans Library book loans last twenty one days. Reference atlases remain in the reading room. Renewals are available once per loan.",
+    "id": "Q026"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How many flotation vests are aboard patrol vessels?",
+    "source": "boats.pdf",
+    "answer": "six",
+    "passage": "Harbour safety Harbour patrol boats carry six life jackets. A radio check precedes every departure. The north channel closes during fog.",
+    "passage_overlap": [
+      "patrol"
+    ],
+    "id": "Q027"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "When does the north channel close?",
+    "source": "boats.pdf",
+    "passage": "Harbour safety Harbour patrol boats carry six life jackets. A radio check precedes every departure. The north channel closes during fog.",
+    "id": "Q028"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How frequently is starlight intensity logged?",
+    "source": "stars.docx",
+    "answer": "nightly",
+    "passage": "Star observations The observatory records stellar brightness nightly. Calibrate images with dark frames. Observation logs use UTC timestamps.",
+    "passage_overlap": [],
+    "id": "Q029"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What timestamps do observation logs use?",
+    "source": "stars.docx",
+    "passage": "Star observations The observatory records stellar brightness nightly. Calibrate images with dark frames. Observation logs use UTC timestamps.",
+    "id": "Q030"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How high above ground are the anemometers?",
+    "source": "wind.xlsx",
+    "answer": "twenty metres",
+    "passage": "# Wind survey The wind survey uses ten minute averages. Sensors are mounted at twenty metres. Flag measurements recorded during ice storms.",
+    "passage_overlap": [],
+    "id": "Q031"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What averaging period does the wind survey use?",
+    "source": "wind.xlsx",
+    "passage": "# Wind survey The wind survey uses ten minute averages. Sensors are mounted at twenty metres. Flag measurements recorded during ice storms.",
+    "id": "Q032"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "When do the electric vehicles get back?",
+    "source": "buses.xlsx",
+    "answer": "midnight",
+    "passage": "# Bus depot Electric buses return to the depot at midnight. Chargers are inspected weekly. Emergency exits must remain clear.",
+    "passage_overlap": [
+      "electric"
+    ],
+    "id": "Q033"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How often are chargers inspected?",
+    "source": "buses.xlsx",
+    "passage": "# Bus depot Electric buses return to the depot at midnight. Chargers are inspected weekly. Emergency exits must remain clear.",
+    "id": "Q034"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Do I need to book a visit to the archive?",
+    "source": "access.pdf",
+    "answer": "reservation required",
+    "passage": "Archive access Archive reading room access requires a reservation. Readers use pencils for notes. Food and drink remain outside.",
+    "passage_overlap": [
+      "archive"
+    ],
+    "id": "Q035"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "What do readers use for notes?",
+    "source": "access.pdf",
+    "passage": "Archive access Archive reading room access requires a reservation. Readers use pencils for notes. Food and drink remain outside.",
+    "id": "Q036"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Where are the original audio tapes kept?",
+    "source": "music.pdf",
+    "answer": "offline",
+    "passage": "Music archive The music archive catalogues recordings by ensemble and year. Original masters are stored offline. Listening copies are compressed.",
+    "passage_overlap": [
+      "original"
+    ],
+    "id": "Q037"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How are music recordings catalogued?",
+    "source": "music.pdf",
+    "passage": "Music archive The music archive catalogues recordings by ensemble and year. Original masters are stored offline. Listening copies are compressed.",
+    "id": "Q038"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "When does the Bibliothek open?",
+    "source": "unicode.txt",
+    "answer": "nine",
+    "passage": "Multilingual notes El archivo conserva documentos durante treinta días. Die Bibliothek öffnet um neun Uhr. 図書館は静かな場所です。",
+    "passage_overlap": [
+      "bibliothek"
+    ],
+    "id": "Q039"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "direct",
+    "question": "How long are documents kept according to the Spanish note?",
+    "source": "unicode.txt",
+    "passage": "Multilingual notes El archivo conserva documentos durante treinta días. Die Bibliothek öffnet um neun Uhr. 図書館は静かな場所です。",
+    "id": "Q040"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Which group manages retention?",
+    "source": "orbital-archive.txt",
+    "answer": "Flight Records team",
+    "passage": "Orbital archive retention The orbital archive retains signed telemetry for thirty days. Operators verify SHA256 checksums before deletion. The retention owner is the Flight Records team.",
+    "passage_overlap": [
+      "retention"
+    ],
+    "id": "Q041"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "short",
+    "question": "Retention?",
+    "source": "orbital-archive.txt",
+    "passage": "Orbital archive retention The orbital archive retains signed telemetry for thirty days. Operators verify SHA256 checksums before deletion. The retention owner is the Flight Records team.",
+    "id": "Q042"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Where should damaged cells go?",
+    "source": "batteries.txt",
+    "answer": "approved collection point",
+    "passage": "Battery storage Store spare batteries at fifteen degrees Celsius. Inspect terminals monthly. Recycle swollen cells through the approved collection point.",
+    "passage_overlap": [
+      "cells"
+    ],
+    "id": "Q043"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "short",
+    "question": "Batteries?",
+    "source": "batteries.txt",
+    "passage": "Battery storage Store spare batteries at fifteen degrees Celsius. Inspect terminals monthly. Recycle swollen cells through the approved collection point.",
+    "id": "Q044"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Where should fresh loaves rest?",
+    "source": "bread.md",
+    "answer": "open rack",
+    "passage": "# Bread workshop The bread workshop begins at nine. Sourdough starters are fed daily. Cool baked loaves on an open rack.",
+    "passage_overlap": [
+      "loaves"
+    ],
+    "id": "Q045"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "short",
+    "question": "Sourdough?",
+    "source": "bread.md",
+    "passage": "# Bread workshop The bread workshop begins at nine. Sourdough starters are fed daily. Cool baked loaves on an open rack.",
+    "id": "Q046"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "What must be measured prior to straining water?",
+    "source": "water.docx",
+    "answer": "turbidity",
+    "passage": "Water quality Water samples are collected every Tuesday. Measure turbidity before filtering. Deliver sealed samples to the laboratory within four hours.",
+    "passage_overlap": [
+      "water"
+    ],
+    "id": "Q047"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "on",
+    "style": "short",
+    "question": "Turbidity?",
+    "source": "water.docx",
+    "passage": "Water quality Water samples are collected every Tuesday. Measure turbidity before filtering. Deliver sealed samples to the laboratory within four hours.",
+    "id": "Q048"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "How long do we hold onto archive snapshots?",
+    "source": "orbital.txt",
+    "answer": "thirty days",
+    "passage": "Orbital archive retention is thirty days, after which the cold storage tier deletes the snapshot.",
+    "passage_overlap": [
+      "archive"
+    ],
+    "id": "Q049"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "direct",
+    "question": "What is the orbital archive retention?",
+    "source": "orbital.txt",
+    "passage": "Orbital archive retention is thirty days, after which the cold storage tier deletes the snapshot.",
+    "id": "Q050"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "When is the Northwind bill payable?",
+    "source": "invoice.txt",
+    "answer": "fifteenth of next month",
+    "passage": "Invoice 4471 from Northwind Supplies is due on the fifteenth of next month.",
+    "passage_overlap": [
+      "northwind"
+    ],
+    "id": "Q051"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "direct",
+    "question": "When is invoice 4471 due?",
+    "source": "invoice.txt",
+    "passage": "Invoice 4471 from Northwind Supplies is due on the fifteenth of next month.",
+    "id": "Q052"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Which bird was spotted at the pond?",
+    "source": "heron.txt",
+    "answer": "grey heron",
+    "passage": "A grey heron was seen fishing at the north pond every morning in October.",
+    "passage_overlap": [
+      "pond"
+    ],
+    "id": "Q053"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "direct",
+    "question": "What colour was the heron?",
+    "source": "heron.txt",
+    "passage": "A grey heron was seen fishing at the north pond every morning in October.",
+    "id": "Q054"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "During which month was the bird observed?",
+    "source": "heron.txt",
+    "answer": "October",
+    "passage": "A grey heron was seen fishing at the north pond every morning in October.",
+    "passage_overlap": [],
+    "id": "Q055"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "direct",
+    "question": "When was the heron seen fishing?",
+    "source": "heron.txt",
+    "passage": "A grey heron was seen fishing at the north pond every morning in October.",
+    "id": "Q056"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "What happens when the archive expires?",
+    "source": "orbital.txt",
+    "answer": "cold storage tier deletes the snapshot",
+    "passage": "Orbital archive retention is thirty days, after which the cold storage tier deletes the snapshot.",
+    "passage_overlap": [
+      "archive"
+    ],
+    "id": "Q057"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "direct",
+    "question": "Which tier deletes the snapshot?",
+    "source": "orbital.txt",
+    "passage": "Orbital archive retention is thirty days, after which the cold storage tier deletes the snapshot.",
+    "id": "Q058"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "paraphrase",
+    "question": "Who sent the bill?",
+    "source": "invoice.txt",
+    "answer": "Northwind Supplies",
+    "passage": "Invoice 4471 from Northwind Supplies is due on the fifteenth of next month.",
+    "passage_overlap": [],
+    "id": "Q059"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "on",
+    "style": "short",
+    "question": "Northwind?",
+    "source": "invoice.txt",
+    "passage": "Invoice 4471 from Northwind Supplies is due on the fifteenth of next month.",
+    "id": "Q060"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the archive street address?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q061"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How much does the bread workshop cost?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q062"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What ingredients are needed to bake bread?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q063"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the cooling circuit manufacturer?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q064"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who built the pedestrian bridges?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q065"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How much salinity was measured yesterday?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q066"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the orbital archive encryption password?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q067"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What colour are the battery storage cabinets?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q068"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Where is the community garden street entrance?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q069"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How much do the seed bank envelopes cost?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q070"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the map publisher phone number?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q071"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the blue trail elevation gain?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q072"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who manages the thermal desk?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q073"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the water laboratory street address?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q074"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What brand of reference thermometer is certified?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q075"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What fine is charged for late library loans?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q076"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the maximum speed of harbour patrol boats?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q077"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Which star was brightest last night?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q078"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the wind survey budget?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q079"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How many electric buses are at the depot?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q080"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who composed the music archive recordings?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q081"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How much does an archive reservation cost?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q082"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who wrote the multilingual notes?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q083"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the approved collection point address?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q084"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "What is the capital of France?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q085"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "Who painted the Mona Lisa?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q086"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "How do I reset my email password?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q087"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "What will the weather be tomorrow?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q088"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "Who won the 2018 World Cup?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q089"
+  },
+  {
+    "corpus": "fixtures",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "What is quantum entanglement?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q090"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How much does Northwind charge for shipping?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q091"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the invoice total?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q092"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What currency is invoice 4471 in?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q093"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the Northwind street address?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q094"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who approved the Northwind invoice?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q095"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the orbital archive street address?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q096"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How large is the orbital archive?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q097"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "Who owns the cold storage tier?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q098"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What encryption protects the snapshot?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q099"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What time exactly was the heron seen?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q100"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "How many fish did the grey heron catch?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q101"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the pond depth?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q102"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What is the heron wingspan?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q103"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "near-miss",
+    "question": "What year was the heron seen?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q104"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "How do I bake bread?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q105"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "What is the capital of France?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q106"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "Who painted the Mona Lisa?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q107"
+  },
+  {
+    "corpus": "three-file",
+    "kind": "off",
+    "style": "unrelated",
+    "question": "Can you explain quantum entanglement?",
+    "reason": "Requested fact or procedure absent from the entire corpus.",
+    "id": "Q108"
+  }
+]
