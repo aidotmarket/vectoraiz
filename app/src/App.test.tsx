@@ -180,6 +180,8 @@ it("installs exactly once after consent, streams progress, and disables other bu
   act(() => channel.onmessage({ stage: "installing" }));
   expect(screen.getByText("Installing update…")).toBeInTheDocument();
   await act(async () => pending.resolve(undefined));
+  act(() => channel.onmessage({ stage: "downloading", downloaded: 50, total: 100 }));
+  expect(screen.queryByText(/Downloading update…|Installing update…/)).not.toBeInTheDocument();
 });
 
 it.each(["Index folder", "Search", "Ask", "Run self-test"])("prevents installing while %s is running", async name => {
@@ -578,4 +580,32 @@ it.each(["Search", "Ask"])("clears the previous result when %s starts, before it
   expect(screen.getByRole("button", { name })).toBeDisabled();
   await act(async () => pending.resolve(name === "Ask" ? { text: "No indexed sources answer this question.", citations: [] } : []));
   expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
+});
+
+it("ignores settled Ask tokens while Search runs and after its results arrive", async () => {
+  const askPending = deferred();
+  const searchPending = deferred();
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_ask") return askPending.promise;
+    if (command === "pipeline_search") return searchPending.promise;
+    return { available: false };
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+  const channel = invoke.mock.calls.find(([command]) => command === "pipeline_ask")![1].tokens;
+  await act(async () => askPending.resolve({ text: "Completed answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Old source.txt" }] }));
+  const answer = screen.getByText("Completed answer");
+  await userEvent.click(screen.getByRole("button", { name: "Search" }));
+  expect(answer).toBeEmptyDOMElement();
+  expect(screen.queryByText(/Old source.txt/)).not.toBeInTheDocument();
+  act(() => channel.onmessage("Late Ask token"));
+  expect(answer).toBeEmptyDOMElement();
+  expect(screen.getByRole("status")).toHaveTextContent("Searching…");
+  expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
+  await act(async () => searchPending.resolve([{ chunk: { chunk_id: "new", doc_id: "doc", page: 2, text: "New search result" }, score: 1 }]));
+  expect(screen.getByText("New search result")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(answer).toBeEmptyDOMElement();
+  expect(screen.getByRole("button", { name: "Search" })).toBeEnabled();
 });
