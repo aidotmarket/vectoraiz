@@ -84,16 +84,21 @@ export default function App() {
     if (running || modelBusyRef.current || updateBusy.current || !availableVersion) return;
     updateBusy.current = true;
     setInstalling(true); setInstallFailure(undefined); setUpdateProgress("Downloading update…");
+    let active = true;
     const channel = new Channel<UpdateProgress>();
-    channel.onmessage = p => setUpdateProgress(p.stage === "installing"
-      ? "Installing update…"
-      : `Downloading update… ${p.downloaded ?? 0}${p.total ? ` / ${p.total}` : ""} bytes`);
+    channel.onmessage = p => {
+      if (!active) return;
+      setUpdateProgress(p.stage === "installing"
+        ? "Installing update…"
+        : `Downloading update… ${p.downloaded ?? 0}${p.total ? ` / ${p.total}` : ""} bytes`);
+    };
     try {
       await invoke("update_install", { progress: channel });
     } catch (cause) {
       setInstallFailure(typeof cause === "object" && cause !== null && "detail" in cause
         ? cause as InstallFailure : { detail: String(cause) });
     } finally {
+      active = false;
       updateBusy.current = false;
       setInstalling(false); setUpdateProgress("");
     }
@@ -108,20 +113,25 @@ export default function App() {
     finally { active = false; setRunning(false); }
   }
   async function search() {
-    setRunning(true); setError(""); setProgress("Searching…");
+    setRunning(true); setError(""); setProgress("Searching…"); setAnswer(""); setCitations([]);
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
     catch (cause) { setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
-    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…");
+    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…"); setHits([]);
+    let active = true;
     const channel = new Channel<string>();
-    channel.onmessage = token => { if (token) setProgress(""); setAnswer(text => text + token); };
+    channel.onmessage = token => {
+      if (!active) return;
+      if (token) setProgress("");
+      setAnswer(text => text + token);
+    };
     try {
       const result = await invoke<{ text: string; citations: Citation[] }>("pipeline_ask", { question: query, tokens: channel });
       setAnswer(result.text); setCitations(result.citations);
     } catch (cause) { setError(String(cause)); setProgress(""); }
-    finally { setRunning(false); setProgress(""); }
+    finally { active = false; setRunning(false); setProgress(""); }
   }
   async function runSelfTest() {
     setRunning(true); setSelfTestRunning(true);
