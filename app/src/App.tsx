@@ -108,13 +108,13 @@ export default function App() {
     finally { active = false; setRunning(false); }
   }
   async function search() {
-    setRunning(true); setError(""); setProgress("Searching…");
+    setRunning(true); setError(""); setProgress("Searching…"); setAnswer(""); setCitations([]);
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
     catch (cause) { setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
-    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…");
+    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…"); setHits([]);
     const channel = new Channel<string>();
     channel.onmessage = token => { if (token) setProgress(""); setAnswer(text => text + token); };
     try {

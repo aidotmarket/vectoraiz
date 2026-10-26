@@ -426,9 +426,10 @@ it.each(["lighthouse.txt", undefined, null, ""])("renders filenames or the ID fa
   render(<App />);
   await waitFor(() => expect(screen.getByRole("button", { name: "Search" })).toBeEnabled());
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
-  await userEvent.click(screen.getByRole("button", { name: "Ask" }));
   const label = `${file_name || "Document 12345678"} · Page 2`;
   expect(screen.getByText(`· ${label}`)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", { name: "Ask" }));
+  expect(screen.queryByText(`· ${label}`)).not.toBeInTheDocument();
   expect(screen.getByText(`[1] ${label}`)).toBeInTheDocument();
 });
 
@@ -554,4 +555,27 @@ it("retains Downloaded after download success with a failed status refresh and r
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
   expect(checks).toBe(3);
+});
+
+it.each(["Search", "Ask"])("clears the previous result when %s starts, before it completes", async name => {
+  const pending = deferred();
+  let next = false;
+  invoke.mockImplementation(async command => {
+    if (command === "update_check") return { available: false };
+    if (next) return pending.promise;
+    if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
+    if (command === "pipeline_ask") return { text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name: name === "Search" ? "Ask" : "Search" }));
+  expect(await screen.findByText(name === "Search" ? "Previous answer" : "Previous search hit")).toBeInTheDocument();
+  next = true;
+  await userEvent.click(screen.getByRole("button", { name }));
+  expect(screen.queryByText("Previous answer")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Previous search hit")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name })).toBeDisabled();
+  await act(async () => pending.resolve(name === "Ask" ? { text: "No indexed sources answer this question.", citations: [] } : []));
+  expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
 });

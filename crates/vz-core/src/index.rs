@@ -240,9 +240,44 @@ pub fn ask(
     engines: &Engines,
     question: &str,
     hits: &[Hit],
-    mut emit: impl FnMut(&str),
+    emit: impl FnMut(&str),
 ) -> Result<Answer> {
-    if hits.is_empty() {
+    ask_with(question, hits, emit, |context, emit| {
+        engines.stream(question, context, emit)
+    })
+}
+
+// Two distinct content words preserve the measured orbital paraphrases while
+// rejecting a lone topic mention (for example, bread in a workshop notice).
+fn has_source_overlap(question: &str, hits: &[Hit]) -> bool {
+    const STOP_WORDS: &str = "a an the is are was were be been being do does did how what which who whom whose where when why i me my we our you your he she it its they their this that these those of in on at to for from by with as and or but if than then after before into about can could should would will may might must";
+    let question = question.to_lowercase();
+    let words: HashSet<_> = question
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty() && !STOP_WORDS.split_whitespace().any(|stop| stop == *word))
+        .collect();
+    let mut matched = HashSet::new();
+    for hit in hits {
+        let text = hit.chunk.text.to_lowercase();
+        for word in text.split(|c: char| !c.is_ascii_alphanumeric()) {
+            if words.contains(word) {
+                matched.insert(word.to_owned());
+                if matched.len() >= 2 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn ask_with(
+    question: &str,
+    hits: &[Hit],
+    mut emit: impl FnMut(&str),
+    answer: impl FnOnce(&str, &mut dyn FnMut(&str)) -> Result<String>,
+) -> Result<Answer> {
+    if !has_source_overlap(question, hits) {
         return Ok(Answer {
             text: "No indexed sources answer this question.".into(),
             citations: vec![],
@@ -264,7 +299,7 @@ pub fn ask(
         .map(|(i, h)| format!("[{}] {}", i + 1, h.chunk.text))
         .collect::<Vec<_>>()
         .join("\n\n");
-    let text = engines.stream(question, &context, &mut emit)?;
+    let text = answer(&context, &mut emit)?;
     finish_answer(text, citations, emit)
 }
 
@@ -325,6 +360,77 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn hit(text: &str) -> Hit {
+        Hit {
+            chunk: crate::pipeline::Chunk {
+                chunk_id: "chunk".into(),
+                doc_id: "orbital".into(),
+                text: text.into(),
+                page: 2,
+                heading_path: vec![],
+                token_count: 0,
+                embedding: vec![],
+            },
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn rejects_without_calling_answer_or_emitting_citations() {
+        for (question, hits) in [
+            (
+                "Who painted the Mona Lisa?",
+                vec![hit("Orbital archive retention is thirty days.")],
+            ),
+            (
+                "How do I bake bread?",
+                vec![hit("Bread workshop. Bread bread bread.")],
+            ),
+            ("Is it the?", vec![hit("Is it the?")]),
+            ("What is the orbital archive retention policy?", vec![]),
+        ] {
+            let mut emitted = String::new();
+            let answer = ask_with(
+                question,
+                &hits,
+                |token| emitted.push_str(token),
+                |_, _| panic!("a rejected question must not call the answer model"),
+            )
+            .unwrap();
+            assert_eq!(answer.text, "No indexed sources answer this question.");
+            assert!(answer.citations.is_empty());
+            assert!(emitted.is_empty());
+        }
+    }
+
+    #[test]
+    fn accepts_two_distinct_content_words_and_preserves_answer_path() {
+        let hits = vec![hit("ORBITAL archive retention is thirty days.")];
+        let question = "How long is the orbital archive kept?";
+        let mut calls = 0;
+        let mut emitted = String::new();
+        let answer = ask_with(
+            question,
+            &hits,
+            |token| emitted.push_str(token),
+            |context, emit| {
+                calls += 1;
+                assert_eq!(context, "[1] ORBITAL archive retention is thirty days.");
+                emit("Thirty days [1].");
+                Ok("Thirty days [1].".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(answer.text, "Thirty days [1].\n\nRetrieved sources: [1]");
+        assert_eq!(emitted, answer.text);
+        assert_eq!(answer.citations.len(), 1);
+        let citation = &answer.citations[0];
+        assert_eq!((citation.number, citation.page), (1, 2));
+        assert_eq!(citation.doc_id, "orbital");
+        assert_eq!(citation.chunk_id, "chunk");
+    }
+
     #[test]
     fn refuses_unknown_model_citations() {
         assert!(validate_citations("supported [1]", 1).is_ok());

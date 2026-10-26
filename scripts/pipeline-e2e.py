@@ -23,6 +23,13 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
             print(result.stdout)
             raise RuntimeError(f'CLI {args[0]} failed: {result.returncode}')
         return json.loads(result.stdout)
+    def assert_off_topic_refused():
+        for question in ['Who painted the Mona Lisa?', 'What is the capital of France?',
+                         'How do I bake bread?', 'Who won the 2018 World Cup?',
+                         'What is quantum entanglement?']:
+            answer = cli('ask', question)
+            assert answer == {'text': 'No indexed sources answer this question.', 'citations': []}, (question, answer)
+
     indexed = cli('index', 'spike/fixtures/documents')
     assert indexed['completed'] == 20 and indexed['failed'] == 0, indexed
     unchanged = cli('index', 'spike/fixtures/documents')
@@ -36,6 +43,7 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     assert 'thirty days' in body.lower(), body
     numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
     assert numbers and numbers == [c['number'] for c in answer['citations']], answer
+    assert_off_topic_refused()
     manifest = cli('pack', str(pack), '--query', query)
     docs = {doc['doc_id']: doc for doc in pq.read_table(pack / 'documents.parquet').to_pylist()}
     for hit in hits:
@@ -91,6 +99,8 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
         assert numbers == [1, 2, 3] == [c['number'] for c in small_answer['citations']], small_answer
         small_answers.append({'question': question, 'answer': small_answer})
+
+    assert_off_topic_refused()
 
     # A real two-page PDF: text on page 1, an image XObject only on page 2.
     mixed = Path(temp) / 'mixed'
