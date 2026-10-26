@@ -14,9 +14,9 @@ Record of the by-hand check of the chunk D5 Ask fix (vectorAIz #80) on Max's Win
 
 ## Findings
 
-1. **Off-topic question answered from general knowledge, with unrelated files cited (open defect).** The answer for step 4 is not in any indexed file, yet the model answered it and the app listed all three files as sources. Retrieval always returns the top hits, however weakly related, and the model did not follow the "if the sources do not answer, say so" instruction.
+1. **Off-topic question answered from general knowledge, with unrelated files cited (open defect).** The answer for step 4 is not in any indexed file, yet an answer was given and the app listed all three files as sources. Confirmed in code: retrieval returns up to the top three available hits with no relevance cutoff (storage.rs search, desktop.rs), Ask uses every hit and rejects only an empty set (index.rs), and the app itself appends all retrieved citations, so the citations do not show the model chose them. The prompt (engine.rs) does say "If the sources do not answer say so." The reported answer is consistent with the model not following that instruction (inferred, not verified).
 2. The previous Ask answer stays on screen under later Search results (minor).
-3. A second Claude run worked on the same PC and evidence folder at 10:08–10:11 and most likely clicked Ask once; steps 2–5 were run and screenshotted by the main run, so results are unaffected.
+3. A second Claude run worked on the same PC and evidence folder at 10:08–10:11 and most likely clicked Ask once; steps 2–5 were run and screenshotted by the main run and no interference was observed in its log; the overlap at 10:11 means this is not proven.
 
 ## Left on the PC
 
