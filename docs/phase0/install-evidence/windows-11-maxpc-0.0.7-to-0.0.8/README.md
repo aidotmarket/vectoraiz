@@ -11,18 +11,18 @@ The check was run by a Claude session on the PC, with Max clicking the administr
 - Machine: AMD Ryzen 7 5800X, 64 GB RAM, RTX 4070, Windows 11 Home 25H2 (build 26200.9711).
 - Index: the three one-line files orbital.txt, invoice.txt and heron.txt from the earlier runs.
 
-**How the times were measured.** After each click, the session took a screenshot about every second and counted frames until the result showed. The times are estimates, accurate to about a second, not instrumented timings.
+**How the times were measured.** After each click, the session took a screenshot about every second (every 0.5 s for step 3) and counted frames until the result showed. Durations are estimates to about ±1 s; clock times are to about ±5 s. They are not instrumented timings.
 
 ## Results
 
 | Step | Result | Exact text / what happened | Time (s, estimate) |
 |---|---|---|---|
-| 1 Update | PASS | The banner "vectorAIz 0.0.8 is available" showed at launch. After Install and restart, the taskbar shield and Yes (17:10–17:11), the app reopened as "Version 0.0.8" in one window. | — |
+| 1 Update | PASS | The banner "vectorAIz 0.0.8 is available" showed at launch. After Install and restart, the taskbar shield and Yes (17:10–17:11), the app reopened as "Version 0.0.8 · Native pipeline spike" in one window. | — |
 | 2 First Search after launch ("orbital archive") | PASS | orbital.txt · Page 1 first | ~2–3 |
-| 3 Second Search ("cold storage snapshot") | PASS | orbital.txt · Page 1 first | ~0.5–1 |
+| 3 Second Search ("cold storage snapshot") | PASS | orbital.txt first | ~0.5–1 |
 | 4 Ask "How long is the orbital archive kept?" | PASS | "The orbital archive is kept for thirty days after which it is deleted.", citing orbital.txt, invoice.txt and heron.txt | ~7–8 |
 | 5 Second Ask "What is the orbital archive retention policy?" | PASS | "The orbital archive retention policy is thirty days, after which the cold storage tier deletes the snapshot.", same citations | ~1–2 |
-| 6 Search and Ask clear each other | PASS | Search "invoice" removed the previous answer. Ask "Who sent the invoice?" removed the results and answered "The invoice was sent by Northwind Supplies." | <6 |
+| 6 Search and Ask clear each other | PASS | Search "invoice" removed the previous answer. Ask "Who sent the invoice?" removed the results and answered "The invoice was sent by Northwind Supplies." | within 6 |
 | 7 Re-index `Documents\vz-test` | PASS | "3/3 · 0 indexed · 0 failed"; a Search afterwards still put orbital.txt first | <1 |
 | 8 Memory (information only) | — | Task Manager Processes: one vectorAIz process, 88.0 MB, idle. System memory in use: 8.1 of 63.9 GB. | — |
 | 9 Ask "Who painted the Mona Lisa?" (information only) | — | "The Mona Lisa was painted by Leonardo da Vinci.", citing the three unrelated files | — |
@@ -31,7 +31,7 @@ The check was run by a Claude session on the PC, with Max clicking the administr
 
 1. **Repeat Search and Ask are fast on Windows (D7 confirmed).**
    - Second Search: about 1 s. Second Ask: about 1–2 s.
-   - On 0.0.6/0.0.7 installs, the first Search after indexing took 60–90 s.
+   - For comparison, D7 (#85) measured Search at 12.1 s before and 0.43 s after on macOS; there is no instrumented Windows baseline from earlier versions.
    - The first Search after launch was also only about 2–3 s on this machine.
 2. **The memory figure does not answer the 8 GB question.**
    - The 88 MB is Task Manager's default Memory column, which counts only memory private to the process.
