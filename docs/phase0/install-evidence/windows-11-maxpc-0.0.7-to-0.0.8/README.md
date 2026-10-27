@@ -31,7 +31,7 @@ The check was run by a Claude session on the PC, with Max clicking the administr
 
 1. **Repeat Search and Ask are fast on Windows (D7 confirmed).**
    - Second Search: about 1 s. Second Ask: about 1–2 s.
-   - For comparison, D7 (#85) measured Search at 12.1 s before and 0.43 s after on macOS; there is no instrumented Windows baseline from earlier versions.
+   - For comparison, D7 (#85) measured the first Search after indexing at 12.1 s before and 0.43 s after on macOS (CPU backend); there is no instrumented Windows baseline from earlier versions.
    - The first Search after launch was also only about 2–3 s on this machine.
 2. **The memory figure does not answer the 8 GB question.**
    - The 88 MB is Task Manager's default Memory column, which counts only memory private to the process.
