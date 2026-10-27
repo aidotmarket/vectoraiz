@@ -727,3 +727,51 @@ fn failed_load_is_retried_and_failed_chat_preserves_embedding() {
     held.get_or_load(false, || panic!("embedding should survive a chat failure"))
         .unwrap();
 }
+
+#[test]
+fn invalid_import_preserves_loaded_cache_and_valid_import_invalidates_it() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    ops.acquire()
+        .unwrap()
+        .get_or_load(false, || fake_load(&counts))
+        .unwrap();
+    let source = Temp::new();
+    let destination = Temp::new();
+    let file = source.0.join("file");
+    fs::write(&file, b"not a directory").unwrap();
+    for (folder, message) in [
+        (PathBuf::from("relative"), "Type an absolute folder path"),
+        (source.0.join("missing"), "Import folder not found"),
+        (file, "Import folder not found"),
+    ] {
+        assert_eq!(ops.acquire_import(&folder).err().unwrap(), message);
+        assert_eq!(counts.drops.get(), 0);
+        ops.acquire()
+            .unwrap()
+            .get_or_load(false, || fake_load(&counts))
+            .unwrap();
+        assert_eq!(counts.embed.get(), 1, "invalid import must preserve cache");
+    }
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'x'; 100]).unwrap();
+    {
+        let _guard = ops.acquire_import(&source.0).unwrap();
+        assert_eq!(counts.drops.get(), 1, "drop before importing models");
+        let results = runtime()
+            .block_on(import(
+                &destination.0,
+                std::slice::from_ref(&pin),
+                &source.0,
+                ops.start(),
+            ))
+            .unwrap();
+        assert_eq!(results[0]["result"], "imported");
+        assert!(verified(&destination.0, &pin));
+    }
+    ops.acquire()
+        .unwrap()
+        .get_or_load(false, || fake_load(&counts))
+        .unwrap();
+    assert_eq!(counts.embed.get(), 2);
+}

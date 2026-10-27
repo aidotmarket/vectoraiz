@@ -104,7 +104,7 @@ export default function App() {
     }
   }
   async function indexFolder() {
-    setRunning(true); setError(""); setProgress("Scanning…");
+    setRunning(true); setError(""); setProgress("Scanning…"); setAnswer(""); setCitations([]); setHits([]);
     let active = true;
     const channel = new Channel<Progress>();
     channel.onmessage = p => { if (active) setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); };

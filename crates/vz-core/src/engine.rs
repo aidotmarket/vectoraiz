@@ -28,9 +28,22 @@ impl PhaseTimer {
         }
     }
 }
+fn engine_timing_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value == Some(std::ffi::OsStr::new("1"))
+}
+
+#[test]
+fn timing_requires_exactly_one() {
+    assert!(!engine_timing_enabled(None));
+    for value in ["", "0", "true", "01", " 1", "1 "] {
+        assert!(!engine_timing_enabled(Some(std::ffi::OsStr::new(value))));
+    }
+    assert!(engine_timing_enabled(Some(std::ffi::OsStr::new("1"))));
+}
+
 impl Drop for PhaseTimer {
     fn drop(&mut self) {
-        if std::env::var_os("VZ_ENGINE_TIMING").is_some() {
+        if engine_timing_enabled(std::env::var_os("VZ_ENGINE_TIMING").as_deref()) {
             eprintln!(
                 "VZ_ENGINE_TIMING {} {:.3} ms",
                 self.phase,

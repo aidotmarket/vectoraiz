@@ -81,6 +81,10 @@ impl<E: CachedEngine> OperationState<E> {
         cache.invalidate();
         Ok(cache)
     }
+    pub fn acquire_import(&self, folder: &Path) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
+        validate_import_folder(folder).map_err(|e| e.to_string())?;
+        self.acquire_mutation()
+    }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     pub fn start(&self) -> watch::Receiver<bool> {
         self.cancel.send_replace(false);
@@ -588,14 +592,19 @@ pub async fn download(
     }
     Ok(())
 }
+fn validate_import_folder(folder: &Path) -> Result<()> {
+    ensure!(folder.is_absolute(), "Type an absolute folder path");
+    ensure!(folder.is_dir(), "Import folder not found");
+    Ok(())
+}
+
 pub async fn import(
     dir: &Path,
     pins: &[Pin],
     folder: &Path,
     cancel: watch::Receiver<bool>,
 ) -> Result<Vec<Value>> {
-    ensure!(folder.is_absolute(), "Type an absolute folder path");
-    ensure!(folder.is_dir(), "Import folder not found");
+    validate_import_folder(folder)?;
     fs::create_dir_all(dir)?;
     check_space(dir, space_needed(folder, pins, true)?)?;
     let mut results = Vec::new();

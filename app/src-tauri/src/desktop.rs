@@ -665,7 +665,7 @@ async fn models_import<R: tauri::Runtime>(
     operations: tauri::State<'_, models::Operations>,
     folder: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let _guard = operations.acquire_mutation()?;
+    let _guard = operations.acquire_import(std::path::Path::new(&folder))?;
     let cancel = operations.start();
     models::import(
         &model_dir(&app)?,
