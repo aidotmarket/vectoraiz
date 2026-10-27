@@ -178,6 +178,7 @@ impl State {
         Ok(())
     }
     pub async fn search(&self, query: &str, vector: &[f32], top_k: usize) -> Result<Vec<Hit>> {
+        let _timer = crate::engine::PhaseTimer::new("search");
         let mut lexical = Vec::new();
         let mut semantic = Vec::new();
         let docs = self.documents()?;

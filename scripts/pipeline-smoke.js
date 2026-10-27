@@ -48,6 +48,9 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await pipelineWait(() => document.querySelector('section li')?.textContent.includes('thirty days') && !button('Ask').disabled);
   const previousSearch = [...document.querySelectorAll('section ol:first-of-type li')].map(li => li.textContent);
   const query = 'What is the orbital archive retention policy?';
+  const repeatedHits = await window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
+  if (!repeatedHits[0]?.chunk.text.includes('thirty days')) throw new Error('Repeated Search lost its result');
+  await report('searched again');
   await report('guard-before');
   const progress = '__CHANNEL__:' + window.__TAURI_INTERNALS__.transformCallback(() => {});
   for (const invalid of ['', '   ', window.__VZ_SMOKE__.fixture + '/directory-that-does-not-exist']) {
@@ -61,6 +64,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));
   }
   await report('guard-after');
+  await report('hold-next-search');
   window.__VZ_SMOKE__.searchLocked = false;
   const secondSearch = window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
   // Observe the backend's post-acquire signal before dispatching competitors.
@@ -71,6 +75,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     window.__TAURI_INTERNALS__.invoke('models_download', { progress }),
     window.__TAURI_INTERNALS__.invoke('models_import', { folder: window.__VZ_SMOKE__.fixture }),
   ]);
+  await report('release-search');
   for (const result of overlaps) {
     if (result.status !== 'rejected' || String(result.reason) !== 'Another model or index operation is running') throw new Error('Overlapping operation was not refused');
   }
@@ -82,5 +87,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   button('Ask').click();
   await pipelineWait(() => document.querySelector('section ol:last-of-type li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');
+  const secondAnswer = await window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress });
+  if (!secondAnswer.text.toLowerCase().includes('thirty days') || !secondAnswer.citations.length) throw new Error('Repeated Ask lost its answer or citations');
+  await report('answered again');
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));
