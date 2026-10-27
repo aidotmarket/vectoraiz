@@ -15,25 +15,71 @@ use std::{
 use tokio::sync::{watch, Mutex, OwnedMutexGuard};
 
 pub const BUSY: &str = "Another model or index operation is running";
-#[derive(Clone)]
-pub struct Operations {
-    lock: Arc<Mutex<()>>,
+// The operation lock owns the cache: no model can stay mapped during mutation.
+// Generic loader seam keeps lifecycle tests independent of native model files.
+pub trait CachedEngine {
+    fn ensure_chat(&self) -> Result<()>;
+}
+impl CachedEngine for vz_core::engine::Engines {
+    fn ensure_chat(&self) -> Result<()> {
+        self.load_chat()
+    }
+}
+pub struct EngineCache<E> {
+    engine: Option<E>,
+    generation: u64,
+}
+impl<E: CachedEngine> EngineCache<E> {
+    pub fn get_or_load(&mut self, chat: bool, load: impl FnOnce() -> Result<E>) -> Result<&E> {
+        if self.engine.is_none() {
+            self.engine = Some(load()?);
+        }
+        let engine = self.engine.as_ref().unwrap();
+        if chat {
+            engine.ensure_chat()?;
+        }
+        Ok(engine)
+    }
+    fn invalidate(&mut self) {
+        self.engine = None;
+    }
+}
+pub type Operations = OperationState<vz_core::engine::Engines>;
+pub struct OperationState<E> {
+    lock: Arc<Mutex<EngineCache<E>>>,
+    generation: AtomicU64,
     cancel: watch::Sender<bool>,
 }
-impl Default for Operations {
+impl<E> Default for OperationState<E> {
     fn default() -> Self {
         Self {
-            lock: Arc::new(Mutex::new(())),
+            lock: Arc::new(Mutex::new(EngineCache {
+                engine: None,
+                generation: 0,
+            })),
+            generation: AtomicU64::new(0),
             cancel: watch::channel(false).0,
         }
     }
 }
-impl Operations {
-    pub fn acquire(&self) -> Result<OwnedMutexGuard<()>, String> {
-        self.lock
+impl<E: CachedEngine> OperationState<E> {
+    pub fn acquire(&self) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
+        let mut cache = self
+            .lock
             .clone()
             .try_lock_owned()
-            .map_err(|_| BUSY.to_owned())
+            .map_err(|_| BUSY.to_owned())?;
+        let generation = self.generation.load(Ordering::Acquire);
+        if cache.generation != generation {
+            cache.invalidate();
+            cache.generation = generation;
+        }
+        Ok(cache)
+    }
+    pub fn acquire_mutation(&self) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
+        let mut cache = self.acquire()?;
+        cache.invalidate();
+        Ok(cache)
     }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     pub fn start(&self) -> watch::Receiver<bool> {
@@ -42,6 +88,12 @@ impl Operations {
     }
     pub fn cancel(&self) {
         self.cancel.send_replace(true);
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        // During acquisition the cache is already empty. During inference it
+        // must remain alive until the operation ends; acquire invalidates next.
+        if let Ok(mut cache) = self.lock.try_lock() {
+            cache.invalidate();
+        }
     }
 }
 

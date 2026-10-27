@@ -1,5 +1,11 @@
 use crate::{desktop_pipeline, models};
 
+// The overlap smoke test must not depend on Search being slower than its UI poll.
+#[cfg(feature = "smoke-test")]
+static HOLD_NEXT_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
+static RELEASE_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 // Keep the checked Update, including its version and signature, until consent.
 #[derive(Default)]
 struct PendingUpdate(tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
@@ -96,6 +102,11 @@ fn self_test<R: tauri::Runtime>(
     if smoke_test_requested() {
         if let Some(checkpoint) = checkpoint {
             println!("VECTORAIZ_SMOKE_STAGE: {checkpoint}");
+            if checkpoint == "hold-next-search" {
+                HOLD_NEXT_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else if checkpoint == "release-search" {
+                RELEASE_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
             if matches!(checkpoint.as_str(), "guard-before" | "guard-after") {
                 static BEFORE: std::sync::Mutex<Option<serde_json::Value>> =
                     std::sync::Mutex::new(None);
@@ -435,20 +446,23 @@ async fn pipeline_index<R: tauri::Runtime>(
     folder: String,
     progress: tauri::ipc::Channel<vz_core::index::Progress>,
 ) -> Result<serde_json::Value, String> {
+    let _timer = vz_core::engine::PhaseTimer::new("pipeline_index_total");
     models::validate_folder(&folder)?;
     let guard = operations.acquire()?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let _guard = guard;
-        let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
+        let mut cache = guard;
+        let mut run = || -> anyhow::Result<serde_json::Value> {
+            let engines = cache.get_or_load(false, || {
+                vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())
+            })?;
             #[cfg(feature = "smoke-test")]
-            record_loaded_models(&assets, &pins)?;
+            record_loaded_models(&assets, &pins, engines.chat_loaded())?;
             let mut state = vz_core::storage::State::open(&root)?;
             let result = tokio::runtime::Runtime::new()?.block_on(vz_core::index::index(
                 &mut state,
                 std::path::Path::new(&folder),
-                &engines,
+                engines,
                 &assets,
                 |value| {
                     let _ = progress.send(value.clone());
@@ -467,8 +481,16 @@ async fn pipeline_search<R: tauri::Runtime>(
     operations: tauri::State<'_, models::Operations>,
     query: String,
 ) -> Result<serde_json::Value, String> {
+    let _timer = vz_core::engine::PhaseTimer::new("pipeline_search_total");
     let guard = operations.acquire()?;
     desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
+    #[cfg(feature = "smoke-test")]
+    let hold =
+        smoke_test_requested() && HOLD_NEXT_SEARCH.swap(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "smoke-test")]
+    if hold {
+        RELEASE_SEARCH.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
         tauri::Manager::get_webview_window(&app, "main")
@@ -478,11 +500,23 @@ async fn pipeline_search<R: tauri::Runtime>(
     }
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let _guard = guard;
-        let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
+        let mut cache = guard;
+        #[cfg(feature = "smoke-test")]
+        if hold {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !RELEASE_SEARCH.load(std::sync::atomic::Ordering::SeqCst) {
+                if std::time::Instant::now() >= deadline {
+                    return Err("Smoke Search release timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
+        let mut run = || -> anyhow::Result<serde_json::Value> {
+            let engines = cache.get_or_load(false, || {
+                vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())
+            })?;
             #[cfg(feature = "smoke-test")]
-            record_loaded_models(&assets, &pins)?;
+            record_loaded_models(&assets, &pins, engines.chat_loaded())?;
             let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &query,
@@ -507,22 +541,25 @@ async fn pipeline_ask<R: tauri::Runtime>(
     question: String,
     tokens: tauri::ipc::Channel<String>,
 ) -> Result<serde_json::Value, String> {
+    let _timer = vz_core::engine::PhaseTimer::new("pipeline_ask_total");
     let guard = operations.acquire()?;
     desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let _guard = guard;
-        let run = || -> anyhow::Result<serde_json::Value> {
-            let engines = vz_core::engine::Engines::load(&assets, &pins, pipeline_cpu_requested())?;
+        let mut cache = guard;
+        let mut run = || -> anyhow::Result<serde_json::Value> {
+            let engines = cache.get_or_load(true, || {
+                vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())
+            })?;
             #[cfg(feature = "smoke-test")]
-            record_loaded_models(&assets, &pins)?;
+            record_loaded_models(&assets, &pins, engines.chat_loaded())?;
             let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)?;
             let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
                 &question,
                 &engines.vector(&question, true)?,
                 3,
             ))?;
-            let answer = vz_core::index::ask(&engines, &question, &hits, |token| {
+            let answer = vz_core::index::ask(engines, &question, &hits, |token| {
                 let _ = tokens.send(token.to_owned());
             })?;
             let names = desktop_pipeline::file_names(&state);
@@ -592,7 +629,7 @@ async fn models_download<R: tauri::Runtime>(
     operations: tauri::State<'_, models::Operations>,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<(), String> {
-    let _guard = operations.acquire()?;
+    let _guard = operations.acquire_mutation()?;
     let cancel = operations.start();
     #[cfg(feature = "smoke-test")]
     let mut last_attempt = None;
@@ -628,7 +665,7 @@ async fn models_import<R: tauri::Runtime>(
     operations: tauri::State<'_, models::Operations>,
     folder: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let _guard = operations.acquire()?;
+    let _guard = operations.acquire_mutation()?;
     let cancel = operations.start();
     models::import(
         &model_dir(&app)?,
@@ -640,9 +677,16 @@ async fn models_import<R: tauri::Runtime>(
     .map_err(|e| format!("{e:#}"))
 }
 #[cfg(feature = "smoke-test")]
-fn record_loaded_models(assets: &std::path::Path, pins: &std::path::Path) -> anyhow::Result<()> {
+fn record_loaded_models(
+    assets: &std::path::Path,
+    pins: &std::path::Path,
+    chat_loaded: bool,
+) -> anyhow::Result<()> {
     if let Some(report) = std::env::var_os("VZ_LOADED_MODELS_REPORT") {
-        let pins = models::pins(pins)?;
+        let mut pins = models::pins(pins)?;
+        if !chat_loaded {
+            pins.truncate(1); // Embedding only until Ask first loads chat.
+        }
         anyhow::ensure!(
             pins.iter()
                 .all(|p| models::regular(&assets.join(&p.file), false)
@@ -650,8 +694,10 @@ fn record_loaded_models(assets: &std::path::Path, pins: &std::path::Path) -> any
                     .unwrap_or(false)),
             "Loaded model sizes must match acquisition pins"
         );
-        // Engines::load just rehashed these exact paths. The install harness
-        // independently checks the acquired bytes against this report after exit.
+        // These paths were hash-verified when this cache generation loaded.
+        // Mutation drops the cache before any file can be replaced. Report only
+        // actually loaded models, including chat retained after an earlier Ask.
+        // The install harness independently hashes the files after exit.
         let files: Vec<_> = pins
             .iter()
             .map(|p| {

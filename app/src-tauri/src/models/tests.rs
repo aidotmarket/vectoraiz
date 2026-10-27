@@ -236,7 +236,7 @@ fn cancel_keeps_partial_and_refused_overlap_cannot_touch_its_staging() {
             // Every command uses this same try_lock. These are download/download,
             // download/import and download/pipeline refusals while bytes are staged.
             for _ in 0..5 {
-                assert_eq!(ops.acquire().unwrap_err(), BUSY);
+                assert_eq!(ops.acquire().err().as_deref(), Some(BUSY));
             }
             ops.cancel();
         }
@@ -262,7 +262,7 @@ fn shared_lock_refuses_pipeline_pipeline_and_pipeline_mutation_without_waiting()
     let ops = Operations::default();
     let guard = ops.acquire().unwrap();
     for _ in 0..5 {
-        assert_eq!(ops.acquire().unwrap_err(), BUSY);
+        assert_eq!(ops.acquire().err().as_deref(), Some(BUSY));
     }
     drop(guard);
     assert!(ops.acquire().is_ok());
@@ -597,4 +597,133 @@ fn invalid_folder_guard_preserves_seeded_rows_generation_files_and_search() {
         );
         drop(state);
     }
+}
+
+// Exercise the same cache/operation entry points as desktop IPC with cheap loaders.
+#[derive(Default)]
+struct Loads {
+    embed: std::cell::Cell<usize>,
+    chat: std::cell::Cell<usize>,
+    drops: std::cell::Cell<usize>,
+}
+struct FakeEngines {
+    counts: std::rc::Rc<Loads>,
+    chat: std::cell::Cell<bool>,
+}
+impl CachedEngine for FakeEngines {
+    fn ensure_chat(&self) -> Result<()> {
+        if !self.chat.replace(true) {
+            self.counts.chat.set(self.counts.chat.get() + 1);
+        }
+        Ok(())
+    }
+}
+impl Drop for FakeEngines {
+    fn drop(&mut self) {
+        self.counts.drops.set(self.counts.drops.get() + 1);
+    }
+}
+fn fake_load(counts: &std::rc::Rc<Loads>) -> Result<FakeEngines> {
+    counts.embed.set(counts.embed.get() + 1);
+    Ok(FakeEngines {
+        counts: counts.clone(),
+        chat: std::cell::Cell::new(false),
+    })
+}
+#[test]
+fn second_search_reuses_embedding_and_search_never_loads_chat() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    for _ in 0..2 {
+        ops.acquire()
+            .unwrap()
+            .get_or_load(false, || fake_load(&counts))
+            .unwrap();
+    }
+    assert_eq!(counts.embed.get(), 1);
+    assert_eq!(counts.chat.get(), 0);
+    for _ in 0..2 {
+        ops.acquire()
+            .unwrap()
+            .get_or_load(true, || fake_load(&counts))
+            .unwrap();
+    }
+    assert_eq!(counts.embed.get(), 1);
+    assert_eq!(counts.chat.get(), 1);
+    // Negative control: forcibly invalidated per-command loads reproduce the bug.
+    for _ in 0..2 {
+        drop(ops.acquire_mutation().unwrap());
+        ops.acquire()
+            .unwrap()
+            .get_or_load(false, || fake_load(&counts))
+            .unwrap();
+    }
+    assert_eq!(counts.embed.get(), 3);
+    assert_eq!(counts.chat.get(), 1);
+}
+#[test]
+fn mutations_drop_models_before_writing_and_next_use_reloads() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    for _ in 0..3 {
+        ops.acquire()
+            .unwrap()
+            .get_or_load(true, || fake_load(&counts))
+            .unwrap();
+        let _mutation = ops.acquire_mutation().unwrap();
+        let _cancel = ops.start();
+        assert_eq!(
+            counts.drops.get(),
+            counts.embed.get(),
+            "drop before download/import or cleanup"
+        );
+        assert!(ops.acquire().is_err(), "no inference while mutating");
+        ops.cancel(); // Must never deadlock the acquisition/cleanup guard.
+    }
+    ops.acquire()
+        .unwrap()
+        .get_or_load(false, || fake_load(&counts))
+        .unwrap();
+    assert_eq!(counts.embed.get(), 4);
+    assert_eq!(counts.chat.get(), 3);
+}
+#[test]
+fn refused_mutation_keeps_cache_and_cancel_invalidates_idle_or_active_cache() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    let mut held = ops.acquire().unwrap();
+    held.get_or_load(false, || fake_load(&counts)).unwrap();
+    assert!(ops.acquire_mutation().is_err());
+    assert_eq!(counts.drops.get(), 0);
+    ops.cancel();
+    assert_eq!(
+        counts.drops.get(),
+        0,
+        "active engines remain valid until release"
+    );
+    drop(held);
+    ops.acquire()
+        .unwrap()
+        .get_or_load(false, || fake_load(&counts))
+        .unwrap();
+    assert_eq!(counts.drops.get(), 1);
+    ops.cancel();
+    assert_eq!(counts.drops.get(), 2);
+}
+#[test]
+fn failed_load_is_retried_and_failed_chat_preserves_embedding() {
+    struct ChatFails;
+    impl CachedEngine for ChatFails {
+        fn ensure_chat(&self) -> Result<()> {
+            bail!("bad chat hash")
+        }
+    }
+    let ops = OperationState::<ChatFails>::default();
+    let mut held = ops.acquire().unwrap();
+    assert!(held
+        .get_or_load(false, || bail!("bad embedding hash"))
+        .is_err());
+    assert!(held.get_or_load(true, || Ok(ChatFails)).is_err());
+    held.get_or_load(false, || panic!("embedding should survive a chat failure"))
+        .unwrap();
 }
