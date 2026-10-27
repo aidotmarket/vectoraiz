@@ -582,6 +582,29 @@ it.each(["Search", "Ask"])("clears the previous result when %s starts, before it
   expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
 });
 
+it.each(["Ask", "Search"])("clears the previous %s result when Index folder starts, before it completes", async name => {
+  const pending = deferred();
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_index") return pending.promise;
+    if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
+    if (command === "pipeline_ask") return { text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
+    return { available: false };
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", { name }));
+  expect(await screen.findByText(name === "Ask" ? "Previous answer" : "Previous search hit")).toBeInTheDocument();
+  if (name === "Ask") expect(screen.getByText(/Previous source.txt/)).toBeInTheDocument();
+  await userEvent.type(screen.getByLabelText("Folder"), "/documents");
+  await userEvent.click(screen.getByRole("button", { name: "Index folder" }));
+  expect(screen.getByRole("status")).toHaveTextContent("Scanning…");
+  expect(screen.getByRole("button", { name: "Index folder" })).toBeDisabled();
+  expect(screen.queryByText("Previous answer")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Previous search hit")).not.toBeInTheDocument();
+  await act(async () => pending.resolve(undefined));
+});
+
 it("ignores settled Ask tokens while Search runs and after its results arrive", async () => {
   const askPending = deferred();
   const searchPending = deferred();
