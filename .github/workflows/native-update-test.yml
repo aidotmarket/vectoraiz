@@ -5,11 +5,11 @@ on:
       from_version:
         description: Installed stage 1 version (0.0.N)
         required: true
-        default: '0.0.6'
+        default: '0.0.7'
       to_version:
         description: Expected latest stage 1 version (0.0.N)
         required: true
-        default: '0.0.7'
+        default: '0.0.8'
       dry_check:
         description: Validate inputs and updater URL without installing
         type: boolean
@@ -30,8 +30,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     env:
-      FROM_VERSION: ${{ inputs.from_version || '0.0.6' }}
-      TO_VERSION: ${{ inputs.to_version || '0.0.7' }}
+      FROM_VERSION: ${{ inputs.from_version || '0.0.7' }}
+      TO_VERSION: ${{ inputs.to_version || '0.0.8' }}
       DRY_CHECK: ${{ github.event_name != 'workflow_dispatch' || inputs.dry_check }}
       GH_TOKEN: ${{ github.token }}
       PYTHONUTF8: '1'
