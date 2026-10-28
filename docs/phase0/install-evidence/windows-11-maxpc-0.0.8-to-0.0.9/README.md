@@ -1,4 +1,4 @@
-# vectorAIz 0.0.8 → 0.0.9 check — Max's Windows PC (S1833 plan, run 28 Oct 2026)
+# vectorAIz 0.0.8 → 0.0.9 check — Max's Windows PC (S1833 plan, run S1837, 28 Oct 2026)
 
 Record of the by-hand check of vectorAIz 0.0.9 on Max's Windows 11 PC (same machine as `windows-11-maxpc-0.0.7-to-0.0.8`), 28 Oct 2026, 10:23–10:38 CET. 0.0.9 contains chunk D8 (#88): Index folder clears the previous Ask answer, citations and Search results; `VZ_ENGINE_TIMING` turns on only for `1`; an invalid model-import folder is rejected before the model cache is dropped. Only the first is visible on screen; the other two are covered by CI tests and were not checked by hand.
 
@@ -34,6 +34,7 @@ The check was run by a Claude session on the PC, with Max clicking the administr
    - The ~533 MB difference is close to the two model files (67,308,128 + 491,400,032 bytes). That it is the mapped model files is inferred from the size and from llama.cpp mapping model files by default (`crates/vz-core/src/engine.rs` loads with default parameters); Task Manager does not show it directly.
    - Not included: the app's window runs in separate `msedgewebview2.exe` processes, which Details does not attribute to vectoraiz.exe and which were not measured.
    - **8 GB verdict (Phase 0, inference, not a test on an 8 GB machine):** the engine process needs about 0.6 GB with both models loaded, most of it file-backed pages Windows can drop and re-read under memory pressure, plus the unmeasured WebView2 processes. That should fit on an 8 GB PC alongside normal use. A run on a real 8 GB machine, including the WebView2 processes, is still needed before stating a supported minimum.
+   - Decision after this run (Max, 2026-10-28, Event `2f2cb0e8`): no 8 GB test; Phase 0 states a conservative minimum (proposed 16 GB) instead, to be lowered only after a real 8 GB run.
 3. First Search after launch was ~1–2 s; first Ask ~8–9 s (chat model load); second Ask under 1 s.
 4. Re-indexing unchanged files finishes in under a second with "0 indexed".
 5. **Session note:** one Task Manager read (step 5) was taken from the screenshot just before Max scrolled the list. Only this Claude run wrote to the evidence folder (checked at 10:23 and 10:38).
