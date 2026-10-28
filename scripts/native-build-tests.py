@@ -350,5 +350,11 @@ class PackageGate(unittest.TestCase):
             self.assertEqual(set(manifest['files']), {'vectorAIz_0.0.1_x64.msi', 'THIRD_PARTY_NOTICES-x86_64-pc-windows-msvc.txt'})
 
 
+def load_tests(loader, tests, pattern):
+    # Keep the bake-off's offline scoring/download tests in the existing Python gate.
+    tests.addTests(loader.discover(str(Path(__file__).resolve().parents[1] / 'spike/bakeoff'), pattern='test_*.py'))
+    return tests
+
+
 if __name__ == '__main__':
     unittest.main()
