@@ -1,4 +1,4 @@
-//! Headless offline pipeline. Network is used only by the explicit upload command.
+//! Headless pipeline. Network is used by explicit upload and SFTP export commands.
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{io::Write, path::PathBuf};
@@ -34,6 +34,33 @@ enum Operation {
         #[arg(long, value_parser = ["answer", "cite"])]
         prompt: String,
     },
+    Export {
+        pack: PathBuf,
+        #[arg(long)]
+        pack_id: String,
+        #[arg(
+            long,
+            required_unless_present = "sftp",
+            conflicts_with = "sftp",
+            requires = "staging"
+        )]
+        folder: Option<PathBuf>,
+        #[arg(long, requires = "folder")]
+        staging: Option<PathBuf>,
+        #[arg(
+            long,
+            required_unless_present = "folder",
+            conflicts_with = "folder",
+            requires = "sftp_staging"
+        )]
+        sftp: Option<String>,
+        #[arg(long, requires = "sftp")]
+        sftp_staging: Option<String>,
+        #[arg(long, requires = "sftp")]
+        identity: Option<PathBuf>,
+        #[arg(long, requires = "sftp")]
+        known_hosts: Option<PathBuf>,
+    },
     SelfTest,
     Embed {
         text: String,
@@ -68,6 +95,44 @@ enum Operation {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    if let Operation::Export {
+        pack,
+        pack_id,
+        folder,
+        staging,
+        sftp,
+        sftp_staging,
+        identity,
+        known_hosts,
+    } = &args.command
+    {
+        let result = if let Some(source) = folder {
+            vz_pack::export::folder(
+                pack,
+                pack_id,
+                source,
+                staging.as_deref().expect("clap requires staging"),
+            )?
+        } else {
+            tokio_runtime()?
+                .block_on(vz_pack::export::sftp(
+                    pack,
+                    pack_id,
+                    &vz_pack::export::SftpOptions {
+                        target: sftp.clone().expect("clap requires mode"),
+                        staging: sftp_staging.clone().expect("clap requires SFTP staging"),
+                        identity: identity.clone(),
+                        known_hosts: known_hosts.clone(),
+                    },
+                ))
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error:#}");
+                    std::process::exit(vz_pack::export::exit_code(&error));
+                })
+        };
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
     if matches!(args.command, Operation::SelfTest) {
         println!("{}", serde_json::to_string(&vz_core::self_test())?);
         return Ok(());
@@ -161,7 +226,10 @@ fn main() -> Result<()> {
                 let manifest = vz_pack::write(&args.state, &engines, &output, &query)?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
-            Operation::SelfTest | Operation::Upload { .. } | Operation::BakeoffChat { .. } => unreachable!(),
+            Operation::SelfTest
+            | Operation::Upload { .. }
+            | Operation::BakeoffChat { .. }
+            | Operation::Export { .. } => unreachable!(),
         }
         Ok(())
     })
