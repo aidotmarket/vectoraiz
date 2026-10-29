@@ -57,7 +57,7 @@ jobs:
       - name: Install protocol compiler
         run: python scripts/install-protoc.py
       - name: Install pipeline example dependencies
-        run: python -m pip install numpy==2.2.6 pyarrow==19.0.1 boto3==1.40.45
+        run: python -m pip install numpy==2.2.6 pyarrow==19.0.1 boto3==1.40.45 paramiko==3.5.1
       - uses: actions/cache@v4
         with:
           path: .assets

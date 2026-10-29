@@ -1,4 +1,5 @@
 //! Minimal portable vector packs and explicitly requested S3-compatible upload.
+pub mod export;
 use anyhow::{bail, Context, Result};
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};
