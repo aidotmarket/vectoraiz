@@ -13,6 +13,38 @@ use std::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+/// The server may have published the pack, but its rename acknowledgement was lost.
+/// CLI callers must distinguish this from ordinary failure using exit code 3.
+#[derive(Debug)]
+pub struct PublicationOutcomeUnknown {
+    destination: String,
+    source: String,
+    staging: String,
+    id: String,
+    cause: russh_sftp::client::error::Error,
+}
+
+impl std::fmt::Display for PublicationOutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SFTP publication outcome unknown: publication may or may not have happened at {}; list {}/vz/{}; if it exists with all files, the export completed; if not, the pack is still in {}/{}.partial-* and a retry with the same pack id is safe", self.destination, self.source, self.id, self.staging, self.id)
+    }
+}
+
+impl std::error::Error for PublicationOutcomeUnknown {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.cause)
+    }
+}
+
+/// Export CLI exit codes: 1 for ordinary failure, 3 for uncertain publication.
+pub fn exit_code(error: &anyhow::Error) -> i32 {
+    if error.is::<PublicationOutcomeUnknown>() {
+        3
+    } else {
+        1
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PackFile {
     pub path: String,
@@ -153,7 +185,15 @@ fn same_filesystem(a: &Path, b: &Path) -> Result<bool> {
 
 /// Export to existing source/staging directories. Interrupted partials are left alone.
 pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
-    folder_inner(pack, id, source, staging, same_filesystem, || Ok(()))
+    folder_inner(
+        pack,
+        id,
+        source,
+        staging,
+        same_filesystem,
+        |_| Ok(()),
+        || Ok(()),
+    )
 }
 
 /// Fault injection seam for export acceptance tests. Normal callers use `folder`.
@@ -172,7 +212,28 @@ pub fn folder_with_checks(
         source,
         staging,
         |_, _| Ok(same_device),
+        |_| Ok(()),
         before_rename,
+    )
+}
+
+/// Fault injection after copy and before staged verification. Normal callers use `folder`.
+#[doc(hidden)]
+pub fn folder_with_staged_check(
+    pack: &Path,
+    id: &str,
+    source: &Path,
+    staging: &Path,
+    after_copy: impl FnOnce(&Path) -> Result<()>,
+) -> Result<Value> {
+    folder_inner(
+        pack,
+        id,
+        source,
+        staging,
+        same_filesystem,
+        after_copy,
+        || Ok(()),
     )
 }
 
@@ -182,6 +243,7 @@ fn folder_inner(
     source: &Path,
     staging: &Path,
     device_check: impl FnOnce(&Path, &Path) -> Result<bool>,
+    after_copy: impl FnOnce(&Path) -> Result<()>,
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<Value> {
     let start = Instant::now();
@@ -231,6 +293,10 @@ fn folder_inner(
             .open(&target)?;
         std::io::copy(&mut input, &mut output)?;
         output.sync_all()?;
+    }
+    after_copy(&stage)?;
+    for file in &files {
+        let target = stage.join(&file.path);
         ensure!(
             hash_file(&target)? == (file.size, file.sha256.clone()),
             "staged file verification failed: {}",
@@ -247,7 +313,10 @@ fn folder_inner(
     }
     before_rename()?;
     ensure!(!destination.exists(), "export destination already exists");
-    publish_folder(&stage, &destination).context("atomic export rename failed (possibly cross-device/EXDEV/ERROR_NOT_SAME_DEVICE); nothing was copied into the source; choose staging on the source filesystem")?;
+    publish_folder(&stage, &destination).map_err(|error| {
+        let message = folder_rename_error(&error);
+        anyhow::Error::new(error).context(message)
+    })?;
     Ok(report(
         id,
         "folder",
@@ -255,6 +324,22 @@ fn folder_inner(
         destination.to_string_lossy().into_owned(),
         start,
     ))
+}
+
+fn folder_rename_error(error: &std::io::Error) -> &'static str {
+    #[cfg(target_os = "macos")]
+    let unsupported = matches!(error.raw_os_error(), Some(45 | 22)); // ENOTSUP, EINVAL
+    #[cfg(target_os = "linux")]
+    let unsupported = matches!(error.raw_os_error(), Some(95 | 22 | 38)); // ENOTSUP, EINVAL, ENOSYS
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let unsupported = false;
+    if unsupported {
+        "filesystem does not support an exclusive (no-replace) rename; nothing was copied into the source; the pack is in staging"
+    } else if error.kind() == std::io::ErrorKind::CrossesDevices {
+        "atomic export rename failed (cross-device/EXDEV/ERROR_NOT_SAME_DEVICE); nothing was copied into the source; choose staging on the source filesystem"
+    } else {
+        "atomic export rename failed; nothing was copied into the source; the pack is in staging"
+    }
 }
 
 // Refuse a destination created by another exporter between inspection and rename.
@@ -386,8 +471,7 @@ impl russh::client::Handler for PinnedHost {
             .context("cannot open host pin lock")?;
         // OS locks are released on process death, so an interrupted first use
         // cannot leave a stale lock that prevents a later export.
-        lock.try_lock()
-            .context("host pin file is in use by another export")?;
+        lock.lock().context("cannot lock host pin file")?;
         let result = (|| {
             let mut pins: BTreeMap<String, String> = match fs::read(&self.file) {
                 Ok(bytes) => serde_json::from_slice(&bytes).context("invalid host pin file")?,
@@ -449,7 +533,7 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
         Some(path) => path.clone(),
         None => home()?.join(".ssh/id_ed25519"),
     };
-    let key = russh::keys::load_secret_key(&identity, None).map_err(|_| anyhow::anyhow!("cannot load identity: Phase 0 requires a valid, unencrypted private key; encrypted keys/passphrases are not supported"))?;
+    let key = russh::keys::load_secret_key(&identity, None).context("cannot load identity: Phase 0 requires a valid, unencrypted private key; encrypted keys/passphrases are not supported")?;
     let handler = PinnedHost {
         host: format!("{host}:{port}"),
         file: match &options.known_hosts {
@@ -540,13 +624,56 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
     }
     // SFTP v3 RENAME must fail if the destination exists; do not use posix-rename
     // extensions, which overwrite an existing destination.
-    sftp.rename(&stage, &destination).await.context("atomic SFTP rename failed (possibly cross-device); nothing was copied into the source; choose staging on the source filesystem")?;
-    sftp.close().await?;
-    Ok(report(
-        id,
-        "sftp",
-        &files,
-        format!("sftp://{user}@{host}:{port}{destination}"),
-        start,
-    ))
+    let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
+    if let Err(error) = sftp.rename(&stage, &destination).await {
+        // Only a status reply explicitly rejects RENAME. All other variants can
+        // represent a lost reply after the server committed publication.
+        if matches!(error, russh_sftp::client::error::Error::Status(_)) {
+            return Err(anyhow::Error::new(error).context("atomic SFTP rename failed (possibly cross-device); nothing was copied into the source; choose staging on the source filesystem"));
+        }
+        return Err(PublicationOutcomeUnknown {
+            destination: destination_url,
+            source,
+            staging,
+            id: id.into(),
+            cause: error,
+        }
+        .into());
+    }
+    // The acknowledged rename is the commit boundary; cleanup is best effort.
+    if let Err(error) = sftp.close().await {
+        eprintln!("Warning: SFTP export completed, but closing the session failed: {error}");
+    }
+    Ok(report(id, "sftp", &files, destination_url, start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::folder_rename_error;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn rename_diagnostics_distinguish_cross_device_from_other_failures() {
+        let cross_device = folder_rename_error(&Error::from(ErrorKind::CrossesDevices));
+        assert!(cross_device.contains("cross-device"));
+        let ordinary = folder_rename_error(&Error::from(ErrorKind::PermissionDenied));
+        assert!(!ordinary.contains("cross-device"));
+        assert!(ordinary.contains("the pack is in staging"));
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn unsupported_exclusive_rename_has_actionable_diagnostic() {
+        #[cfg(target_os = "macos")]
+        let codes = [45, 22]; // ENOTSUP, EINVAL
+        #[cfg(target_os = "linux")]
+        let codes = [95, 22, 38]; // ENOTSUP, EINVAL, ENOSYS
+        for code in codes {
+            let message = folder_rename_error(&Error::from_raw_os_error(code));
+            assert!(message.contains("does not support an exclusive (no-replace) rename"));
+            assert!(message.contains("nothing was copied into the source"));
+            assert!(message.contains("the pack is in staging"));
+            assert!(!message.contains("cross-device"));
+        }
+    }
 }

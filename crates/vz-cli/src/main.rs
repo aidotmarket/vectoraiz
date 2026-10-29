@@ -114,16 +114,21 @@ fn main() -> Result<()> {
                 staging.as_deref().expect("clap requires staging"),
             )?
         } else {
-            tokio_runtime()?.block_on(vz_pack::export::sftp(
-                pack,
-                pack_id,
-                &vz_pack::export::SftpOptions {
-                    target: sftp.clone().expect("clap requires mode"),
-                    staging: sftp_staging.clone().expect("clap requires SFTP staging"),
-                    identity: identity.clone(),
-                    known_hosts: known_hosts.clone(),
-                },
-            ))?
+            tokio_runtime()?
+                .block_on(vz_pack::export::sftp(
+                    pack,
+                    pack_id,
+                    &vz_pack::export::SftpOptions {
+                        target: sftp.clone().expect("clap requires mode"),
+                        staging: sftp_staging.clone().expect("clap requires SFTP staging"),
+                        identity: identity.clone(),
+                        known_hosts: known_hosts.clone(),
+                    },
+                ))
+                .unwrap_or_else(|error| {
+                    eprintln!("Error: {error:#}");
+                    std::process::exit(vz_pack::export::exit_code(&error));
+                })
         };
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());

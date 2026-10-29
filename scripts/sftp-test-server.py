@@ -49,6 +49,10 @@ class Auth(paramiko.ServerInterface):
 
 
 class Sftp(paramiko.SFTPServerInterface):
+    def __init__(self, server, *args, **kwargs):
+        self.transport = kwargs.pop("transport")
+        super().__init__(server, *args, **kwargs)
+
     def local(self, path):
         result = (root / path.lstrip("/")).resolve()
         if not result.is_relative_to(root):
@@ -102,6 +106,9 @@ class Sftp(paramiko.SFTPServerInterface):
             if self.local(new).exists():
                 return paramiko.SFTP_FAILURE
             self.local(old).rename(self.local(new))
+            if (root / "lost-rename-ack").exists():
+                # Commit, then close before Paramiko can send the RENAME status.
+                self.transport.close()
             return paramiko.SFTP_OK
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
@@ -110,7 +117,7 @@ class Sftp(paramiko.SFTPServerInterface):
 def serve(connection):
     transport = paramiko.Transport(connection)
     transport.add_server_key(host_key)
-    transport.set_subsystem_handler("sftp", paramiko.SFTPServer, Sftp)
+    transport.set_subsystem_handler("sftp", paramiko.SFTPServer, Sftp, transport=transport)
     try:
         transport.start_server(server=Auth())
         while transport.is_active():

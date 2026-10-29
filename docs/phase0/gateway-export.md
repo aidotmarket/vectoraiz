@@ -30,10 +30,19 @@ Folder export flushes files to disk and checks every copied file's size and
 SHA-256. It compares Unix device IDs or Windows volume serials before copying.
 SFTP checks remote sizes with stat and re-reads each uploaded file to hash it.
 Only after all checks pass does one directory rename expose the complete pack.
-There is no copy fallback. A cross-device or other rename failure stops export
-and leaves the pack in staging, with no pack files under the source.
+There is no copy fallback. Folder rename failures stop export with the pack in
+staging and no pack files under the source. An explicit SFTP RENAME status error
+from the server (including cross-device rejection) likewise leaves the pack in
+staging with no pack files under the source. A timeout, transport/IO failure or
+unexpected reply instead means **publication outcome unknown**: publication may
+or may not have happened. The error names `sftp://user@host:port<destination>`.
+List `<source>/vz/<pack-id>`; if it exists with all files, the export completed.
+If not, the pack is still in `<staging>/<pack-id>.partial-*` and a retry with the
+same pack id is safe. After an acknowledged rename, session-close errors print a
+warning and the export still returns success JSON.
 
-Interrupted and failed attempts leave their `.partial-*` directories in staging.
+Attempts interrupted or failed before publication leave their `.partial-*`
+directories in staging.
 A retry uses a new random name and succeeds without removing old partials. Once
 no export is running, operators can remove stale partials. An empty `vz/`
 directory may have been created in the source before a failure.
@@ -68,15 +77,19 @@ The server must support SFTP v3 directory rename on the same filesystem.
 Success prints one JSON object to stdout with `pack_id`, `mode`, `files`
 (`path`, `size`, `sha256`, including the manifest), `destination`, and
 `elapsed_ms`. The SFTP destination contains the user, host, port and remote path;
-it contains no identity path or key material. Errors go to stderr and exit nonzero.
+it contains no identity path or key material. Exit codes are 0 for success, 1 for
+ordinary failure, and 3 for an unknown SFTP publication outcome. Errors go to
+stderr; exit 3 requires the recovery check above before retrying.
 
 Automated checks live in `crates/vz-pack/tests/`. The SFTP test starts a disposable
 loopback Paramiko server, authenticates with a generated fixture key, and tests
-verified upload, key pinning/rotation refusal, rename failure/retry and encrypted
-key refusal. Install `paramiko==3.5.1` for local tests; `VZ_TEST_PYTHON` can select
-the interpreter. Local runs skip with an explicit message if the server cannot
-start; Native CI installs Paramiko and treats inability to start as failure on
-both macOS and Windows. Gateway inventory checks below remain operator work.
+verified upload, key pinning/rotation refusal, explicit rename rejection/retry,
+lost rename acknowledgements (exit-3 error variant with a complete destination),
+and encrypted key refusal. Install `paramiko==3.5.1` for local tests;
+`VZ_TEST_PYTHON` can select the interpreter. Local runs skip with an explicit message if the server cannot
+start; a local `ok` can therefore mean a skip without Paramiko (use `--nocapture`
+to see the reason). Native CI installs Paramiko and treats inability to start as
+failure on both macOS and Windows. Gateway inventory checks below remain operator work.
 
 ## Test gateway runs
 
@@ -93,7 +106,7 @@ Run 2026-10-29 13:15–14:10 CET (S1837) against a production-paired test gatewa
 | Run | Result |
 |---|---|
 | Before | Inventory: one 6-byte probe file only |
-| SFTP export `pack-g-sftp1` | Host key pinned on first use: `SHA256:mjQOqw/Vk79YHAGhgtuydzYIoa0rC+UcchKv5Fva3w8`, equal to the VM's ED25519 host key. Exit 0, 812 s (upload ~0.4 MB/s from Koskadeux, plus re-reading every file to hash it). |
+| SFTP export `pack-g-sftp1` | Host key pinned on first use: `SHA256:mjQOqw/Vk79YHAGhgtuydzYIoa0rC+UcchKv5Fva3w8`, equal to the VM's ED25519 host key. Exit 0, 812 s (~0.22 MB/s end to end; upload ~0.4 MB/s from Koskadeux, plus re-reading every file to hash it). |
 | Inventory during that transfer (forced scan at ~23 MB staged) | Probe file only: nothing from the pack |
 | Inventory after | Probe + all 7 pack files, sizes equal to the pack |
 | SFTP export `pack-g-sftp2` killed (`kill -9`) after 40 s | `.partial-*` (16 MB) left in staging, nothing under `vz/`. Inventory unchanged (same 8 entries) |
@@ -108,5 +121,12 @@ Run 2026-10-29 13:15–14:10 CET (S1837) against a production-paired test gatewa
 | Inventory after the folder runs (SFTP rerun still uploading) | 22 entries: the probe plus three complete packs (7 files each, sizes equal). Nothing from the running SFTP export |
 
 **Cleanup:** gateway revoked with `confirm_open_orders`, seller tokens cleared (`api.py logout-all`), `pairing.env` deleted, VM `aim-gw-selftest-s1837g` and firewall rule `aim-gw-selftest-s1837g-web` deleted. Evidence: `/Users/max/koskadeux-state/s1837/g-runs/` on Koskadeux (outputs, inventories).
+
+No inventory was taken during a folder export: the 176 MB export finished in
+1.9 s, faster than a forced rescan. The killed folder run stands in for that check.
+
+Folder export to network shares (SMB/NFS) that lack exclusive rename stops with
+"filesystem does not support an exclusive (no-replace) rename; nothing was copied
+into the source; the pack is in staging". There is no fallback.
 
 **Not covered:** Windows clients (untested this round), SFTP servers other than OpenSSH 9.2 (Debian 12), NFS/SMB shares as the folder target, and a scan landing at the exact moment of the rename.

@@ -5,7 +5,7 @@ use std::{
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
 };
-use vz_pack::export::{normalize_remote, sftp, SftpOptions};
+use vz_pack::export::{exit_code, normalize_remote, sftp, PublicationOutcomeUnknown, SftpOptions};
 
 struct Server {
     child: Child,
@@ -34,6 +34,7 @@ fn server(f: &Fixture, port: u16, host_key: &str) -> Option<Server> {
         Ok(child) => child,
         Err(error) => {
             eprintln!("SKIP SFTP server unavailable: {error}");
+            println!("SKIP SFTP server unavailable: {error}");
             assert!(
                 std::env::var_os("CI").is_none(),
                 "SFTP acceptance must run in Native CI"
@@ -66,6 +67,7 @@ fn server(f: &Fixture, port: u16, host_key: &str) -> Option<Server> {
         let _ = child.kill();
         let _ = child.wait();
         eprintln!("SKIP SFTP test server could not start; install paramiko==3.5.1");
+        println!("SKIP SFTP test server could not start; install paramiko==3.5.1");
         assert!(
             std::env::var_os("CI").is_none(),
             "SFTP acceptance must run in Native CI"
@@ -128,6 +130,15 @@ fn local_sftp_acceptance() {
         .unwrap_err()
         .to_string()
         .contains("unencrypted"));
+    options.identity = Some(f.root.join("missing.pem"));
+    let error = runtime
+        .block_on(sftp(&f.pack, "missing-key", &options))
+        .unwrap_err();
+    assert!(
+        error.chain().count() > 1,
+        "identity load cause must be retained"
+    );
+    assert!(error.to_string().contains("cannot load identity"));
     options.identity = Some(f.root.join("client.pem"));
     options.staging = "/staging/../source//./nested".into();
     assert!(runtime
@@ -153,10 +164,33 @@ fn local_sftp_acceptance() {
         .block_on(sftp(&f.pack, "retry", &options))
         .unwrap_err();
     assert!(error.to_string().contains("atomic SFTP rename failed"));
+    assert!(error
+        .to_string()
+        .contains("nothing was copied into the source"));
+    assert_eq!(exit_code(&error), 1);
+    assert!(!error.is::<PublicationOutcomeUnknown>());
     assert!(!f.source.join("vz/retry").exists());
     assert!(fs::read_dir(&f.staging).unwrap().count() > 0);
     fs::remove_file(f.root.join("fail-rename")).unwrap();
     runtime.block_on(sftp(&f.pack, "retry", &options)).unwrap();
+    fs::write(f.root.join("lost-rename-ack"), b"yes").unwrap();
+    let error = runtime
+        .block_on(sftp(&f.pack, "lost-ack", &options))
+        .unwrap_err();
+    assert!(error.is::<PublicationOutcomeUnknown>(), "{error:#}");
+    assert_eq!(exit_code(&error), 3);
+    let message = error.to_string();
+    assert!(message.contains("publication may or may not have happened"));
+    assert!(message.contains(&format!(
+        "sftp://fixture@127.0.0.1:{}/source/vz/lost-ack",
+        server_a.port
+    )));
+    assert!(message.contains("list /source/vz/lost-ack"));
+    assert!(message.contains("/staging/lost-ack.partial-*"));
+    assert!(message.contains("retry with the same pack id is safe"));
+    assert!(!message.contains("nothing was copied"));
+    f.assert_pack(&f.source.join("vz/lost-ack"), &result);
+    fs::remove_file(f.root.join("lost-rename-ack")).unwrap();
     let port = server_a.port;
     drop(server_a);
     // Same address and port, different server key: reject before authentication/upload.

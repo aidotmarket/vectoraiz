@@ -1,7 +1,7 @@
 mod common;
 use common::Fixture;
 use std::fs;
-use vz_pack::export::{folder, folder_with_checks};
+use vz_pack::export::{folder, folder_with_checks, folder_with_staged_check};
 
 #[test]
 fn complete_pack_and_nested_files() {
@@ -124,4 +124,24 @@ fn canonical_staging_alias_inside_source_refused() {
     let link = f.pack.join("link");
     symlink(f.pack.join("documents.parquet"), link).unwrap();
     assert!(folder(&f.pack, "fixture", &f.source, &f.staging).is_err());
+}
+
+#[test]
+fn corrupted_staged_file_is_not_published() {
+    let f = Fixture::new();
+    let error = folder_with_staged_check(&f.pack, "fixture", &f.source, &f.staging, |stage| {
+        // Same length: the staged SHA-256 check must catch this.
+        let path = stage.join("documents.parquet");
+        let mut bytes = fs::read(&path)?;
+        bytes[0] ^= 1;
+        fs::write(path, bytes)?;
+        Ok(())
+    })
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("staged file verification failed"));
+    f.assert_source_empty();
+    assert!(!f.source.join("vz/fixture").exists());
+    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 1);
 }
