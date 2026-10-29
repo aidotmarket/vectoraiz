@@ -1,0 +1,773 @@
+[
+ {
+  "id": "q001",
+  "language": "en",
+  "question": "In 1978, who became the first Chief Minister of the Northern Territory when it attained self-government?",
+  "doc_path": "en-wiki-0001.html"
+ },
+ {
+  "id": "q002",
+  "language": "en",
+  "question": "What nickname was given to Neville Wran's 1978 New South Wales election win?",
+  "doc_path": "en-wiki-0001.html"
+ },
+ {
+  "id": "q003",
+  "language": "en",
+  "question": "For which film did Angelo Rizzoli win the Nastro d'Argento for best producer in 1961?",
+  "doc_path": "en-wiki-0009.html"
+ },
+ {
+  "id": "q004",
+  "language": "en",
+  "question": "Which rapper is the only guest appearance on Lil B's mixtape Black Ken?",
+  "doc_path": "en-wiki-0010.html"
+ },
+ {
+  "id": "q005",
+  "language": "en",
+  "question": "When was the Call of Duty League's switch to a tournament system officially announced?",
+  "doc_path": "en-wiki-0011.html"
+ },
+ {
+  "id": "q006",
+  "language": "en",
+  "question": "Which Entertainment Weekly writer judged Beth Orton's 1999 album more cohesive than Trailer Park?",
+  "doc_path": "en-wiki-0012.html"
+ },
+ {
+  "id": "q007",
+  "language": "en",
+  "question": "How did the Dutch darts player Chris Landman earn a Tour Card for the first time in January 2024?",
+  "doc_path": "en-wiki-0013.html"
+ },
+ {
+  "id": "q008",
+  "language": "en",
+  "question": "How many vehicles were in the Bundeswehr's first batch order of the LAPV Enok, and over which years were deliveries scheduled?",
+  "doc_path": "en-wiki-0017.html"
+ },
+ {
+  "id": "q009",
+  "language": "en",
+  "question": "What share of the Ukrainian population lived in rural settings when collectivization policies were implemented?",
+  "doc_path": "en-wiki-0014.html"
+ },
+ {
+  "id": "q010",
+  "language": "en",
+  "question": "Which psychologist appears in Woody Allen's mockumentary describing the title character as \"the ultimate conformist\"?",
+  "doc_path": "en-wiki-0022.html"
+ },
+ {
+  "id": "q011",
+  "language": "en",
+  "question": "Who defeated Corrado Buratti in April 2014 to become secretary of the Union for Trentino?",
+  "doc_path": "en-wiki-0021.html"
+ },
+ {
+  "id": "q012",
+  "language": "en",
+  "question": "According to MDN, since what year have all modern browsers supported the JavaScript let keyword?",
+  "doc_path": "en-mdn-0004.md"
+ },
+ {
+  "id": "q013",
+  "language": "en",
+  "question": "In MDN's object-view-box example, what are the dimensions of the image element showing the leopard picture?",
+  "doc_path": "en-mdn-0007.md"
+ },
+ {
+  "id": "q014",
+  "language": "en",
+  "question": "What are the six Core Functions of the NIST Cybersecurity Framework 2.0?",
+  "doc_path": "en-nist-0001.pdf",
+  "page": 8
+ },
+ {
+  "id": "q015",
+  "language": "en",
+  "question": "As of January 3, 2023, what was the moving 14-day case fatality ratio of the cholera outbreak in Haiti?",
+  "doc_path": "en-cdc-0002.pdf",
+  "page": 1
+ },
+ {
+  "id": "q016",
+  "language": "en",
+  "question": "Which food was strongly associated with the 2023 gastrointestinal illness outbreak at a restaurant in Bozeman, Montana?",
+  "doc_path": "en-cdc-0004.pdf",
+  "page": 1
+ },
+ {
+  "id": "q017",
+  "language": "en",
+  "question": "Which separator material caused problems in the Apollo command module entry and postlanding batteries?",
+  "doc_path": "en-nasa-0007.pdf",
+  "page": 3
+ },
+ {
+  "id": "q018",
+  "language": "en",
+  "question": "How many routing protocols does the ONE simulator provide by default?",
+  "doc_path": "en-arxiv-0005.pdf",
+  "page": 2
+ },
+ {
+  "id": "q019",
+  "language": "en",
+  "question": "In which year did the author of NASA's review of 50 years of NACA/NASA aerodynamic research begin taking part in that research?",
+  "doc_path": "en-nasa-0008.pdf",
+  "page": 3,
+  "also_expected": [
+   {
+    "doc_path": "en-nasa-0008.pdf",
+    "page": 14
+   }
+  ]
+ },
+ {
+  "id": "q020",
+  "language": "en",
+  "question": "In NACA Technical Memorandum 1428, which aluminum alloy specimens were least susceptible to the fatigue crack?",
+  "doc_path": "en-nasascan-0002.pdf",
+  "page": 2
+ },
+ {
+  "id": "q021",
+  "language": "en",
+  "question": "Why did NACA investigate the tensile strength of round-head, flat-head and brazier-head aluminum-alloy rivets?",
+  "doc_path": "en-nasascan-0003.pdf",
+  "page": 2
+ },
+ {
+  "id": "q022",
+  "language": "en",
+  "question": "Which numerical method was used to solve the differential equation for the temperature distribution of a water-cooled turbine blade?",
+  "doc_path": "en-nasascan-0004.pdf",
+  "page": 2
+ },
+ {
+  "id": "q023",
+  "language": "en",
+  "question": "At altitudes about 10,000 feet below the operational limits, what did the flames look like in the Westinghouse 19XB-1 combustor?",
+  "doc_path": "en-nasascan-0007.pdf",
+  "page": 2
+ },
+ {
+  "id": "q024",
+  "language": "en",
+  "question": "How many rocket-powered free-flight models were used to measure skin friction on the NACA RM-10 body?",
+  "doc_path": "en-nasascan-0008.pdf",
+  "page": 2
+ },
+ {
+  "id": "q025",
+  "language": "en",
+  "question": "Which aircraft design problem motivated the low-speed experiments on turbulence in the wake of a two-dimensional airfoil?",
+  "doc_path": "en-nasascan-0009.pdf",
+  "page": 2
+ },
+ {
+  "id": "q026",
+  "language": "en",
+  "question": "What does the summary of NACA TM 1422 describe as a new source of landing gear failures?",
+  "doc_path": "en-nasascan-0011.pdf",
+  "page": 2
+ },
+ {
+  "id": "q027",
+  "language": "en",
+  "question": "Using Weissinger's simpler method, roughly how long does calculating the lift distribution of a swept-back wing take?",
+  "doc_path": "en-nasascan-0012.pdf",
+  "page": 2
+ },
+ {
+  "id": "q028",
+  "language": "en",
+  "question": "According to the preface of the NACA memorandum on flutter safeguards, how rigid would a structure have to be for an infallible way of avoiding flutter?",
+  "doc_path": "en-nasascan-0014.pdf",
+  "page": 2
+ },
+ {
+  "id": "q029",
+  "language": "en",
+  "question": "How many risk-based recommendations does the guidance suggest giving in a project assurance review report?",
+  "doc_path": "en-govuk-docx-0004.docx"
+ },
+ {
+  "id": "q030",
+  "language": "en",
+  "question": "How many classifications are in the classification set used to tag assurance review recommendations?",
+  "doc_path": "en-govuk-docx-0004.docx"
+ },
+ {
+  "id": "q031",
+  "language": "en",
+  "question": "Which questionnaire did the standard Selection Questionnaire replace under Procurement Policy Note 8/16?",
+  "doc_path": "en-govuk-docx-0006.docx"
+ },
+ {
+  "id": "q032",
+  "language": "en",
+  "question": "In the school bomb alert template, which number should you dial to get the caller's number once the call has ended?",
+  "doc_path": "en-govuk-docx-0009.docx"
+ },
+ {
+  "id": "q033",
+  "language": "en",
+  "question": "Under the statutory right, how long may an employer take to consider a flexible working request?",
+  "doc_path": "en-govuk-docx-0013.docx"
+ },
+ {
+  "id": "q034",
+  "language": "en",
+  "question": "Within what period must an applicant be likely to become destitute to be eligible for asylum support under the Immigration and Asylum Act 1999?",
+  "doc_path": "en-govuk-docx-0024.docx"
+ },
+ {
+  "id": "q035",
+  "language": "en",
+  "question": "What is the Workplace Charging Scheme cap per socket for installations after 1 April 2026?",
+  "doc_path": "en-govuk-docx-0026.docx"
+ },
+ {
+  "id": "q036",
+  "language": "en",
+  "question": "On what date does the Funding Period of the Sustainable Warmth competition memorandum of understanding end?",
+  "doc_path": "en-govuk-docx-0022.docx"
+ },
+ {
+  "id": "q037",
+  "language": "en",
+  "question": "Who is the responsible statistician for the Home Office asylum outcome analysis detailed datasets (year ending June 2026)?",
+  "doc_path": "en-govuk-xlsx-0021.xlsx"
+ },
+ {
+  "id": "q038",
+  "language": "en",
+  "question": "When is the next update of the asylum outcome analysis detailed datasets published in August 2026?",
+  "doc_path": "en-govuk-xlsx-0021.xlsx"
+ },
+ {
+  "id": "q039",
+  "language": "en",
+  "question": "Who was the responsible statistician for the Asylum and Resettlement summary tables for the year ending December 2020?",
+  "doc_path": "en-govuk-xlsx-0026.xlsx"
+ },
+ {
+  "id": "q040",
+  "language": "en",
+  "question": "In the Tree Production Innovation Fund finance spreadsheet, which tab is for equipment with a usable lifetime beyond the end of the project?",
+  "doc_path": "en-govuk-xlsx-0016.xlsx"
+ },
+ {
+  "id": "q041",
+  "language": "en",
+  "question": "Into how many levels of items is the defined pricing structure (DPS) for a submarine split?",
+  "doc_path": "en-govuk-xlsx-0009.xlsx"
+ },
+ {
+  "id": "q042",
+  "language": "en",
+  "question": "What does Figure 2 of the April to June 2026 planning applications chart data show?",
+  "doc_path": "en-govuk-xlsx-0022.xlsx"
+ },
+ {
+  "id": "q043",
+  "language": "es",
+  "question": "¿A qué institución fue invitado Alessandro Volta para demostrar su invento ante sus miembros?",
+  "doc_path": "es-wiki-0001.html"
+ },
+ {
+  "id": "q044",
+  "language": "es",
+  "question": "¿Qué pena pidió la fiscal especial Mette Bendix para el acusado en el caso de Mia Stevn?",
+  "doc_path": "es-wiki-0002.html"
+ },
+ {
+  "id": "q045",
+  "language": "es",
+  "question": "¿Dónde estudió enfermería Mia Stevn?",
+  "doc_path": "es-wiki-0002.html"
+ },
+ {
+  "id": "q046",
+  "language": "es",
+  "question": "¿Quién estaba al mando de la Gobernación de Nueva León cuando se amplió hasta el estrecho de Magallanes en 1536?",
+  "doc_path": "es-wiki-0007.html"
+ },
+ {
+  "id": "q047",
+  "language": "es",
+  "question": "¿En qué año alcanzó su punto máximo la producción de la mina de diamantes Argyle?",
+  "doc_path": "es-wiki-0012.html"
+ },
+ {
+  "id": "q048",
+  "language": "es",
+  "question": "¿Qué lugar ocupa Pentecostés entre las festividades más importantes de la Iglesia católica?",
+  "doc_path": "es-wiki-0014.html"
+ },
+ {
+  "id": "q049",
+  "language": "es",
+  "question": "En el método húngaro, ¿cómo se llama el paso de restar el número más pequeño de cada renglón a cada número del renglón?",
+  "doc_path": "es-wiki-0015.html"
+ },
+ {
+  "id": "q050",
+  "language": "es",
+  "question": "¿Cuál es la precipitación anual de Tingo María?",
+  "doc_path": "es-wiki-0019.html"
+ },
+ {
+  "id": "q051",
+  "language": "es",
+  "question": "¿Qué héroe nacional del Perú tiene un monumento en Tingo María y aparece en el billete de 10 Nuevos Soles?",
+  "doc_path": "es-wiki-0019.html"
+ },
+ {
+  "id": "q052",
+  "language": "es",
+  "question": "¿Cuántos libros publicó Verónica Bonilla con el sello de Editorial Vebodi en 2012 y 2013?",
+  "doc_path": "es-wiki-0021.html"
+ },
+ {
+  "id": "q053",
+  "language": "es",
+  "question": "¿Qué deporte de invierno se describe como minoritario en África, practicado solo por unos pocos países?",
+  "doc_path": "es-wiki-0004.html"
+ },
+ {
+  "id": "q054",
+  "language": "es",
+  "question": "¿En qué cementerio se encuentra el monumento funerario a José Arana (1911) de Mariano Benlliure?",
+  "doc_path": "es-wiki-0011.html"
+ },
+ {
+  "id": "q055",
+  "language": "es",
+  "question": "Según MDN, ¿qué códigos de estado tienen las respuestas HTTP que normalmente prescinden del cuerpo?",
+  "doc_path": "es-mdn-0001.md"
+ },
+ {
+  "id": "q056",
+  "language": "es",
+  "question": "Según MDN, ¿qué software adicional suele tener un servidor web dinámico además de un servidor web estático?",
+  "doc_path": "es-mdn-0006.md"
+ },
+ {
+  "id": "q057",
+  "language": "es",
+  "question": "Según la Directiva 2006/7/CE, ¿qué se dicta si unas aguas de baño se clasifican como de calidad «insuficiente» durante cinco años consecutivos?",
+  "doc_path": "es-eurlex-0007.pdf",
+  "page": 5
+ },
+ {
+  "id": "q058",
+  "language": "es",
+  "question": "¿Cómo se llama el comité que asiste a la Comisión según la Directiva 2008/50/CE relativa a la calidad del aire?",
+  "doc_path": "es-eurlex-0003.pdf",
+  "page": 12
+ },
+ {
+  "id": "q059",
+  "language": "es",
+  "question": "Según el Reglamento (UE) n.º 1169/2011, ¿por debajo de qué superficie mayor del envase quedan los alimentos exentos de la información nutricional obligatoria?",
+  "doc_path": "es-eurlex-0006.pdf",
+  "page": 30
+ },
+ {
+  "id": "q060",
+  "language": "de",
+  "question": "Welchen Konkurrenten übernahm die Consus Real Estate Ende 2018, wodurch sie größter Projektentwickler Deutschlands wurde?",
+  "doc_path": "de-wiki-0001.html"
+ },
+ {
+  "id": "q061",
+  "language": "de",
+  "question": "Wann wurde das ehemalige Essl-Museum als Albertina Klosterneuburg wiedereröffnet?",
+  "doc_path": "de-wiki-0002.html"
+ },
+ {
+  "id": "q062",
+  "language": "de",
+  "question": "Wie lässt sich der Rest bei der Division durch 10 direkt ablesen?",
+  "doc_path": "de-wiki-0004.html"
+ },
+ {
+  "id": "q063",
+  "language": "de",
+  "question": "Mit welchem Partner entwickelte Hugendubel 2022 eine Augmented-Reality-Gaming-App?",
+  "doc_path": "de-wiki-0009.html"
+ },
+ {
+  "id": "q064",
+  "language": "de",
+  "question": "Wie viele Einwohner hatte der Kreis Liebenwerda im Jahr 1907?",
+  "doc_path": "de-wiki-0011.html"
+ },
+ {
+  "id": "q065",
+  "language": "de",
+  "question": "Wie viele Lesenächte pro Jahr gestalten LesArt-Mitarbeiter auf dem Gelände des Evangelischen Johannesstifts Berlin?",
+  "doc_path": "de-wiki-0012.html"
+ },
+ {
+  "id": "q066",
+  "language": "de",
+  "question": "In welchem Jahr fasste F. M. Vierordt seine Erkenntnisse über die badischen Besitzungen in Luxemburg in einem vierbändigen Werk zusammen?",
+  "doc_path": "de-wiki-0013.html"
+ },
+ {
+  "id": "q067",
+  "language": "de",
+  "question": "Seit wann gehörte die Dachreling beim T-Modell der Mercedes-Benz Baureihe 123 zur Serienausstattung?",
+  "doc_path": "de-wiki-0014.html"
+ },
+ {
+  "id": "q068",
+  "language": "de",
+  "question": "Was erwarb Philip Freneau 1784, nachdem er das Blatt verlassen hatte?",
+  "doc_path": "de-wiki-0016.html"
+ },
+ {
+  "id": "q069",
+  "language": "de",
+  "question": "Bis zu welcher Wassertiefe konnten die 400-mm-Torpedorohre der U-Boote des Projekts 667A eingesetzt werden?",
+  "doc_path": "de-wiki-0018.html"
+ },
+ {
+  "id": "q070",
+  "language": "de",
+  "question": "Wie hieß der Schaltmonat des römischen Kalenders, mit dem die fehlenden Tage ausgeglichen wurden?",
+  "doc_path": "de-wiki-0020.html"
+ },
+ {
+  "id": "q071",
+  "language": "de",
+  "question": "Wie viele Buchstaben enthält das klingonische Alphabet?",
+  "doc_path": "de-wiki-0021.html"
+ },
+ {
+  "id": "q072",
+  "language": "de",
+  "question": "Wie viele Arbeitsproben soll der Prüfling im praktischen Teil der Glasbläser-Abschlussprüfung durchführen, und in welcher Zeit?",
+  "doc_path": "de-gesetz-0002.md"
+ },
+ {
+  "id": "q073",
+  "language": "de",
+  "question": "Wer unterstützt die Mindestlohnkommission bei der Prüfung nach § 9 Absatz 2 durch wissenschaftlichen Sachverstand?",
+  "doc_path": "de-gesetz-0005.md"
+ },
+ {
+  "id": "q074",
+  "language": "de",
+  "question": "Wie sollen öffentliche Stellen ihre Websites und mobilen Anwendungen nach Artikel 4 der Richtlinie (EU) 2016/2102 gestalten?",
+  "doc_path": "de-eurlex-0002.pdf",
+  "page": 10
+ },
+ {
+  "id": "q075",
+  "language": "de",
+  "question": "Was sollen die Mitgliedstaaten nach der Urheberrechtsrichtlinie (EU) 2019/790 vorsehen, weil Urheber oft davor zurückscheuen, ihre Rechte vor Gericht einzuklagen?",
+  "doc_path": "de-eurlex-0004.pdf",
+  "page": 20
+ },
+ {
+  "id": "q076",
+  "language": "de",
+  "question": "Was müssen Mitgliedstaaten, die sich für die Einführung intelligenter Messsysteme entscheiden, erlassen und veröffentlichen?",
+  "doc_path": "de-eurlex-0007.pdf",
+  "page": 30
+ },
+ {
+  "id": "q077",
+  "language": "de",
+  "question": "Welche Objektbezeichnung trägt das Baudenkmal Nr. 2 der Denkmalliste am Aegidienkirchhof?",
+  "doc_path": "de-sh-xlsx-0002.xlsx"
+ },
+ {
+  "id": "q078",
+  "language": "de",
+  "question": "Wie hoch ist die voraussichtliche Weizenernte 2026 in Schleswig-Holstein laut Ernteberichterstattung (in 1 000 t)?",
+  "doc_path": "de-sh-xlsx-0008.xlsx"
+ },
+ {
+  "id": "q079",
+  "language": "de",
+  "question": "Wie viele Ankünfte von Durchgangsgästen auf Campingplätzen weist der Bericht zur Beherbergung im Reiseverkehr (Juni 2026) im Berichtsmonat aus?",
+  "doc_path": "de-sh-xlsx-0007.xlsx"
+ },
+ {
+  "id": "q080",
+  "language": "fr",
+  "question": "Sous le commandement de quel lieutenant se déroulent les opérations militaires de 1901 entre le N’Zi et le Bandama ?",
+  "doc_path": "fr-wiki-0002.html"
+ },
+ {
+  "id": "q081",
+  "language": "fr",
+  "question": "Quelle est la longueur de l'Armance, affluent de rive droite de l'Armançon ?",
+  "doc_path": "fr-wiki-0003.html"
+ },
+ {
+  "id": "q082",
+  "language": "fr",
+  "question": "En quelle année a eu lieu l'Année des Délégations, apogée du pouvoir de Mahomet ?",
+  "doc_path": "fr-wiki-0005.html"
+ },
+ {
+  "id": "q083",
+  "language": "fr",
+  "question": "À quelle date la cathédrale Notre-Dame-et-Saint-Vaast d'Arras a-t-elle été rendue au culte ?",
+  "doc_path": "fr-wiki-0007.html"
+ },
+ {
+  "id": "q084",
+  "language": "fr",
+  "question": "À qui Guillaume Kasbarian a-t-il succédé comme ministre délégué du Logement en février 2024 ?",
+  "doc_path": "fr-wiki-0009.html"
+ },
+ {
+  "id": "q085",
+  "language": "fr",
+  "question": "À qui Gilles de Rais vendit-il Ingrande en 1437 ?",
+  "doc_path": "fr-wiki-0011.html"
+ },
+ {
+  "id": "q086",
+  "language": "fr",
+  "question": "Combien d'hôpitaux compte la province marocaine de Taounate ?",
+  "doc_path": "fr-wiki-0016.html"
+ },
+ {
+  "id": "q087",
+  "language": "fr",
+  "question": "Combien d'habitants compte Torrelisa selon le recensement de 2024 ?",
+  "doc_path": "fr-wiki-0018.html"
+ },
+ {
+  "id": "q088",
+  "language": "fr",
+  "question": "Quel anniversaire l'Université de Sienne a-t-elle célébré en 1990 ?",
+  "doc_path": "fr-wiki-0019.html"
+ },
+ {
+  "id": "q089",
+  "language": "fr",
+  "question": "Selon Ndlovu, quel pays aurait lancé l'épidémie de choléra au Zimbabwe comme une arme biologique-chimique ?",
+  "doc_path": "fr-wiki-0022.html"
+ },
+ {
+  "id": "q090",
+  "language": "fr",
+  "question": "Quel évêque de Rome rejeta le canon 28 comme transgression du canon 6 du concile de Nicée ?",
+  "doc_path": "fr-wiki-0014.html"
+ },
+ {
+  "id": "q091",
+  "language": "fr",
+  "question": "Selon MDN, dans quels environnements la prise en charge des promesses JavaScript est-elle problématique ?",
+  "doc_path": "fr-mdn-0004.md"
+ },
+ {
+  "id": "q092",
+  "language": "fr",
+  "question": "Dans le tutoriel React de MDN, sous quel nom est connue la constante d'en-tête écrite en syntaxe de type HTML ?",
+  "doc_path": "fr-mdn-0007.md"
+ },
+ {
+  "id": "q093",
+  "language": "fr",
+  "question": "À quelle fréquence minimale les autorités compétentes doivent-elles réexaminer leurs procédures de réception des signalements selon la directive (UE) 2019/1937 ?",
+  "doc_path": "fr-eurlex-0005.pdf",
+  "page": 25
+ },
+ {
+  "id": "q094",
+  "language": "fr",
+  "question": "Quelle était la date limite de transposition de la directive 2002/49/CE relative au bruit dans l'environnement ?",
+  "doc_path": "fr-eurlex-0007.pdf",
+  "page": 6
+ },
+ {
+  "id": "q095",
+  "language": "fr",
+  "question": "Selon l'article 27 de la directive (UE) 2015/2366, quelle autorité une autorité compétente peut-elle saisir en cas de désaccord sur la coopération transfrontalière ?",
+  "doc_path": "fr-eurlex-0002.pdf",
+  "page": 40
+ },
+ {
+  "id": "q096",
+  "language": "fr",
+  "question": "Dans la méthodologie des données d'activité en cancérologie, dans quelle CMD sont groupés tous les RSA des séances ?",
+  "doc_path": "fr-datagouv-docx-0001.docx"
+ },
+ {
+  "id": "q097",
+  "language": "fr",
+  "question": "Quelle unité de contrôle de l'inspection du travail est compétente pour le transport sur l'ensemble de la région Bourgogne Franche Comté ?",
+  "doc_path": "fr-datagouv-docx-0002.docx"
+ },
+ {
+  "id": "q098",
+  "language": "fr",
+  "question": "Quelle est la taille totale de l'échantillon du Baromètre Tendances audio-vidéo de l'Arcom ?",
+  "doc_path": "fr-datagouv-docx-0006.docx"
+ },
+ {
+  "id": "q099",
+  "language": "fr",
+  "question": "À quel institut le dispositif du Baromètre Tendances audio-vidéo de l'Arcom est-il confié ?",
+  "doc_path": "fr-datagouv-docx-0006.docx"
+ },
+ {
+  "id": "q100",
+  "language": "fr",
+  "question": "Depuis quelle année l'enquête Cadre de vie et sécurité mesure-t-elle la part des personnes se sentant en insécurité à leur domicile ?",
+  "doc_path": "fr-datagouv-docx-0005.docx"
+ },
+ {
+  "id": "q101",
+  "language": "fr",
+  "question": "Combien de lits de médecine compte le CH Ambert, hôpital de proximité labellisé en 2024 ?",
+  "doc_path": "fr-datagouv-xlsx-0001.xlsx"
+ },
+ {
+  "id": "q102",
+  "language": "fr",
+  "question": "Quel montant de subvention avec convention a été attribué à « CSI Animation jeunesse » ?",
+  "doc_path": "fr-datagouv-xlsx-0004.xlsx"
+ },
+ {
+  "id": "q103",
+  "language": "fr",
+  "question": "Quel alias correspond à la question « Nom du tiers-lieu » dans les métadonnées du recensement des tiers-lieux 2026 ?",
+  "doc_path": "fr-datagouv-xlsx-0006.xlsx"
+ },
+ {
+  "id": "q104",
+  "language": "ja",
+  "question": "2001年、松井稼頭央が通算1000安打を達成したのは何試合目だったか？",
+  "doc_path": "ja-wiki-0001.html"
+ },
+ {
+  "id": "q105",
+  "language": "ja",
+  "question": "2024年パリオリンピック女子マラソンで完走したのは何人か？",
+  "doc_path": "ja-wiki-0003.html"
+ },
+ {
+  "id": "q106",
+  "language": "ja",
+  "question": "森博嗣がVシリーズのコンセプトとして掲げた「SSS」とは何を表すか？",
+  "doc_path": "ja-wiki-0005.html"
+ },
+ {
+  "id": "q107",
+  "language": "ja",
+  "question": "おおはた雄一がメジャーデビューしたアルバムの名前は？",
+  "doc_path": "ja-wiki-0006.html"
+ },
+ {
+  "id": "q108",
+  "language": "ja",
+  "question": "ヴィレッジ・シンガーズが1971年に解散する前、最後に演奏した場所はどこか？",
+  "doc_path": "ja-wiki-0009.html"
+ },
+ {
+  "id": "q109",
+  "language": "ja",
+  "question": "アニメ監督・川瀬敏文の監督デビュー作は何か？",
+  "doc_path": "ja-wiki-0012.html"
+ },
+ {
+  "id": "q110",
+  "language": "ja",
+  "question": "斎藤隆夫が反軍演説の後に衆議院議員を除名されたのは何月何日か？",
+  "doc_path": "ja-wiki-0013.html"
+ },
+ {
+  "id": "q111",
+  "language": "ja",
+  "question": "日本古典文学会賞は何年度から開始されたか？",
+  "doc_path": "ja-wiki-0014.html"
+ },
+ {
+  "id": "q112",
+  "language": "ja",
+  "question": "細川政元が最初に後継者として迎えた澄之は誰の次男か？",
+  "doc_path": "ja-wiki-0016.html"
+ },
+ {
+  "id": "q113",
+  "language": "ja",
+  "question": "「水上艦用電波探知妨害装置」の技術・実用試験はどの艦で行われたか？",
+  "doc_path": "ja-wiki-0017.html"
+ },
+ {
+  "id": "q114",
+  "language": "ja",
+  "question": "黒澤明の映画『生きる』で、渡辺は夜の街へ出かける際に貯金からいくらおろしたか？",
+  "doc_path": "ja-wiki-0018.html"
+ },
+ {
+  "id": "q115",
+  "language": "ja",
+  "question": "目黒寄生虫館の展示スペースは建物の何階にあるか？",
+  "doc_path": "ja-wiki-0019.html"
+ },
+ {
+  "id": "q116",
+  "language": "ja",
+  "question": "船橋オートレース場はいつをもって廃止する意向と報道されたか？",
+  "doc_path": "ja-wiki-0020.html"
+ },
+ {
+  "id": "q117",
+  "language": "ja",
+  "question": "雄武町の町内在住者がマイナンバーカードを提示すると、町内区間のバス運賃はどうなるか？",
+  "doc_path": "ja-wiki-0022.html"
+ },
+ {
+  "id": "q118",
+  "language": "ja",
+  "question": "MDNの認知アクセシビリティのガイドによると、時間制限が何時間を超える場合に合理的配慮は不要か？",
+  "doc_path": "ja-mdn-0004.md"
+ },
+ {
+  "id": "q119",
+  "language": "ja",
+  "question": "MDNのクロスブラウザー動画プレイヤーの例では、何種類の動画ソースが提供されているか？",
+  "doc_path": "ja-mdn-0006.md"
+ },
+ {
+  "id": "q120",
+  "language": "ja",
+  "question": "MDNのフレームワーク入門で、Vueのスニペットによりコードは約何行から何行に減るか？",
+  "doc_path": "ja-mdn-0001.md"
+ },
+ {
+  "id": "q121",
+  "language": "ja",
+  "question": "「AI」という言葉は何年に開催されたどの会議で提唱されたか？",
+  "doc_path": "ja-soumu-0002.pdf",
+  "page": 2
+ },
+ {
+  "id": "q122",
+  "language": "ja",
+  "question": "2022年の我が国の民間企業による情報化投資額（2015年価格）はいくらか？",
+  "doc_path": "ja-soumu-0004.pdf",
+  "page": 3
+ },
+ {
+  "id": "q123",
+  "language": "ja",
+  "question": "総務省が「5Gセキュリティガイドライン第1版」を公表したのはいつか？",
+  "doc_path": "ja-soumu-0006.pdf",
+  "page": 4
+ }
+]

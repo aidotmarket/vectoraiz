@@ -48,3 +48,7 @@ leaves those downloads as `.part` rather than making them accepted inputs.
 `.corpus/` is ignored. Do not commit documents or model files.
 
 Run [the harness](../bakeoff/README.md) after the manifest and questions arrive.
+
+## Corpus as delivered (S1837)
+
+`manifest.json` holds 298 documents (html 110, md 40, pdf 59, pdf-scanned 14, docx 35, xlsx 40; en/es/de/fr/ja), each with `id`, `url` pinned to a revision or commit, `size`, `sha256`, `format`, `language`, `license`, `license_url`, `source`, `title`, `filename`, and for Wikipedia `"postprocess": "strip-mediawiki-render-id"` (the fetcher removes the per-render id and `utm_campaign` values before hashing; a Wikipedia renderer upgrade can still change bytes and require re-pinning). `retrieval-questions.json` has 123 questions (en 42, de 20, fr 24, ja 20, es 17), `chat-questions.json` the 30 chat questions. Sources, licences and checks: `CORPUS-REPORT.md`.

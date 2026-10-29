@@ -79,6 +79,21 @@ def refusal(answer):
     return bool(re.search(r"(?:sources?|context|information|documents?|passages?).{0,70}(?:do not|does not|don't|doesn't|cannot|can't|insufficient|not (?:provide|contain|answer|mention|state|specif))|(?:cannot|can't|couldn't|unable to) (?:answer|determine|find)|(?:not (?:enough|provided|mentioned|specified)|no (?:indexed )?sources? answer)", text))
 
 
+# Wikipedia REST HTML embeds a per-render id and a varying utm_campaign value on
+# media links; documents marked "strip-mediawiki-render-id" are hashed without them.
+_RENDER_ID = re.compile(rb'<meta http-equiv="x-mediawiki-render-id" content="[^"]*"/>')
+_UTM = re.compile(rb'utm_campaign=[A-Za-z0-9_-]*&amp;')
+
+
+def postprocess(path, how):
+    if not how:
+        return
+    if how != "strip-mediawiki-render-id":
+        raise ValueError(f"unknown postprocess: {how}")
+    data = Path(path).read_bytes()
+    Path(path).write_bytes(_UTM.sub(b"", _RENDER_ID.sub(b"", data, count=1)))
+
+
 def verified(path, pin):
     path = Path(path)
     if not path.is_file() or path.stat().st_size != pin.get("size"):
@@ -111,7 +126,12 @@ def fetch(pin, folder, resume=False, record=False):
                     return
                 part.unlink()
                 offset = 0
-            req = urllib.request.Request(pin["url"], headers={"Range": f"bytes={offset}-"} if offset else {})
+            if pin.get("postprocess"):
+                offset = 0
+            headers = {"User-Agent": "vectoraiz-phase0-corpus/1"}
+            if offset:
+                headers["Range"] = f"bytes={offset}-"
+            req = urllib.request.Request(pin["url"], headers=headers)
             with urllib.request.urlopen(req, timeout=120) as response:
                 if offset and response.status == 206:
                     if not response.headers.get("Content-Range", "").startswith(f"bytes {offset}-"):
@@ -121,6 +141,7 @@ def fetch(pin, folder, resume=False, record=False):
                     mode = "wb"
                 with part.open(mode) as output:
                     shutil.copyfileobj(response, output, 1024 * 1024)
+            postprocess(part, pin.get("postprocess"))
             if record and (not pin.get("sha256") or not pin.get("size")):
                 digest = hashlib.sha256()
                 with part.open("rb") as f:

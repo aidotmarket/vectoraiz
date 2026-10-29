@@ -146,3 +146,8 @@ No selected embedding or per-tier chat model yet. Record quality, hand-check
 verdicts, load failures, hardware caveats and reasons before making picks in
 the BQ. Keep full raw results as private evidence; commit only reviewed results
 and no corpus/model binaries.
+
+## Parser findings from the corpus run (S1837)
+
+- A real open-data XLSX (`de-sh-xlsx-0003.xlsx`, Schleswig-Holstein open data) is refused by the archive-expansion guard (`zip compression ratio exceeds 100:1`). It was removed from the bake-off corpus. Phase 1 should revisit the guard (ratio plus absolute expanded-size cap) so ordinary highly compressible spreadsheets index.
+- Scanned PDFs need the `vz-vision-ocr` helper next to `vectoraiz-cli` (CI builds it with `swiftc scripts/vision-ocr.swift -O -o target/<profile>/vz-vision-ocr`); without it they fail with `start Apple Vision OCR helper`.
