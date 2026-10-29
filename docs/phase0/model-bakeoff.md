@@ -1,8 +1,8 @@
 # Phase 0 model bake-off method
 
-C1 implements the harness. The golden corpus and labels arrive separately;
-measurements and model selection are operator work after this PR. No result or
-model pick is claimed here. Authority: Phase 0 Gate 2 section 4.3.
+C1 (PR #91) added the harness and the golden corpus. The measured results and
+the provisional model picks are in [Results](#results-s1837-2026-10-29) below
+(PR #93). Authority: Phase 0 Gate 2 section 4.3.
 
 Use [the run instructions](../../spike/bakeoff/README.md) and
 [input schemas](../../spike/corpus/README.md). Freeze corpus, licences,
@@ -149,14 +149,14 @@ Measured on Koskadeux (Mac Studio M3 Ultra, 256 GB, macOS, Metal) with the C1 ha
 
 All runs indexed 298/298 documents into 13,235 chunks. Index time is end to end (model load, hashing, parsing, Apple Vision OCR of 14 scanned PDFs, storage). Qwen3-Embedding ran after the Gate 3 fold (single EOS); the other three are unaffected by that fold.
 
-**Ceiling effect.** Every candidate finds the expected document in the top 10 for 122–123 of 123 questions. The app's search is hybrid (full-text plus vector), and the corpus questions share distinctive words with their passages, so this set separates the embedding models only weakly (MRR range 0.921–0.948, page recall 0.889–0.963; one question is about 0.8 points). A harder set (paraphrased and cross-language questions, vector-only scoring) is needed before reading small differences; recorded for Phase 1.
+**Ceiling effect.** Every candidate finds the expected document in the top 10 for 122–123 of 123 questions. The app's search is hybrid (full-text plus vector), and the corpus questions share distinctive words with their passages, so this set separates the embedding models only weakly (MRR range 0.921–0.948, page recall 0.889–0.963; one of the 123 questions moves document recall by 0.81 points, but one of the 27 page-labelled questions moves page recall by 3.70 points). A harder set (paraphrased and cross-language questions, vector-only scoring) is needed before reading small differences; recorded for Phase 1.
 
 ### Chat (same top-3 sources from the bge-m3 index for every candidate; 30 questions; Q4_K_M)
 
-| Chat | Tier | Answer correct (app prompt) | Answer (cite prompt) | Citation correct | Citation (token overlap) | Off-topic refused (48) | On-topic refused (60) | TTFT | Tokens/s | Peak RSS |
+| Chat | Tier | Answer correct (app prompt) | Answer (cite prompt) | Citation correct | Citation (token overlap) | Off-topic refused (48) | On-topic refused (60) | TTFT (app prompt) | Tokens/s (app prompt) | Peak RSS (app prompt) |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | Qwen3-4B-Instruct-2507 | 8 GB | 0.667 | 0.633 | 0.600 | 0.667 | 0.979 | 0.067 | 0.76 s | 138 | 3.24 GB |
-| Gemma 4 E4B | 8 GB | 0.667 | 0.600 | 0.400 | 0.467 | 1.000 | 0.067 | 0.76 s | 91 | 5.44 GB |
+| Gemma 4 E4B | 8 GB | 0.667 | 0.600 | 0.400 | 0.467 | 1.000 | 0.067 | 0.76 s | 90 | 5.44 GB |
 | Qwen3-8B (no thinking) | 16 GB | 0.733 | 0.800 | 0.500 | 0.600 | 0.979 | 0.033 | 1.28 s | 88 | 5.79 GB |
 | Ministral 3 8B Instruct | 16 GB | 0.800 | 0.800 | 0.567 | 0.667 | 1.000 | 0.033 | 1.29 s | 83 | 5.94 GB |
 | Gemma 4 26B-A4B | 32 GB+ | 0.700 | 0.767 | 0.633 | 0.667 | 1.000 | 0.117 | 0.89 s | 86 | 17.95 GB |
@@ -164,17 +164,29 @@ All runs indexed 298/298 documents into 13,235 chunks. Index time is end to end 
 
 - **Grounding (the open Phase 0 defect).** With the provisional Qwen2.5-0.5B, off-topic questions were answered from general knowledge. Every candidate refuses 98–100% of the 48 off-topic cases in `spike/fixtures/ask-grounding-questions.json`, with 3–12% refusals on the 60 on-topic cases (refusal is a text heuristic, not a proof).
 - **BOS check.** `first_prompt_token` was 2 for both Gemma 4 models and 1 for Ministral (their BOS); Qwen prompts start with `<|im_start|>` (151644; 248045 for Qwen3.6) and no BOS, as expected.
-- **Noise.** 30 questions means one question is 3.3 points; differences under about 10 points are not significant. The hand check of 10 answers per candidate (`hand-check.md`, seed 1837) is done by the reviewing instance at Gate 3, as the spec requires.
-- **Speed and memory** are M3 Ultra figures with full Metal offload. Speed for 8 and 16 GB machines is UNVERIFIED (spec 4.3); Windows figures are UNTESTED in this round (Max 2026-10-29). Peak RSS counts the memory-mapped model file; on an 8 GB Mac or PC, Qwen3-4B (3.2 GB) leaves room for the OS, embedding model and app, Gemma 4 E4B (5.4 GB) is tight.
+- **Noise.** 30 questions means one question is 3.3 points, so small differences are within noise and no difference here is shown to be statistically significant. Example: Qwen3-4B beat Gemma 4 E4B on citations in 7 paired questions and lost 1 (exact two-sided McNemar p = 0.07), an observed advantage, not an established one.
+- **Hand check (spec 4.3, codex2 at Gate 3).** Ten answers per candidate (`hand-check.md`, seed 1837), checked against the shown sources; q114 is unanswerable from its sources and every candidate rightly abstained (counted separately):
+
+  | Candidate | Supported answers | Citation correct | Right to abstain |
+  |---|---:|---:|---|
+  | Qwen3-4B-Instruct-2507 | 9/10 | 9/10 | q114 |
+  | Gemma 4 E4B | 8/10 | 6/10 | q114 |
+  | Qwen3-8B | 9/10 | 7/10 | q114 |
+  | Ministral 3 8B | 8/10 | 8/10 | q114 |
+  | Gemma 4 26B-A4B | 9/10 | 9/10 | q114 |
+  | Qwen3.6-35B-A3B | 9/10 | 9/10 | q114 |
+
+  Automatic-scorer disagreements: Ministral q012 passed both automatic checks but first says the source gives no year, then gives 2015 (false positive); Ministral q043 failed the automatic citation check though source [2] supports the answer (false negative). Qwen3-8B cited non-existent sources [6] and [32] in q069 and q084; Gemma 4 E4B refused q012 although source [1] gives the answer and cited the wrong source in q083 and q106. These match the method's known limits and do not change the picks.
+- **Speed and memory** are M3 Ultra figures with Metal requested; full offload was not confirmed (stderr empty, and the loader allows CPU fallback). Speed for 8 and 16 GB machines is UNVERIFIED (spec 4.3); Windows figures are UNTESTED in this round (Max 2026-10-29). Peak RSS counts the memory-mapped model file. On an 8 GB Mac or PC we expect Qwen3-4B (3.2 GB) to leave room for the OS, embedding model and app and Gemma 4 E4B (5.4 GB) to be tight; neither fit is verified on a small machine.
 
 ### Picks
 
 | Role | Pick | Reasons |
 |---|---|---|
 | Embedding | **bge-m3** (MIT) | Best MRR@10 and full recall; middle index speed; MIT licence with no extra terms. EmbeddingGemma had the best page recall and smallest index but carries Gemma's terms of use (prohibited-use policy and notice obligations passed to users), which is a heavier licence for a default download; differences are within the ceiling noise. |
-| Chat, 8 GB | **Qwen3-4B-Instruct-2507** (Apache-2.0) | Same answer rate as Gemma 4 E4B, clearly better citations (0.60 vs 0.40), 1.5× faster and 2.2 GB less memory. |
-| Chat, 16 GB | **Ministral 3 8B Instruct** (Apache-2.0) | Best answer rate of all candidates (0.80 with both prompts), best citations in its tier, 100% off-topic refusal. Qwen3-8B is within noise and is the fallback. |
-| Chat, 32 GB and above | **Qwen3.6-35B-A3B** (Apache-2.0) | Best answer rate with the app's prompt and best overlap citation; Gemma 4 26B-A4B is within noise, uses 2.8 GB less memory, but refuses more on-topic questions (0.117). Near tie; revisit with the harder set. |
+| Chat, 8 GB | **Qwen3-4B-Instruct-2507** (Apache-2.0) | Same answer rate as Gemma 4 E4B, better observed citations (0.60 vs 0.40; not statistically established), 1.5× faster and 2.2 GB less memory on the M3 Ultra. |
+| Chat, 16 GB | **Ministral 3 8B Instruct** (Apache-2.0) | Best answer rate of all candidates in this run (0.80 with both prompts), best citations in its tier, 100% off-topic refusal. Qwen3-8B is within noise and is the fallback. |
+| Chat, 32 GB and above | **Qwen3.6-35B-A3B** (Apache-2.0) | Best answer rate in its tier with the app's prompt and best overlap citation; Gemma 4 26B-A4B is within noise, uses 2.8 GB less memory, but refuses more on-topic questions (0.117). Near tie; revisit with the harder set. |
 
 Licence notes for the app (spec 4.3): bge-m3 MIT (include the MIT notice); Qwen3-4B-Instruct-2507, Ministral 3 8B, Qwen3.6-35B-A3B Apache-2.0 (include the licence and any NOTICE file from the model repository). Exact revisions, sizes and hashes are in `spike/bakeoff/candidates.json`.
 
@@ -194,4 +206,4 @@ Licence notes for the app (spec 4.3): bge-m3 MIT (include the MIT notice); Qwen3
 
 ## Results PR notes (S1837)
 
-- CC Gate 3 advisory items folded here: `compact()` also removes soft hyphens; chat results record `prompt_tokens` (first token and prompt length range per prompt) at the top level, and a run stops if a candidate's prompts do not all start with the same token; the summary shows a "First token" column (results produced before this change show `n/a`; their first tokens are checked from the raw rows above) and a row for a candidate with no completed attempt; every attempt folder also keeps its own `result.json`; `rescore.py` re-scores saved embedding results.
+- CC Gate 3 advisory items folded here: `compact()` also removes soft hyphens; chat results record `prompt_tokens` (first token and prompt length range per prompt) at the top level, and a run stops unless every prompt the candidate saw (all corpus prompts and the grounding prompts) starts with the same token; the summary shows a "First token" column (results produced before this change show `n/a`; their first tokens are checked from the raw rows above) and a row for a candidate with no completed attempt; every attempt folder also keeps its own `result.json`; `rescore.py` re-scores saved embedding results and writes when any per-question row changes, not only the totals (codex2 LOW-1; this updated q019's page ranks to [1, 2] for bge-m3 and EmbeddingGemma, totals unchanged).

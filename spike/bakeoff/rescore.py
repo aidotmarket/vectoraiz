@@ -19,13 +19,15 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--results", type=Path, default=HERE / "results")
     p.add_argument("--questions", type=Path, default=ROOT / "spike/corpus/retrieval-questions.json")
-    p.add_argument("--write", action="store_true", help="update totals in place (keeps the old totals under totals_before_rescore)")
+    p.add_argument("--write", action="store_true", help="update rows and totals in place (keeps changed old totals under totals_before_rescore)")
     a = p.parse_args()
     labels = {q["id"]: q for q in questions(a.questions)}
     for path in sorted(x for x in a.results.glob("embedding-*.json") if not x.name.endswith(".failed.json")):
         r, scored, totals = rescore(path, labels)
         print(path.name, {k: round(v, 3) if isinstance(v, float) else v for k, v in totals.items()}, "was", r["totals"])
-        if a.write and totals != r["totals"]:
-            r["totals_before_rescore"] = r["totals"]
+        # Write when any per-question row changes, even if the totals do not (codex2 #93 LOW-1).
+        if a.write and (totals != r["totals"] or scored != r["questions_scored"]):
+            if totals != r["totals"]:
+                r["totals_before_rescore"] = r["totals"]
             r["totals"], r["questions_scored"] = totals, scored
             write_json(path, r)
