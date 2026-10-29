@@ -69,10 +69,10 @@ def answer_ok(answer, alternatives):
 
 def compact(text):
     """NFKC + casefold + no whitespace: the rule the corpus support strings were
-    verified with (CORPUS-REPORT.md), robust to parser spacing in Japanese text,
+    verified with (CORPUS-REPORT.md: NFKC, casefold, no soft hyphens, no whitespace), robust to parser spacing in Japanese text,
     XLSX cells and OCR line breaks."""
     import unicodedata
-    return "".join(unicodedata.normalize("NFKC", text).casefold().split())
+    return "".join(unicodedata.normalize("NFKC", text).casefold().replace("\u00ad", "").split())
 
 
 def citation_ok(answer, sources, support, overlap=False):

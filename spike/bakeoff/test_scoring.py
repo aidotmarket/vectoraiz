@@ -39,6 +39,8 @@ class Scoring(unittest.TestCase):
         self.assertTrue(citation_ok("value [2]", sources, "Region Year 2023 17.5"))
         # negative control: different text still fails
         self.assertFalse(citation_ok("答え [1]", sources, "総務省は2023年に白書を公表した"))
+        # soft hyphens from PDF text extraction do not break a match
+        self.assertTrue(citation_ok("x [1]", [{"n": 1, "text": "inter\u00adnational standard"}], "international standard"))
 
     def test_failed_rerun_never_masks_as_current(self):
         import summarise
@@ -57,6 +59,10 @@ class Scoring(unittest.TestCase):
                 self.assertIn("latest attempt FAILED", table)
                 self.assertIn(second.name, table)
                 self.assertEqual((first / "evidence.txt").read_text(), "success evidence")
+                common.record_failure("embedding", "never", common.new_attempt("embedding", "never"), RuntimeError("no model"))
+                table = summarise.tables(results)
+                self.assertIn("never (no completed attempt: RuntimeError: no model)", table)
+                common.clear_failure("embedding", "never")
                 common.clear_failure("embedding", "m")
                 self.assertNotIn("FAILED", summarise.tables(results))
 
