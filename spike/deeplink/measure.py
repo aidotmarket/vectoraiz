@@ -2,7 +2,7 @@
 """Deep-link length probe (Phase 0 chunk F, spec 4.6).
 Serves a page on 127.0.0.1 that reports the received #vz= fragment length and sha256,
 then opens URLs of growing size through macOS LaunchServices (`open -a <browser> <url>`),
-the same path the app's opener uses. Also tests the local-HTML location.replace fallback.
+a LaunchServices transport proxy for the app's future opener (equivalence unverified). Also tests the local-HTML location.replace fallback.
 Usage: measure.py "Google Chrome" [--fallback]"""
 import base64, hashlib, http.server, json, os, secrets, subprocess, sys, tempfile, threading, time
 SIZES = [2_000, 8_000, 16_000, 32_000, 48_000, 64_000, 128_000, 256_000, 1_000_000]
@@ -35,10 +35,13 @@ for n in SIZES:
         target=tmp
     else:
         target=url
-    t0=time.time(); p=subprocess.run(["open","-a",browser,target],capture_output=True,text=True)
-    while rid not in got and time.time()-t0<20: time.sleep(0.2)
-    r=got.get(rid); ok=bool(r and r["len"]==n and r["sha"]==want)
-    results.append({"size":n,"open_rc":p.returncode,"open_err":p.stderr.strip()[:120],"received":r["len"] if r else None,"intact":ok})
-    print(json.dumps(results[-1]),flush=True)
-    if tmp: time.sleep(1); os.unlink(tmp)
+    try:
+        t0=time.time(); p=subprocess.run(["open","-a",browser,target],capture_output=True,text=True)
+        while rid not in got and time.time()-t0<20: time.sleep(0.2)
+        r=got.get(rid); ok=bool(r and r["len"]==n and r["sha"]==want)
+        results.append({"size":n,"open_rc":p.returncode,"open_err":p.stderr.strip()[:120],"received":r["len"] if r else None,"intact":ok})
+        print(json.dumps(results[-1]),flush=True)
+        if tmp: time.sleep(1)
+    finally:
+        if tmp and os.path.exists(tmp): os.unlink(tmp)
 print(json.dumps({"browser":browser,"fallback":fallback,"results":results}))

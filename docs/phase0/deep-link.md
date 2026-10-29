@@ -4,7 +4,7 @@ Question: what is the largest `#vz=` link that opens intact when the app hands i
 
 ## Method
 
-`spike/deeplink/measure.py` serves a page on `127.0.0.1` that reports the length and sha256 of the `#vz=` fragment it received. It opens links of 2,000 to 1,000,000 fragment characters (random base64url) with `open -a <browser> <url>`, which goes through LaunchServices like the app's opener, and checks length and hash. `--fallback` writes a temporary local HTML file that calls `location.replace(<full link>)` and opens that file instead. A localhost origin stands in for `https://ai.market/dashboard/seller-workspace`: browsers never send the fragment to a server, so the limit is on the client side.
+`spike/deeplink/measure.py` serves a page on `127.0.0.1` that reports the length and sha256 of the `#vz=` fragment it received. It opens links of 2,000 to 1,000,000 fragment characters (random base64url) with `open -a <browser> <url>`, which goes through LaunchServices, and checks length and hash. This is a proxy for the URL transport: the app has no opener implemented yet, so equivalence with it is UNVERIFIED, and default-browser selection, HTTPS redirects and Seller Workspace's own fragment handling are not exercised. `--fallback` writes a temporary local HTML file that calls `location.replace(<full link>)` and opens that file instead. A localhost origin stands in for `https://ai.market/dashboard/seller-workspace`: browsers never send the fragment to a server, so the limit is on the client side.
 
 ## Results, macOS (Koskadeux, Apple M3 Ultra, macOS 27.0.1, 2026-10-29)
 
@@ -16,7 +16,7 @@ Question: what is the largest `#vz=` link that opens intact when the app hands i
 | Firefox | UNTESTED (not installed; disk hold) | UNTESTED |
 | Edge | UNTESTED (not installed; disk hold) | UNTESTED |
 
-Every size tested (2 K, 8 K, 16 K, 32 K, 48 K, 64 K, 128 K, 256 K, 1 M) arrived intact (length and sha256) in all three browsers, both ways. 2,000,000 could not be tested with the `open` command, which hit the shell's argument limit (`ARG_MAX` 1,048,576); that limit is the test tool's, not the app's opener's.
+Every size tested (2 K, 8 K, 16 K, 32 K, 48 K, 64 K, 128 K, 256 K, 1 M) arrived intact (length and sha256) in all three browsers, both ways. 2,000,000 could not be tested with the `open` command, which hit the process argument limit (`ARG_MAX` 1,048,576) when passing the URL on the command line; that is a limit of this test method.
 
 Conclusion for macOS: the design's 48 KB encoded maximum opens directly in Safari, Chrome and Brave with a wide margin; the fallback is not needed in those browsers but also works.
 
