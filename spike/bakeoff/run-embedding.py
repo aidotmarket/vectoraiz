@@ -40,12 +40,14 @@ def run(a, p, selected, rows, work):
     with sqlite3.connect(state / "state.sqlite") as db:
         generations = [r[0] for r in db.execute("SELECT generation FROM documents")]
     chunk_count = sum(len(read_json(state / "generations" / g / "document.json")["chunks"]) for g in generations)
-    write_json(HERE / "results" / f"embedding-{a.candidate}.json", {
+    result = {
         "candidate": selected, "attempt": str(work), "machine": machine(a.cpu), "state": str(state), "pins": str(pin_path),
         "questions": str(a.questions), "index": indexed[-1], "index_timing": timing,
         "chunk_count": chunk_count, "chunks_per_s": chunk_count / timing["wall_s"],
         "index_bytes": sum(f.stat().st_size for f in state.rglob("*") if f.is_file()),
-        "search_timing": search_timing, "totals": {key: mean([r[key] for r in scores]) for key in ["recall_at_10", "mrr_at_10", "page_recall_at_10"]}, "questions_scored": scores})
+        "search_timing": search_timing, "totals": {key: mean([r[key] for r in scores]) for key in ["recall_at_10", "mrr_at_10", "page_recall_at_10"]}, "questions_scored": scores}
+    write_json(HERE / "results" / f"embedding-{a.candidate}.json", result)
+    write_json(work / "result.json", result)
     print(state)
 
 

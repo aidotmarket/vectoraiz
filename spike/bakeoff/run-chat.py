@@ -88,8 +88,17 @@ def run(a, p, selected, rows, work):
         ground_outputs.extend({**r, "kind": labels[r["id"]]["kind"], "corpus": corpus, "refusal": refusal(r["answer"]), "timing": timing} for r in output)
     off = [r for r in ground_outputs if r["kind"] == "off"]
     on = [r for r in ground_outputs if r["kind"] == "on"]
-    write_json(HERE / "results" / f"chat-{a.candidate}.json", {"candidate": selected, "attempt": str(work), "machine": machine(a.cpu), "source_cache_key": identity, "source_digest": hashlib.sha256(__import__("json").dumps(items, sort_keys=True).encode()).hexdigest(),
-        "prompts": reports, "grounding": {"off_topic_count": len(off), "off_topic_refusal_share": mean([r["refusal"] for r in off]), "off_topic_nonrefusal_share": mean([not r["refusal"] for r in off]), "on_topic_refusal_share": mean([r["refusal"] for r in on]), "raw": ground_outputs}})
+    prompt_meta = {}
+    for prompt, report in reports.items():
+        firsts = sorted({r["first_prompt_token"] for r in report["raw"]})
+        if len(firsts) != 1:
+            raise RuntimeError(f"{prompt}: prompts start with different tokens {firsts}; template path broken")
+        lengths = [r["prompt_tokens"] for r in report["raw"]]
+        prompt_meta[prompt] = {"first_prompt_token": firsts[0], "prompt_tokens_min": min(lengths), "prompt_tokens_max": max(lengths)}
+    result = {"candidate": selected, "attempt": str(work), "prompt_tokens": prompt_meta, "machine": machine(a.cpu), "source_cache_key": identity, "source_digest": hashlib.sha256(__import__("json").dumps(items, sort_keys=True).encode()).hexdigest(),
+        "prompts": reports, "grounding": {"off_topic_count": len(off), "off_topic_refusal_share": mean([r["refusal"] for r in off]), "off_topic_nonrefusal_share": mean([not r["refusal"] for r in off]), "on_topic_refusal_share": mean([r["refusal"] for r in on]), "raw": ground_outputs}}
+    write_json(HERE / "results" / f"chat-{a.candidate}.json", result)
+    write_json(work / "result.json", result)
 
 
 if __name__ == "__main__":
