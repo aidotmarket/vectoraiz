@@ -6,8 +6,8 @@ Written 2026-10-29 (S1837) from what Phase 0 took between 2026-10-21 and 2026-10
 
 | Evidence | Planned | Actual |
 |---|---|---|
-| Phase 0 | 2 weeks | 9 days to here. Done: model picks ([model-bakeoff.md](model-bakeoff.md)), test builds 0.0.1–0.0.9, gateway export ([gateway-export.md](gateway-export.md)), deep link on macOS ([deep-link.md](deep-link.md)), budgets ([budgets.md](budgets.md)). Open: R2 end-to-end test (chunk E, blocked on secret custody), macOS UI test harness, Windows and other-browser measurements |
-| Gateway opaque-files BQ (gateway, backend, website) | 2–3 weeks in parallel | Gate 1 on 2026-10-21; v0.2.4 released and pack listing proven 2026-10-28 (about 1 week); Gate 4 in progress on 2026-10-29 (one follow-up check done) |
+| Phase 0 | 2 weeks | 9 days to here. Done: model picks ([model-bakeoff.md](model-bakeoff.md)), test builds 0.0.1–0.0.9, gateway export ([gateway-export.md](gateway-export.md)), deep link on macOS ([deep-link.md](deep-link.md)), budgets ([budgets.md](budgets.md); the 50,000 **mixed**-document measurement is still owed, only a Markdown-only baseline was run). Open: R2 end-to-end test (chunk E, blocked on secret custody), macOS UI test harness, Windows and other-browser measurements |
+| Gateway opaque-files BQ (gateway, backend, website) | 2–3 weeks in parallel | Gate 1 on 2026-10-21; v0.2.4 released and pack listing proven 2026-10-28 (about 1 week); Gate 4 completed 2026-10-29 |
 | A small app chunk (brief, MP build, Gate 3, merge) | — | usually the same day (3–10 h, 1–3 review rounds) |
 | A release (version PR, CI, publish, outside check, update test) | — | about 2–3 h agent time; a Windows by-hand run needs Max's PC (15–60 min of his time) |
 
@@ -19,11 +19,11 @@ The building went faster than planned. The waits were for things only Max or ano
 |---|---|---|---|
 | 1. Core | 3–4 wk | 3–4 wk | Pipeline, models and download path exist from Phase 0. New: shares, parser coverage, proxy/trust store, and the storage rework that [budgets.md](budgets.md) finding 1 requires (one chunks table with vector and full-text indexes, index migration), worth about a week. Windows budgets need Max's PC or a Windows VM. |
 | 2. Your own AI | 1 wk | 1 wk | No Phase 0 evidence either way. |
-| 3. Prepare listing | 3–4 wk, plus gateway BQ 2–3 wk | 2–3 wk; gateway BQ about 0.5 wk left | Pack writer, upload and gateway export exist as tested Phase 0 code. The website panels BQ has not started and needs its own Gate 1/2. |
+| 3. Prepare listing | 3–4 wk, plus gateway BQ 2–3 wk | 2–3 wk; gateway BQ done | Pack writer, upload and gateway export exist as tested Phase 0 code. The website panels BQ has not started and needs its own Gate 1/2. |
 | 4. Beta | 3 wk | 3 wk | Paced by real sellers, not builds. |
 | 5. Public release | 3–4 wk | 3–4 wk | Paced by Apple and Microsoft account checks (Apple enrolment pending since 2026-10-23). |
 
-Total: stage 1 about **10–12 weeks after Phase 0 exit** (design: 12–15); stage 2 unchanged at 3–4 weeks after that.
+Total: phases 1–4 add up to 9–11 weeks after Phase 0 exit. With one week of contingency for the waits on Max and owners described above (phases run back to back, no overlap assumed), that is about **10–12 weeks after Phase 0 exit**. The design's 12–15 weeks counts from the start of Phase 0; on that basis this estimate is about 11.5–13.5 weeks (Phase 0 so far 9 days plus whatever chunk E and the open measurements take). Stage 2 is unchanged at 3–4 weeks after that.
 
 ## Assumptions and risks
 
