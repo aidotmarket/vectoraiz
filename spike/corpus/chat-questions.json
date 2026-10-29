@@ -1,0 +1,287 @@
+[
+ {
+  "id": "q001",
+  "language": "en",
+  "question": "In 1978, who became the first Chief Minister of the Northern Territory when it attained self-government?",
+  "answers": [
+   "Paul Everingham"
+  ],
+  "support": "The Northern Territory attains self-government; Majority Leader Paul Everingham becomes the inaugural Chief Minister"
+ },
+ {
+  "id": "q004",
+  "language": "en",
+  "question": "Which rapper is the only guest appearance on Lil B's mixtape Black Ken?",
+  "answers": [
+   "ILoveMakonnen"
+  ],
+  "support": "It contains no guest appearances other than rapper ILoveMakonnen on the song, \"Global\"."
+ },
+ {
+  "id": "q012",
+  "language": "en",
+  "question": "According to MDN, since what year have all modern browsers supported the JavaScript let keyword?",
+  "answers": [
+   "2015"
+  ],
+  "support": "all modern browsers have supported `let` since 2015"
+ },
+ {
+  "id": "q014",
+  "language": "en",
+  "question": "What are the six Core Functions of the NIST Cybersecurity Framework 2.0?",
+  "answers": [
+   "GOVERN, IDENTIFY, PROTECT, DETECT, RESPOND, and RECOVER"
+  ],
+  "support": "The CSF Core Functions — GOVERN, IDENTIFY, PROTECT, DETECT, RESPOND, and RECOVER — organize cybersecurity outcomes at their highest level."
+ },
+ {
+  "id": "q016",
+  "language": "en",
+  "question": "Which food was strongly associated with the 2023 gastrointestinal illness outbreak at a restaurant in Bozeman, Montana?",
+  "answers": [
+   "morel mushrooms",
+   "morels"
+  ],
+  "support": "Consumption of morel mushrooms, which are generally considered edible, was strongly associated with gastrointestinal illness."
+ },
+ {
+  "id": "q023",
+  "language": "en",
+  "question": "At altitudes about 10,000 feet below the operational limits, what did the flames look like in the Westinghouse 19XB-1 combustor?",
+  "answers": [
+   "yellow and steady"
+  ],
+  "support": "the flames were yellow and steady"
+ },
+ {
+  "id": "q024",
+  "language": "en",
+  "question": "How many rocket-powered free-flight models were used to measure skin friction on the NACA RM-10 body?",
+  "answers": [
+   "six",
+   "6"
+  ],
+  "support": "Measurements of average skin-friction coefficients have been made on six rocket-powered free-flight models"
+ },
+ {
+  "id": "q032",
+  "language": "en",
+  "question": "In the school bomb alert template, which number should you dial to get the caller's number once the call has ended?",
+  "answers": [
+   "1471"
+  ],
+  "support": "dial 1471 to obtain the number once the call has ended"
+ },
+ {
+  "id": "q035",
+  "language": "en",
+  "question": "What is the Workplace Charging Scheme cap per socket for installations after 1 April 2026?",
+  "answers": [
+   "£500",
+   "500 pounds"
+  ],
+  "support": "£500 per socket for installations after 1 April 2026"
+ },
+ {
+  "id": "q043",
+  "language": "es",
+  "question": "¿A qué institución fue invitado Alessandro Volta para demostrar su invento ante sus miembros?",
+  "answers": [
+   "Instituto de Francia",
+   "al Instituto de Francia"
+  ],
+  "support": "fue invitado al Instituto de Francia para demostrar su invento a los miembros del instituto"
+ },
+ {
+  "id": "q044",
+  "language": "es",
+  "question": "¿Qué pena pidió la fiscal especial Mette Bendix para el acusado en el caso de Mia Stevn?",
+  "answers": [
+   "cadena perpetua"
+  ],
+  "support": "La fiscal especial Mette Bendix pidió que el hombre fuera condenado a cadena perpetua"
+ },
+ {
+  "id": "q047",
+  "language": "es",
+  "question": "¿En qué año alcanzó su punto máximo la producción de la mina de diamantes Argyle?",
+  "answers": [
+   "1994"
+  ],
+  "support": "La producción alcanzó su punto máximo en 1994"
+ },
+ {
+  "id": "q050",
+  "language": "es",
+  "question": "¿Cuál es la precipitación anual de Tingo María?",
+  "answers": [
+   "3.000 mm",
+   "3000 mm"
+  ],
+  "support": "con una precipitación anual de 3.000 mm"
+ },
+ {
+  "id": "q057",
+  "language": "es",
+  "question": "Según la Directiva 2006/7/CE, ¿qué se dicta si unas aguas de baño se clasifican como de calidad «insuficiente» durante cinco años consecutivos?",
+  "answers": [
+   "una prohibición permanente de baño",
+   "prohibición permanente de baño"
+  ],
+  "support": "si las aguas de baño son clasificadas como de calidad «insuficiente» durante cinco años consecutivos, se dictará una prohibición permanente de baño"
+ },
+ {
+  "id": "q060",
+  "language": "de",
+  "question": "Welchen Konkurrenten übernahm die Consus Real Estate Ende 2018, wodurch sie größter Projektentwickler Deutschlands wurde?",
+  "answers": [
+   "SSN Group"
+  ],
+  "support": "Ende 2018 übernahm Consus zudem den Konkurrenten SSN Group"
+ },
+ {
+  "id": "q061",
+  "language": "de",
+  "question": "Wann wurde das ehemalige Essl-Museum als Albertina Klosterneuburg wiedereröffnet?",
+  "answers": [
+   "9. April 2024",
+   "am 9. April 2024"
+  ],
+  "support": "Am 9. April 2024 wurde das ehemalige Essl-Museum als Albertina Klosterneuburg wiederöffnet."
+ },
+ {
+  "id": "q069",
+  "language": "de",
+  "question": "Bis zu welcher Wassertiefe konnten die 400-mm-Torpedorohre der U-Boote des Projekts 667A eingesetzt werden?",
+  "answers": [
+   "250 Meter",
+   "250 m"
+  ],
+  "support": "während die 400-mm-Rohre gar bis in 250 Meter Wassertiefe verwendet werden konnten"
+ },
+ {
+  "id": "q074",
+  "language": "de",
+  "question": "Wie sollen öffentliche Stellen ihre Websites und mobilen Anwendungen nach Artikel 4 der Richtlinie (EU) 2016/2102 gestalten?",
+  "answers": [
+   "wahrnehmbar, bedienbar, verständlich und robust"
+  ],
+  "support": "indem sie sie wahrnehmbar, bedienbar, verständlich und robust gestalten"
+ },
+ {
+  "id": "q077",
+  "language": "de",
+  "question": "Welche Objektbezeichnung trägt das Baudenkmal Nr. 2 der Denkmalliste am Aegidienkirchhof?",
+  "answers": [
+   "Renaissance-Traufenhaus"
+  ],
+  "support": "Renaissance-Traufenhaus Aegidienkirchhof"
+ },
+ {
+  "id": "q083",
+  "language": "fr",
+  "question": "À quelle date la cathédrale Notre-Dame-et-Saint-Vaast d'Arras a-t-elle été rendue au culte ?",
+  "answers": [
+   "14 mai 1934",
+   "le 14 mai 1934"
+  ],
+  "support": "La cathédrale est rendue au culte le 14 mai 1934"
+ },
+ {
+  "id": "q084",
+  "language": "fr",
+  "question": "À qui Guillaume Kasbarian a-t-il succédé comme ministre délégué du Logement en février 2024 ?",
+  "answers": [
+   "Patrice Vergriete"
+  ],
+  "support": "Il succède à Patrice Vergriete"
+ },
+ {
+  "id": "q091",
+  "language": "fr",
+  "question": "Selon MDN, dans quels environnements la prise en charge des promesses JavaScript est-elle problématique ?",
+  "answers": [
+   "Opera Mini et IE11",
+   "Opera Mini et Internet Explorer 11"
+  ],
+  "support": "Opera Mini et IE11 ainsi que les versions antérieures"
+ },
+ {
+  "id": "q093",
+  "language": "fr",
+  "question": "À quelle fréquence minimale les autorités compétentes doivent-elles réexaminer leurs procédures de réception des signalements selon la directive (UE) 2019/1937 ?",
+  "answers": [
+   "une fois tous les trois ans",
+   "tous les trois ans"
+  ],
+  "support": "et au minimum une fois tous les trois ans"
+ },
+ {
+  "id": "q097",
+  "language": "fr",
+  "question": "Quelle unité de contrôle de l'inspection du travail est compétente pour le transport sur l'ensemble de la région Bourgogne Franche Comté ?",
+  "answers": [
+   "025U02",
+   "UC 025U02"
+  ],
+  "support": "l’UC 025U02 compétente pour le transport sur l’ensemble de la région Bourgogne Franche Comté"
+ },
+ {
+  "id": "q101",
+  "language": "fr",
+  "question": "Combien de lits de médecine compte le CH Ambert, hôpital de proximité labellisé en 2024 ?",
+  "answers": [
+   "40",
+   "40 lits"
+  ],
+  "support": "CH AMBERT Centre hospitalier (CH) 2024 Allier Puy-de-Dôme 40"
+ },
+ {
+  "id": "q106",
+  "language": "ja",
+  "question": "森博嗣がVシリーズのコンセプトとして掲げた「SSS」とは何を表すか？",
+  "answers": [
+   "シンプル、シャープ、スパイシィ"
+  ],
+  "support": "シンプル、シャープ、スパイシィのSSSを掲げている"
+ },
+ {
+  "id": "q112",
+  "language": "ja",
+  "question": "細川政元が最初に後継者として迎えた澄之は誰の次男か？",
+  "answers": [
+   "九条政基"
+  ],
+  "support": "関白・九条政基の次男である澄之を迎えた"
+ },
+ {
+  "id": "q114",
+  "language": "ja",
+  "question": "黒澤明の映画『生きる』で、渡辺は夜の街へ出かける際に貯金からいくらおろしたか？",
+  "answers": [
+   "5万円"
+  ],
+  "support": "貯金から5万円をおろして夜の街へ出かける"
+ },
+ {
+  "id": "q119",
+  "language": "ja",
+  "question": "MDNのクロスブラウザー動画プレイヤーの例では、何種類の動画ソースが提供されているか？",
+  "answers": [
+   "3種類",
+   "MP4、WebM、Ogg"
+  ],
+  "support": "このプレイヤーには、MP4、WebM、Ogg の 3 種類の動画ソースが提供されてます"
+ },
+ {
+  "id": "q121",
+  "language": "ja",
+  "question": "「AI」という言葉は何年に開催されたどの会議で提唱されたか？",
+  "answers": [
+   "1956年のダートマス会議",
+   "ダートマス会議"
+  ],
+  "support": "AI という言葉は、1956 年に開催されたダートマス会議にて"
+ }
+]

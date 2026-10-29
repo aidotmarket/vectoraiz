@@ -1,8 +1,11 @@
 //! Headless offline pipeline. Network is used only by the explicit upload command.
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::{io::Write, path::PathBuf};
-use vz_core::{engine::Engines, storage::State};
+use vz_core::{
+    engine::{ChatOnly, Engines},
+    storage::State,
+};
 #[derive(Parser)]
 #[command(name = "vectoraiz-cli")]
 struct Args {
@@ -19,6 +22,18 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Operation {
+    BakeoffSearch {
+        #[arg(long)]
+        questions: PathBuf,
+        #[arg(long, default_value_t = 10)]
+        top_k: usize,
+    },
+    BakeoffChat {
+        #[arg(long)]
+        items: PathBuf,
+        #[arg(long, value_parser = ["answer", "cite"])]
+        prompt: String,
+    },
     SelfTest,
     Embed {
         text: String,
@@ -67,10 +82,52 @@ fn main() -> Result<()> {
     {
         return vz_pack::upload(pack, endpoint, bucket, region, prefix);
     }
-    let engines = Engines::load(&args.assets, &args.models, args.cpu)?;
+    if let Operation::BakeoffChat { items, prompt } = &args.command {
+        let chat = ChatOnly::load(&args.assets, &args.models, args.cpu)?;
+        for item in read_questions(items)? {
+            let sources = item["sources"].as_array().context("sources array")?;
+            let context = sources
+                .iter()
+                .map(|s| {
+                    Ok(format!(
+                        "[{}] {}",
+                        s["n"].as_u64().context("source number")?,
+                        s["text"].as_str().context("source text")?
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?
+                .join("\n\n");
+            let result = chat.measure(
+                item["question"].as_str().context("question")?,
+                &context,
+                prompt == "cite",
+            )?;
+            let mut value = serde_json::to_value(result)?;
+            value["id"] = item.get("id").context("id")?.clone();
+            println!("{}", value);
+        }
+        return Ok(());
+    }
+    let engines = if matches!(args.command, Operation::BakeoffSearch { .. }) {
+        Engines::load_embedding(&args.assets, &args.models, args.cpu)?
+    } else {
+        Engines::load(&args.assets, &args.models, args.cpu)?
+    };
     let runtime = tokio_runtime()?;
     runtime.block_on(async {
         match args.command {
+            Operation::BakeoffSearch { questions, top_k } => {
+                let (state, _) = State::open_index(&args.state, &engines.recipe)?;
+                let paths = state.documents()?.into_iter().map(|d| (d.doc_id, d.path)).collect::<std::collections::HashMap<_, _>>();
+                for item in read_questions(&questions)? {
+                    let question = item["question"].as_str().context("question")?;
+                    let started = std::time::Instant::now();
+                    let hits = state.search(question, &engines.vector(question, true)?, top_k.clamp(1, 100)).await?;
+                    let query_ms = started.elapsed().as_secs_f64() * 1000.0;
+                    let hits = hits.iter().enumerate().map(|(i, h)| Ok(serde_json::json!({"rank": i + 1, "doc_path": paths.get(&h.chunk.doc_id).context("hit document")?, "page": h.chunk.page, "chunk_id": h.chunk.chunk_id, "score": h.score}))).collect::<Result<Vec<_>>>()?;
+                    println!("{}", serde_json::json!({"id": item.get("id").context("id")?, "hits": hits, "query_ms": query_ms}));
+                }
+            }
             Operation::Embed { text } => { println!("{}",serde_json::to_string(&serde_json::json!({"embedding":engines.vector(&text,true)?,"recipe":engines.recipe}))?); }
             Operation::Index { folder } => {
                 let mut state = State::open(&args.state)?;
@@ -104,11 +161,22 @@ fn main() -> Result<()> {
                 let manifest = vz_pack::write(&args.state, &engines, &output, &query)?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
-            Operation::SelfTest | Operation::Upload { .. } => unreachable!(),
+            Operation::SelfTest | Operation::Upload { .. } | Operation::BakeoffChat { .. } => unreachable!(),
         }
         Ok(())
     })
 }
 fn tokio_runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
+}
+
+fn read_questions(path: &std::path::Path) -> Result<Vec<serde_json::Value>> {
+    let text = std::fs::read_to_string(path)?;
+    if text.trim_start().starts_with('[') {
+        return Ok(serde_json::from_str(&text)?);
+    }
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| Ok(serde_json::from_str(line)?))
+        .collect()
 }

@@ -1,0 +1,160 @@
+# Phase 0 model bake-off method
+
+C1 implements the harness. The golden corpus and labels arrive separately;
+measurements and model selection are operator work after this PR. No result or
+model pick is claimed here. Authority: Phase 0 Gate 2 section 4.3.
+
+Use [the run instructions](../../spike/bakeoff/README.md) and
+[input schemas](../../spike/corpus/README.md). Freeze corpus, licences,
+question ids and labels before running. Record the input revision along with
+the result artifacts. Target about 300 documents across the formats, five
+languages/scripts and OCR cases listed in the corpus README, at least 100
+retrieval questions, and exactly 30 chat questions.
+
+## Recipes and compatibility
+
+Candidate pins override pooling, prefixes, embedding context/batch size and
+EOS, plus chat template, context and output limits. Defaults preserve today's
+CLS/BGE recipe values and literal ChatML Ask prompt. The recipe regression test
+compares serialized bytes to the old literal fields and includes negative
+controls. EOS is recorded in the existing tokenizer descriptor to prevent
+mixing incompatible indices; no index schema is added.
+
+The brief explicitly permits a llama.cpp bump for candidate support. The
+original `llama-cpp-2`/sys `0.1.138` vendors llama.cpp
+`244641955f6146f7e8474afff7772d427593a534`, which lacks Gemma 4 architecture
+support. `0.1.140` and `0.1.141` also lack it; `0.1.142` is the first release
+with it, vendoring `b8635075ffe27b135c49afb9a8b5c434bd42c502`.
+This is the only dependency bump. The vendored MIT licence is unchanged.
+The existing recipe's `llama_commit` consequently records that new revision;
+all other default recipe bytes stay identical. This is the necessary exception
+to total byte identity under the brief's permitted bump: old indices need
+re-indexing because the existing recipe gate checks the backend revision.
+Actual full candidate loads remain UNVERIFIED; architecture availability is
+not evidence of successful inference. No multi-GB candidate was downloaded
+for this code build. Operator load errors must be retained with the raw
+measurement evidence; do not silently substitute a model or fabricate results.
+
+GGUF prompts use the embedded Jinja template via llama-cpp-2's chat-template
+API with system and user messages. Thinking is disabled via template parameters;
+Qwen3-8B also receives `/no_think` in extra system text. ChatML defaults retain
+the app's exact literal Ask wording. Prompt budget is context minus output
+limit minus 16 tokens. Sampling is greedy. EmbeddingGemma uses the decoder
+embedding path; BERT models retain encode; Qwen last-token embeddings append
+EOS after truncating to leave room for it. All vectors are L2 normalized.
+
+## Metrics and scoring
+
+Retrieval is the app's hybrid `State::search` over the actual query vector.
+Take ten chunk hits in their original order. A question's document recall is
+1 if its labelled document appears, otherwise 0; report the mean. MRR@10 is
+1 / the first matching hit's one-based rank, otherwise 0. Duplicate chunks do
+not earn additional success and do not compress ranks. Page recall additionally
+requires the labelled page and averages only questions with a page label.
+Raw hits contain paths, pages, chunk ids, scores and query latency, no text.
+Index throughput is chunks / wall seconds including loading, hashing, parsing,
+OCR and storage. Also record chunk count, index bytes and peak process RSS.
+
+For each chat candidate, reuse the same frozen top-three sources from a chosen
+embedding state, preserving order. The answer prompt is today's Ask prompt.
+The cite prompt appends exactly: "Cite each fact with its source number in
+square brackets, for example [2]." `answer_ok` accepts any nonempty labelled
+answer substring after case folding and whitespace collapsing. `citation_ok`
+requires at least one numeric `[n]`; every cited number must exist and every
+cited source must contain the normalized support substring. The overlap
+variant uses unique Unicode word tokens: support/source intersection divided
+by support-token count must be at least 0.8 for every citation. Unknown
+numbers fail. These string proxies require a reviewing instance's seeded
+hand check of ten answers per candidate; they do not establish factual truth.
+
+TTFT starts before prompt rendering/tokenization and ends at the first sampled
+non-EOG token. Output tokens count actual sampled non-EOG tokens, including
+pieces with empty decoded text. Tokens/s is (output tokens - 1) divided by
+generation time after the first token; fewer than two tokens gives zero.
+No-token output has null TTFT. Total includes prefill/context construction and
+generation, excludes model load. Means are reported across questions; raw
+per-item timings and full command stdout/stderr are retained. Process peak RSS
+includes model loading. macOS `time -l` reports bytes; other systems use
+optional psutil sampled process-tree RSS or explicitly `unmeasured`.
+
+Grounding runs all 108 existing labelled cases, preserving fixture versus
+three-file retrieval corpora and today's fixture embedding. The latter is
+reconstructed from the frozen on-topic source passages. As in
+[the previous measurement](ask-grounding-measurement.md), retrieve three
+chunks with the actual CLI and retain on/off-topic labels. That report measured
+A1/lexical/cosine gate proxies, not generated refusal classifications; no gate
+is added here. This round measures raw answers with a conservative refusal
+phrase heuristic in `common.refusal`, reporting off-topic refusal/non-refusal
+shares and on-topic refusals. Non-refusal is a proxy for answering from general
+knowledge, requiring manual review; ambiguous and mixed answers can be
+misclassified. This is not directly comparable to the old A1 false-acceptance
+rate and does not reverse the decision to ship no grounding gate.
+
+## Hardware limits
+
+Record OS, CPU, RAM, requested acceleration and measurement method with every
+result. GPU requests can fall back to CPU; inspect the run environment before
+interpreting speed. Koskadeux is M3 Ultra / 256 GB, above the target tiers:
+**8/16 GB speed figures are UNVERIFIED on Koskadeux** until measured on those
+machines. **Windows figures are UNTESTED in this round**, per Max 2026-10-29.
+Memory footprint alone does not prove fit or speed on a smaller machine.
+
+## Candidate provenance and licence terms
+
+All ten requested models exist; no model substitutions. Additional embedding:
+Qwen3-Embedding-0.6B. Maker repositories are preferred, then ggml-org; Q4_K_M
+availability requires community quantisers for the two Gemma 4 models and
+Qwen3-4B-Instruct-2507. E5 has no located maker/ggml-org conversion and uses
+Ralriki. GGUF sizes and SHA256 are from Hugging Face LFS metadata queried again
+at each pinned commit. Full hashes, source revisions, licence URLs, terms,
+recipes and notices are in [candidates.json](../../spike/bakeoff/candidates.json).
+Commercial use is permitted by MIT, Apache-2.0, and conditionally Gemma terms.
+MIT requires retaining its notice; Apache requires licence, attribution and
+applicable NOTICE, modification notices, and carries patent terms. Gemma
+requires passing through its agreement and use restrictions, preserving
+notices/marking modifications and the prescribed Notice file. Its policy is
+linked in the manifest. No candidate with unclear terms is selected.
+Gemma 4 is Apache-2.0 according to Google's maker metadata; it does not inherit
+EmbeddingGemma's Gemma terms.
+
+| Candidate | Kind / tier | GGUF revision | Bytes | Licence |
+|---|---|---|---:|---|
+| [bge-m3](https://huggingface.co/gpustack/bge-m3-GGUF/resolve/2d48f1737679ad900d5c26c5aad5410e9c70fdca/bge-m3-Q8_0.gguf) | embedding / — | `2d48f1737679ad900d5c26c5aad5410e9c70fdca` | 634553760 | [MIT](https://huggingface.co/BAAI/bge-m3/blob/5617a9f61b028005a4858fdac845db406aefb181/README.md) |
+| [multilingual-e5-large-instruct](https://huggingface.co/Ralriki/multilingual-e5-large-instruct-GGUF/resolve/f43c843a00e7c3bdd087cbaf481464c1fa7fb37d/multilingual-e5-large-instruct-q8_0.gguf) | embedding / — | `f43c843a00e7c3bdd087cbaf481464c1fa7fb37d` | 603097568 | [MIT](https://huggingface.co/intfloat/multilingual-e5-large-instruct/blob/274baa43b0e13e37fafa6428dbc7938e62e5c439/README.md) |
+| [embeddinggemma-300m](https://huggingface.co/ggml-org/embeddinggemma-300M-GGUF/resolve/0f741b5a6585bd53aeb15cd1372c56f2a0f65e12/embeddinggemma-300M-Q8_0.gguf) | embedding / — | `0f741b5a6585bd53aeb15cd1372c56f2a0f65e12` | 333590944 | [Gemma](https://ai.google.dev/gemma/terms) |
+| [qwen3-embedding-0.6b](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/370f27d7550e0def9b39c1f16d3fbaa13aa67728/Qwen3-Embedding-0.6B-Q8_0.gguf) | embedding / — | `370f27d7550e0def9b39c1f16d3fbaa13aa67728` | 639150592 | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/blob/97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3/README.md) |
+| [qwen3-4b-instruct-2507](https://huggingface.co/lmstudio-community/Qwen3-4B-Instruct-2507-GGUF/resolve/4edb920b6f14e3b9284d4502a6485103d72cde05/Qwen3-4B-Instruct-2507-Q4_K_M.gguf) | chat / 8gb | `4edb920b6f14e3b9284d4502a6485103d72cde05` | 2497280448 | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/LICENSE) |
+| [gemma-4-e4b](https://huggingface.co/unsloth/gemma-4-E4B-it-GGUF/resolve/bfc15c382204943c3a8fff0c750b94ae2364d7a3/gemma-4-E4B-it-Q4_K_M.gguf) | chat / 8gb | `bfc15c382204943c3a8fff0c750b94ae2364d7a3` | 4977171584 | [Apache-2.0](https://huggingface.co/google/gemma-4-E4B-it/blob/ee0ef6023621cff504d758262d4e04895a5af4a2/README.md) |
+| [qwen3-8b](https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/7c41481f57cb95916b40956ab2f0b139b296d974/Qwen3-8B-Q4_K_M.gguf) | chat / 16gb | `7c41481f57cb95916b40956ab2f0b139b296d974` | 5027783488 | [Apache-2.0](https://huggingface.co/Qwen/Qwen3-8B/blob/b968826d9c46dd6066d109eabc6255188de91218/LICENSE) |
+| [ministral-3-8b](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF/resolve/0102285ad796bd99af90f58de616092e5630e970/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf) | chat / 16gb | `0102285ad796bd99af90f58de616092e5630e970` | 5198911904 | [Apache-2.0](https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512/blob/5b26027e7b19eeb4b7352e1fed3926375dd2cb4d/README.md) |
+| [qwen3.6-35b-a3b](https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF/resolve/7878dc9a905c7c9379e5e8d6a1aa9affdd6839c5/Qwen3.6-35B-A3B-Q4_K_M.gguf) | chat / 32gb | `7878dc9a905c7c9379e5e8d6a1aa9affdd6839c5` | 20419565568 | [Apache-2.0](https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/995ad96eacd98c81ed38be0c5b274b04031597b0/LICENSE) |
+| [gemma-4-26b-a4b](https://huggingface.co/lmstudio-community/gemma-4-26B-A4B-it-GGUF/resolve/f6e6747823b2912661935db7e0009287c4838073/gemma-4-26B-A4B-it-Q4_K_M.gguf) | chat / 32gb | `f6e6747823b2912661935db7e0009287c4838073` | 16796017248 | [Apache-2.0](https://huggingface.co/google/gemma-4-26B-A4B-it/blob/4d7ae4984b7db7de8f8457170b3f1a419ee76d52/README.md) |
+
+E5 is explicitly limited to 512 tokens by the supplied recipe/model context;
+other candidates have at least 1024. An estimated 500-token chunk may exceed
+512 real tokens, so record this truncation risk when interpreting E5 results.
+
+## Results (operator fills after measurements)
+
+| Embedding | Recall@10 | MRR@10 | Page recall@10 | Index s | Peak RSS bytes | Chunks/s | Index bytes |
+|---|---:|---:|---:|---:|---:|---:|---:|
+
+| Chat | Tier | Prompt | Answer | Citation | Overlap citation | TTFT ms | Tokens/s | Total ms | Peak RSS bytes | Off-topic refusal |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+
+No selected embedding or per-tier chat model yet. Record quality, hand-check
+verdicts, load failures, hardware caveats and reasons before making picks in
+the BQ. Keep full raw results as private evidence; commit only reviewed results
+and no corpus/model binaries.
+
+## Parser findings from the corpus run (S1837)
+
+- A real open-data XLSX (`de-sh-xlsx-0003.xlsx`, Schleswig-Holstein open data) is refused by the archive-expansion guard (`zip compression ratio exceeds 100:1`). It was removed from the bake-off corpus. Phase 1 should revisit the guard (ratio plus absolute expanded-size cap) so ordinary highly compressible spreadsheets index.
+- Scanned PDFs need the `vz-vision-ocr` helper next to `vectoraiz-cli` (CI builds it with `swiftc scripts/vision-ocr.swift -O -o target/<profile>/vz-vision-ocr`); without it they fail with `start Apple Vision OCR helper`.
+
+## Gate 3 fold notes (S1837)
+
+- **Index compatibility after the llama.cpp bump.** `llama-cpp-2` 0.1.142 changes `Recipe.llama_commit`, so every index written by 0.0.9 or earlier fails `validate_recipe` on Index, Search and Ask after the next release. The app shows "embedding recipe mismatch; re-index required (use a new index)" and has no reset action. Recovery for testers is in `docs/install-notes/macos.md` and `windows.md` (quit, rename `phase0-index`, index again); the release record for the next version must say so. A Phase 1 follow-up should rebuild the index in place on a recipe mismatch instead of erroring (CC Gate 3 BETTER).
+- **Raw results.** Per-question raw results stay in the ignored `spike/bakeoff/results/` attempt folders (operator evidence on Koskadeux, path recorded in the BQ). This document commits the summary tables, the picks and their reasons, and the per-candidate totals.
+- **Measurement fixes before the chat runs.** GGUF-template chat prompts are tokenized with `AddBos::Always`, so Gemma 4 and Ministral receive their BOS (`bakeoff-chat` now reports `prompt_tokens` and `first_prompt_token`; Gemma 4 should start with token 2, Ministral with 1, Qwen unchanged). Last-token embedding no longer appends a second EOS when the vocab already added one (Qwen3-Embedding). Citation checks compare NFKC/casefolded text with all whitespace removed, the rule the corpus support strings were verified with, and report citation and answer rates per language. An alternate labelled page (`also_expected`) counts for page recall. Each run uses a fresh attempt folder; a failed rerun writes `<kind>-<name>.failed.json`, and the summary flags a candidate whose latest attempt failed.
+- **bge-m3 and multilingual-e5 were measured before this fold.** It changes neither of their recipes nor the retrieval scoring, except q019's alternate page. Their page recall is recomputed from the raw ranks with the new rule.
