@@ -265,9 +265,15 @@ impl Engines {
         );
         let mut tokens = self.embed.str_to_token(&text, AddBos::Always)?;
         let append_eos = pin_bool(&self.pins, "embedding", "append_eos")?;
+        let eos = self.embed.token_eos();
+        // A vocab with add_eos_token already appended EOS in str_to_token; never
+        // end with two EOS tokens (CC Gate 3 LOW-1).
+        if append_eos && tokens.last() == Some(&eos) {
+            tokens.pop();
+        }
         tokens.truncate(self.recipe.max_tokens - usize::from(append_eos));
         if append_eos {
-            tokens.push(self.embed.token_eos());
+            tokens.push(eos);
         }
         let max_tokens = self.recipe.max_tokens as u32;
         let params = LlamaContextParams::default()
@@ -325,6 +331,8 @@ pub struct ChatMeasurement {
     pub output_tokens: usize,
     pub tokens_per_s: f64,
     pub total_ms: f64,
+    pub prompt_tokens: usize,
+    pub first_prompt_token: i32,
 }
 /// Harness loader: never opens or requires the embedding GGUF.
 pub struct ChatOnly {
@@ -415,14 +423,11 @@ fn generate(
         }
         _ => bail!("invalid chat.template"),
     };
-    let tokens = chat.str_to_token(
-        &prompt,
-        if pin_str(pins, "chat", "template", "chatml")? == "gguf" {
-            AddBos::Never
-        } else {
-            AddBos::Always
-        },
-    )?;
+    // AddBos::Always maps to llama_tokenize(add_special = true), which adds a BOS
+    // only when the vocab asks for one. llama.cpp's Jinja path strips a leading BOS
+    // from the rendered text for such vocabs, so this yields exactly one BOS for
+    // Gemma/Mistral templates and none for Qwen (whose vocab sets no BOS).
+    let tokens = chat.str_to_token(&prompt, AddBos::Always)?;
     if tokens.len() > budget as usize {
         bail!("question and context exceed chat context budget");
     }
@@ -469,6 +474,8 @@ fn generate(
             0.0
         },
         total_ms: total * 1000.0,
+        prompt_tokens: tokens.len(),
+        first_prompt_token: tokens[0].0,
     })
 }
 impl Embedder for Engines {

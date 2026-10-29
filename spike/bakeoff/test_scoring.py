@@ -21,6 +21,45 @@ class Scoring(unittest.TestCase):
         self.assertIsNone(retrieval({"doc_path": "right.pdf"}, hits)["page_recall_at_10"])
         self.assertEqual(retrieval({"doc_path": "right.pdf"}, [{"doc_path": "copyright.pdf", "page": 1}])["recall_at_10"], 0)
 
+    def test_alternate_labelled_page_counts(self):
+        # q019 shape: the passage is printed on two pages of one report.
+        q = {"doc_path": "r.pdf", "page": 2, "also_expected": [{"doc_path": "r.pdf", "page": 14}]}
+        self.assertEqual(retrieval(q, [{"doc_path": "/c/r.pdf", "page": 14}])["page_recall_at_10"], 1)
+        self.assertEqual(retrieval(q, [{"doc_path": "/c/r.pdf", "page": 2}])["page_recall_at_10"], 1)
+        # negative control: an unrelated page of the right document is still a page miss
+        r = retrieval(q, [{"doc_path": "/c/r.pdf", "page": 7}])
+        self.assertEqual((r["recall_at_10"], r["page_recall_at_10"]), (1, 0))
+        # negative control: the alternate page of a different document does not count
+        self.assertEqual(retrieval(q, [{"doc_path": "/c/other.pdf", "page": 14}])["recall_at_10"], 0)
+
+    def test_citation_ignores_parser_spacing(self):
+        # Japanese HTML text gets spaces from extraction; XLSX cells are tab-joined.
+        sources = [{"n": 1, "text": "総務省 は 2024 年に 白書 を 公表した"}, {"n": 2, "text": "Region\tYear\t2023\t17.5"}]
+        self.assertTrue(citation_ok("答え [1]", sources, "総務省は2024年に白書を公表した"))
+        self.assertTrue(citation_ok("value [2]", sources, "Region Year 2023 17.5"))
+        # negative control: different text still fails
+        self.assertFalse(citation_ok("答え [1]", sources, "総務省は2023年に白書を公表した"))
+
+    def test_failed_rerun_never_masks_as_current(self):
+        import summarise
+        with tempfile.TemporaryDirectory() as tmp:
+            results = Path(tmp) / "results"
+            with patch.object(common, "HERE", Path(tmp)):
+                first = common.new_attempt("embedding", "m")
+                second = common.new_attempt("embedding", "m")
+                self.assertNotEqual(first, second)  # attempts are never reused
+                (first / "evidence.txt").write_text("success evidence")
+                common.write_json(results / "embedding-m.json", {"candidate": {"name": "m"}, "attempt": str(first),
+                    "totals": {"recall_at_10": 1.0, "mrr_at_10": 1.0, "page_recall_at_10": 1.0},
+                    "index_timing": {"wall_s": 1.0, "peak_rss_bytes": 1}, "chunks_per_s": 1.0, "index_bytes": 1})
+                common.record_failure("embedding", "m", second, RuntimeError("boom"))
+                table = summarise.tables(results)
+                self.assertIn("latest attempt FAILED", table)
+                self.assertIn(second.name, table)
+                self.assertEqual((first / "evidence.txt").read_text(), "success evidence")
+                common.clear_failure("embedding", "m")
+                self.assertNotIn("FAILED", summarise.tables(results))
+
     def test_answers(self):
         self.assertTrue(answer_ok("It is THIRTY\n days.", ["30 days", "thirty days"]))
         self.assertFalse(answer_ok("I don't know.", ["thirty days"]))

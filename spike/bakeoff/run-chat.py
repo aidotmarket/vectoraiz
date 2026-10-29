@@ -2,7 +2,7 @@
 """Compare chat candidates on a shared frozen top-three source set."""
 import hashlib
 from pathlib import Path
-from common import ROOT, HERE, answer_ok, argv, candidate, citation_ok, invoke, machine, mean, parser, questions, read_json, refusal, sources_for, write_json
+from common import ROOT, HERE, answer_ok, argv, candidate, citation_ok, clear_failure, invoke, machine, mean, new_attempt, parser, questions, read_json, record_failure, refusal, sources_for, write_json
 
 
 def main():
@@ -15,8 +15,16 @@ def main():
     rows = questions(a.questions)
     if len(rows) != 30:
         p.error("expected exactly 30 corpus chat questions")
-    work = HERE / "results" / ("chat-" + a.candidate)
-    work.mkdir(parents=True, exist_ok=True)
+    work = new_attempt("chat", a.candidate)
+    try:
+        run(a, p, selected, rows, work)
+    except BaseException as error:
+        record_failure("chat", a.candidate, work, error)
+        raise
+    clear_failure("chat", a.candidate)
+
+
+def run(a, p, selected, rows, work):
     state = a.embedding.resolve()
     embed_pins = (a.embedding_models or state.parent / "models.json").resolve()
     # Candidate chat pins do not affect retrieval. Sources are cached once per
@@ -42,7 +50,13 @@ def main():
         for q, item in zip(rows, items):
             result = by_id[q["id"]]
             scored.append({**result, "question": q["question"], "sources": item["sources"], "answer_ok": answer_ok(result["answer"], q["answers"]), **({"citation_ok": citation_ok(result["answer"], item["sources"], q["support"]), "citation_overlap_ok": citation_ok(result["answer"], item["sources"], q["support"], True)} if prompt == "cite" else {})})
-        reports[prompt] = {"timing": timing, "raw": scored, "totals": {k: mean([r.get(k) for r in scored]) for k in ["answer_ok", "citation_ok", "citation_overlap_ok", "ttft_ms", "tokens_per_s", "total_ms"]}}
+        for q, r in zip(rows, scored):
+            r["language"] = q.get("language")
+        by_language = {}
+        for r in scored:
+            by_language.setdefault(r["language"] or "unknown", []).append(r)
+        reports[prompt] = {"timing": timing, "raw": scored, "totals": {k: mean([r.get(k) for r in scored]) for k in ["answer_ok", "citation_ok", "citation_overlap_ok", "ttft_ms", "tokens_per_s", "total_ms"]},
+            "by_language": {lang: {k: mean([r.get(k) for r in items]) for k in ["answer_ok", "citation_ok"]} for lang, items in sorted(by_language.items())}}
     # Historical cases have separate retrieval corpora; preserve those labels.
     grounding = questions(ROOT / "spike/fixtures/ask-grounding-questions.json")
     fixture_pins = read_json(ROOT / "spike/fixtures/models.json")
@@ -74,7 +88,7 @@ def main():
         ground_outputs.extend({**r, "kind": labels[r["id"]]["kind"], "corpus": corpus, "refusal": refusal(r["answer"]), "timing": timing} for r in output)
     off = [r for r in ground_outputs if r["kind"] == "off"]
     on = [r for r in ground_outputs if r["kind"] == "on"]
-    write_json(HERE / "results" / f"chat-{a.candidate}.json", {"candidate": selected, "machine": machine(a.cpu), "source_cache_key": identity, "source_digest": hashlib.sha256(__import__("json").dumps(items, sort_keys=True).encode()).hexdigest(),
+    write_json(HERE / "results" / f"chat-{a.candidate}.json", {"candidate": selected, "attempt": str(work), "machine": machine(a.cpu), "source_cache_key": identity, "source_digest": hashlib.sha256(__import__("json").dumps(items, sort_keys=True).encode()).hexdigest(),
         "prompts": reports, "grounding": {"off_topic_count": len(off), "off_topic_refusal_share": mean([r["refusal"] for r in off]), "off_topic_nonrefusal_share": mean([not r["refusal"] for r in off]), "on_topic_refusal_share": mean([r["refusal"] for r in on]), "raw": ground_outputs}})
 
 

@@ -7,7 +7,7 @@ Built on Koskadeux on 2026-10-29. Nothing was committed, pushed or posted. Every
 
 | path | what it is |
 |---|---|
-| `manifest.json` | 299 documents: id, pinned URL, sha256, bytes, format, language, licence, licence_url, source, title, filename. Wikipedia entries also carry `"postprocess": "strip-mediawiki-render-id"` (see "Hash stability" below). |
+| `manifest.json` | 299 documents as delivered (298 after the change below): id, pinned URL, sha256, bytes, format, language, licence, licence_url, source, title, filename. Wikipedia entries also carry `"postprocess": "strip-mediawiki-render-id"` (see "Hash stability" below). |
 | `questions.json` | 123 retrieval questions; 30 have `"chat": true`. |
 | `files/` | the 299 downloaded files. Fetched by script, never committed. |
 | `tools/fetch_corpus.py` | standalone fetcher (needs only the standard library and curl). It downloads every manifest entry, applies the postprocess step and checks sha256 and size. Exits 1 if anything does not match. |

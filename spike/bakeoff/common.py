@@ -42,12 +42,22 @@ def normal(text):
 def retrieval(question, hits, k=10):
     # Chunk ranking is retained; repeated chunks from one document do not earn
     # additional credit or promote later documents to an earlier rank.
-    expected = question["doc_path"].replace("\\", "/")
-    def matches(hit):
-        path = hit["doc_path"].replace("\\", "/")
+    # `also_expected` lists other labelled locations of the same answer
+    # (for example a passage printed on two pages); any of them counts.
+    locations = [(question["doc_path"], question.get("page"))]
+    locations += [(alt["doc_path"], alt.get("page")) for alt in question.get("also_expected", [])]
+    def norm_path(path):
+        return path.replace("\\", "/")
+    def doc_matches(hit, expected):
+        path = norm_path(hit["doc_path"])
+        expected = norm_path(expected)
         return path == expected or path.endswith("/" + expected)
+    def matches(hit):
+        return any(doc_matches(hit, doc) for doc, _ in locations)
+    def page_matches(hit):
+        return any(doc_matches(hit, doc) and page is not None and hit.get("page") == page for doc, page in locations)
     ranks = [i + 1 for i, h in enumerate(hits[:k]) if matches(h)]
-    page_ranks = [i + 1 for i, h in enumerate(hits[:k]) if matches(h) and h["page"] == question.get("page")]
+    page_ranks = [i + 1 for i, h in enumerate(hits[:k]) if page_matches(h)]
     return {"recall_at_10": float(bool(ranks)), "mrr_at_10": 1 / ranks[0] if ranks else 0.0,
             "page_recall_at_10": float(bool(page_ranks)) if question.get("page") is not None else None,
             "document_ranks": ranks, "page_ranks": page_ranks}
@@ -57,10 +67,18 @@ def answer_ok(answer, alternatives):
     return any(normal(a) and normal(a) in normal(answer) for a in alternatives)
 
 
+def compact(text):
+    """NFKC + casefold + no whitespace: the rule the corpus support strings were
+    verified with (CORPUS-REPORT.md), robust to parser spacing in Japanese text,
+    XLSX cells and OCR line breaks."""
+    import unicodedata
+    return "".join(unicodedata.normalize("NFKC", text).casefold().split())
+
+
 def citation_ok(answer, sources, support, overlap=False):
     cited = re.findall(r"\[(\d+)\]", answer)
-    by_n = {str(s["n"]): normal(s["text"]) for s in sources}
-    target = normal(support)
+    by_n = {str(s["n"]): (normal(s["text"]) if overlap else compact(s["text"])) for s in sources}
+    target = normal(support) if overlap else compact(support)
     if not cited or not target:
         return False
     def supported(n):
@@ -259,3 +277,23 @@ def sources_for(args, pins, state, rows, work, label):
         chunks.update({c["chunk_id"]: c["text"] for c in document["chunks"]})
     by_id = {r["id"]: r for r in results}
     return [{"id": q["id"], "question": q["question"], "sources": [{"n": i + 1, "text": chunks[h["chunk_id"]]} for i, h in enumerate(by_id[q["id"]]["hits"])]} for q in rows]
+
+
+def new_attempt(kind, name):
+    """A fresh, never-reused attempt folder: results/<kind>-<name>/attempt-<utc>-<rand>/."""
+    import secrets
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    folder = HERE / "results" / f"{kind}-{name}" / f"attempt-{stamp}-{secrets.token_hex(3)}"
+    folder.mkdir(parents=True, exist_ok=False)
+    return folder
+
+
+def record_failure(kind, name, attempt, error):
+    """Mark the latest attempt as failed so an older success is never shown as current."""
+    write_json(HERE / "results" / f"{kind}-{name}.failed.json", {
+        "attempt": str(attempt), "error": f"{type(error).__name__}: {error}",
+        "failed_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())})
+
+
+def clear_failure(kind, name):
+    (HERE / "results" / f"{kind}-{name}.failed.json").unlink(missing_ok=True)

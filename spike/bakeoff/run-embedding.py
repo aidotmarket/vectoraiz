@@ -2,7 +2,7 @@
 """Index a fresh corpus state and score real app hybrid retrieval."""
 import tempfile
 from pathlib import Path
-from common import ROOT, HERE, argv, candidate, invoke, machine, mean, parser, questions, read_json, retrieval, write_json
+from common import ROOT, HERE, argv, candidate, clear_failure, invoke, machine, mean, new_attempt, parser, questions, read_json, record_failure, retrieval, write_json
 
 
 def main():
@@ -13,8 +13,16 @@ def main():
     a = p.parse_args()
     selected = candidate(a.candidate, "embedding")
     rows = questions(a.questions)
-    work = HERE / "results" / ("embedding-" + a.candidate)
-    work.mkdir(parents=True, exist_ok=True)
+    work = new_attempt("embedding", a.candidate)
+    try:
+        run(a, p, selected, rows, work)
+    except BaseException as error:
+        record_failure("embedding", a.candidate, work, error)
+        raise
+    clear_failure("embedding", a.candidate)
+
+
+def run(a, p, selected, rows, work):
     state = a.state.resolve() if a.state else Path(tempfile.mkdtemp(prefix="state-", dir=work))
     if state.exists() and any(state.iterdir()):
         p.error("state must be fresh and empty")
@@ -33,7 +41,7 @@ def main():
         generations = [r[0] for r in db.execute("SELECT generation FROM documents")]
     chunk_count = sum(len(read_json(state / "generations" / g / "document.json")["chunks"]) for g in generations)
     write_json(HERE / "results" / f"embedding-{a.candidate}.json", {
-        "candidate": selected, "machine": machine(a.cpu), "state": str(state), "pins": str(pin_path),
+        "candidate": selected, "attempt": str(work), "machine": machine(a.cpu), "state": str(state), "pins": str(pin_path),
         "questions": str(a.questions), "index": indexed[-1], "index_timing": timing,
         "chunk_count": chunk_count, "chunks_per_s": chunk_count / timing["wall_s"],
         "index_bytes": sum(f.stat().st_size for f in state.rglob("*") if f.is_file()),
