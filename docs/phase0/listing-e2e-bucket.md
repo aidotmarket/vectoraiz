@@ -5,7 +5,7 @@ Spec: runbooks `specs/BQ-VECTORAIZ-NATIVE-DESKTOP-PHASE0-GATE2.md` §4.5 (runboo
 12:16-12:46 CET (11:16-11:46 UTC). Times below are CET (UTC+1) with UTC in
 brackets where an API or log reported UTC.
 
-**Result: steps 1-6 passed.** A synthetic seller listed a vector pack from a
+**Result: steps 1-5 passed; step 6 is partly done (listing unpublished, tokens revoked and vault slots removed; deleting the bucket is owed and needs Max's separate approval).** A synthetic seller listed a vector pack from a
 dedicated R2 bucket through Seller Workspace in a scripted browser, a synthetic
 buyer bought it with a mock payment and downloaded it directly from R2, and the
 downloaded pack matched its manifest and answered the example query. One
@@ -145,7 +145,8 @@ Buyer download, after the disarm (12:41-12:42 CET):
   account id, by design 6.6). Checked, after URL-decoding, against the seller's
   identity terms: `seller-01`, `e2e-test`, `ai.market E2E Fixture Seller 01`
   (the seller's legal name on the licence), `Fixture Seller`, `E2E Fixture`,
-  `synthetic seller`: **0 hits** in 7 URLs.
+  `synthetic seller` (6 terms, passed to the scan explicitly; the script's
+  default list is empty): **0 hits** in 7 URLs.
 - **Query.** The pack rebuilt from the download, `examples/query.py <pack>` exit
   0: `hashes OK`, `citations OK`, top 3 equal `expected_top`. Again with the
   release CLI recomputing the query embedding from the recorded recipe
