@@ -293,7 +293,6 @@ mod tests {
     #[test]
     fn unsafe_missing_and_invalid_pointers_fall_back() {
         let data = tempfile::tempdir().unwrap();
-        let outside = tempfile::tempdir().unwrap();
         let legacy = data.path().join("phase0-index");
         fs::create_dir(&legacy).unwrap();
         assert_eq!(resolve(data.path()), legacy);
@@ -311,6 +310,7 @@ mod tests {
         }
         #[cfg(unix)]
         {
+            let outside = tempfile::tempdir().unwrap();
             std::os::unix::fs::symlink(outside.path(), data.path().join("escape")).unwrap();
             fs::write(
                 data.path().join("active-index.json"),
