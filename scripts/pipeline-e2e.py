@@ -138,7 +138,8 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     incomplete_assets.mkdir()
     for kind in ['embedding', 'chat']:
         model_file = pins[kind]['file']
-        os.link(ROOT / '.assets' / model_file, incomplete_assets / model_file)
+        # Runner temp directories can be on a different Windows volume.
+        shutil.copyfile(ROOT / '.assets' / model_file, incomplete_assets / model_file)
     state = migration_library('infrastructure-library')
     before = (state / 'active-index.json').read_bytes()
     failure = refused_index(infrastructure, incomplete_assets)
