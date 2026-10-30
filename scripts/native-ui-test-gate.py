@@ -9,6 +9,26 @@ import tomllib
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def cargo_features(values):
+    """Normalize Tauri/CLI feature lists, including workspace-qualified names."""
+    return {feature.removeprefix("vectoraiz/")
+            for value in values for feature in re.split(r"[,\s]+", value) if feature}
+
+
+def shipping_config_features():
+    paths = [ROOT / "app/src-tauri/tauri.conf.json",
+             ROOT / "app/src-tauri/tauri.stage1.conf.json"]
+    # native-package.py preserves build.features in gen/stage1.conf.json.
+    # Check all generated config overlays too, when prepare has already run.
+    paths += sorted((ROOT / "app/src-tauri/gen").rglob("*.conf.json"))
+    features = set()
+    for path in paths:
+        configured = cargo_features(json.loads(path.read_text()).get("build", {}).get("features", []))
+        assert "ui-test" not in configured, f"Shipping config enables ui-test: {path}"
+        features.update(configured)
+    return features
+
+
 def main():
     manifest = tomllib.loads((ROOT / "app/src-tauri/Cargo.toml").read_text())
     assert manifest["dependencies"]["tauri-plugin-wdio-webdriver"]["optional"]
@@ -16,6 +36,7 @@ def main():
     assert config["app"]["security"]["capabilities"] == ["self-test"]
     for path in (ROOT / "app/src-tauri/capabilities").rglob("*.json"):
         assert "wdio" not in path.read_text(), f"Shipping capability widened: {path}"
+    config_features = shipping_config_features()
     feature_sets = {"": "default release", "smoke-test,custom-protocol": "stage-1"}
     # Inspect every shipping build command, excluding only the dedicated UI job.
     for path in (ROOT / ".github/workflows").glob("*.yml"):
@@ -24,10 +45,13 @@ def main():
             content = content.split("  ui-test-macos:", 1)[0]
         assert "ui-test" not in content, f"Shipping workflow enables ui-test: {path}"
         for features in re.findall(r"--features[ =]+([\w,/-]+)", content):
-            if "vectoraiz/" in features:
-                features = ",".join(f.removeprefix("vectoraiz/") for f in features.split(","))
             feature_sets[features] = str(path.relative_to(ROOT))
-    for features, label in feature_sets.items():
+    for cli_features, label in feature_sets.items():
+        # Conservatively include every shipping overlay, even if an overlay
+        # replaces a base feature array: no shipping source may enable ui-test.
+        effective = config_features | cargo_features([cli_features])
+        assert "ui-test" not in effective, f"Shipping build enables ui-test: {label}"
+        features = ",".join(sorted(effective))
         args = ["cargo", "tree", "--locked", "-p", "vectoraiz", "-e", "features", "--prefix", "none"]
         if features:
             args += ["--features", features]

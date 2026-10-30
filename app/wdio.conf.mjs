@@ -1,9 +1,12 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 
 // Config is evaluated in launcher and worker; inherit one fresh data root.
-process.env.VZ_UI_TEST_DATA_ROOT ??= mkdtempSync(resolve(tmpdir(), 'vectoraiz-ui-'));
+const temporaryDataRoot = process.env.VZ_UI_TEST_DATA_ROOT
+  ? undefined
+  : mkdtempSync(resolve(tmpdir(), 'vectoraiz-ui-'));
+process.env.VZ_UI_TEST_DATA_ROOT ??= temporaryDataRoot;
 const artifacts = resolve('ui-test-results');
 mkdirSync(artifacts, { recursive: true });
 
@@ -25,6 +28,9 @@ export const config = {
     captureBackendLogs: true,
   }]],
   capabilities: [{ browserName: 'tauri', 'tauri:options': {} }],
+  onComplete: function () {
+    if (temporaryDataRoot) rmSync(temporaryDataRoot, { recursive: true, force: true });
+  },
   afterTest: async function (_test, _context, { passed }) {
     const evidence = await browser.execute(() => window.__VZ_UI_TEST__ ?? null);
     writeFileSync(resolve(artifacts, 'frontend.json'), JSON.stringify(evidence, null, 2));

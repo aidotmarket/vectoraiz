@@ -27,6 +27,8 @@ cd ..
 python3 scripts/native-ui-test-gate.py
 ```
 
+The UI-test and stage-1 builds share `target/debug/bundle/macos/vectorAIz.app`, so rebuild stage-1 before using that path for shipping acceptance.
+
 The config launches `target/debug/bundle/macos/vectorAIz.app/Contents/MacOS/vectoraiz`
 (the executable inside the debug bundle), one main window and one worker. It creates a fresh temporary model directory, bundles only the
 model manifest, skips the startup update request, and never clicks download or
@@ -51,9 +53,11 @@ startup behavior and the separate `ui-test/capability.json` are guarded by both
 the feature and `debug_assertions`; optimized builds with `ui-test` are rejected.
 The capability is outside the auto-discovered shipping capabilities directory
 and is added only by that guarded code. Existing default/self-test ACLs stay
-unchanged. The CI gate checks shipping workflow feature lists and default and
+unchanged. The CI gate combines shipping workflow feature lists with `build.features` from
+the base, stage-1 and generated packaging configs and checks the default and
 stage-1 Cargo dependency graphs, including the debug stage-1 package, contain no
-WDIO plugin. Release workflows are unchanged.
+WDIO plugin; no shipping workflow or build command enables it.
+The embedded server is loopback-only (`127.0.0.1:4445`, or the port set by `TAURI_WEBDRIVER_PORT`) and unauthenticated, and `ui-test` builds must not run outside the harness.
 
 This proves first paint and real first-run IPC on macOS, not model downloads,
 inference, accessibility or a full interaction suite. Windows is not wired yet;

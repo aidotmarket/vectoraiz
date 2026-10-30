@@ -231,6 +231,8 @@ jobs:
       - name: Build debug UI test app (no model assets)
         working-directory: app
         run: npm run tauri -- build --debug --ci --features ui-test,custom-protocol --bundles app --config src-tauri/ui-test/tauri.conf.json
+      - name: Lint UI test Rust code
+        run: cargo clippy --locked -p vectoraiz --all-targets --features ui-test,custom-protocol -- -D warnings
       - name: Native first-run UI smoke
         working-directory: app
         run: npx wdio run wdio.conf.mjs
