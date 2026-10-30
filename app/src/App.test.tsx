@@ -685,10 +685,13 @@ it("keeps Search disabled when Re-index is cancelled", async () => {
   expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
 });
 
-it("reports unfinished Re-index with counts and allows retry while Search stays disabled", async () => {
+it.each([true, false])("reports unfinished Re-index with counts and allows retry while Search stays disabled (backend counts=%s)", async backendCounts => {
   modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
-  invoke.mockImplementation(async command => {
-    if (command === "pipeline_index") throw "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; Re-index to resume";
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "pipeline_index") {
+      args.progress.onmessage({completed: 1, skipped: 0, failed: 1, total: 2, path: "file.pdf"});
+      throw backendCounts ? "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; Re-index to resume" : "worker crashed";
+    }
     return {available: false};
   });
   render(<App />);

@@ -107,10 +107,16 @@ export default function App() {
   async function indexFolder() {
     setIndexing(true); setRunning(true); setError(""); setProgress("Scanning…"); setAnswer(""); setCitations([]); setHits([]);
     let active = true;
+    let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); };
+    channel.onmessage = p => { if (active) { counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
-    catch (cause) { setError(String(cause)); setProgress(""); }
+    catch (cause) {
+      const detail = String(cause);
+      setError(detail.startsWith("Re-index did not finish") ? detail :
+        `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
+      setProgress("");
+    }
     finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
