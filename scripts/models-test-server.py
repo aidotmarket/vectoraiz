@@ -19,11 +19,26 @@ if not openssl and sys.platform == 'win32':
 config = root / 'openssl.cnf'
 config.write_text('[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n'
                   '[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n'
-                  'basicConstraints=critical,CA:TRUE\nkeyUsage=digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n')
+                  'basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n')
 subprocess.run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-                '-config', str(config), '-keyout', str(root / 'key.pem'),
-                '-out', str(root / 'cert.pem')], check=True, stdout=subprocess.DEVNULL,
+                '-config', str(config), '-keyout', str(root / 'ca-key.pem'),
+                '-out', str(root / 'ca.pem')], check=True, stdout=subprocess.DEVNULL,
                stderr=subprocess.DEVNULL)
+# Use a separate end-entity certificate: WebPKI correctly rejects a CA
+# certificate presented as the TLS server leaf (CaUsedAsEndEntity).
+leaf = root / 'leaf.cnf'
+leaf.write_text('[leaf]\nsubjectAltName=DNS:localhost,IP:127.0.0.1\n'
+                'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\n'
+                'extendedKeyUsage=serverAuth\n')
+subprocess.run([openssl, 'req', '-new', '-newkey', 'rsa:2048', '-nodes',
+                '-subj', '/CN=localhost', '-keyout', str(root / 'key.pem'),
+                '-out', str(root / 'server.csr')], check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+subprocess.run([openssl, 'x509', '-req', '-days', '1', '-in', str(root / 'server.csr'),
+                '-CA', str(root / 'ca.pem'), '-CAkey', str(root / 'ca-key.pem'),
+                '-CAcreateserial', '-extfile', str(leaf), '-extensions', 'leaf',
+                '-out', str(root / 'cert.pem')], check=True,
+               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 plan = json.loads((root / 'plan.json').read_text())
 requests = []
 
