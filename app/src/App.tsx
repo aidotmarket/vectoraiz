@@ -8,7 +8,7 @@ interface Citation { number: number; doc_id: string; page: number; file_name?: s
 interface SelfTestResult { status: string; version: string; os: string; arch: string }
 
 interface ModelFile { name: string; file: string; size: number; license: string; source: string; verified: boolean }
-interface ModelsStatus { needs_reindex?: boolean; ready: boolean; files: ModelFile[] }
+interface ModelsStatus { last_indexed_folder?: string; needs_reindex?: boolean; ready: boolean; files: ModelFile[] }
 interface ModelProgress { file: string; downloaded: number; total: number; attempt: number; retry?: boolean }
 interface ImportResult { file: string; result: string }
 
@@ -20,6 +20,7 @@ export default function App() {
   const [result, setResult] = useState<SelfTestResult>();
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
+  const [indexing, setIndexing] = useState(false);
   const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
@@ -104,13 +105,13 @@ export default function App() {
     }
   }
   async function indexFolder() {
-    setRunning(true); setError(""); setProgress("Scanning…"); setAnswer(""); setCitations([]); setHits([]);
+    setIndexing(true); setRunning(true); setError(""); setProgress("Scanning…"); setAnswer(""); setCitations([]); setHits([]);
     let active = true;
     const channel = new Channel<Progress>();
     channel.onmessage = p => { if (active) setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) { setError(String(cause)); setProgress(""); }
-    finally { active = false; setRunning(false); }
+    finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
     setRunning(true); setError(""); setProgress("Searching…"); setAnswer(""); setCitations([]);
@@ -148,6 +149,7 @@ export default function App() {
   const refreshModels = useCallback(async () => {
     const status = await invoke<ModelsStatus>("models_status");
     setModels(status);
+    setFolder(current => current || status.last_indexed_folder || "");
     setDownloadStates({});
     return status;
   }, []);
@@ -245,7 +247,8 @@ export default function App() {
       {models?.needs_reindex && <p role="alert">Your library needs re-indexing for the new search model.</p>}
       {error && <p role="alert">{error}</p>}
       <label>Folder <input placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
-      <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>
+      <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>{models?.needs_reindex ? "Re-index" : "Index folder"}</button>
+      {indexing && <button className={buttonStyle} onClick={() => void cancelModels()}>Cancel indexing</button>}
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
       <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={ask}>Ask</button></div>
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>

@@ -31,26 +31,36 @@ flag. Normal installed launches always use the bundled release pins. The shell
 passes a resolved embedding/chat pair to the offline engine; downloads remain
 in the shell and the engine rehashes each model before loading it.
 
-## Re-index behaviour and implementation conflict
+## Re-index behaviour
 
-On launch, the shell compares the full stored embedding recipe with the
-selected pins, without loading a model. A mismatch, invalid recipe, or missing
-recipe with surviving index data shows “Your library needs re-indexing for the
-new search model”. Search and Ask are disabled. The existing core recipe gate
-also refuses mismatched queries, including direct CLI calls. Old model files
-are retained.
+Minerva's Decision 4 design, pending confirmation at Gate 3, uses one index
+per embedding recipe and an atomic active pointer. The per-document storage
+protocol is unchanged.
 
-**Decision 4 is blocked at the atomic Re-index action.** At base a33eefe6,
-`State::stage` and `State::commit` stage and atomically switch one document at a
-time; `index::index` stores a single global `recipe.json` outside SQLite and
-refuses a different recipe. Recovery deletes unreferenced document generations.
-There is no library-wide generation/recipe switch to reuse. Updating the global
-recipe before all document commits would permit mixed models after interruption;
-updating it afterwards would label the new vectors with the old recipe during
-that interval. Per the brief's conflict rule, this change does not invent a new
-storage protocol or wire a Re-index action to a partial migration. The atomic
-rebuild and its after-reindex acceptance test remain unimplemented pending that
-decision. The warning and query guard are implemented and tested.
+Indexes live at `<data_root>/indexes/<recipe-id>/`, where the ID is the first
+16 lowercase hex digits of SHA-256 over compact canonical recipe JSON (sorted
+object keys). `<data_root>/active-index.json` contains
+`{"dir":"indexes/<recipe-id>","recipe_id":"<recipe-id>"}`. Readers share one
+resolver. With no valid pointer, they fall back to `<data_root>/phase0-index`,
+whose recipe is read from its own `recipe.json`. Missing directories and paths
+outside the data root (including symlink escapes) are ignored safely. CLI
+Search/Ask/pack accept a library data root through `--state` as well as the
+existing explicit index-directory form. Phase 0 MCP is still a placeholder;
+its future index reads must use the same resolver.
+
+On launch, the shell compares the full stored recipe against current pins
+without loading a model. A mismatch shows “Your library needs re-indexing for
+the new search model”, with Search and Ask disabled. Re-index prefills the source
+folder inferred from the old index's document paths; if unknown, enter a folder.
+It runs the existing resumable indexer in the new recipe directory. Only a
+finished run activates that directory, using a temporary pointer file, fsync,
+and atomic rename (and directory fsync on Unix). Failed documents are allowed
+as in normal indexing. Cancel or kill before completion leaves the pointer
+unchanged; the next Re-index resumes using the existing skip logic.
+
+The legacy index is never moved or deleted. Old recipe directories and old
+model files are never deleted automatically. Both indexes are kept, so rebuilding
+requires disk space for the new index in addition to the old index and models.
 
 ## Verification limits
 

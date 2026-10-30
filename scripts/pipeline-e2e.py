@@ -69,6 +69,34 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         assert refused.returncode != 0 and 're-index required' in refused.stderr, refused.stderr
     assert manifest['embedding_recipe'] == json.loads((state / 'recipe.json').read_text())
 
+    # Migrate a legacy library through the same recipe-directory/pointer path
+    # used by desktop Re-index; old storage stays byte-for-byte intact.
+    import shutil
+    library = Path(temp) / 'library'
+    legacy = library / 'phase0-index'
+    shutil.copytree(state, legacy)
+    old_recipe = json.loads((legacy / 'recipe.json').read_text())
+    old_recipe['model'] += '-old'
+    old_bytes = json.dumps(old_recipe).encode()
+    (legacy / 'recipe.json').write_bytes(old_bytes)
+    explicit_state = state
+    state = library
+    rebuilt = cli('index', 'spike/fixtures/documents')
+    assert rebuilt['completed'] == 20 and rebuilt['failed'] == 0, rebuilt
+    pointer_bytes = (library / 'active-index.json').read_bytes()
+    pointer = json.loads(pointer_bytes)
+    active = library / pointer['dir']
+    recipe = json.loads((active / 'recipe.json').read_text())
+    recipe_id = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()[:16]
+    assert pointer == {'dir': f'indexes/{recipe_id}', 'recipe_id': recipe_id}, pointer
+    assert cli('search', query), 'search after migration'
+    assert cli('ask', query)['citations'], 'Ask after migration'
+    assert cli('pack', str(Path(temp) / 'migrated-pack'), '--query', query)['embedding_recipe'] == recipe
+    assert cli('index', 'spike/fixtures/documents')['skipped'] == 20
+    assert (library / 'active-index.json').read_bytes() == pointer_bytes
+    assert (legacy / 'recipe.json').read_bytes() == old_bytes
+    state = explicit_state
+
     # Short sources used to make the model stop after a bare citation marker.
     small = Path(temp) / 'small'
     small.mkdir()

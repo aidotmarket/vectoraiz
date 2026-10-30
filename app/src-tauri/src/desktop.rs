@@ -110,7 +110,7 @@ fn self_test<R: tauri::Runtime>(
             if matches!(checkpoint.as_str(), "guard-before" | "guard-after") {
                 static BEFORE: std::sync::Mutex<Option<serde_json::Value>> =
                     std::sync::Mutex::new(None);
-                let root = data_root(&_app).expect("data path").join("phase0-index");
+                let root = vz_core::active_index::resolve(&data_root(&_app).expect("data path"));
                 let snapshot = models::index_snapshot(&root).expect("seeded index snapshot");
                 let mut before = BEFORE.lock().unwrap();
                 if checkpoint == "guard-before" {
@@ -418,7 +418,7 @@ fn pipeline_paths<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf), String> {
     use tauri::Manager;
-    let state = data_root(app)?.join("phase0-index");
+    let state = vz_core::active_index::resolve(&data_root(app)?);
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
     let selected = model_dir(app)?.join("models.selected.json");
     std::fs::create_dir_all(model_dir(app)?).map_err(|e| e.to_string())?;
@@ -456,7 +456,9 @@ async fn pipeline_index<R: tauri::Runtime>(
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_index_total");
     models::validate_folder(&folder)?;
     let guard = operations.acquire()?;
-    let (root, assets, pins) = pipeline_paths(&app)?;
+    let cancel = operations.start();
+    let data = data_root(&app)?;
+    let (_, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let mut cache = guard;
         let mut run = || -> anyhow::Result<serde_json::Value> {
@@ -465,16 +467,17 @@ async fn pipeline_index<R: tauri::Runtime>(
             })?;
             #[cfg(feature = "smoke-test")]
             record_loaded_models(&assets, &pins, engines.chat_loaded())?;
-            let mut state = vz_core::storage::State::open(&root)?;
-            let result = tokio::runtime::Runtime::new()?.block_on(vz_core::index::index(
-                &mut state,
-                std::path::Path::new(&folder),
-                engines,
-                &assets,
-                |value| {
-                    let _ = progress.send(value.clone());
-                },
-            ))?;
+            let result =
+                tokio::runtime::Runtime::new()?.block_on(vz_core::active_index::reindex(
+                    &data,
+                    std::path::Path::new(&folder),
+                    engines,
+                    &assets,
+                    |value| {
+                        let _ = progress.send(value.clone());
+                    },
+                    || *cancel.borrow(),
+                ))?;
             Ok(serde_json::to_value(result)?)
         };
         run().map_err(|e| format!("{e:#}"))
@@ -490,7 +493,7 @@ async fn pipeline_search<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_search_total");
     let guard = operations.acquire()?;
-    desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
+    desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(&app)?))?;
     #[cfg(feature = "smoke-test")]
     let hold =
         smoke_test_requested() && HOLD_NEXT_SEARCH.swap(false, std::sync::atomic::Ordering::SeqCst);
@@ -550,7 +553,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_ask_total");
     let guard = operations.acquire()?;
-    desktop_pipeline::require_index(&data_root(&app)?.join("phase0-index"))?;
+    desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(&app)?))?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let mut cache = guard;
@@ -650,9 +653,11 @@ async fn models_status<R: tauri::Runtime>(
     let dir = model_dir(&app)?;
     let selected = selected_model_pins(&app)?;
     let pins = models::pins_from_value(&selected).map_err(|e| e.to_string())?;
-    let root = data_root(&app)?.join("phase0-index");
+    let root = vz_core::active_index::resolve(&data_root(&app)?);
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let mut status = models::status(&dir, &pins);
+        status["last_indexed_folder"] =
+            serde_json::json!(vz_core::active_index::last_indexed_folder(&root));
         status["needs_reindex"] =
             serde_json::json!(models::needs_reindex(&root, &selected).map_err(|e| e.to_string())?);
         Ok(status)

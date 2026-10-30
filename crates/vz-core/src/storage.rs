@@ -93,7 +93,8 @@ impl State {
         root: &Path,
         selected: &crate::engine::Recipe,
     ) -> Result<(Self, crate::engine::Recipe)> {
-        let state = Self::open(root)?;
+        let root = crate::active_index::resolve_state(root);
+        let state = Self::open(&root)?;
         let recipe = state.validate_recipe(selected)?;
         Ok((state, recipe))
     }

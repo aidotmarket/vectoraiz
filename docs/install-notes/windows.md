@@ -14,7 +14,7 @@ The app closes as soon as the installer starts. Windows asks for administrator a
 
 A failure before the installer starts appears in the banner and the app keeps running; download or signature failures leave the installed app unchanged. Updates do not touch the data folder.
 
-Data lives in `%USERPROFILE%\vectorAIz`, with the Phase 0 index in `phase0-index`. Uninstall from Settings → Apps → Installed apps → vectorAIz → Uninstall and approve UAC. Uninstall keeps the data folder. Delete it separately only if you want to erase the data.
+Data lives in `%USERPROFILE%\vectorAIz`, with recipe indexes in `indexes/`, selected by `active-index.json` (`phase0-index` is the legacy fallback). Uninstall from Settings → Apps → Installed apps → vectorAIz → Uninstall and approve UAC. Uninstall keeps the data folder. Delete it separately only if you want to erase the data.
 
 The updater is configured with the rotated signing public key and the test-build release endpoint. No real updater release is published by chunk D. CI uses fresh `windows-2022` Windows Server runners as stand-ins, not Windows 10/11 client evidence. Client VM checks and screenshots follow Gate 3.
 
@@ -24,4 +24,4 @@ For an offline or restricted network, an administrator can use `python scripts/f
 
 Models live in `%USERPROFILE%\vectorAIz\models`. Updates and uninstall preserve them. After verification, choose your document Folder to index; an empty field or missing folder is refused without changing an existing index. Opening vectorAIz again restores and focuses its existing window.
 
-**If the app says "embedding recipe mismatch; re-index required".** An update changed the AI engine or the search model, so an index built by an older version can't be used. Quit vectorAIz, rename `%USERPROFILE%\vectorAIz\phase0-index` (for example to `phase0-index-old`), open the app again and choose **Index folder**. Your documents and the downloaded models (`%USERPROFILE%\vectorAIz\models`) are not touched. Delete the renamed folder once the new index works.
+**If the app says your library needs re-indexing for the new search model.** Choose **Re-index**, confirm the prefilled source folder (or enter one), and wait for completion. Search and Ask become available after the new index is activated. An interrupted run resumes the next time you choose Re-index. Both indexes and old model files are kept; allow disk space for the new index as well as the old one. See [default pins](../phase0/default-pins.md#re-index-behaviour).

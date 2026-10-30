@@ -821,7 +821,8 @@ fn release_tiers_and_fixture_compatibility() {
 fn old_recipe_is_detected_before_models_are_downloaded() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let directory = Temp::new();
-    let temp = &directory.0;
+    let temp = &directory.0.join("phase0-index");
+    std::fs::create_dir(temp).unwrap();
     let fixture: Value =
         serde_json::from_slice(&std::fs::read(root.join("spike/fixtures/models.json")).unwrap())
             .unwrap();
@@ -829,7 +830,7 @@ fn old_recipe_is_detected_before_models_are_downloaded() {
     let old = vz_core::engine::Recipe::from_pins(&fixture, 384).unwrap();
     std::fs::write(temp.join("recipe.json"), serde_json::to_vec(&old).unwrap()).unwrap();
     assert!(!needs_reindex(temp, &fixture).unwrap());
-    assert!(needs_reindex(temp, &release).unwrap());
+    assert!(needs_reindex(&vz_core::active_index::resolve(&directory.0), &release).unwrap());
     let new = vz_core::engine::Recipe::from_pins(&release, 1024).unwrap();
     let error = vz_core::storage::State::open_index(temp, &new)
         .err()

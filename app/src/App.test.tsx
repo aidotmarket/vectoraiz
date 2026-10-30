@@ -652,3 +652,35 @@ it("disables Search and Ask on a recipe mismatch at launch", async () => {
   expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
   expect(invoke.mock.calls.some(([command]) => command === "pipeline_search" || command === "pipeline_ask")).toBe(false);
 });
+
+it("prefills Re-index and enables search after the recipe switch", async () => {
+  modelsInvoke.mockResolvedValueOnce({...readyModels, needs_reindex: true, last_indexed_folder: "/previous/documents"})
+    .mockResolvedValue({...readyModels, needs_reindex: false});
+  render(<App />);
+  const button = await screen.findByRole("button", {name: "Re-index"});
+  expect(screen.getByPlaceholderText("Choose a folder to index")).toHaveValue("/previous/documents");
+  await userEvent.click(button);
+  await waitFor(() => expect(screen.getByRole("button", {name: "Search"})).toBeEnabled());
+  expect(invoke.mock.calls.some(([command, args]) => command === "pipeline_index" && args?.folder === "/previous/documents")).toBe(true);
+});
+
+it("asks for a folder when Re-index has no known source", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true});
+  render(<App />);
+  expect(await screen.findByRole("button", {name: "Re-index"})).toBeDisabled();
+  expect(screen.getByPlaceholderText("Choose a folder to index")).toHaveValue("");
+});
+
+it("keeps Search disabled when Re-index is cancelled", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/previous/documents"});
+  const pending = deferred();
+  invoke.mockImplementation((command: string) => command === "pipeline_index" ? pending.promise : Promise.resolve({available: false}));
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  await userEvent.click(screen.getByRole("button", {name: "Cancel indexing"}));
+  expect(modelsInvoke.mock.calls.some(([command]) => command === "models_cancel")).toBe(true);
+  await act(async () => pending.resolve(Promise.reject("Indexing cancelled; Re-index to resume")));
+  expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
+});

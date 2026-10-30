@@ -195,12 +195,16 @@ fn main() -> Result<()> {
             }
             Operation::Embed { text } => { println!("{}",serde_json::to_string(&serde_json::json!({"embedding":engines.vector(&text,true)?,"recipe":engines.recipe}))?); }
             Operation::Index { folder } => {
-                let mut state = State::open(&args.state)?;
-                let result =
+                let result = if vz_core::active_index::is_library_root(&args.state) {
+                    vz_core::active_index::reindex(&args.state, &folder, &engines, &args.assets,
+                        |p| eprintln!("{}", serde_json::to_string(p).unwrap()), || false).await?
+                } else {
+                    let mut state = State::open(&args.state)?;
                     vz_core::index::index(&mut state, &folder, &engines, &args.assets, |p| {
                         eprintln!("{}", serde_json::to_string(p).unwrap())
                     })
-                    .await?;
+                    .await?
+                };
                 println!("{}", serde_json::to_string(&result)?);
             }
             Operation::Search { query, top_k } => {

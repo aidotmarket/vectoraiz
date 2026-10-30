@@ -76,6 +76,7 @@ mod tests {
     }
 }
 
+pub mod active_index;
 pub mod engine;
 pub mod index;
 pub mod parsers;
