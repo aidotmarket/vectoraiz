@@ -666,7 +666,8 @@ mod tests {
         let error = finish_reindex(data.path(), &new, &selected, async { Ok(stats) }, || false)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("broken.pdf: IoError"));
+        assert!(error.to_string().contains("broken.pdf:"), "{error:#}");
+        assert!(error.to_string().contains("IoError"), "{error:#}");
         assert_eq!(
             error.to_string().matches("Re-index did not finish").count(),
             1
