@@ -1,5 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(all(feature = "ui-test", not(debug_assertions)))]
+compile_error!("ui-test is restricted to debug builds");
+
 // Keep inference/native backend startup out of the permission-test harness.
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.

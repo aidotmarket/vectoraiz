@@ -19,3 +19,5 @@ THIRD_PARTY_NOTICES
 
 /.corpus/
 /spike/bakeoff/results/
+
+/app/ui-test-results/
