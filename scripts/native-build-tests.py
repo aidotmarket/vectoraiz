@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 import sys
@@ -97,6 +98,83 @@ class VersionGate(unittest.TestCase):
     def test_placeholder_cannot_release(self):
         with self.assertRaisesRegex(SystemExit, 'placeholder updater public key'):
             self.invoke('--release')
+
+
+class UiTestShippingGate(unittest.TestCase):
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location('ui_gate', Path(__file__).with_name('native-ui-test-gate.py'))
+        self.gate = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.gate)
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Use unchanged repository inputs rather than an invented safe config.
+        for name in ['app/src-tauri/Cargo.toml', 'app/src-tauri/tauri.conf.json',
+                     'app/src-tauri/tauri.stage1.conf.json', 'app/src-tauri/capabilities',
+                     '.github/workflows']:
+            source = self.gate.ROOT / name
+            dest = self.root / name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if source.is_dir():
+                shutil.copytree(source, dest)
+            else:
+                shutil.copy2(source, dest)
+
+    def invoke(self):
+        # Dependency resolution is exercised by the real CI gate; these tests
+        # isolate feature discovery and rejection without invoking Cargo.
+        with patch.object(self.gate, 'ROOT', self.root), \
+                patch.object(self.gate.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='')) as cargo, \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.gate.main()
+        return cargo
+
+    def add_features(self, name, features):
+        path = self.root / 'app/src-tauri' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        config = json.loads(path.read_text()) if path.exists() else {}
+        config.setdefault('build', {})['features'] = features
+        path.write_text(json.dumps(config))
+
+    def test_unchanged_shipping_inputs_pass(self):
+        self.assertGreater(self.invoke().call_count, 0)
+
+    def test_base_config_ui_test_fails(self):
+        self.add_features('tauri.conf.json', ['ui-test'])
+        with self.assertRaisesRegex(AssertionError, 'Shipping config enables ui-test'):
+            self.invoke()
+
+    def test_stage1_config_ui_test_fails(self):
+        self.add_features('tauri.stage1.conf.json', ['ui-test'])
+        with self.assertRaisesRegex(AssertionError, 'Shipping config enables ui-test'):
+            self.invoke()
+
+    def test_generated_overlay_ui_test_fails(self):
+        self.add_features('gen/stage1.conf.json', ['ui-test'])
+        with self.assertRaisesRegex(AssertionError, 'Shipping config enables ui-test'):
+            self.invoke()
+
+    def test_workflow_ui_test_fails(self):
+        path = self.root / '.github/workflows/native-ci.yml'
+        original = path.read_text()
+        mutant = original.replace('--features smoke-test,custom-protocol',
+                                  '--features smoke-test,custom-protocol,ui-test')
+        self.assertNotEqual(original, mutant)
+        path.write_text(mutant)
+        with self.assertRaisesRegex(AssertionError, 'Shipping workflow enables ui-test'):
+            self.invoke()
+
+    def test_effective_features_include_cli_base_stage1_and_generated(self):
+        self.add_features('tauri.conf.json', ['base-feature'])
+        self.add_features('tauri.stage1.conf.json', ['stage1-feature'])
+        self.add_features('gen/stage1.conf.json', ['generated-feature'])
+        cargo = self.invoke()
+        resolved = [set(call.args[0][call.args[0].index('--features') + 1].split(','))
+                    for call in cargo.call_args_list]
+        for features in resolved:
+            self.assertTrue({'base-feature', 'stage1-feature', 'generated-feature'} <= features)
+        self.assertTrue(any({'smoke-test', 'custom-protocol'} <= features for features in resolved))
+        self.assertFalse(any('vectoraiz/smoke-test' in features for features in resolved))
 
 
 class ProtocInstaller(unittest.TestCase):
