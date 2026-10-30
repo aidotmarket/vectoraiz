@@ -6,7 +6,7 @@ describe('native first launch (offline)', () => {
       { timeoutMsg: 'Expected the main native window' });
     const heading = await $('h1');
     await heading.waitForDisplayed();
-    assert.equal(await heading.getText(), 'DELIBERATE FAILURE: vectorAIz');
+    assert.equal(await heading.getText(), 'vectorAIz');
     const models = await $('aside[aria-label="Models"]');
     await models.waitForDisplayed();
     await browser.waitUntil(async () => /Checking models…|Models/.test(await models.getText()),
