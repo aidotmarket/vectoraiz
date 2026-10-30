@@ -29,26 +29,9 @@ pub fn infrastructure(error: Error) -> Error {
     error.context(InfrastructureFailure)
 }
 
-/// Source reads may fail because a particular file is unreadable. Other I/O
-/// failures (including storage exhaustion/device errors) remain infrastructure.
+/// Any source I/O failure can indicate unavailable storage; retry without publishing.
 pub fn source_io(error: Error) -> Error {
-    if error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
-        .is_some_and(|e| {
-            matches!(
-                e.kind(),
-                std::io::ErrorKind::PermissionDenied
-                    | std::io::ErrorKind::NotFound
-                    | std::io::ErrorKind::InvalidData
-                    | std::io::ErrorKind::UnexpectedEof
-            )
-        })
-    {
-        content(format!("{error:#}"))
-    } else {
-        error
-    }
+    infrastructure(error)
 }
 
 /// Parser format/decoding failures are content errors. Infrastructure marked at
@@ -56,6 +39,21 @@ pub fn source_io(error: Error) -> Error {
 pub fn parser(error: Error) -> Error {
     if error.downcast_ref::<InfrastructureFailure>().is_some() {
         return error;
+    }
+    // PdfiumError deliberately exposes no source(), including for wrapped I/O.
+    // Enumerate known document exclusions; unknown/internal/resource errors fail closed.
+    if let Some(pdf) = error.downcast_ref::<pdfium_render::prelude::PdfiumError>() {
+        use pdfium_render::prelude::{PdfiumError as P, PdfiumInternalError as I};
+        return if matches!(
+            pdf,
+            P::PdfiumLibraryInternalError(I::FormatError | I::PasswordError | I::SecurityError)
+                | P::NoPagesInDocument
+                | P::ImageSizeOutOfBounds
+        ) {
+            content(format!("{error:#}"))
+        } else {
+            infrastructure(error)
+        };
     }
     if error.chain().any(|cause| cause.is::<std::io::Error>()) {
         return source_io(error);
@@ -69,7 +67,7 @@ mod tests {
     #[test]
     fn classification_is_explicit_and_io_fails_closed() {
         assert!(is_content(&parser(anyhow::anyhow!("corrupt ZIP"))));
-        assert!(is_content(&source_io(
+        assert!(!is_content(&source_io(
             std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()
         )));
         // ZIP and workbook errors wrap I/O errors in their own error types.
@@ -77,7 +75,23 @@ mod tests {
         assert!(!is_content(&parser(device.into())));
         let unreadable =
             zip::result::ZipError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
-        assert!(is_content(&parser(unreadable.into())));
+        assert!(!is_content(&parser(unreadable.into())));
+        use pdfium_render::prelude::{PdfiumError as P, PdfiumInternalError as I};
+        for pdf in [
+            P::IoError(std::io::Error::from(std::io::ErrorKind::Other)),
+            P::PdfiumLibraryInternalError(I::FileError),
+            P::PdfiumLibraryInternalError(I::Unknown),
+            P::PdfiumLibraryInternalError(I::PageError),
+            P::PdfiumFunctionReturnValueIndicatedFailure,
+            P::DataBufferLengthMismatch,
+        ] {
+            assert!(!is_content(&parser(pdf.into())));
+        }
+        for internal in [I::FormatError, I::PasswordError, I::SecurityError] {
+            assert!(is_content(&parser(
+                P::PdfiumLibraryInternalError(internal).into()
+            )));
+        }
         for error in [
             anyhow::anyhow!("worker crashed"),
             anyhow::anyhow!("worker timeout"),

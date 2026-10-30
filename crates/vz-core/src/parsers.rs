@@ -144,7 +144,8 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
     let library = request
         .pdfium
         .as_ref()
-        .context("PDFium library path required (run scripts/fetch-assets.py)")?;
+        .context("PDFium library path required (run scripts/fetch-assets.py)")
+        .map_err(crate::failures::infrastructure)?;
     let pdfium = Pdfium::new(
         Pdfium::bind_to_library(library).map_err(|e| crate::failures::infrastructure(e.into()))?,
     );

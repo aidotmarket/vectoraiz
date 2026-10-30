@@ -503,9 +503,7 @@ async fn pipeline_index<R: tauri::Runtime>(
             if detail.starts_with("Re-index did not finish") {
                 detail
             } else {
-                format!(
-                    "Re-index did not finish: 0 indexed, 0 skipped, 0 failed, 0 total; {detail}"
-                )
+                format!("Re-index did not finish: {detail}")
             }
         })
     })

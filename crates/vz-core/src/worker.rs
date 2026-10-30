@@ -55,6 +55,12 @@ pub fn executable() -> Result<PathBuf> {
         .join(name))
 }
 pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Page>> {
+    // sandbox-exec itself may spawn even when the actual worker is missing.
+    anyhow::ensure!(
+        worker.is_file(),
+        "parser worker missing: {}",
+        worker.display()
+    );
     let mut cmd = command(worker);
     #[cfg(unix)]
     {
@@ -85,7 +91,9 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
     if let Err(error) = write_frame(&mut stdin, request) {
         let _ = terminate(&mut child);
         let _ = child.wait();
-        return Err(error);
+        return Err(crate::failures::content(format!(
+            "worker request failed: {error:#}"
+        )));
     }
     drop(stdin);
     let stdout = child.stdout.take().context("worker stdout")?;
@@ -97,9 +105,13 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
                 .join()
                 .map_err(|_| anyhow::anyhow!("worker reader panic"));
             if !status.success() {
-                bail!("worker crashed: {status}");
+                return Err(crate::failures::content(format!(
+                    "worker crashed: {status}"
+                )));
             }
-            let response = response??;
+            let response = response
+                .and_then(|r| r)
+                .map_err(|e| crate::failures::content(format!("worker response failed: {e:#}")))?;
             if let Some(error) = response.error {
                 return Err(if response.content_failure {
                     crate::failures::content(error)
@@ -114,13 +126,18 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
             terminate(&mut child)?;
             child.wait()?;
             let _ = reader.join();
-            bail!("worker resident memory exceeds 1.5 GiB");
+            return Err(crate::failures::content(
+                "worker resident memory exceeds 1.5 GiB",
+            ));
         }
         if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
             let _ = reader.join();
-            bail!("worker timeout after {}ms", timeout.as_millis());
+            return Err(crate::failures::content(format!(
+                "worker timeout after {}ms",
+                timeout.as_millis()
+            )));
         }
         std::thread::sleep(Duration::from_millis(10));
     }

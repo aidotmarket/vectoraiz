@@ -124,19 +124,24 @@ fn publication_dir(data: &Path, recipe: &Recipe) -> Result<String> {
 }
 
 /// Call only after the indexer returned successfully and cancellation was checked.
-pub fn activate(data: &Path, recipe: &Recipe) -> Result<()> {
-    activate_with(data, recipe, || Ok(()))
+#[cfg(test)]
+fn activate(data: &Path, recipe: &Recipe) -> Result<()> {
+    activate_with(data, recipe, &publication_dir(data, recipe)?, || Ok(()))
 }
 
 fn activate_with(
     data: &Path,
     recipe: &Recipe,
+    relative: &str,
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let id = recipe_id(recipe)?;
-    let relative = publication_dir(data, recipe)?;
+    ensure!(
+        relative == "phase0-index" || relative == format!("indexes/{id}"),
+        "invalid index directory"
+    );
     let root = data.canonicalize()?;
-    let target = root.join(&relative).canonicalize()?;
+    let target = root.join(relative).canonicalize()?;
     ensure!(
         target.starts_with(&root) && target.is_dir(),
         "index outside data root"
@@ -148,7 +153,7 @@ fn activate_with(
         "index recipe mismatch"
     );
     let pointer = Pointer {
-        dir: relative,
+        dir: relative.to_owned(),
         recipe_id: id,
     };
     let temp = data.join(format!(".active-index-{}.tmp", uuid::Uuid::new_v4()));
@@ -227,10 +232,12 @@ pub async fn reindex(
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
     let mut latest = crate::index::Progress::default();
+    let mut started = false;
     let mut progress = progress;
     let result = async {
         ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
-        let root = data.join(publication_dir(data, &engines.recipe)?);
+        let selected = publication_dir(data, &engines.recipe)?;
+        let root = data.join(&selected);
         fs::create_dir_all(&root)?;
         ensure!(
             root.canonicalize()?.starts_with(data.canonicalize()?),
@@ -240,7 +247,9 @@ pub async fn reindex(
         finish_reindex(
             data,
             &engines.recipe,
+            &selected,
             crate::index::index(&mut state, folder, engines, assets, |p| {
+                started = true;
                 latest = p.clone();
                 progress(p);
             }),
@@ -250,6 +259,12 @@ pub async fn reindex(
     }
     .await;
     result.map_err(|e| {
+        if e.to_string().starts_with("Re-index did not finish") {
+            return e;
+        }
+        if !started {
+            return anyhow::anyhow!("Re-index did not finish: {e:#}");
+        }
         anyhow::anyhow!(
             "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {e:#}",
             latest.completed,
@@ -263,6 +278,7 @@ pub async fn reindex(
 async fn finish_reindex(
     data: &Path,
     recipe: &Recipe,
+    selected: &str,
     run: impl std::future::Future<Output = Result<crate::index::Progress>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
@@ -279,7 +295,7 @@ async fn finish_reindex(
     .await?;
     ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
     result.ensure_publishable()?;
-    activate(data, recipe)?;
+    activate_with(data, recipe, selected, || Ok(()))?;
     Ok(result)
 }
 
@@ -327,11 +343,16 @@ mod tests {
         let mut new = old.clone();
         new.model.push_str("-new");
         seed(data.path(), &new);
-        let error = activate_with(data.path(), &new, || {
-            // At the last boundary before rename readers still see the old file.
-            assert_eq!(fs::read(data.path().join("active-index.json"))?, before);
-            anyhow::bail!("simulated rename failure")
-        });
+        let error = activate_with(
+            data.path(),
+            &new,
+            &publication_dir(data.path(), &new).unwrap(),
+            || {
+                // At the last boundary before rename readers still see the old file.
+                assert_eq!(fs::read(data.path().join("active-index.json"))?, before);
+                anyhow::bail!("simulated rename failure")
+            },
+        );
         assert!(error.is_err());
         assert_eq!(
             fs::read(data.path().join("active-index.json")).unwrap(),
@@ -339,7 +360,13 @@ mod tests {
         );
         assert_eq!(fs::read_dir(data.path()).unwrap().count(), 2);
         fs::remove_file(data.path().join("active-index.json")).unwrap();
-        assert!(activate_with(data.path(), &new, || anyhow::bail!("failed first write")).is_err());
+        assert!(activate_with(
+            data.path(),
+            &new,
+            &publication_dir(data.path(), &new).unwrap(),
+            || anyhow::bail!("failed first write")
+        )
+        .is_err());
         assert!(!data.path().join("active-index.json").exists());
         activate(data.path(), &new).unwrap();
         assert_eq!(
@@ -521,9 +548,15 @@ mod tests {
                 ..Default::default()
             },
         ] {
-            let error = finish_reindex(data.path(), &new, async { Ok(stats) }, || false)
-                .await
-                .unwrap_err();
+            let error = finish_reindex(
+                data.path(),
+                &new,
+                &publication_dir(data.path(), &new).unwrap(),
+                async { Ok(stats) },
+                || false,
+            )
+            .await
+            .unwrap_err();
             assert!(error.to_string().contains("Re-index did not finish:"));
             assert!(error.to_string().contains("failed"));
             assert_eq!(
@@ -540,16 +573,159 @@ mod tests {
             failed: 1,
             ..Default::default()
         };
-        finish_reindex(data.path(), &new, async { Ok(stats) }, || false)
-            .await
-            .unwrap();
-        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
-        // A genuinely empty folder is publishable, too.
-        finish_reindex(data.path(), &new, async { Ok(Progress::default()) }, || {
-            false
-        })
+        finish_reindex(
+            data.path(),
+            &new,
+            &publication_dir(data.path(), &new).unwrap(),
+            async { Ok(stats) },
+            || false,
+        )
         .await
         .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+        // A genuinely empty folder is publishable, too.
+        finish_reindex(
+            data.path(),
+            &new,
+            &publication_dir(data.path(), &new).unwrap(),
+            async { Ok(Progress::default()) },
+            || false,
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn completed_document_plus_worker_timeout_publishes() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        let candidate = seed(data.path(), &recipe);
+        let selected = publication_dir(data.path(), &recipe).unwrap();
+        let _state = crate::storage::State::open(&candidate).unwrap();
+        let timeout = crate::failures::content("worker timeout after 60000ms");
+        finish_reindex(
+            data.path(),
+            &recipe,
+            &selected,
+            async {
+                Ok(crate::index::Progress {
+                    completed: 1,
+                    failed: 1,
+                    total: 2,
+                    infrastructure_failed: usize::from(!crate::failures::is_content(&timeout)),
+                    failure_examples: vec![format!("slow.pdf: {timeout}")],
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn pdfium_io_mixed_success_keeps_pointer_then_retry_succeeds() {
+        use crate::{
+            failures,
+            index::Progress,
+            worker::{read_frame, write_frame, Response},
+        };
+        let data = tempfile::tempdir().unwrap();
+        let old = recipe();
+        seed(data.path(), &old);
+        activate(data.path(), &old).unwrap();
+        let before = fs::read(data.path().join("active-index.json")).unwrap();
+        let mut new = old.clone();
+        new.model.push_str("-new");
+        let candidate = seed(data.path(), &new);
+        let selected = publication_dir(data.path(), &new).unwrap();
+        let _state = crate::storage::State::open(&candidate).unwrap();
+        let error = failures::parser(
+            pdfium_render::prelude::PdfiumError::IoError(std::io::Error::from(
+                std::io::ErrorKind::Other,
+            ))
+            .into(),
+        );
+        let response = Response {
+            pages: vec![],
+            error: Some(format!("{error:#}")),
+            content_failure: failures::is_content(&error),
+        };
+        let mut bytes = vec![];
+        write_frame(&mut bytes, &response).unwrap();
+        let received: Response = read_frame(bytes.as_slice()).unwrap();
+        let stats = Progress {
+            completed: 1,
+            failed: 1,
+            total: 2,
+            infrastructure_failed: usize::from(!received.content_failure),
+            infrastructure_examples: vec![format!("broken.pdf: {}", received.error.unwrap())],
+            ..Default::default()
+        };
+        let error = finish_reindex(data.path(), &new, &selected, async { Ok(stats) }, || false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("broken.pdf: IoError"));
+        assert_eq!(
+            error.to_string().matches("Re-index did not finish").count(),
+            1
+        );
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).unwrap(),
+            before
+        );
+        finish_reindex(
+            data.path(),
+            &new,
+            &selected,
+            async {
+                Ok(Progress {
+                    skipped: 1,
+                    completed: 1,
+                    total: 2,
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn legacy_appearing_after_selection_cannot_replace_locked_candidate() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        let selected = publication_dir(data.path(), &recipe).unwrap();
+        let candidate = seed(data.path(), &recipe);
+        let _state = crate::storage::State::open(&candidate).unwrap();
+        finish_reindex(
+            data.path(),
+            &recipe,
+            &selected,
+            async {
+                let legacy = data.path().join("phase0-index");
+                fs::create_dir(&legacy)?;
+                fs::write(legacy.join("recipe.json"), serde_json::to_vec(&recipe)?)?;
+                assert_eq!(publication_dir(data.path(), &recipe)?, "phase0-index");
+                assert!(
+                    crate::storage::State::open(&candidate).is_err(),
+                    "candidate lock must still be held"
+                );
+                Ok(crate::index::Progress {
+                    completed: 1,
+                    total: 1,
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+        assert!(!data.path().join("phase0-index/state.sqlite").exists());
     }
 
     #[tokio::test]
@@ -603,6 +779,7 @@ mod tests {
         let result = finish_reindex(
             data.path(),
             &new,
+            &publication_dir(data.path(), &new).unwrap(),
             async {
                 let mut state = State::open(&root)?;
                 let generation = state.stage(&doc).await?;
@@ -627,6 +804,7 @@ mod tests {
         finish_reindex(
             data.path(),
             &new,
+            &publication_dir(data.path(), &new).unwrap(),
             async {
                 let state = State::open(&root)?;
                 assert_eq!(state.documents()?.len(), 1);
@@ -662,6 +840,7 @@ mod tests {
         assert!(finish_reindex(
             data.path(),
             &new,
+            &publication_dir(data.path(), &new).unwrap(),
             async { Ok(crate::index::Progress::default()) },
             || true
         )
@@ -674,6 +853,7 @@ mod tests {
         assert!(finish_reindex(
             data.path(),
             &new,
+            &publication_dir(data.path(), &new).unwrap(),
             async { Err::<crate::index::Progress, _>(anyhow::anyhow!("interrupted run")) },
             || false
         )

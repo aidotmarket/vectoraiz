@@ -47,7 +47,16 @@ fn timeout_and_crash() {
     ] {
         let failure = run(worker, &request(path), timeout).unwrap_err();
         assert!(failure.to_string().contains(expected));
-        assert!(!vz_core::failures::is_content(&failure));
+        assert!(vz_core::failures::is_content(&failure));
+        vz_core::index::Progress {
+            completed: 1,
+            failed: 1,
+            total: 2,
+            infrastructure_failed: usize::from(!vz_core::failures::is_content(&failure)),
+            ..Default::default()
+        }
+        .ensure_publishable()
+        .unwrap();
     }
     assert!(run(worker, &request("ok"), Duration::from_secs(5)).is_ok());
 }
@@ -95,6 +104,7 @@ fn macos_memory_budget_kills_worker() {
     )
     .unwrap_err();
     assert!(error.to_string().contains("memory"), "{error:#}");
+    assert!(vz_core::failures::is_content(&error));
 }
 
 #[test]
@@ -143,4 +153,23 @@ fn pages_without_text_use_platform_ocr_policy() {
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0].page, 1);
     assert_eq!(pages[0].needs_ocr, cfg!(windows));
+}
+
+#[test]
+fn pdfium_io_and_spawn_failure_remain_infrastructure_through_transport() {
+    let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
+    let request = Request {
+        path: "pdfium-io".into(),
+        pdfium: None,
+    };
+    let failure = run(worker, &request, Duration::from_secs(5)).unwrap_err();
+    assert!(!vz_core::failures::is_content(&failure));
+    assert!(failure.to_string().contains("IoError"));
+    let failure = run(
+        Path::new("missing-worker-binary"),
+        &request,
+        Duration::from_secs(5),
+    )
+    .unwrap_err();
+    assert!(!vz_core::failures::is_content(&failure));
 }

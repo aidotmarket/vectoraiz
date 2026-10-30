@@ -112,6 +112,15 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         assert result.returncode != 0 and 'Re-index did not finish' in result.stderr, result.stderr
         return result.stderr
 
+    supported_only = Path(temp) / 'supported-only'
+    supported_only.mkdir()
+    (supported_only / 'good.txt').write_text('Orbital archive retention is thirty days.')
+    (supported_only / '.DS_Store').write_bytes(b'ignored')
+    (supported_only / 'photo.png').write_bytes(b'ignored')
+    state = migration_library('supported-only-library')
+    filtered = cli('index', str(supported_only))
+    assert filtered['total'] == 1 and filtered['completed'] == 1, filtered
+
     content = Path(temp) / 'content-failures'
     content.mkdir()
     (content / 'good.txt').write_text('Orbital archive retention is thirty days.')
@@ -119,14 +128,14 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     (content / 'unsupported.bin').write_bytes(b'unsupported')
     state = migration_library('mixed-content-library')
     mixed_result = cli('index', str(content))
-    assert (mixed_result['completed'], mixed_result['failed'], mixed_result['infrastructure_failed']) == (1, 2, 0), mixed_result
+    assert (mixed_result['completed'], mixed_result['failed'], mixed_result['infrastructure_failed']) == (1, 1, 0), mixed_result
     assert json.loads((state / 'active-index.json').read_text())['dir'].startswith('indexes/')
 
     (content / 'good.txt').unlink()
     state = migration_library('all-failed-library')
     before = (state / 'active-index.json').read_bytes()
     failure = refused_index(content)
-    assert '0 indexed' in failure and '2 failed' in failure, failure
+    assert '0 indexed' in failure and '1 failed' in failure, failure
     assert (state / 'active-index.json').read_bytes() == before
     assert list((state / 'indexes').glob('*/recipe.json')), 'candidate retained'
 
@@ -144,6 +153,8 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     before = (state / 'active-index.json').read_bytes()
     failure = refused_index(infrastructure, incomplete_assets)
     assert '1 indexed' in failure and '1 failed' in failure and '1 infrastructure' in failure, failure
+    assert 'b-access.pdf' in failure and 'PDFium asset missing' in failure, failure
+    assert failure.count('Re-index did not finish') == 1, failure
     assert (state / 'active-index.json').read_bytes() == before
     resumed = cli('index', str(infrastructure))
     assert (resumed['completed'], resumed['skipped'], resumed['failed']) == (1, 1, 0), resumed

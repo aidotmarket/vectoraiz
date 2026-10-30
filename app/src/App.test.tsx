@@ -690,14 +690,28 @@ it.each([true, false])("reports unfinished Re-index with counts and allows retry
   invoke.mockImplementation(async (command, args) => {
     if (command === "pipeline_index") {
       args.progress.onmessage({completed: 1, skipped: 0, failed: 1, total: 2, path: "file.pdf"});
-      throw backendCounts ? "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; Re-index to resume" : "worker crashed";
+      throw backendCounts ? "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; file.pdf: PDFium asset missing; Re-index to resume" : "file.pdf: PDFium asset missing";
     }
     return {available: false};
   });
   render(<App />);
   await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
-  expect(await screen.findByText(/Re-index did not finish: 1 indexed, 0 skipped, 1 failed/)).toBeInTheDocument();
+  const error = await screen.findByText(/Re-index did not finish: 1 indexed, 0 skipped, 1 failed/);
+  expect(error).toHaveTextContent("file.pdf: PDFium asset missing");
+  expect(error.textContent?.match(/Re-index did not finish/g)).toHaveLength(1);
   expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
   expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
   expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
+});
+
+it("reports setup failure without invented zero counts", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_index") throw "engine load failed";
+    return {available: false};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  expect(await screen.findByText("Re-index did not finish: engine load failed")).toBeInTheDocument();
+  expect(screen.queryByText(/0 indexed/)).not.toBeInTheDocument();
 });

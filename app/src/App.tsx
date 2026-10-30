@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { version } from "../package.json";
 
-interface Progress { completed: number; failed: number; skipped: number; total: number; path: string; reason?: string }
+interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
 interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
 interface Citation { number: number; doc_id: string; page: number; file_name?: string | null }
 interface SelfTestResult { status: string; version: string; os: string; arch: string }
@@ -107,13 +107,14 @@ export default function App() {
   async function indexFolder() {
     setIndexing(true); setRunning(true); setError(""); setProgress("Scanning…"); setAnswer(""); setCitations([]); setHits([]);
     let active = true;
+    let receivedProgress = false;
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
+    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) {
       const detail = String(cause);
-      setError(detail.startsWith("Re-index did not finish") ? detail :
+      setError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
         `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
       setProgress("");
     }

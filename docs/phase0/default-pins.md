@@ -67,12 +67,27 @@ finished run activates that directory, using a temporary pointer file, fsync,
 and atomic rename (and directory fsync on Unix). Initial recipe creation also
 uses temp + fsync + rename, so interruption cannot leave partial recipe JSON.
 Publication requires at least one completed or previously completed (skipped)
-document, or a genuinely empty folder, and every failure must be a document
-content failure (unsupported, corrupt, unreadable, empty text or needs OCR).
-Worker crashes/timeouts, model errors and infrastructure I/O failures keep the
-pointer unchanged and the candidate resumable. The UI reports “Re-index did not
-finish” with indexed/skipped/failed/total counts. Cancel or kill before completion leaves the pointer
-unchanged; the next Re-index resumes using the existing skip logic.
+document, or a folder with no supported documents. Unsupported extensions are
+excluded at scan time, before hashing or worker launch; the parser also rejects
+unsupported formats as document failures for callers bypassing the scanner.
+
+| Failure | Class | Publication with another completed/skipped document |
+| --- | --- | --- |
+| Corrupt/password-protected/unsupported document, empty text, needs OCR | Document | Allowed |
+| Successfully spawned worker crashes, times out, or exceeds memory budget on a file | Document | Allowed |
+| Source changes during parsing | Document (retry on next run) | Allowed |
+| Source I/O, including permission/missing-file/device errors | Infrastructure | Blocked |
+| Worker spawn/missing binary; PDFium binding; OCR engine unavailable; engine/model load; storage errors | Infrastructure | Blocked |
+| PDFium wrapped I/O, internal file/page/unknown errors, other unrecognized PDFium failures | Infrastructure (fail closed) | Blocked |
+
+All-failed nonempty runs remain blocked even when every failure is a document
+failure. Infrastructure errors keep the pointer unchanged and the candidate
+resumable. The UI reports “Re-index did not finish” once, with real progress
+counts when available and the first three failed file paths and reasons.
+Cancel or kill before completion leaves the pointer unchanged; the next Re-index
+resumes using the existing skip logic. The directory selected at Re-index start
+is held under its writer lock through activation and is the exact directory
+published; a matching legacy directory appearing during the run cannot replace it.
 
 If the legacy recipe already equals current pins, Index adopts `phase0-index`
 in place and resumes its existing documents instead of rebuilding.

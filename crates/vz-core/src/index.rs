@@ -17,6 +17,8 @@ pub struct Progress {
     pub infrastructure_failed: usize,
     pub skipped: usize,
     pub total: usize,
+    pub failure_examples: Vec<String>,
+    pub infrastructure_examples: Vec<String>,
     pub needs_ocr_pages: Vec<u32>,
     pub path: String,
     pub reason: Option<String>,
@@ -25,8 +27,8 @@ impl Progress {
     pub fn ensure_publishable(&self) -> Result<()> {
         anyhow::ensure!(
             self.infrastructure_failed == 0 && (self.completed + self.skipped > 0 || self.total == 0),
-            "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; Re-index to resume",
-            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total
+            "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {}; Re-index to resume",
+            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, if self.infrastructure_failed > 0 { &self.infrastructure_examples } else { &self.failure_examples }.join("; ")
         );
         Ok(())
     }
@@ -99,7 +101,18 @@ pub async fn index(
                 return Err(error).context("source unavailable during scan");
             }
         };
-        if entry.file_type().is_file() {
+        if entry.file_type().is_file()
+            && entry
+                .path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| {
+                    matches!(
+                        e.to_ascii_lowercase().as_str(),
+                        "pdf" | "docx" | "xlsx" | "txt" | "md" | "markdown" | "html" | "htm"
+                    )
+                })
+        {
             files.push(entry.into_path());
         }
     }
@@ -176,7 +189,9 @@ pub async fn index(
                 .map_err(|e| crate::failures::source_io(e.into()))?
                 != hash
             {
-                bail!("source changed during parsing; retry indexing");
+                return Err(crate::failures::content(
+                    "source changed during parsing; retry indexing",
+                ));
             }
             let doc_id = sha256(path_text.as_bytes());
             let mut chunks = chunk(&doc_id, &pages);
@@ -233,8 +248,18 @@ pub async fn index(
                 stats.failed += 1;
                 if !crate::failures::is_content(&error) {
                     stats.infrastructure_failed += 1;
+                    if stats.infrastructure_examples.len() < 3 {
+                        stats
+                            .infrastructure_examples
+                            .push(format!("{path_text}: {error:#}"));
+                    }
                 }
                 let reason = format!("{error:#}");
+                if stats.failure_examples.len() < 3 {
+                    stats
+                        .failure_examples
+                        .push(format!("{path_text}: {reason}"));
+                }
                 stats.reason = Some(reason.clone());
                 // Never serve an older revision when replacement failed.
                 state
