@@ -20,7 +20,7 @@ export const config = {
   mochaOpts: { timeout: 60_000 },
   services: [['@wdio/tauri-service', {
     driverProvider: 'embedded',
-    appBinaryPath: resolve('../target/debug/bundle/macos/vectorAIz.app'),
+    appBinaryPath: resolve('../target/debug/bundle/macos/vectorAIz.app/Contents/MacOS/vectoraiz'),
     captureFrontendLogs: false,
     captureBackendLogs: true,
   }]],

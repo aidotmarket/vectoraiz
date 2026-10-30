@@ -27,8 +27,8 @@ cd ..
 python3 scripts/native-ui-test-gate.py
 ```
 
-The config launches `target/debug/bundle/macos/vectorAIz.app`, one main window
-and one worker. It creates a fresh temporary model directory, bundles only the
+The config launches `target/debug/bundle/macos/vectorAIz.app/Contents/MacOS/vectoraiz`
+(the executable inside the debug bundle), one main window and one worker. It creates a fresh temporary model directory, bundles only the
 model manifest, skips the startup update request, and never clicks download or
 loads models. No model assets or inference helper are needed. The smoke checks
 the real `vectorAIz` heading and Models first-run screen, waits for model status
