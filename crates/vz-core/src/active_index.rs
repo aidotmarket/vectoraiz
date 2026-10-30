@@ -17,6 +17,10 @@ struct Pointer {
 /// Canonical JSON: recursively sorted object keys, compact UTF-8 serialization.
 /// Sort explicitly so dependency feature unification cannot change the ID.
 pub fn recipe_id(recipe: &Recipe) -> Result<String> {
+    canonical_id(serde_json::to_value(recipe)?)
+}
+
+fn canonical_id(value: serde_json::Value) -> Result<String> {
     fn sorted(value: serde_json::Value) -> serde_json::Value {
         match value {
             serde_json::Value::Object(map) => {
@@ -31,7 +35,7 @@ pub fn recipe_id(recipe: &Recipe) -> Result<String> {
             other => other,
         }
     }
-    Ok(sha256(&serde_json::to_vec(&sorted(serde_json::to_value(recipe)?))?)[..16].into())
+    Ok(sha256(&serde_json::to_vec(&sorted(value))?)[..16].into())
 }
 
 pub fn recipe_dir(data: &Path, recipe: &Recipe) -> Result<PathBuf> {
@@ -75,9 +79,12 @@ fn verified_target(data: &Path) -> Option<PathBuf> {
         {
             return None;
         }
-        let stored: Recipe =
+        let stored: serde_json::Value =
             serde_json::from_slice(&fs::read(target.join("recipe.json")).ok()?).ok()?;
-        if recipe_id(&stored).ok()? != pointer.recipe_id {
+        // Validate the schema, but hash the complete stored JSON so deserialization
+        // cannot silently discard unknown fields when verifying pointer identity.
+        serde_json::from_value::<Recipe>(stored.clone()).ok()?;
+        if canonical_id(stored).ok()? != pointer.recipe_id {
             return None;
         }
         Some(target)
@@ -106,9 +113,9 @@ fn publication_dir(data: &Path, recipe: &Recipe) -> Result<String> {
     let legacy = data.join("phase0-index").join("recipe.json");
     if fs::read(legacy)
         .ok()
-        .and_then(|b| serde_json::from_slice::<Recipe>(&b).ok())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
         .as_ref()
-        == Some(recipe)
+        == Some(&serde_json::to_value(recipe)?)
     {
         Ok("phase0-index".into())
     } else {
@@ -134,8 +141,12 @@ fn activate_with(
         target.starts_with(&root) && target.is_dir(),
         "index outside data root"
     );
-    let stored: Recipe = serde_json::from_slice(&fs::read(target.join("recipe.json"))?)?;
-    ensure!(stored == *recipe, "index recipe mismatch");
+    let value: serde_json::Value = serde_json::from_slice(&fs::read(target.join("recipe.json"))?)?;
+    let stored: Recipe = serde_json::from_value(value.clone())?;
+    ensure!(
+        stored == *recipe && canonical_id(value)? == id,
+        "index recipe mismatch"
+    );
     let pointer = Pointer {
         dir: relative,
         recipe_id: id,
@@ -417,6 +428,30 @@ mod tests {
         .unwrap();
         assert!(activate(data.path(), &recipe).is_err());
         assert!(!data.path().join("active-index.json").exists());
+        let mut with_unknown = serde_json::to_value(&recipe).unwrap();
+        with_unknown["unknown_recipe_field"] = serde_json::json!("must participate in the hash");
+        fs::write(
+            root.join("recipe.json"),
+            serde_json::to_vec(&with_unknown).unwrap(),
+        )
+        .unwrap();
+        assert!(activate(data.path(), &recipe).is_err());
+        fs::write(
+            data.path().join("active-index.json"),
+            serde_json::to_vec(&Pointer {
+                dir: format!("indexes/{}", recipe_id(&recipe).unwrap()),
+                recipe_id: recipe_id(&recipe).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(needs_pointer_repair(data.path()));
+        assert_eq!(resolve(data.path()), legacy);
+        fs::write(
+            root.join("recipe.json"),
+            serde_json::to_vec(&different).unwrap(),
+        )
+        .unwrap();
         // Correct-shaped dir/id with a different stored recipe also fails.
         fs::write(
             data.path().join("active-index.json"),

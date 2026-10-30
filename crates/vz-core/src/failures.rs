@@ -32,15 +32,19 @@ pub fn infrastructure(error: Error) -> Error {
 /// Source reads may fail because a particular file is unreadable. Other I/O
 /// failures (including storage exhaustion/device errors) remain infrastructure.
 pub fn source_io(error: Error) -> Error {
-    if error.downcast_ref::<std::io::Error>().is_some_and(|e| {
-        matches!(
-            e.kind(),
-            std::io::ErrorKind::PermissionDenied
-                | std::io::ErrorKind::NotFound
-                | std::io::ErrorKind::InvalidData
-                | std::io::ErrorKind::UnexpectedEof
-        )
-    }) {
+    if error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .is_some_and(|e| {
+            matches!(
+                e.kind(),
+                std::io::ErrorKind::PermissionDenied
+                    | std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::UnexpectedEof
+            )
+        })
+    {
         content(format!("{error:#}"))
     } else {
         error
@@ -53,7 +57,7 @@ pub fn parser(error: Error) -> Error {
     if error.downcast_ref::<InfrastructureFailure>().is_some() {
         return error;
     }
-    if error.downcast_ref::<std::io::Error>().is_some() {
+    if error.chain().any(|cause| cause.is::<std::io::Error>()) {
         return source_io(error);
     }
     content(format!("{error:#}"))
@@ -68,6 +72,12 @@ mod tests {
         assert!(is_content(&source_io(
             std::io::Error::from(std::io::ErrorKind::PermissionDenied).into()
         )));
+        // ZIP and workbook errors wrap I/O errors in their own error types.
+        let device = zip::result::ZipError::Io(std::io::Error::from(std::io::ErrorKind::Other));
+        assert!(!is_content(&parser(device.into())));
+        let unreadable =
+            zip::result::ZipError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
+        assert!(is_content(&parser(unreadable.into())));
         for error in [
             anyhow::anyhow!("worker crashed"),
             anyhow::anyhow!("worker timeout"),
