@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     env:
       PYTHONUTF8: '1'
@@ -172,7 +172,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -200,7 +200,7 @@ jobs:
             msi-uninstall.log
           if-no-files-found: warn
   ui-test-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 35
     env:
       CARGO_INCREMENTAL: '0'
