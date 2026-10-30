@@ -93,7 +93,16 @@ impl State {
         root: &Path,
         selected: &crate::engine::Recipe,
     ) -> Result<(Self, crate::engine::Recipe)> {
+        anyhow::ensure!(
+            !crate::active_index::needs_pointer_repair(root),
+            "active index pointer invalid; re-index required"
+        );
         let root = crate::active_index::resolve_state(root);
+        // Querying an interrupted first migration must not create an empty legacy index.
+        anyhow::ensure!(
+            root.join("recipe.json").is_file(),
+            "index recipe missing; re-index required"
+        );
         let state = Self::open(&root)?;
         let recipe = state.validate_recipe(selected)?;
         Ok((state, recipe))

@@ -9,15 +9,16 @@ fn failed_file_does_not_prevent_next_worker() {
     let good = dir.join("good.txt");
     std::fs::write(&good, "working").unwrap();
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-parser-worker"));
-    assert!(run(
+    let failure = run(
         worker,
         &Request {
             path: bad,
-            pdfium: None
+            pdfium: None,
         },
-        Duration::from_secs(10)
+        Duration::from_secs(10),
     )
-    .is_err());
+    .unwrap_err();
+    assert!(vz_core::failures::is_content(&failure));
     assert_eq!(
         run(
             worker,
@@ -40,14 +41,14 @@ fn timeout_and_crash() {
         path: path.into(),
         pdfium: None,
     };
-    assert!(run(worker, &request("timeout"), Duration::from_millis(500))
-        .unwrap_err()
-        .to_string()
-        .contains("timeout"));
-    assert!(run(worker, &request("crash"), Duration::from_secs(5))
-        .unwrap_err()
-        .to_string()
-        .contains("crashed"));
+    for (path, expected, timeout) in [
+        ("timeout", "timeout", Duration::from_millis(500)),
+        ("crash", "crashed", Duration::from_secs(5)),
+    ] {
+        let failure = run(worker, &request(path), timeout).unwrap_err();
+        assert!(failure.to_string().contains(expected));
+        assert!(!vz_core::failures::is_content(&failure));
+    }
     assert!(run(worker, &request("ok"), Duration::from_secs(5)).is_ok());
 }
 #[cfg(target_os = "macos")]

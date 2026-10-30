@@ -83,3 +83,5 @@ pub mod parsers;
 pub mod pipeline;
 pub mod storage;
 pub mod worker;
+
+pub mod failures;

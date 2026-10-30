@@ -19,6 +19,8 @@ pub struct Request {
 pub struct Response {
     pub pages: Vec<Page>,
     pub error: Option<String>,
+    #[serde(default)]
+    pub content_failure: bool,
 }
 pub fn write_frame<T: Serialize>(mut writer: impl Write, value: &T) -> Result<()> {
     let data = serde_json::to_vec(value)?;
@@ -99,7 +101,11 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
             }
             let response = response??;
             if let Some(error) = response.error {
-                bail!("{error}");
+                return Err(if response.content_failure {
+                    crate::failures::content(error)
+                } else {
+                    anyhow::anyhow!(error)
+                });
             }
             return Ok(response.pages);
         }

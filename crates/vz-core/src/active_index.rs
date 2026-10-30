@@ -41,7 +41,16 @@ pub fn recipe_dir(data: &Path, recipe: &Recipe) -> Result<PathBuf> {
 /// Invalid, missing, escaping (including symlink escapes) pointers fall back to
 /// the untouched legacy index. A missing legacy path is returned for first use.
 pub fn resolve(data: &Path) -> PathBuf {
-    let selected = (|| -> Option<PathBuf> {
+    verified_target(data).unwrap_or_else(|| data.join("phase0-index"))
+}
+
+/// An existing invalid pointer needs repair even if the legacy recipe matches.
+pub fn needs_pointer_repair(data: &Path) -> bool {
+    data.join("active-index.json").symlink_metadata().is_ok() && verified_target(data).is_none()
+}
+
+fn verified_target(data: &Path) -> Option<PathBuf> {
+    (|| -> Option<PathBuf> {
         let pointer: Pointer =
             serde_json::from_slice(&fs::read(data.join("active-index.json")).ok()?).ok()?;
         let relative = Path::new(&pointer.dir);
@@ -62,11 +71,17 @@ pub fn resolve(data: &Path) -> PathBuf {
         if !target.starts_with(&root) || target == root || !target.is_dir() {
             return None;
         }
-        // The index's own recipe remains authoritative. Missing/corrupt recipes
-        // must reach the mismatch guard rather than silently selecting old data.
+        if pointer.dir != format!("indexes/{}", pointer.recipe_id) && pointer.dir != "phase0-index"
+        {
+            return None;
+        }
+        let stored: Recipe =
+            serde_json::from_slice(&fs::read(target.join("recipe.json")).ok()?).ok()?;
+        if recipe_id(&stored).ok()? != pointer.recipe_id {
+            return None;
+        }
         Some(target)
-    })();
-    selected.unwrap_or_else(|| data.join("phase0-index"))
+    })()
 }
 
 /// Recognize libraries including an interrupted first rebuild with no pointer yet.
@@ -86,6 +101,21 @@ pub fn resolve_state(path: &Path) -> PathBuf {
     }
 }
 
+/// Reuse a matching legacy library in place; never rewrite an incompatible one.
+fn publication_dir(data: &Path, recipe: &Recipe) -> Result<String> {
+    let legacy = data.join("phase0-index").join("recipe.json");
+    if fs::read(legacy)
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Recipe>(&b).ok())
+        .as_ref()
+        == Some(recipe)
+    {
+        Ok("phase0-index".into())
+    } else {
+        Ok(format!("indexes/{}", recipe_id(recipe)?))
+    }
+}
+
 /// Call only after the indexer returned successfully and cancellation was checked.
 pub fn activate(data: &Path, recipe: &Recipe) -> Result<()> {
     activate_with(data, recipe, || Ok(()))
@@ -97,7 +127,7 @@ fn activate_with(
     before_rename: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let id = recipe_id(recipe)?;
-    let relative = format!("indexes/{id}");
+    let relative = publication_dir(data, recipe)?;
     let root = data.canonicalize()?;
     let target = root.join(&relative).canonicalize()?;
     ensure!(
@@ -153,6 +183,8 @@ pub fn last_indexed_folder(root: &Path) -> Option<String> {
         .prepare("SELECT path FROM documents ORDER BY path")
         .ok()?;
     let paths = query.query_map([], |r| r.get::<_, String>(0)).ok()?;
+    // Safe for the current one-folder library. Revisit before supporting
+    // multiple source folders: their common ancestor could be a volume root.
     let mut folder: Option<PathBuf> = None;
     for path in paths {
         let path = PathBuf::from(path.ok()?);
@@ -183,29 +215,46 @@ pub async fn reindex(
     progress: impl FnMut(&crate::index::Progress),
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
-    ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
-    let root = recipe_dir(data, &engines.recipe)?;
-    fs::create_dir_all(&root)?;
-    ensure!(
-        root.canonicalize()?.starts_with(data.canonicalize()?),
-        "index outside data root"
-    );
-    let mut state = crate::storage::State::open(&root)?;
-    finish_reindex(
-        data,
-        &engines.recipe,
-        crate::index::index(&mut state, folder, engines, assets, progress),
-        cancelled,
-    )
-    .await
+    let mut latest = crate::index::Progress::default();
+    let mut progress = progress;
+    let result = async {
+        ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
+        let root = data.join(publication_dir(data, &engines.recipe)?);
+        fs::create_dir_all(&root)?;
+        ensure!(
+            root.canonicalize()?.starts_with(data.canonicalize()?),
+            "index outside data root"
+        );
+        let mut state = crate::storage::State::open(&root)?;
+        finish_reindex(
+            data,
+            &engines.recipe,
+            crate::index::index(&mut state, folder, engines, assets, |p| {
+                latest = p.clone();
+                progress(p);
+            }),
+            cancelled,
+        )
+        .await
+    }
+    .await;
+    result.map_err(|e| {
+        anyhow::anyhow!(
+            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {e:#}",
+            latest.completed,
+            latest.skipped,
+            latest.failed,
+            latest.total
+        )
+    })
 }
 
-async fn finish_reindex<T>(
+async fn finish_reindex(
     data: &Path,
     recipe: &Recipe,
-    run: impl std::future::Future<Output = Result<T>>,
+    run: impl std::future::Future<Output = Result<crate::index::Progress>>,
     cancelled: impl Fn() -> bool,
-) -> Result<T> {
+) -> Result<crate::index::Progress> {
     let mut run = Box::pin(run);
     let result = futures::future::poll_fn(|cx| {
         if cancelled() {
@@ -218,6 +267,7 @@ async fn finish_reindex<T>(
     })
     .await?;
     ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
+    result.ensure_publishable()?;
     activate(data, recipe)?;
     Ok(result)
 }
@@ -327,6 +377,146 @@ mod tests {
         assert_eq!(resolve(data.path()), legacy);
     }
 
+    #[test]
+    fn pointer_identity_and_activation_recipe_are_verified() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        let root = seed(data.path(), &recipe);
+        let legacy = data.path().join("phase0-index");
+        let mut different = recipe.clone();
+        different.model.push_str("-different");
+        for (dir, id) in [
+            (
+                format!("indexes/{}", recipe_id(&recipe).unwrap()),
+                "0123456789abcdef".to_string(),
+            ),
+            (
+                format!("indexes/{}", recipe_id(&different).unwrap()),
+                recipe_id(&recipe).unwrap(),
+            ),
+        ] {
+            fs::create_dir_all(data.path().join(&dir)).unwrap();
+            fs::write(
+                data.path().join(&dir).join("recipe.json"),
+                serde_json::to_vec(&recipe).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                data.path().join("active-index.json"),
+                serde_json::to_vec(&Pointer { dir, recipe_id: id }).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(resolve(data.path()), legacy);
+            assert!(needs_pointer_repair(data.path()));
+        }
+        fs::remove_file(data.path().join("active-index.json")).unwrap();
+        fs::write(
+            root.join("recipe.json"),
+            serde_json::to_vec(&different).unwrap(),
+        )
+        .unwrap();
+        assert!(activate(data.path(), &recipe).is_err());
+        assert!(!data.path().join("active-index.json").exists());
+        // Correct-shaped dir/id with a different stored recipe also fails.
+        fs::write(
+            data.path().join("active-index.json"),
+            serde_json::to_vec(&Pointer {
+                dir: format!("indexes/{}", recipe_id(&recipe).unwrap()),
+                recipe_id: recipe_id(&recipe).unwrap(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(resolve(data.path()), legacy);
+    }
+
+    #[test]
+    fn matching_legacy_is_adopted_in_place_and_verified() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        let legacy = data.path().join("phase0-index");
+        fs::create_dir(&legacy).unwrap();
+        let bytes = serde_json::to_vec(&recipe).unwrap();
+        fs::write(legacy.join("recipe.json"), &bytes).unwrap();
+        assert_eq!(
+            publication_dir(data.path(), &recipe).unwrap(),
+            "phase0-index"
+        );
+        activate(data.path(), &recipe).unwrap();
+        assert_eq!(resolve(data.path()), legacy.canonicalize().unwrap());
+        assert!(!data.path().join("indexes").exists());
+        assert_eq!(fs::read(legacy.join("recipe.json")).unwrap(), bytes);
+        let mut wrong = recipe.clone();
+        wrong.model.push('x');
+        fs::write(
+            legacy.join("recipe.json"),
+            serde_json::to_vec(&wrong).unwrap(),
+        )
+        .unwrap();
+        // A legacy pointer is accepted only when its own recipe hashes to its ID.
+        let pointer: Pointer =
+            serde_json::from_slice(&fs::read(data.path().join("active-index.json")).unwrap())
+                .unwrap();
+        assert_ne!(recipe_id(&wrong).unwrap(), pointer.recipe_id);
+        assert!(needs_pointer_repair(data.path()));
+    }
+
+    #[tokio::test]
+    async fn publication_requires_success_and_only_content_failures_then_resumes() {
+        use crate::index::Progress;
+        let data = tempfile::tempdir().unwrap();
+        let old = recipe();
+        seed(data.path(), &old);
+        activate(data.path(), &old).unwrap();
+        let before = fs::read(data.path().join("active-index.json")).unwrap();
+        let mut new = old.clone();
+        new.model.push_str("-new");
+        let candidate = seed(data.path(), &new);
+        for stats in [
+            Progress {
+                total: 2,
+                failed: 2,
+                ..Default::default()
+            },
+            Progress {
+                total: 3,
+                completed: 1,
+                failed: 2,
+                infrastructure_failed: 1,
+                ..Default::default()
+            },
+        ] {
+            let error = finish_reindex(data.path(), &new, async { Ok(stats) }, || false)
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("Re-index did not finish:"));
+            assert!(error.to_string().contains("failed"));
+            assert_eq!(
+                fs::read(data.path().join("active-index.json")).unwrap(),
+                before
+            );
+            assert!(candidate.join("recipe.json").is_file());
+        }
+        // Resumed work may skip already committed documents and exclude corrupt ones.
+        let stats = Progress {
+            total: 3,
+            skipped: 1,
+            completed: 1,
+            failed: 1,
+            ..Default::default()
+        };
+        finish_reindex(data.path(), &new, async { Ok(stats) }, || false)
+            .await
+            .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+        // A genuinely empty folder is publishable, too.
+        finish_reindex(data.path(), &new, async { Ok(Progress::default()) }, || {
+            false
+        })
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn interrupted_reindex_resumes_then_switches_and_searches() {
         use crate::{
@@ -385,7 +575,11 @@ mod tests {
                     .put(&doc, "mtime", &generation)
                     .map_err(anyhow::Error::msg)?;
                 cancelled.store(true, Ordering::SeqCst);
-                Ok(())
+                Ok(crate::index::Progress {
+                    completed: 1,
+                    total: 1,
+                    ..Default::default()
+                })
             },
             || cancelled.load(Ordering::SeqCst),
         )
@@ -401,7 +595,11 @@ mod tests {
             async {
                 let state = State::open(&root)?;
                 assert_eq!(state.documents()?.len(), 1);
-                Ok(())
+                Ok(crate::index::Progress {
+                    skipped: 1,
+                    total: 1,
+                    ..Default::default()
+                })
             },
             || false,
         )
@@ -426,9 +624,14 @@ mod tests {
         assert!(!hits.is_empty());
         drop(state);
         let pointer = fs::read(data.path().join("active-index.json")).unwrap();
-        assert!(finish_reindex(data.path(), &new, async { Ok(()) }, || true)
-            .await
-            .is_err());
+        assert!(finish_reindex(
+            data.path(),
+            &new,
+            async { Ok(crate::index::Progress::default()) },
+            || true
+        )
+        .await
+        .is_err());
         assert_eq!(
             fs::read(data.path().join("active-index.json")).unwrap(),
             pointer
@@ -436,7 +639,7 @@ mod tests {
         assert!(finish_reindex(
             data.path(),
             &new,
-            async { Err::<(), _>(anyhow::anyhow!("interrupted run")) },
+            async { Err::<crate::index::Progress, _>(anyhow::anyhow!("interrupted run")) },
             || false
         )
         .await

@@ -14,12 +14,62 @@ use std::{collections::HashSet, path::Path, time::Duration};
 pub struct Progress {
     pub completed: usize,
     pub failed: usize,
+    pub infrastructure_failed: usize,
     pub skipped: usize,
     pub total: usize,
     pub needs_ocr_pages: Vec<u32>,
     pub path: String,
     pub reason: Option<String>,
 }
+impl Progress {
+    pub fn ensure_publishable(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.infrastructure_failed == 0 && (self.completed + self.skipped > 0 || self.total == 0),
+            "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; Re-index to resume",
+            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total
+        );
+        Ok(())
+    }
+}
+
+/// Write a complete recipe before exposing its name. An interrupted write leaves
+/// only an unreferenced temporary file; retries never validate partial JSON.
+fn initialize_recipe(
+    root: &Path,
+    recipe: &crate::engine::Recipe,
+    before_rename: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use std::{fs, io::Write};
+    let path = root.join("recipe.json");
+    if path.exists() {
+        let stored: crate::engine::Recipe = serde_json::from_slice(&fs::read(path)?)?;
+        anyhow::ensure!(
+            stored == *recipe,
+            "embedding recipe mismatch; re-index required"
+        );
+        return Ok(());
+    }
+    let temp = root.join(format!(".recipe-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)?;
+        file.write_all(&serde_json::to_vec_pretty(recipe)?)?;
+        file.sync_all()?;
+        drop(file);
+        before_rename()?;
+        fs::rename(&temp, path)?;
+        #[cfg(unix)]
+        fs::File::open(root)?.sync_all()?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(temp);
+    }
+    result
+}
+
 pub async fn index(
     state: &mut State,
     folder: &Path,
@@ -39,17 +89,7 @@ pub async fn index(
             bail!("source unavailable");
         }
     };
-    let recipe_path = state.root.join("recipe.json");
-    if recipe_path.exists() {
-        state.validate_recipe(&engines.recipe)?;
-    } else {
-        let file = std::fs::File::create(&recipe_path)?;
-        serde_json::to_writer_pretty(&file, &engines.recipe)?;
-        file.sync_all()?;
-    }
-    let supported = [
-        "pdf", "docx", "xlsx", "txt", "md", "markdown", "html", "htm",
-    ];
+    initialize_recipe(&state.root, &engines.recipe, || Ok(()))?;
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(&folder).follow_links(false) {
         let entry = match entry {
@@ -59,17 +99,7 @@ pub async fn index(
                 return Err(error).context("source unavailable during scan");
             }
         };
-        if entry.file_type().is_file()
-            && supported.contains(
-                &entry
-                    .path()
-                    .extension()
-                    .and_then(|v| v.to_str())
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .as_str(),
-            )
-        {
+        if entry.file_type().is_file() {
             files.push(entry.into_path());
         }
     }
@@ -94,7 +124,8 @@ pub async fn index(
         )?;
         let job = state.db.last_insert_rowid();
         let result: Result<bool> = async {
-            let metadata = std::fs::metadata(&path)?;
+            let metadata =
+                std::fs::metadata(&path).map_err(|e| crate::failures::source_io(e.into()))?;
             let mtime = format!("{:?}", metadata.modified()?);
             let previous: Option<(u64, String, String)> = state
                 .db
@@ -105,7 +136,8 @@ pub async fn index(
                 )
                 .optional()?;
             // Metadata detects candidates; sha256 confirms content, including same-size edits.
-            let hash = crate::pipeline::file_sha256(&path)?;
+            let hash = crate::pipeline::file_sha256(&path)
+                .map_err(|e| crate::failures::source_io(e.into()))?;
             if let Some((size, old_mtime, old_hash)) = previous {
                 if old_hash == hash {
                     if size != metadata.len() || old_mtime != mtime {
@@ -125,19 +157,25 @@ pub async fn index(
             } else {
                 "pdfium/lib/libpdfium.dylib"
             });
-            let parser = worker::SupervisedParser {
-                executable: worker::executable()?,
-                timeout: Duration::from_secs(60),
-            };
-            let pages = crate::Parser::parse(
-                &parser,
+            let pages = worker::run(
+                &worker::executable()?,
                 &worker::Request {
                     path: path.clone(),
-                    pdfium: Some(library.canonicalize().context("PDFium asset missing")?),
+                    pdfium: if path
+                        .extension()
+                        .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+                    {
+                        Some(library.canonicalize().context("PDFium asset missing")?)
+                    } else {
+                        None
+                    },
                 },
-            )
-            .map_err(anyhow::Error::msg)?;
-            if crate::pipeline::file_sha256(&path)? != hash {
+                Duration::from_secs(60),
+            )?;
+            if crate::pipeline::file_sha256(&path)
+                .map_err(|e| crate::failures::source_io(e.into()))?
+                != hash
+            {
                 bail!("source changed during parsing; retry indexing");
             }
             let doc_id = sha256(path_text.as_bytes());
@@ -148,7 +186,7 @@ pub async fn index(
                 } else {
                     "document has no text"
                 };
-                bail!("{reason}");
+                return Err(crate::failures::content(reason));
             }
             for chunk in &mut chunks {
                 chunk.embedding = engines.vector(&chunk.text, false)?;
@@ -193,6 +231,9 @@ pub async fn index(
             }
             Err(error) => {
                 stats.failed += 1;
+                if !crate::failures::is_content(&error) {
+                    stats.infrastructure_failed += 1;
+                }
                 let reason = format!("{error:#}");
                 stats.reason = Some(reason.clone());
                 // Never serve an older revision when replacement failed.
@@ -325,6 +366,42 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn interrupted_initial_recipe_write_retries_without_cleanup() {
+        let data = tempfile::tempdir().unwrap();
+        let pins =
+            serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+        let recipe = crate::engine::Recipe::from_pins(&pins, 384).unwrap();
+        let legacy = data.path().join("phase0-index");
+        std::fs::create_dir(&legacy).unwrap();
+        std::fs::write(legacy.join("recipe.json"), b"legacy unchanged").unwrap();
+        let root = crate::active_index::recipe_dir(data.path(), &recipe).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(initialize_recipe(&root, &recipe, || {
+            // Model a kill during serialization: only the temporary name exists.
+            let temp = std::fs::read_dir(&root)?.next().unwrap()?.path();
+            std::fs::write(temp, b"{\"model\":")?;
+            anyhow::bail!("interrupted recipe creation")
+        })
+        .is_err());
+        assert!(!root.join("recipe.json").exists());
+        // A hard kill can also leave an orphan; retry needs no manual cleanup.
+        std::fs::write(root.join(".recipe-killed.tmp"), b"{").unwrap();
+        initialize_recipe(&root, &recipe, || Ok(())).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<crate::engine::Recipe>(
+                &std::fs::read(root.join("recipe.json")).unwrap()
+            )
+            .unwrap(),
+            recipe
+        );
+        assert_eq!(
+            std::fs::read(legacy.join("recipe.json")).unwrap(),
+            b"legacy unchanged"
+        );
+        assert!(!data.path().join("active-index.json").exists());
+    }
+
     #[test]
     fn refuses_unknown_model_citations() {
         assert!(validate_citations("supported [1]", 1).is_ok());

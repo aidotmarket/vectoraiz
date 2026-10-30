@@ -95,6 +95,73 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     assert cli('index', 'spike/fixtures/documents')['skipped'] == 20
     assert (library / 'active-index.json').read_bytes() == pointer_bytes
     assert (legacy / 'recipe.json').read_bytes() == old_bytes
+    # Gate 3: exercise real indexer failures, publication and retry, rather
+    # than constructing only synthetic completion statistics.
+    def migration_library(name):
+        target = Path(temp) / name
+        shutil.copytree(explicit_state, target / 'phase0-index')
+        (target / 'phase0-index/recipe.json').write_bytes(old_bytes)
+        old_id = hashlib.sha256(json.dumps(json.loads(old_bytes), sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()[:16]
+        (target / 'active-index.json').write_text(json.dumps({'dir': 'phase0-index', 'recipe_id': old_id}))
+        return target
+
+    def refused_index(folder, assets=ROOT / '.assets'):
+        result = subprocess.run([str(CLI), '--cpu', '--state', str(state), '--assets', str(assets),
+                                 'index', str(folder)], cwd=ROOT, text=True, encoding='utf-8', capture_output=True, timeout=600)
+        print(result.stderr, file=sys.stderr)
+        assert result.returncode != 0 and 'Re-index did not finish' in result.stderr, result.stderr
+        return result.stderr
+
+    content = Path(temp) / 'content-failures'
+    content.mkdir()
+    (content / 'good.txt').write_text('Orbital archive retention is thirty days.')
+    (content / 'bad.docx').write_bytes(b'not a ZIP document')
+    (content / 'unsupported.bin').write_bytes(b'unsupported')
+    state = migration_library('mixed-content-library')
+    mixed_result = cli('index', str(content))
+    assert (mixed_result['completed'], mixed_result['failed'], mixed_result['infrastructure_failed']) == (1, 2, 0), mixed_result
+    assert json.loads((state / 'active-index.json').read_text())['dir'].startswith('indexes/')
+
+    (content / 'good.txt').unlink()
+    state = migration_library('all-failed-library')
+    before = (state / 'active-index.json').read_bytes()
+    failure = refused_index(content)
+    assert '0 indexed' in failure and '2 failed' in failure, failure
+    assert (state / 'active-index.json').read_bytes() == before
+    assert list((state / 'indexes').glob('*/recipe.json')), 'candidate retained'
+
+    infrastructure = Path(temp) / 'infrastructure-input'
+    infrastructure.mkdir()
+    (infrastructure / 'a-good.txt').write_text('Orbital archive retention is thirty days.')
+    shutil.copyfile(ROOT / 'spike/fixtures/documents/access.pdf', infrastructure / 'b-access.pdf')
+    incomplete_assets = Path(temp) / 'assets-without-pdfium'
+    incomplete_assets.mkdir()
+    embedding_file = pins['embedding']['file']
+    os.link(ROOT / '.assets' / embedding_file, incomplete_assets / embedding_file)
+    state = migration_library('infrastructure-library')
+    before = (state / 'active-index.json').read_bytes()
+    failure = refused_index(infrastructure, incomplete_assets)
+    assert '1 indexed' in failure and '1 failed' in failure and '1 infrastructure' in failure, failure
+    assert (state / 'active-index.json').read_bytes() == before
+    resumed = cli('index', str(infrastructure))
+    assert (resumed['completed'], resumed['skipped'], resumed['failed']) == (1, 1, 0), resumed
+    assert (state / 'active-index.json').read_bytes() != before
+    assert cli('search', query), 'search after infrastructure retry'
+
+    # A matching legacy recipe is adopted without re-embedding or a new directory.
+    state = Path(temp) / 'matching-legacy-library'
+    shutil.copytree(explicit_state, state / 'phase0-index')
+    assert cli('index', 'spike/fixtures/documents')['skipped'] == 20
+    assert json.loads((state / 'active-index.json').read_text())['dir'] == 'phase0-index'
+    assert not (state / 'indexes').exists()
+    assert cli('search', query)
+
+    state = Path(temp) / 'interrupted-first-library'
+    (state / 'indexes').mkdir(parents=True)
+    missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'search', query],
+                             cwd=ROOT, text=True, encoding='utf-8', capture_output=True, timeout=600)
+    assert missing.returncode != 0 and 're-index required' in missing.stderr
+    assert not (state / 'phase0-index').exists(), 'read must not create legacy state'
     state = explicit_state
 
     # Short sources used to make the model stop after a bare citation marker.

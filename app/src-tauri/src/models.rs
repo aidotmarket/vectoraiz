@@ -150,7 +150,7 @@ pub fn selected_pins(path: &Path, ram_bytes: u64) -> Result<Value> {
                 "first chat tier must start at zero"
             );
             previous = Some(minimum);
-            if minimum <= ram_bytes / (1024 * 1024 * 1024) {
+            if minimum <= ram_bytes.saturating_add(512 * 1024 * 1024) / (1024 * 1024 * 1024) {
                 ensure!(tier["pin"].is_object(), "chat tier pin");
                 chosen = Some(tier["pin"].clone());
             }
@@ -198,6 +198,14 @@ pub fn total_ram_bytes() -> Result<u64> {
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        fn GetPhysicallyInstalledSystemMemory(kib: *mut u64) -> i32;
+    }
+    let mut installed_kib = 0u64;
+    // SAFETY: valid writable output; API returns installed RAM in KiB.
+    if unsafe { GetPhysicallyInstalledSystemMemory(&mut installed_kib) } != 0 && installed_kib > 0 {
+        return installed_kib
+            .checked_mul(1024)
+            .context("Installed RAM overflow");
     }
     let mut status = MemoryStatus {
         length: std::mem::size_of::<MemoryStatus>() as u32,

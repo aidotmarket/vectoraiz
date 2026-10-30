@@ -441,11 +441,10 @@ fn pipeline_paths<R: tauri::Runtime>(
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
     let selected = model_dir(app)?.join("models.selected.json");
     std::fs::create_dir_all(model_dir(app)?).map_err(|e| e.to_string())?;
-    std::fs::write(
-        &selected,
-        serde_json::to_vec(&selected_model_pins(app)?).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    let bytes = serde_json::to_vec(&selected_model_pins(app)?).map_err(|e| e.to_string())?;
+    if std::fs::read(&selected).ok().as_deref() != Some(bytes.as_slice()) {
+        std::fs::write(&selected, bytes).map_err(|e| e.to_string())?;
+    }
     if resources.join("models.json").is_file() {
         return Ok((state, installed_assets(app)?, selected));
     }
@@ -499,7 +498,16 @@ async fn pipeline_index<R: tauri::Runtime>(
                 ))?;
             Ok(serde_json::to_value(result)?)
         };
-        run().map_err(|e| format!("{e:#}"))
+        run().map_err(|e| {
+            let detail = format!("{e:#}");
+            if detail.starts_with("Re-index did not finish") {
+                detail
+            } else {
+                format!(
+                    "Re-index did not finish: 0 indexed, 0 skipped, 0 failed, 0 total; {detail}"
+                )
+            }
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -648,7 +656,7 @@ fn model_pin_path<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
-    #[cfg(feature = "smoke-test")]
+    #[cfg(all(feature = "smoke-test", debug_assertions))]
     if smoke_test_requested() {
         if let Some(path) = std::env::var_os("VZ_SMOKE_MODELS") {
             let path = std::path::PathBuf::from(path);
@@ -691,8 +699,10 @@ async fn models_status<R: tauri::Runtime>(
         let mut status = models::status(&dir, &pins);
         status["last_indexed_folder"] =
             serde_json::json!(vz_core::active_index::last_indexed_folder(&root));
-        status["needs_reindex"] =
-            serde_json::json!(models::needs_reindex(&root, &selected).map_err(|e| e.to_string())?);
+        status["needs_reindex"] = serde_json::json!(
+            vz_core::active_index::needs_pointer_repair(&data_root(&app)?)
+                || models::needs_reindex(&root, &selected).map_err(|e| e.to_string())?
+        );
         Ok(status)
     })
     .await

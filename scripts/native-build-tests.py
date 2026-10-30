@@ -23,6 +23,48 @@ publisher = importlib.util.module_from_spec(publish_spec)
 publish_spec.loader.exec_module(publisher)
 
 
+class DefaultPinsFold(unittest.TestCase):
+    def test_fetcher_ram_tiers_round_to_nearest_gib(self):
+        spec = importlib.util.spec_from_file_location('fetch_assets', Path(__file__).with_name('fetch-assets.py'))
+        fetcher = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fetcher)
+        tiers = json.loads((version.ROOT / 'spike/fixtures/models.release.json').read_text())['chat_tiers']
+        for size, expected in [(8 << 30, 'qwen3-4b-instruct-2507'),
+                               (16 << 30, 'ministral-3-8b'), (24 << 30, 'ministral-3-8b'),
+                               (32 << 30, 'qwen3.6-35b-a3b'), (64 << 30, 'qwen3.6-35b-a3b'),
+                               (17_000_000_000, 'ministral-3-8b'), (34_000_000_000, 'qwen3.6-35b-a3b')]:
+            with self.subTest(bytes=size):
+                self.assertEqual(fetcher.select_tier(tiers, size)['name'], expected)
+
+    def test_release_profile_compiles_out_smoke_model_override(self):
+        # Compile the actual override block in isolation with the feature enabled.
+        # This pins the guard and checks both its executable and binary contents.
+        source = (version.ROOT / 'app/src-tauri/src/desktop.rs').read_text()
+        function = source[source.index('fn model_pin_path<'):]
+        start = function.index('    #[cfg(')
+        block = function[start:function.index('    let resources =')]
+        self.assertTrue(block.startswith('    #[cfg(all(feature = "smoke-test", debug_assertions))]'))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            src = root / 'override.rs'
+            src.write_text('fn smoke_test_requested() -> bool { true }\n'
+                           '#[allow(dead_code)]\nfn select() -> Result<std::path::PathBuf, String> {\n' + block +
+                           'Ok(std::path::PathBuf::from("bundled")) }\n'
+                           'fn main() { println!("{}", select().unwrap().display()); }\n')
+            for debug in [False, True]:
+                executable = root / ('override.exe' if sys.platform == 'win32' else 'override')
+                subprocess.run(['rustc', str(src), '--cfg', 'feature="smoke-test"',
+                                '-C', f'debug-assertions={"yes" if debug else "no"}', '-o', str(executable)],
+                               check=True, capture_output=True, text=True)
+                env = dict(os.environ, VZ_SMOKE_MODELS=str(root / 'fixture.json'))
+                result = subprocess.run([str(executable)], env=env, check=True, capture_output=True, text=True)
+                self.assertEqual(result.stdout.strip(), str(root / 'fixture.json') if debug else 'bundled')
+                if not debug:
+                    self.assertNotIn(b'VZ_SMOKE_MODELS', executable.read_bytes())
+        workflow = (version.ROOT / '.github/workflows/native-ci.yml').read_text()
+        self.assertIn('build --debug --ci --features smoke-test,custom-protocol', workflow)
+
+
 class VersionGate(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

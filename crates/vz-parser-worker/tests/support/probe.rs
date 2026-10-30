@@ -12,6 +12,7 @@ fn main() {
             &vz_core::worker::Response {
                 pages: vec![],
                 error,
+                content_failure: false,
             },
         )
         .unwrap();
@@ -37,6 +38,7 @@ fn main() {
                 &vz_core::worker::Response {
                     pages: vec![],
                     error: None,
+                    content_failure: false,
                 },
             )
             .unwrap();

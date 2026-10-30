@@ -6,9 +6,13 @@ Stage 1/release bundles carry `spike/fixtures/models.release.json` as
 metadata. The local verification below is separate evidence.
 
 All tiers use bge-m3 Q8_0 (MIT), 634,553,760 bytes. The shell reads total physical
-RAM using macOS `sysctl hw.memsize` or Windows `GlobalMemoryStatusEx` and chooses
-the highest threshold less than or equal to physical RAM, measured in GiB
-(1,073,741,824 bytes). There is no tier picker.
+RAM using macOS `sysctl hw.memsize` or Windows
+`GetPhysicallyInstalledSystemMemory` (KiB), falling back to `GlobalMemoryStatusEx`
+`ullTotalPhys` if installed RAM is unavailable. Both the shell and
+`scripts/fetch-assets.py` select the highest threshold at or below RAM rounded
+to the nearest GiB: `(bytes + 512 MiB) / GiB` using integer division
+(1 GiB = 1,073,741,824 bytes). Nominal 16/32 GiB machines therefore select the
+16/32 tiers even with firmware reservations. There is no tier picker.
 
 | Minimum RAM | Chat model (Q4_K_M) | Chat bytes | Total bytes |
 | --- | --- | ---: | ---: |
@@ -26,14 +30,16 @@ for Ministral (token 1) and none for Qwen; it is unchanged.
 Debug/dev builds use `spike/fixtures/models.json` (bge-small + Qwen2.5-0.5B).
 CI fetches only those small fixtures. Installers still contain release pins;
 the installed acquisition smoke explicitly supplies the fixture path using
-`VZ_SMOKE_MODELS`, honored only by a `smoke-test` build launched with a smoke
-flag. Normal installed launches always use the bundled release pins. The shell
+`VZ_SMOKE_MODELS`, compiled only with both `smoke-test` and debug assertions,
+and honored only when launched with a smoke flag. Stage-1 installers intentionally
+package the debug profile with the smoke-test feature; release-profile builds
+compile this override out even when the feature is enabled. Normal installed launches always use the bundled release pins. The shell
 passes a resolved embedding/chat pair to the offline engine; downloads remain
 in the shell and the engine rehashes each model before loading it.
 
 ## Re-index behaviour
 
-Minerva's Decision 4 design, pending confirmation at Gate 3, uses one index
+Minerva's Decision 4 design, confirmed at Gate 3, uses one index
 per embedding recipe and an atomic active pointer. The per-document storage
 protocol is unchanged.
 
@@ -43,7 +49,11 @@ object keys). `<data_root>/active-index.json` contains
 `{"dir":"indexes/<recipe-id>","recipe_id":"<recipe-id>"}`. Readers share one
 resolver. With no valid pointer, they fall back to `<data_root>/phase0-index`,
 whose recipe is read from its own `recipe.json`. Missing directories and paths
-outside the data root (including symlink escapes) are ignored safely. CLI
+outside the data root (including symlink escapes) are ignored safely. The pointer
+ID must equal the canonical hash of the target recipe, and its directory must
+be `indexes/<recipe-id>` or the legacy `phase0-index` with its own matching ID.
+An invalid pointer marks the library as needing re-index; no unverified target
+is searched. CLI
 Search/Ask/pack accept a library data root through `--state` as well as the
 existing explicit index-directory form. Phase 0 MCP is still a placeholder;
 its future index reads must use the same resolver.
@@ -54,10 +64,18 @@ the new search model”, with Search and Ask disabled. Re-index prefills the sou
 folder inferred from the old index's document paths; if unknown, enter a folder.
 It runs the existing resumable indexer in the new recipe directory. Only a
 finished run activates that directory, using a temporary pointer file, fsync,
-and atomic rename (and directory fsync on Unix). Failed documents are allowed
-as in normal indexing. Cancel or kill before completion leaves the pointer
+and atomic rename (and directory fsync on Unix). Initial recipe creation also
+uses temp + fsync + rename, so interruption cannot leave partial recipe JSON.
+Publication requires at least one completed or previously completed (skipped)
+document, or a genuinely empty folder, and every failure must be a document
+content failure (unsupported, corrupt, unreadable, empty text or needs OCR).
+Worker crashes/timeouts, model errors and infrastructure I/O failures keep the
+pointer unchanged and the candidate resumable. The UI reports “Re-index did not
+finish” with indexed/skipped/failed/total counts. Cancel or kill before completion leaves the pointer
 unchanged; the next Re-index resumes using the existing skip logic.
 
+If the legacy recipe already equals current pins, Index adopts `phase0-index`
+in place and resumes its existing documents instead of rebuilding.
 The legacy index is never moved or deleted. Old recipe directories and old
 model files are never deleted automatically. Both indexes are kept, so rebuilding
 requires disk space for the new index in addition to the old index and models.

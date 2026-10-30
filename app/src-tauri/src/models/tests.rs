@@ -783,14 +783,16 @@ fn release_tiers_and_fixture_compatibility() {
     let candidates: Value =
         serde_json::from_slice(&std::fs::read(root.join("spike/bakeoff/candidates.json")).unwrap())
             .unwrap();
-    for (gb, name) in [
-        (8, "qwen3-4b-instruct-2507"),
-        (16, "ministral-3-8b"),
-        (24, "ministral-3-8b"),
-        (32, "qwen3.6-35b-a3b"),
-        (64, "qwen3.6-35b-a3b"),
+    for (bytes, name) in [
+        (8u64 << 30, "qwen3-4b-instruct-2507"),
+        (16u64 << 30, "ministral-3-8b"),
+        (24u64 << 30, "ministral-3-8b"),
+        (32u64 << 30, "qwen3.6-35b-a3b"),
+        (64u64 << 30, "qwen3.6-35b-a3b"),
+        (17_000_000_000, "ministral-3-8b"),
+        (34_000_000_000, "qwen3.6-35b-a3b"),
     ] {
-        let selected = selected_pins(&release, gb * 1024 * 1024 * 1024).unwrap();
+        let selected = selected_pins(&release, bytes).unwrap();
         assert_eq!(selected["chat"]["name"], name);
         for key in ["embedding", "chat"] {
             let pin = &selected[key];

@@ -684,3 +684,17 @@ it("keeps Search disabled when Re-index is cancelled", async () => {
   expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
   expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
 });
+
+it("reports unfinished Re-index with counts and allows retry while Search stays disabled", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_index") throw "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; Re-index to resume";
+    return {available: false};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  expect(await screen.findByText(/Re-index did not finish: 1 indexed, 0 skipped, 1 failed/)).toBeInTheDocument();
+  expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
+});
