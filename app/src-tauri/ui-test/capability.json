@@ -1,0 +1,6 @@
+{
+  "identifier": "ui-test",
+  "description": "Embedded WebDriver for debug UI tests only",
+  "windows": ["main"],
+  "permissions": ["wdio-webdriver:default"]
+}

@@ -16,6 +16,10 @@ async fn update_check<R: tauri::Runtime>(
     pending: tauri::State<'_, PendingUpdate>,
     startup: Option<bool>,
 ) -> Result<serde_json::Value, String> {
+    #[cfg(all(feature = "ui-test", debug_assertions))]
+    if startup.unwrap_or(false) {
+        return Ok(serde_json::json!({"available": false}));
+    }
     use tauri_plugin_updater::UpdaterExt;
     if startup.unwrap_or(false)
         && std::env::args().any(|arg| {
@@ -251,6 +255,12 @@ fn single_instance_windows_focus<R: tauri::Runtime>(
 }
 
 fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R> {
+    #[cfg(all(feature = "ui-test", debug_assertions))]
+    let builder = builder.plugin(tauri_plugin_wdio_webdriver::init()).plugin(
+        tauri::plugin::Builder::<R>::new("ui-test-observer")
+            .js_init_script(include_str!("../ui-test/observe.js").to_string())
+            .build(),
+    );
     let builder = builder
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             use tauri::Manager;
@@ -339,6 +349,15 @@ fn smoke_test_requested() -> bool {
 
 pub(crate) fn run() {
     let context = tauri::generate_context!();
+    #[cfg(all(feature = "ui-test", debug_assertions))]
+    let context = {
+        let mut context = context;
+        context
+            .runtime_authority_mut()
+            .add_capability(include_str!("../ui-test/capability.json"))
+            .expect("UI test capability");
+        context
+    };
     #[cfg(feature = "smoke-test")]
     let mut context = context;
     #[cfg(feature = "smoke-test")]
@@ -582,6 +601,16 @@ async fn pipeline_ask<R: tauri::Runtime>(
 
 fn data_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
+    #[cfg(all(feature = "ui-test", debug_assertions))]
+    {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("VZ_UI_TEST_DATA_ROOT").ok_or("UI test data root is required")?,
+        );
+        if !root.is_absolute() {
+            return Err("UI test data root must be absolute".into());
+        }
+        return Ok(root);
+    }
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() || std::env::args().any(|a| a == "--single-instance-test") {
         if let Some(root) = std::env::var_os("VZ_SMOKE_DATA_ROOT") {
@@ -592,6 +621,7 @@ fn data_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::
             return Ok(root);
         }
     }
+    #[cfg(not(all(feature = "ui-test", debug_assertions)))]
     Ok(app
         .path()
         .home_dir()

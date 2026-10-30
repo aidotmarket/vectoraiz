@@ -199,3 +199,46 @@ jobs:
             msi-install.log
             msi-uninstall.log
           if-no-files-found: warn
+  ui-test-macos:
+    runs-on: macos-14
+    timeout-minutes: 35
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_BUILD_JOBS: '3'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install protocol compiler
+        run: python scripts/install-protoc.py
+      - name: Install pinned Rust
+        run: rustup show active-toolchain
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ui-test-macos
+          cache-on-failure: true
+      - name: Prove release and stage-1 exclude UI test features
+        run: python scripts/native-ui-test-gate.py
+      - name: Install UI dependencies
+        working-directory: app
+        run: npm ci
+      - name: Build debug UI test app (no model assets)
+        working-directory: app
+        run: npm run tauri -- build --debug --ci --features ui-test,custom-protocol --bundles app --config src-tauri/ui-test/tauri.conf.json
+      - name: Native first-run UI smoke
+        working-directory: app
+        run: npx wdio run wdio.conf.mjs
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-test-macos-failure
+          path: app/ui-test-results/
+          if-no-files-found: warn
+          retention-days: 14

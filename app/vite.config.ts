@@ -5,5 +5,5 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   clearScreen: false,
-  test: { environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
+  test: { exclude: ["ui-tests/**", "node_modules/**"], environment: "jsdom", setupFiles: ["./src/test-setup.ts"] },
 });
