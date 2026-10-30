@@ -136,8 +136,9 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     shutil.copyfile(ROOT / 'spike/fixtures/documents/access.pdf', infrastructure / 'b-access.pdf')
     incomplete_assets = Path(temp) / 'assets-without-pdfium'
     incomplete_assets.mkdir()
-    embedding_file = pins['embedding']['file']
-    os.link(ROOT / '.assets' / embedding_file, incomplete_assets / embedding_file)
+    for kind in ['embedding', 'chat']:
+        model_file = pins[kind]['file']
+        os.link(ROOT / '.assets' / model_file, incomplete_assets / model_file)
     state = migration_library('infrastructure-library')
     before = (state / 'active-index.json').read_bytes()
     failure = refused_index(infrastructure, incomplete_assets)
