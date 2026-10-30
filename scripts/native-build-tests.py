@@ -65,6 +65,21 @@ class DefaultPinsFold(unittest.TestCase):
         self.assertIn('build --debug --ci --features smoke-test,custom-protocol', workflow)
 
 
+class ModelTLSFixture(unittest.TestCase):
+    def test_loopback_bind_does_not_resolve_dns(self):
+        spec = importlib.util.spec_from_file_location('model_fixture', Path(__file__).with_name('models-test-server.py'))
+        fixture = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(fixture)
+        # Model an unavailable resolver without spending a real timeout budget.
+        with patch('socket.getfqdn', side_effect=AssertionError('reverse DNS requested')):
+            # Negative control: the inherited HTTPServer bind really calls DNS.
+            with self.assertRaisesRegex(AssertionError, 'reverse DNS requested'):
+                fixture.http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler)
+            with fixture.LoopbackServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler) as server:
+                self.assertEqual(server.server_name, 'localhost')
+                self.assertGreater(server.server_port, 0)
+
+
 class VersionGate(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

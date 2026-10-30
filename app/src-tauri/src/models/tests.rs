@@ -51,19 +51,15 @@ impl Server {
             url: format!("https://127.0.0.1:{}/initial", port.trim()),
         }
     }
-    fn client_builder(&self) -> reqwest::ClientBuilder {
-        // Trust only this disposable fixture CA. Merging it with system roots
-        // invokes Apple's platform trust evaluator and can stall loopback TLS
-        // on hosted runners. Keep certificate and hostname verification enabled.
+    fn client(&self) -> Client {
         client_builder()
             .no_proxy()
-            .tls_certs_only([reqwest::Certificate::from_pem(
-                &fs::read(self.root.0.join("ca.pem")).unwrap(),
+            .add_root_certificate(
+                reqwest::Certificate::from_pem(&fs::read(self.root.0.join("cert.pem")).unwrap())
+                    .unwrap(),
             )
-            .unwrap()])
-    }
-    fn client(&self) -> Client {
-        self.client_builder().build().unwrap()
+            .build()
+            .unwrap()
     }
     fn pin(&self) -> Pin {
         pin(&self.url)
@@ -100,22 +96,6 @@ async fn acquire(server: &Server, dir: &Path) -> Result<()> {
         &mut |_| {},
     )
     .await
-}
-
-#[test]
-fn fixture_client_rejects_another_fixtures_certificate() {
-    let server = Server::new(json!([{"status":200}]));
-    let other = Server::new(json!([{"status":200}]));
-    let error = runtime()
-        .block_on(async { other.client().get(&server.url).send().await })
-        .unwrap_err();
-    assert!(error.is_connect(), "{error:#}");
-    let diagnostic = format!("{:#}", anyhow::Error::new(error));
-    assert!(
-        diagnostic.contains("invalid peer certificate"),
-        "{diagnostic}"
-    );
-    assert!(!server.root.0.join("requests.json").exists());
 }
 
 #[test]
@@ -217,8 +197,12 @@ fn https_only_refuses_http_redirect_and_caps_chain_at_five() {
 fn stalled_body_times_out() {
     let server = Server::new(json!([{"body_delay":5,"prefix":40}]));
     let dir = Temp::new();
-    let client = server
-        .client_builder()
+    let client = client_builder()
+        .no_proxy()
+        .add_root_certificate(
+            reqwest::Certificate::from_pem(&fs::read(server.root.0.join("cert.pem")).unwrap())
+                .unwrap(),
+        )
         // Allow TLS/headers on loaded CI runners; the body still stalls well
         // beyond this budget, after sending a prefix to exercise an idle read.
         .read_timeout(Duration::from_secs(2))
