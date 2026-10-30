@@ -600,33 +600,36 @@ async fn pipeline_ask<R: tauri::Runtime>(
 }
 
 fn data_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::PathBuf, String> {
-    use tauri::Manager;
     #[cfg(all(feature = "ui-test", debug_assertions))]
     {
+        let _ = app;
         let root = std::path::PathBuf::from(
             std::env::var_os("VZ_UI_TEST_DATA_ROOT").ok_or("UI test data root is required")?,
         );
         if !root.is_absolute() {
             return Err("UI test data root must be absolute".into());
         }
-        return Ok(root);
-    }
-    #[cfg(feature = "smoke-test")]
-    if smoke_test_requested() || std::env::args().any(|a| a == "--single-instance-test") {
-        if let Some(root) = std::env::var_os("VZ_SMOKE_DATA_ROOT") {
-            let root = std::path::PathBuf::from(root);
-            if !root.is_absolute() {
-                return Err("Smoke data root must be absolute".into());
-            }
-            return Ok(root);
-        }
+        Ok(root)
     }
     #[cfg(not(all(feature = "ui-test", debug_assertions)))]
-    Ok(app
-        .path()
-        .home_dir()
-        .map_err(|e| e.to_string())?
-        .join("vectorAIz"))
+    {
+        use tauri::Manager;
+        #[cfg(feature = "smoke-test")]
+        if smoke_test_requested() || std::env::args().any(|a| a == "--single-instance-test") {
+            if let Some(root) = std::env::var_os("VZ_SMOKE_DATA_ROOT") {
+                let root = std::path::PathBuf::from(root);
+                if !root.is_absolute() {
+                    return Err("Smoke data root must be absolute".into());
+                }
+                return Ok(root);
+            }
+        }
+        Ok(app
+            .path()
+            .home_dir()
+            .map_err(|e| e.to_string())?
+            .join("vectorAIz"))
+    }
 }
 fn model_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::PathBuf, String> {
     Ok(data_root(app)?.join("models"))

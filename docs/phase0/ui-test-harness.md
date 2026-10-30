@@ -15,7 +15,7 @@ do not grant without workarounds. See also the
 ## Run locally on macOS
 
 Use the repository's pinned Rust toolchain and Node version (`.nvmrc`), Xcode
-command-line tools, and protocol compiler (`python3 scripts/install-protoc.py`).
+command-line tools (macOS 13+ deployment target), and protocol compiler (`python3 scripts/install-protoc.py`).
 From the repository root:
 
 ```sh

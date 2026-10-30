@@ -222,7 +222,6 @@ jobs:
         run: rustup show active-toolchain
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ui-test-macos
           cache-on-failure: true
       - name: Prove release and stage-1 exclude UI test features
         run: python scripts/native-ui-test-gate.py
