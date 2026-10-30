@@ -2,6 +2,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
 (async () => {
   await report('started');
   const button = label => [...document.querySelectorAll('button')].find(b => b.textContent === label);
+  const downloadButton = () => [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Download models ('));
   const wait = async (predicate, budget = 240000) => {
     const deadline = Date.now() + budget;
     let logged = Date.now();
@@ -18,13 +19,13 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await wait(() => button('Index folder'));
   if (window.__VZ_SMOKE__.acquisition) {
     await report('acquisition: empty model directory, awaiting model status');
-    await wait(() => button('Download models (about 560 MB)') && !button('Download models (about 560 MB)').disabled);
+    await wait(() => downloadButton() && !downloadButton().disabled);
     // Acquisition owns a 900s total budget and at most three UI attempts, in
     // addition to the downloader's bounded retries. Pipeline gets its own 300s.
     const acquisitionDeadline = Date.now() + 900000;
     for (let attempt = 1; ; attempt++) {
       await report('acquisition attempt ' + attempt);
-      button(attempt === 1 ? 'Download models (about 560 MB)' : 'Retry').click();
+      (attempt === 1 ? downloadButton() : button('Retry')).click();
       await new Promise(resolve => setTimeout(resolve, 0));
       await wait(() => !document.querySelector('[aria-label="Models"]') || (button('Retry') && !button('Retry').disabled), Math.max(1, acquisitionDeadline - Date.now()));
       if (!document.querySelector('[aria-label="Models"]')) break;
