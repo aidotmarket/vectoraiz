@@ -8,7 +8,7 @@ interface Citation { number: number; doc_id: string; page: number; file_name?: s
 interface SelfTestResult { status: string; version: string; os: string; arch: string }
 
 interface ModelFile { name: string; file: string; size: number; license: string; source: string; verified: boolean }
-interface ModelsStatus { ready: boolean; files: ModelFile[] }
+interface ModelsStatus { needs_reindex?: boolean; ready: boolean; files: ModelFile[] }
 interface ModelProgress { file: string; downloaded: number; total: number; attempt: number; retry?: boolean }
 interface ImportResult { file: string; result: string }
 
@@ -108,7 +108,7 @@ export default function App() {
     let active = true;
     const channel = new Channel<Progress>();
     channel.onmessage = p => { if (active) setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); };
-    try { await invoke("pipeline_index", { folder, progress: channel }); }
+    try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) { setError(String(cause)); setProgress(""); }
     finally { active = false; setRunning(false); }
   }
@@ -219,7 +219,7 @@ export default function App() {
         <p>{file.name} · {file.size.toLocaleString()} bytes · {file.license} · {downloadStates[file.file] ?? (file.verified ? "Verified" : "Needed")}</p>
         <span className="text-teal-300">{file.source}</span>
       </li>)}</ul>
-      <button className={buttonStyle} disabled={modelBusy || running || installing || !models} onClick={() => void acquireModels("download")}>Download models (about 560 MB)</button>
+      <button className={buttonStyle} disabled={modelBusy || running || installing || !models} onClick={() => void acquireModels("download")}>Download models ({models?.files.reduce((total, file) => total + file.size, 0).toLocaleString()} bytes total)</button>
       <button className={buttonStyle} disabled={modelBusy || running || installing} onClick={() => setShowImport(true)}>Import from a folder</button>
       {showImport && <>
         <label>Model folder <input className="bg-white text-slate-950 p-2 w-full" placeholder="Absolute path to the model folder" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
@@ -242,11 +242,12 @@ export default function App() {
       {result && <pre>{JSON.stringify(result, null, 2)}</pre>}
     </div>
     <section className="mt-8 grid gap-3">
+      {models?.needs_reindex && <p role="alert">Your library needs re-indexing for the new search model.</p>}
       {error && <p role="alert">{error}</p>}
       <label>Folder <input placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
       <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled} onClick={ask}>Ask</button></div>
+      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={ask}>Ask</button></div>
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
       <p aria-live="polite">{answer}</p>
       <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>

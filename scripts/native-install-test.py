@@ -100,6 +100,7 @@ try:
         models.mkdir()
         loaded_report = Path('installed-loaded-models.json').resolve()
         pipeline_env = dict(env, VZ_ACQUISITION_SMOKE='1',
+                            VZ_SMOKE_MODELS=str(Path('spike/fixtures/models.json').resolve()),
                             VZ_PIPELINE_FIXTURE=str(Path('spike/fixtures/documents').resolve()),
                             VZ_LOADED_MODELS_REPORT=str(loaded_report))
         with Path('installed-pipeline.log').open('w', encoding='utf-8') as log:

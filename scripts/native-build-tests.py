@@ -252,6 +252,7 @@ class PackageGate(unittest.TestCase):
                'llama.cpp revision\nNative licence\n'
                'PDFium chromium/8111:\nPDFium licence\n'
                'Provisional model licences and source notices:\nModel licence\n'
+               'Release model licences and source notices:\nRelease licence\n'
                'UI npm dependencies\nnpm licence\n')
 
     def package_module(self):
@@ -264,7 +265,7 @@ class PackageGate(unittest.TestCase):
         package = self.package_module()
         headers = ['THIRD_PARTY_NOTICES — Rust dependencies', 'llama.cpp ',
                    'PDFium chromium/8111:', 'Provisional model licences and source notices:',
-                   'UI npm dependencies']
+                   'Release model licences and source notices:', 'UI npm dependencies']
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
@@ -278,7 +279,7 @@ class PackageGate(unittest.TestCase):
                             patch.object(sys, 'argv', ['native-package.py', 'prepare']), \
                             self.assertRaisesRegex(SystemExit, 'Incomplete third-party notices'):
                         package.main()
-            for body in ['Rust licence', 'PDFium licence', 'Model licence', 'npm licence']:
+            for body in ['Rust licence', 'PDFium licence', 'Model licence', 'Release licence', 'npm licence']:
                 with self.subTest(empty=body):
                     notices.write_text(self.notices.replace(body, ''), encoding='utf-8')
                     with self.assertRaisesRegex(SystemExit, 'empty'):
@@ -307,12 +308,13 @@ class PackageGate(unittest.TestCase):
             root = Path(temporary)
             for name in ['.assets/pdfium/bin/pdfium.dll', '.assets/huge.gguf',
                          'app/src-tauri/gen/bundle/assets/stale.gguf',
-                         'spike/fixtures/models.json', 'THIRD_PARTY_NOTICES',
+                         'spike/fixtures/models.json', 'spike/fixtures/models.release.json', 'THIRD_PARTY_NOTICES',
                          'target/debug/vz-parser-worker.exe', 'target/debug/vectoraiz-mcp.exe',
                          'target/debug/vectoraiz-cli.exe']:
                 file = root / name
                 file.parent.mkdir(parents=True, exist_ok=True)
                 file.write_bytes(b'fixture')
+            (root / 'spike/fixtures/models.release.json').write_text('release pins')
             (root / 'Cargo.toml').write_text('[workspace.package]\nversion="0.0.1"\n')
             (root / 'THIRD_PARTY_NOTICES').write_text(self.notices, encoding='utf-8')
             (root / 'app/src-tauri/tauri.stage1.conf.json').write_text('{"bundle":{}}')
@@ -320,6 +322,8 @@ class PackageGate(unittest.TestCase):
                     patch.object(sys, 'argv', ['native-package.py', 'prepare']):
                 package.main()
             bundle = root / 'app/src-tauri/gen/bundle'
+            self.assertEqual((bundle / 'models.json').read_bytes(),
+                             (root / 'spike/fixtures/models.release.json').read_bytes())
             self.assertEqual(list(bundle.rglob('*.gguf')), [])
             self.assertTrue((bundle / 'assets/pdfium/bin/pdfium.dll').is_file())
 

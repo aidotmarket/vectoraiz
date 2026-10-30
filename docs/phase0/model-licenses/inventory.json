@@ -1,0 +1,46 @@
+[
+  {
+    "repo": "BAAI/bge-m3",
+    "rev": "5617a9f61b028005a4858fdac845db406aefb181",
+    "notices": []
+  },
+  {
+    "repo": "gpustack/bge-m3-GGUF",
+    "rev": "2d48f1737679ad900d5c26c5aad5410e9c70fdca",
+    "notices": []
+  },
+  {
+    "repo": "Qwen/Qwen3-4B-Instruct-2507",
+    "rev": "cdbee75f17c01a7cc42f958dc650907174af0554",
+    "notices": [
+      "LICENSE"
+    ]
+  },
+  {
+    "repo": "lmstudio-community/Qwen3-4B-Instruct-2507-GGUF",
+    "rev": "4edb920b6f14e3b9284d4502a6485103d72cde05",
+    "notices": []
+  },
+  {
+    "repo": "mistralai/Ministral-3-8B-Instruct-2512",
+    "rev": "5b26027e7b19eeb4b7352e1fed3926375dd2cb4d",
+    "notices": []
+  },
+  {
+    "repo": "mistralai/Ministral-3-8B-Instruct-2512-GGUF",
+    "rev": "0102285ad796bd99af90f58de616092e5630e970",
+    "notices": []
+  },
+  {
+    "repo": "Qwen/Qwen3.6-35B-A3B",
+    "rev": "995ad96eacd98c81ed38be0c5b274b04031597b0",
+    "notices": [
+      "LICENSE"
+    ]
+  },
+  {
+    "repo": "ggml-org/Qwen3.6-35B-A3B-GGUF",
+    "rev": "7878dc9a905c7c9379e5e8d6a1aa9affdd6839c5",
+    "notices": []
+  }
+]

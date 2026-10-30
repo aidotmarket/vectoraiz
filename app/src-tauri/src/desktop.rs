@@ -420,8 +420,15 @@ fn pipeline_paths<R: tauri::Runtime>(
     use tauri::Manager;
     let state = data_root(app)?.join("phase0-index");
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
+    let selected = model_dir(app)?.join("models.selected.json");
+    std::fs::create_dir_all(model_dir(app)?).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &selected,
+        serde_json::to_vec(&selected_model_pins(app)?).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
     if resources.join("models.json").is_file() {
-        return Ok((state, installed_assets(app)?, resources.join("models.json")));
+        return Ok((state, installed_assets(app)?, selected));
     }
     let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
     let assets = model_dir(app)?;
@@ -432,7 +439,7 @@ fn pipeline_paths<R: tauri::Runtime>(
     };
     crate::bundled_library::refresh(&cwd.join(".assets").join(relative), &assets.join(relative))
         .map_err(|e| e.to_string())?;
-    Ok((state, assets, cwd.join("spike/fixtures/models.json")))
+    Ok((state, assets, selected))
 }
 
 fn pipeline_cpu_requested() -> bool {
@@ -601,27 +608,57 @@ fn data_root<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::
 fn model_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<std::path::PathBuf, String> {
     Ok(data_root(app)?.join("models"))
 }
-fn model_pins<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Vec<models::Pin>, String> {
+fn model_pin_path<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<std::path::PathBuf, String> {
     use tauri::Manager;
+    #[cfg(feature = "smoke-test")]
+    if smoke_test_requested() {
+        if let Some(path) = std::env::var_os("VZ_SMOKE_MODELS") {
+            let path = std::path::PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err("Smoke model pins must be absolute".into());
+            }
+            return Ok(path);
+        }
+    }
     let resources = app.path().resource_dir().map_err(|e| e.to_string())?;
-    let path = if resources.join("models.json").is_file() {
+    Ok(if resources.join("models.json").is_file() {
         resources.join("models.json")
     } else {
         std::env::current_dir()
             .map_err(|e| e.to_string())?
             .join("spike/fixtures/models.json")
-    };
-    models::pins(&path).map_err(|e| format!("{e:#}"))
+    })
+}
+fn selected_model_pins<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<serde_json::Value, String> {
+    models::selected_pins(
+        &model_pin_path(app)?,
+        models::total_ram_bytes().map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{e:#}"))
+}
+fn model_pins<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Vec<models::Pin>, String> {
+    models::pins(&model_pin_path(app)?).map_err(|e| format!("{e:#}"))
 }
 #[tauri::command]
 async fn models_status<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, String> {
     let dir = model_dir(&app)?;
-    let pins = model_pins(&app)?;
-    tauri::async_runtime::spawn_blocking(move || models::status(&dir, &pins))
-        .await
-        .map_err(|e| e.to_string())
+    let selected = selected_model_pins(&app)?;
+    let pins = models::pins_from_value(&selected).map_err(|e| e.to_string())?;
+    let root = data_root(&app)?.join("phase0-index");
+    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
+        let mut status = models::status(&dir, &pins);
+        status["needs_reindex"] =
+            serde_json::json!(models::needs_reindex(&root, &selected).map_err(|e| e.to_string())?);
+        Ok(status)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 #[tauri::command]
 async fn models_download<R: tauri::Runtime>(

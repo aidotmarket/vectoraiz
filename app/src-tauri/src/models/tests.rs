@@ -775,3 +775,69 @@ fn invalid_import_preserves_loaded_cache_and_valid_import_invalidates_it() {
         .unwrap();
     assert_eq!(counts.embed.get(), 2);
 }
+
+#[test]
+fn release_tiers_and_fixture_compatibility() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let release = root.join("spike/fixtures/models.release.json");
+    let candidates: Value =
+        serde_json::from_slice(&std::fs::read(root.join("spike/bakeoff/candidates.json")).unwrap())
+            .unwrap();
+    for (gb, name) in [
+        (8, "qwen3-4b-instruct-2507"),
+        (16, "ministral-3-8b"),
+        (24, "ministral-3-8b"),
+        (32, "qwen3.6-35b-a3b"),
+        (64, "qwen3.6-35b-a3b"),
+    ] {
+        let selected = selected_pins(&release, gb * 1024 * 1024 * 1024).unwrap();
+        assert_eq!(selected["chat"]["name"], name);
+        for key in ["embedding", "chat"] {
+            let pin = &selected[key];
+            assert_eq!(
+                pin,
+                candidates
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|p| p["name"] == pin["name"])
+                    .unwrap()
+            );
+            for field in ["url", "sha256", "license", "source"] {
+                assert!(!pin[field].as_str().unwrap().is_empty());
+            }
+            assert!(pin["size"].as_u64().unwrap() > 0);
+        }
+        assert_eq!(pins_from_value(&selected).unwrap().len(), 2);
+    }
+    let fixture = root.join("spike/fixtures/models.json");
+    assert_eq!(
+        selected_pins(&fixture, 8 << 30).unwrap(),
+        selected_pins(&fixture, 64 << 30).unwrap()
+    );
+}
+
+#[test]
+fn old_recipe_is_detected_before_models_are_downloaded() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let directory = Temp::new();
+    let temp = &directory.0;
+    let fixture: Value =
+        serde_json::from_slice(&std::fs::read(root.join("spike/fixtures/models.json")).unwrap())
+            .unwrap();
+    let release = selected_pins(&root.join("spike/fixtures/models.release.json"), 8 << 30).unwrap();
+    let old = vz_core::engine::Recipe::from_pins(&fixture, 384).unwrap();
+    std::fs::write(temp.join("recipe.json"), serde_json::to_vec(&old).unwrap()).unwrap();
+    assert!(!needs_reindex(temp, &fixture).unwrap());
+    assert!(needs_reindex(temp, &release).unwrap());
+    let new = vz_core::engine::Recipe::from_pins(&release, 1024).unwrap();
+    let error = vz_core::storage::State::open_index(temp, &new)
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("re-index required"));
+    assert_eq!(
+        std::fs::read(temp.join("recipe.json")).unwrap(),
+        serde_json::to_vec(&old).unwrap()
+    );
+    std::fs::remove_dir_all(temp).unwrap();
+}

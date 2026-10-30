@@ -1,0 +1,20 @@
+Release model attribution
+
+bge-m3: Beijing Academy of Artificial Intelligence (BAAI), MIT.
+GGUF distribution: gpustack/bge-m3-GGUF.
+MIT text: https://github.com/FlagOpen/FlagEmbedding/blob/c086741f5e117b7b8ce1745ea00b6c262f281a01/LICENSE
+(the source project linked by the model card).
+
+Qwen3-4B-Instruct-2507 and Qwen3.6-35B-A3B: Qwen team, Apache License 2.0.
+GGUF distributions: lmstudio-community and ggml-org respectively.
+The two upstream LICENSE files are reproduced alongside this attribution.
+
+Ministral 3 8B Instruct 2512: Mistral AI, Apache License 2.0.
+GGUF distribution: mistralai/Ministral-3-8B-Instruct-2512-GGUF.
+The Apache License 2.0 text is reproduced in the Qwen LICENSE files.
+
+The complete source URLs and pinned revisions accompany these notices in
+models.release.json. Upstream source and GGUF repository trees at those exact
+revisions were checked: no separate NOTICE file was supplied for these four
+models (inventory.json). The distributions are quantized GGUF conversions;
+vectorAIz does not modify the downloaded model files.

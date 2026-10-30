@@ -1,0 +1,90 @@
+{
+  "embedding": {
+    "kind": "embedding",
+    "name": "bge-m3",
+    "file": "bge-m3-Q8_0.gguf",
+    "url": "https://huggingface.co/gpustack/bge-m3-GGUF/resolve/2d48f1737679ad900d5c26c5aad5410e9c70fdca/bge-m3-Q8_0.gguf",
+    "revision": "2d48f1737679ad900d5c26c5aad5410e9c70fdca",
+    "sha256": "950f4a8e5e19477a6d3c26d2f162233c20002c601f75e4b002e3239997821167",
+    "size": 634553760,
+    "license": "MIT",
+    "license_url": "https://huggingface.co/BAAI/bge-m3/blob/5617a9f61b028005a4858fdac845db406aefb181/README.md",
+    "source": "https://huggingface.co/BAAI/bge-m3",
+    "load": "unverified",
+    "pooling": "cls",
+    "query_prefix": "",
+    "document_prefix": "",
+    "max_tokens": 1024,
+    "append_eos": false,
+    "license_terms": "Commercial use permitted; retain copyright and license notice.",
+    "source_revision": "5617a9f61b028005a4858fdac845db406aefb181"
+  },
+  "chat_tiers": [
+    {
+      "min_ram_gb": 0,
+      "pin": {
+        "kind": "chat",
+        "name": "qwen3-4b-instruct-2507",
+        "file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "url": "https://huggingface.co/lmstudio-community/Qwen3-4B-Instruct-2507-GGUF/resolve/4edb920b6f14e3b9284d4502a6485103d72cde05/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+        "revision": "4edb920b6f14e3b9284d4502a6485103d72cde05",
+        "sha256": "8cdb57cbb880d313736a9bc4e3d3d2485f145b5e19cf33783746e753e82641fc",
+        "size": 2497280448,
+        "license": "Apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507/blob/cdbee75f17c01a7cc42f958dc650907174af0554/LICENSE",
+        "source": "https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507",
+        "load": "unverified",
+        "tier": "8gb",
+        "template": "gguf",
+        "n_ctx": 4096,
+        "max_output_tokens": 192,
+        "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
+        "source_revision": "cdbee75f17c01a7cc42f958dc650907174af0554"
+      }
+    },
+    {
+      "min_ram_gb": 16,
+      "pin": {
+        "kind": "chat",
+        "name": "ministral-3-8b",
+        "file": "Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+        "url": "https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512-GGUF/resolve/0102285ad796bd99af90f58de616092e5630e970/Ministral-3-8B-Instruct-2512-Q4_K_M.gguf",
+        "revision": "0102285ad796bd99af90f58de616092e5630e970",
+        "sha256": "33e7a72cf5e6e2cfc2f2847075acc013d68bba023e35310cef86b5cf8fdca761",
+        "size": 5198911904,
+        "license": "Apache-2.0",
+        "license_url": "https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512/blob/5b26027e7b19eeb4b7352e1fed3926375dd2cb4d/README.md",
+        "source": "https://huggingface.co/mistralai/Ministral-3-8B-Instruct-2512",
+        "load": "unverified",
+        "tier": "16gb",
+        "template": "gguf",
+        "n_ctx": 4096,
+        "max_output_tokens": 192,
+        "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
+        "source_revision": "5b26027e7b19eeb4b7352e1fed3926375dd2cb4d"
+      }
+    },
+    {
+      "min_ram_gb": 32,
+      "pin": {
+        "kind": "chat",
+        "name": "qwen3.6-35b-a3b",
+        "file": "Qwen3.6-35B-A3B-Q4_K_M.gguf",
+        "url": "https://huggingface.co/ggml-org/Qwen3.6-35B-A3B-GGUF/resolve/7878dc9a905c7c9379e5e8d6a1aa9affdd6839c5/Qwen3.6-35B-A3B-Q4_K_M.gguf",
+        "revision": "7878dc9a905c7c9379e5e8d6a1aa9affdd6839c5",
+        "sha256": "671e47e0ec53c665d048b98c3ecbfd5236b5ca9c3e02ed19fc8f81f7b85140c7",
+        "size": 20419565568,
+        "license": "Apache-2.0",
+        "license_url": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B/blob/995ad96eacd98c81ed38be0c5b274b04031597b0/LICENSE",
+        "source": "https://huggingface.co/Qwen/Qwen3.6-35B-A3B",
+        "load": "unverified",
+        "tier": "32gb",
+        "template": "gguf",
+        "n_ctx": 4096,
+        "max_output_tokens": 192,
+        "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
+        "source_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0"
+      }
+    }
+  ]
+}
