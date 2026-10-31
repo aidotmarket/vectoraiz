@@ -242,6 +242,32 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         generation = db.execute('SELECT generation FROM documents').fetchone()[0]
     stored = json.loads((state / 'generations' / generation / 'document.json').read_text())
     assert stored['pages'] == 2 and stored['needs_ocr_pages'] == reopened['needs_ocr_pages'], stored
+    # A PDF whose second page object is missing: PDFium loads the document but not
+    # page 2. It must be a document failure, never a silently truncated success.
+    broken = Path(temp) / 'broken'
+    broken.mkdir()
+    (broken / 'ok.md').write_text('Healthy companion document about damaged page handling.\n', encoding='utf-8')
+    bad_objects = [
+        '<</Type/Catalog/Pages 2 0 R>>',
+        '<</Type/Pages/Kids[3 0 R 99 0 R]/Count 2>>',
+        '<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]/Resources<</Font<</F1 4 0 R>>>>/Contents 5 0 R>>',
+        '<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>',
+        f'<</Length {len(text)}>>\nstream\n{text}\nendstream',
+    ]
+    bad = '%PDF-1.4\n'
+    bad_offsets = []
+    for n, obj in enumerate(bad_objects, 1):
+        bad_offsets.append(len(bad))
+        bad += f'{n} 0 obj\n{obj}\nendobj\n'
+    bad_xref = len(bad)
+    bad += f'xref\n0 {len(bad_objects)+1}\n0000000000 65535 f \n'
+    bad += ''.join(f'{offset:010} 00000 n \n' for offset in bad_offsets)
+    bad += f'trailer\n<</Size {len(bad_objects)+1}/Root 1 0 R>>\nstartxref\n{bad_xref}\n%%EOF\n'
+    (broken / 'broken.pdf').write_text(bad, encoding='ascii', newline='\n')
+    state = Path(temp) / 'broken-state'
+    broken_result = cli('index', str(broken))
+    assert broken_result['completed'] == 1 and broken_result['failed'] == 1, broken_result
+    assert broken_result.get('infrastructure_failed', 0) == 0, broken_result
     state = Path(temp) / 'state'
     missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
     assert missing.returncode != 0 and 'source unavailable' in missing.stderr

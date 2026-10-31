@@ -61,9 +61,36 @@ pub fn parser(error: Error) -> Error {
     content(format!("{error:#}"))
 }
 
+/// PDFium errors raised after the document loaded belong to that document (a
+/// damaged page), except I/O, which can still mean unavailable storage.
+pub fn pdf_page(error: pdfium_render::prelude::PdfiumError) -> Error {
+    match error {
+        pdfium_render::prelude::PdfiumError::IoError(_) => infrastructure(error.into()),
+        _ => content(format!("PDF page failed: {error:?}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pdf_errors_after_load_are_document_failures_except_io() {
+        use pdfium_render::prelude::{PdfiumError as P, PdfiumInternalError as I};
+        for error in [
+            P::PdfiumLibraryInternalError(I::PageError),
+            P::PdfiumLibraryInternalError(I::Unknown),
+            P::PdfiumFunctionReturnValueIndicatedFailure,
+        ] {
+            assert!(is_content(&pdf_page(error)));
+        }
+        assert!(!is_content(&pdf_page(P::IoError(std::io::Error::other(
+            "disk gone"
+        )))));
+        // The class survives the protocol-side parser() classification.
+        assert!(is_content(&parser(pdf_page(
+            P::PdfiumLibraryInternalError(I::PageError)
+        ))));
+    }
     #[test]
     fn classification_is_explicit_and_io_fails_closed() {
         assert!(is_content(&parser(anyhow::anyhow!("corrupt ZIP"))));
