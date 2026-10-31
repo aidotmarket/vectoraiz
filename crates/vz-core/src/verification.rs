@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::Mutex,
     time::SystemTime,
@@ -63,18 +63,32 @@ struct Entry {
     sha256: String,
     stamp: Stamp,
 }
-type Records = BTreeMap<String, Entry>;
+const VERSION: u32 = 1;
+#[derive(Serialize, Deserialize)]
+struct Records {
+    version: u32,
+    entries: BTreeMap<String, Entry>,
+}
+impl Default for Records {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            entries: BTreeMap::new(),
+        }
+    }
+}
 
 fn records(path: &Path) -> Records {
     fs::read(path.parent().unwrap().join(RECORD))
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|bytes| serde_json::from_slice::<Records>(&bytes).ok())
+        .filter(|record| record.version == VERSION)
         .unwrap_or_default()
 }
 fn save(path: &Path, sha256: &str, stamp: Stamp) -> Result<()> {
     let dir = path.parent().context("model directory")?;
     let mut entries = records(path);
-    entries.insert(
+    entries.entries.insert(
         path.file_name()
             .context("model filename")?
             .to_string_lossy()
@@ -100,12 +114,27 @@ fn save(path: &Path, sha256: &str, stamp: Stamp) -> Result<()> {
     result
 }
 
+/// Hash the retained file from offset zero, without reopening its path.
+pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
+    reader.seek(SeekFrom::Start(0))?;
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&buffer[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+
 /// Trust only an unchanged regular file with a record for the current pin.
 /// If the cache cannot be persisted, future calls still hash in full.
 pub fn verify(path: &Path, expected: &str, size: Option<u64>) -> Result<()> {
     let _guard = LOCK
         .lock()
-        .map_err(|_| anyhow::anyhow!("verification lock poisoned"))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = regular(path, false)?;
     let before = Stamp::of(&file)?;
     ensure!(
@@ -117,29 +146,20 @@ pub fn verify(path: &Path, expected: &str, size: Option<u64>) -> Result<()> {
         .context("model filename")?
         .to_string_lossy();
     if records(path)
+        .entries
         .get(key.as_ref())
         .is_some_and(|entry| entry.sha256 == expected && entry.stamp == before)
     {
         return Ok(());
     }
-    let mut hash = Sha256::new();
-    let mut buffer = [0; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    ensure!(
-        format!("{:x}", hash.finalize()) == expected,
-        "model hash mismatch"
-    );
+    ensure!(sha256_reader(&mut file)? == expected, "model hash mismatch");
     ensure!(
         before == Stamp::of(&file)? && before == Stamp::of(&regular(path, false)?)?,
         "model changed during verification"
     );
-    let _ = save(path, expected, before);
+    if let Err(error) = save(path, expected, before) {
+        eprintln!("Could not save model verification record: {error:#}");
+    }
     Ok(())
 }
 
@@ -153,7 +173,7 @@ pub fn record_verified(
 ) -> Result<()> {
     let _guard = LOCK
         .lock()
-        .map_err(|_| anyhow::anyhow!("verification lock poisoned"))?;
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let stamp = Stamp::of(staged)?;
     ensure!(
         stamp.size == before_hash.len()
@@ -161,7 +181,9 @@ pub fn record_verified(
             && stamp == Stamp::of(&regular(path, false)?)?,
         "model changed during promotion"
     );
-    let _ = save(path, expected, stamp);
+    if let Err(error) = save(path, expected, stamp) {
+        eprintln!("Could not save model verification record: {error:#}");
+    }
     Ok(())
 }
 
@@ -265,6 +287,36 @@ mod tests {
         verify(&path, &pin, None).unwrap();
         fs::write(dir.path().join(RECORD), b"corrupt").unwrap();
         verify(&path, &pin, None).unwrap();
+    }
+
+    #[test]
+    fn missing_and_unknown_record_versions_require_full_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.gguf");
+        fs::write(&path, b"original").unwrap();
+        let pin = crate::pipeline::file_sha256(&path).unwrap();
+        verify(&path, &pin, None).unwrap();
+        let record_path = dir.path().join(RECORD);
+        let record: serde_json::Value =
+            serde_json::from_slice(&fs::read(&record_path).unwrap()).unwrap();
+        assert_eq!(record["version"], 1);
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, b"modified").unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        for version in [None, Some(2)] {
+            let mut record = record.clone();
+            record.as_object_mut().unwrap().remove("version");
+            if let Some(version) = version {
+                record["version"] = version.into();
+            }
+            fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+            assert!(verify(&path, &pin, None).is_err());
+        }
     }
 
     #[test]

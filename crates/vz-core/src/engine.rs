@@ -1,6 +1,6 @@
 //! Offline llama.cpp library engines. The process never downloads models.
 use crate::{ChatEngine, ComponentResult, Embedder};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use llama_cpp_2::{
     context::params::{LlamaContextParams, LlamaPoolingType},
     llama_backend::LlamaBackend,
@@ -182,6 +182,11 @@ fn load_model(
     let pin = &pins[name];
     let filename = pin["file"].as_str().context("model filename")?;
     let path = assets.join(filename);
+    ensure!(
+        path.try_exists()?,
+        "{} missing; run scripts/fetch-assets.py",
+        path.display()
+    );
     let expected = pin["sha256"].as_str().context("model sha256")?;
     let hash_timer = PhaseTimer::new(format!("{name}_read_hash"));
     crate::verification::verify(&path, expected, pin["size"].as_u64())

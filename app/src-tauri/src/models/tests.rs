@@ -906,3 +906,64 @@ fn acquisition_records_verification_and_reports_checking_then_verified() {
     // Promotion wrote the record, so the next status does not rehash.
     assert!(verified(&installed.0, &pin));
 }
+
+#[test]
+fn acquisition_hashes_retained_handle_when_staging_path_is_replaced() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'y'; 100]).unwrap();
+    let ops = Operations::default();
+    let result = runtime().block_on(stage_verify_promote(
+        &installed.0,
+        &pin,
+        Source::Import(regular(&source.0.join(&pin.file), false).unwrap()),
+        ops.start(),
+        &mut |value| {
+            if value["stage"] == "checking" {
+                let stage = fs::read_dir(&installed.0)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                fs::rename(&stage, installed.0.join("retained")).unwrap();
+                // The pathname now contains pinned bytes, but the retained handle does not.
+                fs::write(stage, [b'x'; 100]).unwrap();
+            }
+        },
+    ));
+    assert!(result.unwrap_err().to_string().contains("sha256 mismatch"));
+    assert!(!installed.0.join(&pin.file).exists());
+    assert!(!installed.0.join("models.verified.json").exists());
+}
+
+#[test]
+fn acquisition_succeeds_when_post_promotion_record_fails() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'x'; 100]).unwrap();
+    let ops = Operations::default();
+    let mut stages = Vec::new();
+    let mut attempted = false;
+    runtime()
+        .block_on(stage_verify_promote_with_record(
+            &installed.0,
+            &pin,
+            Source::Import(regular(&source.0.join(&pin.file), false).unwrap()),
+            ops.start(),
+            &mut |value| stages.push(value["stage"].clone()),
+            |path, _, _, _| {
+                assert!(path.is_file());
+                attempted = true;
+                bail!("injected record failure")
+            },
+        ))
+        .unwrap();
+    assert!(attempted);
+    assert_eq!(stages, [json!("checking"), json!("verified")]);
+    assert_eq!(fs::read(installed.0.join(&pin.file)).unwrap(), [b'x'; 100]);
+    assert!(!installed.0.join("models.verified.json").exists());
+    assert!(verified(&installed.0, &pin));
+}

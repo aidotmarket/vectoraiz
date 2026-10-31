@@ -427,8 +427,27 @@ pub async fn stage_verify_promote(
     dir: &Path,
     pin: &Pin,
     source: Source<'_>,
+    cancel: watch::Receiver<bool>,
+    progress: &mut (impl FnMut(Value) + Send),
+) -> Result<()> {
+    stage_verify_promote_with_record(
+        dir,
+        pin,
+        source,
+        cancel,
+        progress,
+        vz_core::verification::record_verified,
+    )
+    .await
+}
+
+async fn stage_verify_promote_with_record(
+    dir: &Path,
+    pin: &Pin,
+    source: Source<'_>,
     mut cancel: watch::Receiver<bool>,
     progress: &mut (impl FnMut(Value) + Send),
+    record: impl FnOnce(&Path, &str, &File, &fs::Metadata) -> Result<()> + Send,
 ) -> Result<()> {
     let download = matches!(source, Source::Download(_));
     let path = if download {
@@ -500,12 +519,12 @@ pub async fn stage_verify_promote(
         pin.size
     );
     let before_hash = stage_file.metadata()?;
-    let verified_file = stage_file.try_clone()?;
-    drop(stage_file);
     progress(json!({"file": pin.file, "stage": "checking"}));
-    let hash_path = stage.path.clone();
-    let hash =
-        tokio::task::spawn_blocking(move || vz_core::pipeline::file_sha256(&hash_path)).await??;
+    let (verified_file, hash) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let hash = vz_core::verification::sha256_reader(&mut stage_file)?;
+        Ok((stage_file, hash))
+    })
+    .await??;
     ensure!(
         before_hash.len() == verified_file.metadata()?.len()
             && before_hash.modified()? == verified_file.metadata()?.modified()?,
@@ -522,12 +541,14 @@ pub async fn stage_verify_promote(
     cancelled(&cancel)?;
     fs::rename(&stage.path, dir.join(&pin.file))
         .with_context(|| format!("{}: could not promote verified model", pin.file))?;
-    vz_core::verification::record_verified(
+    if let Err(error) = record(
         &dir.join(&pin.file),
         &pin.sha256,
         &verified_file,
         &before_hash,
-    )?;
+    ) {
+        eprintln!("Could not record verification for {}: {error:#}", pin.file);
+    }
     progress(json!({"file": pin.file, "stage": "verified"}));
     Ok(())
 }
