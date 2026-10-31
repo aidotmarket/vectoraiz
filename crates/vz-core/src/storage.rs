@@ -143,14 +143,18 @@ impl State {
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
+    pub fn document(&self, generation: &str) -> Result<Document> {
+        Ok(serde_json::from_slice(&std::fs::read(
+            self.root
+                .join("generations")
+                .join(generation)
+                .join("document.json"),
+        )?)?)
+    }
     pub fn documents(&self) -> Result<Vec<Document>> {
         self.generations()?
             .iter()
-            .map(|id| {
-                Ok(serde_json::from_slice(&std::fs::read(
-                    self.root.join("generations").join(id).join("document.json"),
-                )?)?)
-            })
+            .map(|id| self.document(id))
             .collect()
     }
     pub async fn stage(&self, doc: &Document) -> Result<String> {

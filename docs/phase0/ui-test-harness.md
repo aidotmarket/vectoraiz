@@ -40,7 +40,7 @@ from before React starts. It also rejects and records external frontend fetches;
 Tauri's local IPC transport remains available. This uses ordinary WebDriver
 script execution, so the additional WDIO API/mocking plugin is unnecessary.
 
-`ui-test-macos` runs on `macos-14`. On failure it uploads WDIO/backend logs,
+`ui-test-macos` runs on `macos-15`. On failure it uploads WDIO/backend logs,
 `frontend.json`, a screenshot and page HTML from `app/ui-test-results/`.
 To verify failure detection, temporarily change the heading expectation in
 `app/ui-tests/smoke.e2e.mjs`, push to the PR, observe the failed smoke job, then

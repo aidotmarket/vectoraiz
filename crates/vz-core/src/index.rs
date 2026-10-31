@@ -72,6 +72,36 @@ fn initialize_recipe(
     result
 }
 
+/// Read only the matching generation when an unchanged file can be skipped.
+fn unchanged_document(
+    state: &State,
+    path: &str,
+    size: u64,
+    mtime: &str,
+    hash: &str,
+) -> Result<Option<Document>> {
+    let previous: Option<(u64, String, String, String)> = state
+        .db
+        .query_row(
+            "SELECT size,mtime,sha256,generation FROM documents WHERE path=?1",
+            [path],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    if let Some((old_size, old_mtime, old_hash, generation)) = previous {
+        if old_hash == hash {
+            if old_size != size || old_mtime != mtime {
+                state.db.execute(
+                    "UPDATE documents SET size=?1,mtime=?2 WHERE path=?3",
+                    params![size, mtime, path],
+                )?;
+            }
+            return Ok(Some(state.document(&generation)?));
+        }
+    }
+    Ok(None)
+}
+
 pub async fn index(
     state: &mut State,
     folder: &Path,
@@ -140,30 +170,13 @@ pub async fn index(
             let metadata =
                 std::fs::metadata(&path).map_err(|e| crate::failures::source_io(e.into()))?;
             let mtime = format!("{:?}", metadata.modified()?);
-            let previous: Option<(u64, String, String)> = state
-                .db
-                .query_row(
-                    "SELECT size,mtime,sha256 FROM documents WHERE path=?1",
-                    [&path_text],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-                .optional()?;
             // Metadata detects candidates; sha256 confirms content, including same-size edits.
             let hash = crate::pipeline::file_sha256(&path)
                 .map_err(|e| crate::failures::source_io(e.into()))?;
-            if let Some((size, old_mtime, old_hash)) = previous {
-                if old_hash == hash {
-                    if size != metadata.len() || old_mtime != mtime {
-                        state.db.execute(
-                            "UPDATE documents SET size=?1,mtime=?2 WHERE path=?3",
-                            params![metadata.len(), mtime, path_text],
-                        )?;
-                    }
-                    if let Some(doc) = state.documents()?.iter().find(|d| d.path == path_text) {
-                        stats.needs_ocr_pages = doc.needs_ocr_pages.clone();
-                    }
-                    return Ok(false);
-                }
+            if let Some(doc) = unchanged_document(state, &path_text, metadata.len(), &mtime, &hash)?
+            {
+                stats.needs_ocr_pages = doc.needs_ocr_pages;
+                return Ok(false);
             }
             let library = assets.join(if cfg!(windows) {
                 "pdfium/bin/pdfium.dll"
@@ -391,6 +404,84 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn unchanged_skip_reads_only_matching_document() {
+        let root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let mut state = State::open(root.path()).unwrap();
+        let mut generations = Vec::new();
+        for name in ["first.txt", "other.txt"] {
+            let path = source.path().join(name);
+            std::fs::write(&path, name).unwrap();
+            let path = path.to_str().unwrap();
+            let doc_id = sha256(path.as_bytes());
+            let pages = vec![crate::pipeline::Page {
+                page: 1,
+                text: name.into(),
+                needs_ocr: false,
+            }];
+            let mut chunks = chunk(&doc_id, &pages);
+            for chunk in &mut chunks {
+                chunk.embedding = vec![1.0, 0.0, 0.0, 0.0];
+            }
+            let doc = Document {
+                doc_id,
+                path: path.into(),
+                sha256: crate::pipeline::file_sha256(Path::new(path)).unwrap(),
+                bytes: name.len() as u64,
+                pages: 2,
+                kind: "txt".into(),
+                needs_ocr_pages: vec![2],
+                chunks,
+            };
+            let generation = state.stage(&doc).await.unwrap();
+            state.commit(&doc, "old mtime", &generation).unwrap();
+            generations.push(generation);
+        }
+        let document_path = |generation: &str| {
+            root.path()
+                .join("generations")
+                .join(generation)
+                .join("document.json")
+        };
+        std::fs::write(document_path(&generations[1]), b"invalid JSON").unwrap();
+        assert!(state.documents().is_err());
+        let path = source.path().join("first.txt");
+        let hash = crate::pipeline::file_sha256(&path).unwrap();
+        let skipped = unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash)
+            .unwrap()
+            .expect("unchanged file must be skipped despite unrelated corruption");
+        assert_eq!(skipped.path, path.to_str().unwrap());
+        assert_eq!(skipped.needs_ocr_pages, [2]);
+        let mtime: String = state
+            .db
+            .query_row(
+                "SELECT mtime FROM documents WHERE path=?1",
+                [path.to_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mtime, "new mtime");
+        assert!(unchanged_document(
+            &state,
+            path.to_str().unwrap(),
+            9,
+            "new mtime",
+            "changed hash"
+        )
+        .unwrap()
+        .is_none());
+        // Corruption of the matching generation still fails as infrastructure.
+        std::fs::write(document_path(&generations[0]), b"invalid JSON").unwrap();
+        let error =
+            unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash).unwrap_err();
+        assert!(!crate::failures::is_content(&error));
+        std::fs::remove_file(document_path(&generations[0])).unwrap();
+        let error =
+            unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash).unwrap_err();
+        assert!(!crate::failures::is_content(&error));
+    }
+
     #[test]
     fn interrupted_initial_recipe_write_retries_without_cleanup() {
         let data = tempfile::tempdir().unwrap();

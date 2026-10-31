@@ -3,7 +3,7 @@ use crate::pipeline::Page;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::{Duration, Instant},
@@ -61,7 +61,15 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
         "parser worker missing: {}",
         worker.display()
     );
-    let mut cmd = command(worker);
+    run_command(command(worker), request, timeout, cfg!(target_os = "macos"))
+}
+
+fn run_command(
+    mut cmd: Command,
+    request: &Request,
+    timeout: Duration,
+    sandboxed: bool,
+) -> Result<Vec<Page>> {
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -88,29 +96,47 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
     #[cfg(windows)]
     let _job = windows_limit(&child)?;
     let mut stdin = child.stdin.take().context("worker stdin")?;
-    if let Err(error) = write_frame(&mut stdin, request) {
-        let _ = terminate(&mut child);
-        let _ = child.wait();
-        return Err(crate::failures::content(format!(
-            "worker request failed: {error:#}"
-        )));
-    }
+    // A wrapper can exit before consuming the request. Inspect its status and
+    // stdout before classifying a broken pipe as a document failure.
+    let request_error = write_frame(&mut stdin, request).err();
     drop(stdin);
     let stdout = child.stdout.take().context("worker stdout")?;
-    let reader = std::thread::spawn(move || read_frame::<Response>(stdout));
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut stdout = BufReader::new(stdout);
+        let no_response_bytes = matches!(stdout.fill_buf(), Ok([]));
+        let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
+    });
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            let response = reader
-                .join()
-                .map_err(|_| anyhow::anyhow!("worker reader panic"));
+            // A descendant can keep stdout open after the worker exits. The
+            // whole group goes with the worker, and collection stays bounded.
+            let _ = terminate(&mut child);
+            let remaining = timeout
+                .saturating_sub(start.elapsed())
+                .max(Duration::from_millis(250));
+            let response = receiver
+                .recv_timeout(remaining)
+                .map_err(|_| anyhow::anyhow!("worker response not received in time"));
             if !status.success() {
+                if sandboxed
+                    && status.code().is_some_and(|code| (64..=78).contains(&code))
+                    && response.as_ref().is_ok_and(|(empty, _)| *empty)
+                {
+                    bail!("parser sandbox failed to start the worker: {status}");
+                }
                 return Err(crate::failures::content(format!(
                     "worker crashed: {status}"
                 )));
             }
+            if let Some(error) = request_error {
+                return Err(crate::failures::content(format!(
+                    "worker request failed: {error:#}"
+                )));
+            }
             let response = response
-                .and_then(|r| r)
+                .and_then(|(_, r)| r)
                 .map_err(|e| crate::failures::content(format!("worker response failed: {e:#}")))?;
             if let Some(error) = response.error {
                 return Err(if response.content_failure {
@@ -125,7 +151,6 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
         if resident_bytes(child.id()) > MEMORY_BYTES {
             terminate(&mut child)?;
             child.wait()?;
-            let _ = reader.join();
             return Err(crate::failures::content(
                 "worker resident memory exceeds 1.5 GiB",
             ));
@@ -133,7 +158,6 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
         if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
-            let _ = reader.join();
             return Err(crate::failures::content(format!(
                 "worker timeout after {}ms",
                 timeout.as_millis()
@@ -258,5 +282,73 @@ fn resident_bytes(pid: u32) -> u64 {
         info.resident_size
     } else {
         0
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    fn failed_command(script: &str, sandboxed: bool) -> anyhow::Error {
+        let mut cmd = Command::new("/bin/sh");
+        cmd.args(["-c", script]);
+        run_command(
+            cmd,
+            &Request {
+                path: "source.txt".into(),
+                pdfium: None,
+            },
+            Duration::from_secs(5),
+            sandboxed,
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn sandbox_sysexits_without_response_are_infrastructure() {
+        for code in 64..=78 {
+            let error = failed_command(&format!("cat >/dev/null; exit {code}"), true);
+            assert!(!crate::failures::is_content(&error), "{error:#}");
+            assert!(error
+                .to_string()
+                .starts_with("parser sandbox failed to start the worker: "));
+        }
+        // Also cover a wrapper that exits before reading the request.
+        assert!(!crate::failures::is_content(&failed_command(
+            "exit 71", true
+        )));
+    }
+
+    #[test]
+    fn descendant_holding_stdout_does_not_outlast_the_worker() {
+        // stdin closed before the request (forcing BrokenPipe when the write
+        // loses the race), and a descendant keeps stdout open after exit.
+        for (code, content) in [(71, false), (1, true)] {
+            let start = Instant::now();
+            let error = failed_command(&format!("exec 0<&-; /bin/sleep 5 & exit {code}"), true);
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                start.elapsed()
+            );
+            assert_eq!(crate::failures::is_content(&error), content, "{error:#}");
+        }
+    }
+
+    #[test]
+    fn other_worker_exits_remain_content_failures() {
+        for script in [
+            "cat >/dev/null; exit 0",
+            "cat >/dev/null; exit 1",
+            "cat >/dev/null; exit 63",
+            "cat >/dev/null; exit 79",
+            "cat >/dev/null; kill -KILL $$",
+            "cat >/dev/null; printf x; exit 71",
+        ] {
+            let error = failed_command(script, true);
+            assert!(crate::failures::is_content(&error), "{error:#}");
+        }
+        let error = failed_command("cat >/dev/null; exit 71", false);
+        assert!(crate::failures::is_content(&error), "{error:#}");
     }
 }
