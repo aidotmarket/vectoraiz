@@ -79,7 +79,7 @@ unsupported formats as document failures for callers bypassing the scanner.
 | Source changes during parsing | Document (retry on next run) | Allowed |
 | Source I/O, including permission/missing-file/device errors | Infrastructure | Blocked |
 | Worker spawn/missing binary; PDFium binding; OCR engine unavailable; engine/model load; storage errors | Infrastructure | Blocked |
-| PDFium page text/render error after the document loaded (damaged page) | Document | Allowed |
+| PDFium page load/text/render error after the document loaded (damaged page) | Document | Allowed |
 | PDFium wrapped I/O (any stage); internal file/page/unknown errors while loading; other unrecognized load failures | Infrastructure (fail closed) | Blocked |
 
 All-failed nonempty runs remain blocked even when every failure is a document

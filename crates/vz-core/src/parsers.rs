@@ -151,7 +151,11 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
     );
     let document = pdfium.load_pdf_from_file(&request.path, None)?;
     let mut pages = Vec::new();
-    for (i, pdf_page) in document.pages().iter().enumerate() {
+    // Index by page: PdfPagesIterator ends silently at a page that fails to load,
+    // which would index a truncated document as complete.
+    let count = document.pages().len();
+    for i in 0..count {
+        let pdf_page = document.pages().get(i).map_err(crate::failures::pdf_page)?;
         let text = pdf_page.text().map_err(crate::failures::pdf_page)?.all();
         if !text.trim().is_empty() {
             pages.push(page(i as u32 + 1, text));

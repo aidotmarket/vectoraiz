@@ -66,7 +66,7 @@ pub fn parser(error: Error) -> Error {
 pub fn pdf_page(error: pdfium_render::prelude::PdfiumError) -> Error {
     match error {
         pdfium_render::prelude::PdfiumError::IoError(_) => infrastructure(error.into()),
-        _ => content(format!("PDF page failed: {error:#?}")),
+        _ => content(format!("PDF page failed: {error:?}")),
     }
 }
 
@@ -86,6 +86,10 @@ mod tests {
         assert!(!is_content(&pdf_page(P::IoError(std::io::Error::other(
             "disk gone"
         )))));
+        // The class survives the protocol-side parser() classification.
+        assert!(is_content(&parser(pdf_page(
+            P::PdfiumLibraryInternalError(I::PageError)
+        ))));
     }
     #[test]
     fn classification_is_explicit_and_io_fails_closed() {
