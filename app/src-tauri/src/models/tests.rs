@@ -512,7 +512,18 @@ fn status_checks_size_and_hash_and_space_counts_only_remaining_bytes() {
         .contains("bytes needed"));
     fs::write(dir.0.join(&pin.file), [b'x'; 100]).unwrap();
     assert_eq!(status(&dir.0, &[pin.clone()])["ready"], true);
-    fs::write(dir.0.join(&pin.file), [b'y'; 100]).unwrap();
+    // Same-size rewrite: the verification record keys on size + mtime + file identity, so an
+    // in-place rewrite inside one filesystem timestamp tick (seen on Windows CI) would be trusted
+    // by design. Move the mtime forward explicitly so the test does not depend on clock granularity.
+    let path = dir.0.join(&pin.file);
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, [b'y'; 100]).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(2))
+        .unwrap();
     assert!(!verified(&dir.0, &pin));
     fs::write(dir.0.join(&pin.file), [b'x'; 99]).unwrap();
     assert!(!verified(&dir.0, &pin));
@@ -536,7 +547,8 @@ fn bundled_pins_are_sized_and_download_does_not_fetch_valid_models() {
             panic!("No download of valid models")
         }))
         .unwrap();
-    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 1);
+    assert!(dir.0.join("models.verified.json").is_file());
+    assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 2);
 }
 
 #[test]
@@ -843,4 +855,126 @@ fn old_recipe_is_detected_before_models_are_downloaded() {
         serde_json::to_vec(&old).unwrap()
     );
     std::fs::remove_dir_all(temp).unwrap();
+}
+
+#[test]
+fn second_status_reuses_verification_record() {
+    let dir = Temp::new();
+    let path = dir.0.join("test.gguf");
+    fs::write(&path, b"original").unwrap();
+    let pin = Pin {
+        file: "test.gguf".into(),
+        size: 8,
+        sha256: vz_core::pipeline::file_sha256(&path).unwrap(),
+        metadata: json!({"file": "test.gguf"}),
+    };
+    assert_eq!(status(&dir.0, std::slice::from_ref(&pin))["ready"], true);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, b"modified").unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    assert_eq!(status(&dir.0, std::slice::from_ref(&pin))["ready"], true);
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified + Duration::from_secs(2))
+        .unwrap();
+    assert_eq!(status(&dir.0, &[pin])["ready"], false);
+}
+
+#[test]
+fn acquisition_records_verification_and_reports_checking_then_verified() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'x'; 100]).unwrap();
+    let ops = Operations::default();
+    let mut stages = Vec::new();
+    runtime()
+        .block_on(stage_verify_promote(
+            &installed.0,
+            &pin,
+            Source::Import(regular(&source.0.join(&pin.file), false).unwrap()),
+            ops.start(),
+            &mut |value| stages.push(value["stage"].clone()),
+        ))
+        .unwrap();
+    assert_eq!(stages, [json!("checking"), json!("verified")]);
+    let path = installed.0.join(&pin.file);
+    let modified = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, [b'y'; 100]).unwrap();
+    File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(modified)
+        .unwrap();
+    // Promotion wrote the record, so the next status does not rehash.
+    assert!(verified(&installed.0, &pin));
+}
+
+#[test]
+fn acquisition_hashes_retained_handle_when_staging_path_is_replaced() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'y'; 100]).unwrap();
+    let ops = Operations::default();
+    let result = runtime().block_on(stage_verify_promote(
+        &installed.0,
+        &pin,
+        Source::Import(regular(&source.0.join(&pin.file), false).unwrap()),
+        ops.start(),
+        &mut |value| {
+            if value["stage"] == "checking" {
+                let stage = fs::read_dir(&installed.0)
+                    .unwrap()
+                    .next()
+                    .unwrap()
+                    .unwrap()
+                    .path();
+                fs::rename(&stage, installed.0.join("retained")).unwrap();
+                // The pathname now contains pinned bytes, but the retained handle does not.
+                fs::write(stage, [b'x'; 100]).unwrap();
+            }
+        },
+    ));
+    assert!(result.unwrap_err().to_string().contains("sha256 mismatch"));
+    assert!(!installed.0.join(&pin.file).exists());
+    assert!(!installed.0.join("models.verified.json").exists());
+}
+
+#[test]
+fn acquisition_succeeds_when_post_promotion_record_fails() {
+    let source = Temp::new();
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(source.0.join(&pin.file), [b'x'; 100]).unwrap();
+    let ops = Operations::default();
+    let mut stages = Vec::new();
+    let mut attempted = false;
+    runtime()
+        .block_on(stage_verify_promote_with_record(
+            &installed.0,
+            &pin,
+            Source::Import(regular(&source.0.join(&pin.file), false).unwrap()),
+            ops.start(),
+            &mut |value| stages.push(value["stage"].clone()),
+            |path, _, _, _| {
+                assert!(path.is_file());
+                attempted = true;
+                bail!("injected record failure")
+            },
+        ))
+        .unwrap();
+    assert!(attempted);
+    assert_eq!(stages, [json!("checking"), json!("verified")]);
+    assert_eq!(fs::read(installed.0.join(&pin.file)).unwrap(), [b'x'; 100]);
+    assert!(!installed.0.join("models.verified.json").exists());
+    assert!(verified(&installed.0, &pin));
 }

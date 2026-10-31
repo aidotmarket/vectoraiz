@@ -238,56 +238,9 @@ pub fn needs_reindex(root: &Path, pins: &Value) -> Result<bool> {
     Ok(stored != vz_core::engine::Recipe::from_pins(pins, stored.dimensions)?)
 }
 
-// Open first, without following links, then inspect the opened handle. Windows
-// cloud placeholders are reparse points even when FileType::is_symlink is false.
-pub fn regular(path: &Path, write: bool) -> Result<File> {
-    let metadata = fs::symlink_metadata(path)?;
-    ensure!(
-        is_regular(&metadata),
-        "{}: not a regular file",
-        path.display()
-    );
-    let mut options = OpenOptions::new();
-    options.read(true).write(write);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        #[cfg(target_os = "macos")]
-        const NOFOLLOW: i32 = 0x100;
-        #[cfg(not(target_os = "macos"))]
-        const NOFOLLOW: i32 = 0x20000;
-        options.custom_flags(NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.custom_flags(0x00200000); // FILE_FLAG_OPEN_REPARSE_POINT
-    }
-    let file = options
-        .open(path)
-        .with_context(|| format!("{}: not a regular file or cannot open", path.display()))?;
-    ensure!(
-        is_regular(&file.metadata()?),
-        "{}: not a regular file",
-        path.display()
-    );
-    Ok(file)
-}
-fn is_regular(metadata: &fs::Metadata) -> bool {
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return false;
-        } // FILE_ATTRIBUTE_REPARSE_POINT
-    }
-    metadata.is_file() && !metadata.file_type().is_symlink()
-}
+pub use vz_core::verification::regular;
 pub fn verified(dir: &Path, pin: &Pin) -> bool {
-    regular(&dir.join(&pin.file), false).is_ok_and(|file| {
-        file.metadata().is_ok_and(|m| m.len() == pin.size)
-            && vz_core::pipeline::file_sha256(&dir.join(&pin.file)).is_ok_and(|h| h == pin.sha256)
-    })
+    vz_core::verification::verify(&dir.join(&pin.file), &pin.sha256, Some(pin.size)).is_ok()
 }
 pub fn status(dir: &Path, pins: &[Pin]) -> Value {
     let files: Vec<_> = pins
@@ -468,14 +421,33 @@ impl Drop for Stage {
 }
 
 /// The sole acquisition path: stage on the target filesystem, verify size and
-/// hash, close all handles, and atomically replace. The target is never opened
+/// hash, and atomically replace. The target is never opened
 /// for writing. Only this operation owns this stage (the caller holds the lock).
 pub async fn stage_verify_promote(
     dir: &Path,
     pin: &Pin,
     source: Source<'_>,
+    cancel: watch::Receiver<bool>,
+    progress: &mut (impl FnMut(Value) + Send),
+) -> Result<()> {
+    stage_verify_promote_with_record(
+        dir,
+        pin,
+        source,
+        cancel,
+        progress,
+        vz_core::verification::record_verified,
+    )
+    .await
+}
+
+async fn stage_verify_promote_with_record(
+    dir: &Path,
+    pin: &Pin,
+    source: Source<'_>,
     mut cancel: watch::Receiver<bool>,
     progress: &mut (impl FnMut(Value) + Send),
+    record: impl FnOnce(&Path, &str, &File, &fs::Metadata) -> Result<()> + Send,
 ) -> Result<()> {
     let download = matches!(source, Source::Download(_));
     let path = if download {
@@ -546,10 +518,18 @@ pub async fn stage_verify_promote(
         pin.file,
         pin.size
     );
-    drop(stage_file);
-    let hash_path = stage.path.clone();
-    let hash =
-        tokio::task::spawn_blocking(move || vz_core::pipeline::file_sha256(&hash_path)).await??;
+    let before_hash = stage_file.metadata()?;
+    progress(json!({"file": pin.file, "stage": "checking"}));
+    let (verified_file, hash) = tokio::task::spawn_blocking(move || -> Result<_> {
+        let hash = vz_core::verification::sha256_reader(&mut stage_file)?;
+        Ok((stage_file, hash))
+    })
+    .await??;
+    ensure!(
+        before_hash.len() == verified_file.metadata()?.len()
+            && before_hash.modified()? == verified_file.metadata()?.modified()?,
+        "model changed during verification"
+    );
     ensure!(
         hash == pin.sha256,
         "{}: sha256 mismatch; staging file deleted",
@@ -561,6 +541,15 @@ pub async fn stage_verify_promote(
     cancelled(&cancel)?;
     fs::rename(&stage.path, dir.join(&pin.file))
         .with_context(|| format!("{}: could not promote verified model", pin.file))?;
+    if let Err(error) = record(
+        &dir.join(&pin.file),
+        &pin.sha256,
+        &verified_file,
+        &before_hash,
+    ) {
+        eprintln!("Could not record verification for {}: {error:#}", pin.file);
+    }
+    progress(json!({"file": pin.file, "stage": "verified"}));
     Ok(())
 }
 
