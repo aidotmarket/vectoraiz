@@ -60,6 +60,9 @@ fn page(page: u32, text: String) -> Page {
     }
 }
 pub fn parse(request: &Request) -> Result<Vec<Page>> {
+    parse_inner(request).map_err(crate::failures::parser)
+}
+fn parse_inner(request: &Request) -> Result<Vec<Page>> {
     let path = &request.path;
     let ext = path
         .extension()
@@ -141,8 +144,11 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
     let library = request
         .pdfium
         .as_ref()
-        .context("PDFium library path required (run scripts/fetch-assets.py)")?;
-    let pdfium = Pdfium::new(Pdfium::bind_to_library(library)?);
+        .context("PDFium library path required (run scripts/fetch-assets.py)")
+        .map_err(crate::failures::infrastructure)?;
+    let pdfium = Pdfium::new(
+        Pdfium::bind_to_library(library).map_err(|e| crate::failures::infrastructure(e.into()))?,
+    );
     let document = pdfium.load_pdf_from_file(&request.path, None)?;
     let mut pages = Vec::new();
     for (i, pdf_page) in document.pages().iter().enumerate() {
@@ -158,8 +164,8 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
                 .as_image();
             let mut png = std::io::Cursor::new(Vec::new());
             image.write_to(&mut png, image::ImageFormat::Png)?;
-            let text =
-                crate::Ocr::recognize(&AppleVision, png.get_ref()).map_err(anyhow::Error::msg)?;
+            let text = crate::Ocr::recognize(&AppleVision, png.get_ref())
+                .map_err(|e| crate::failures::infrastructure(anyhow::Error::msg(e)))?;
             pages.push(page(i as u32 + 1, text));
         }
         #[cfg(not(target_os = "macos"))]

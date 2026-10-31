@@ -5,9 +5,14 @@ fn main() {
         vz_core::parsers::parse(&request)
     });
     let response = match result {
-        Ok(pages) => vz_core::worker::Response { pages, error: None },
+        Ok(pages) => vz_core::worker::Response {
+            pages,
+            error: None,
+            content_failure: false,
+        },
         Err(error) => vz_core::worker::Response {
             pages: Vec::new(),
+            content_failure: vz_core::failures::is_content(&error),
             error: Some(format!("{error:#}")),
         },
     };

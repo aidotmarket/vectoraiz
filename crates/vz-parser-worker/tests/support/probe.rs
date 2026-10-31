@@ -12,12 +12,30 @@ fn main() {
             &vz_core::worker::Response {
                 pages: vec![],
                 error,
+                content_failure: false,
             },
         )
         .unwrap();
         return;
     }
     match path {
+        "pdfium-io" => {
+            let error = vz_core::failures::parser(
+                pdfium_render::prelude::PdfiumError::IoError(std::io::Error::from(
+                    std::io::ErrorKind::Other,
+                ))
+                .into(),
+            );
+            vz_core::worker::write_frame(
+                std::io::stdout().lock(),
+                &vz_core::worker::Response {
+                    pages: vec![],
+                    error: Some(format!("{error:#}")),
+                    content_failure: vz_core::failures::is_content(&error),
+                },
+            )
+            .unwrap();
+        }
         "memory" => {
             let mut buffers = Vec::new();
             loop {
@@ -37,6 +55,7 @@ fn main() {
                 &vz_core::worker::Response {
                     pages: vec![],
                     error: None,
+                    content_failure: false,
                 },
             )
             .unwrap();

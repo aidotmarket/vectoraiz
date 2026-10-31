@@ -7,7 +7,7 @@ Apple Silicon, macOS 13 or later. These builds use an ad-hoc signature and are f
 3. Click **Run self-test**. The result should say `OK` and show the installed version.
 4. After each update the changed ad-hoc signature can trigger a keychain prompt. Choose **Always Allow** when vectorAIz asks to read its stored secrets.
 
-Collections, indexes and settings use `~/vectorAIz` (the Phase 0 index is in `phase0-index`). To uninstall, quit the app and move `/Applications/vectorAIz.app` to Trash. Uninstall preserves `~/vectorAIz`; remove that folder yourself only if you want to delete the data.
+Collections, indexes and settings use `~/vectorAIz` (recipe indexes are in `indexes/`, selected by `active-index.json`; `phase0-index` is the legacy fallback). To uninstall, quit the app and move `/Applications/vectorAIz.app` to Trash. Uninstall preserves `~/vectorAIz`; remove that folder yourself only if you want to delete the data.
 
 At launch, vectorAIz checks for updates. You can also choose **Check for updates**. When the banner says “vectorAIz <version> is available”, choose **Install and restart** to download, verify the signature, replace the app and restart on that version. Nothing downloads or installs until you click it. **Later** hides the banner until the next launch. Installation is disabled while indexing, search or chat is running. If Applications is not writable, macOS asks for an administrator password. After restarting, run the self-test; keep choosing **Always Allow** for the keychain prompt described above.
 
@@ -19,4 +19,4 @@ For an offline or restricted network, an administrator can use `python scripts/f
 
 Models live in `~/vectorAIz/models`. Updates and uninstall preserve them. After verification, choose your document Folder to index; an empty field or missing folder is refused without changing an existing index. Opening vectorAIz again restores and focuses its existing window.
 
-**If the app says "embedding recipe mismatch; re-index required".** An update changed the AI engine or the search model, so an index built by an older version can't be used. Quit vectorAIz, rename `~/vectorAIz/phase0-index` (for example to `phase0-index-old`), open the app again and choose **Index folder**. Your documents and the downloaded models (`~/vectorAIz/models`) are not touched. Delete the renamed folder once the new index works.
+**If the app says your library needs re-indexing for the new search model.** Choose **Re-index**, confirm the prefilled source folder (or enter one), and wait for completion. Search and Ask become available after the new index is activated. An interrupted run resumes the next time you choose Re-index. Both indexes and old model files are kept; allow disk space for the new index as well as the old one. See [default pins](../phase0/default-pins.md#re-index-behaviour).

@@ -109,7 +109,10 @@ pub struct Pin {
     pub metadata: Value,
 }
 pub fn pins(path: &Path) -> Result<Vec<Pin>> {
-    let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    let value = selected_pins(path, total_ram_bytes()?)?;
+    pins_from_value(&value)
+}
+pub fn pins_from_value(value: &Value) -> Result<Vec<Pin>> {
     ["embedding", "chat"]
         .iter()
         .map(|key| {
@@ -127,6 +130,112 @@ pub fn pins(path: &Path) -> Result<Vec<Pin>> {
             })
         })
         .collect()
+}
+
+/// Resolve release tiers in the shell; the offline engine still consumes `chat`.
+pub fn selected_pins(path: &Path, ram_bytes: u64) -> Result<Value> {
+    let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
+    if let Some(tiers) = value.get("chat_tiers") {
+        let tiers = tiers.as_array().context("chat_tiers list")?;
+        let mut chosen = None;
+        let mut previous = None;
+        for tier in tiers {
+            let minimum = tier["min_ram_gb"].as_u64().context("RAM threshold")?;
+            ensure!(
+                previous.is_none_or(|p| minimum > p),
+                "chat tiers must be ascending"
+            );
+            ensure!(
+                previous.is_some() || minimum == 0,
+                "first chat tier must start at zero"
+            );
+            previous = Some(minimum);
+            if minimum <= ram_bytes.saturating_add(512 * 1024 * 1024) / (1024 * 1024 * 1024) {
+                ensure!(tier["pin"].is_object(), "chat tier pin");
+                chosen = Some(tier["pin"].clone());
+            }
+        }
+        value["chat"] = chosen.context("no chat RAM tier")?;
+        value.as_object_mut().unwrap().remove("chat_tiers");
+    }
+    Ok(value)
+}
+
+#[cfg(target_os = "macos")]
+pub fn total_ram_bytes() -> Result<u64> {
+    unsafe extern "C" {
+        fn sysctlbyname(
+            name: *const std::ffi::c_char,
+            old: *mut std::ffi::c_void,
+            len: *mut usize,
+            new: *mut std::ffi::c_void,
+            new_len: usize,
+        ) -> i32;
+    }
+    let mut bytes = 0u64;
+    let mut len = std::mem::size_of::<u64>();
+    // SAFETY: constant terminated name and correctly sized writable output.
+    let result = unsafe {
+        sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            (&mut bytes as *mut u64).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    ensure!(result == 0 && len == 8, "Cannot read total physical RAM");
+    Ok(bytes)
+}
+#[cfg(windows)]
+pub fn total_ram_bytes() -> Result<u64> {
+    #[repr(C)]
+    struct MemoryStatus {
+        length: u32,
+        load: u32,
+        values: [u64; 7],
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GlobalMemoryStatusEx(status: *mut MemoryStatus) -> i32;
+        fn GetPhysicallyInstalledSystemMemory(kib: *mut u64) -> i32;
+    }
+    let mut installed_kib = 0u64;
+    // SAFETY: valid writable output; API returns installed RAM in KiB.
+    if unsafe { GetPhysicallyInstalledSystemMemory(&mut installed_kib) } != 0 && installed_kib > 0 {
+        return installed_kib
+            .checked_mul(1024)
+            .context("Installed RAM overflow");
+    }
+    let mut status = MemoryStatus {
+        length: std::mem::size_of::<MemoryStatus>() as u32,
+        load: 0,
+        values: [0; 7],
+    };
+    // SAFETY: MEMORYSTATUSEX layout and initialized length, valid writable pointer.
+    ensure!(
+        unsafe { GlobalMemoryStatusEx(&mut status) } != 0,
+        "Cannot read total physical RAM"
+    );
+    Ok(status.values[0])
+}
+#[cfg(not(any(target_os = "macos", windows)))]
+pub fn total_ram_bytes() -> Result<u64> {
+    bail!("Physical RAM detection is supported on macOS and Windows")
+}
+
+/// Compare the complete recipe without loading or downloading a model. Reuse the
+/// persisted dimension only for comparison; model name/hash still have to match.
+pub fn needs_reindex(root: &Path, pins: &Value) -> Result<bool> {
+    let path = root.join("recipe.json");
+    if !path.try_exists()? {
+        return vz_core::storage::State::has_persisted_documents(root);
+    }
+    let stored: vz_core::engine::Recipe = match serde_json::from_slice(&fs::read(path)?) {
+        Ok(recipe) => recipe,
+        Err(_) => return Ok(true),
+    };
+    Ok(stored != vz_core::engine::Recipe::from_pins(pins, stored.dimensions)?)
 }
 
 // Open first, without following links, then inspect the opened handle. Windows

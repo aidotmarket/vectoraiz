@@ -21,6 +21,7 @@ def validate_notices(path):
     text = path.read_text(encoding='utf-8-sig')
     headers = ['THIRD_PARTY_NOTICES — Rust dependencies', 'llama.cpp ',
                'PDFium chromium/8111:', 'Provisional model licences and source notices:',
+               'Release model licences and source notices:',
                'UI npm dependencies']
     positions = [text.find(header) for header in headers]
     if any(position < 0 for position in positions) or positions != sorted(positions):
@@ -70,7 +71,7 @@ def main():
         library = 'pdfium.dll' if windows else 'libpdfium.dylib'
         shutil.copy2(ROOT / '.assets/pdfium' / ('bin' if windows else 'lib') / library, runtime / library)
         assert not list(bundle.rglob('*.gguf')), 'Models must be imported or downloaded separately'
-        shutil.copy2(ROOT / 'spike/fixtures/models.json', bundle / 'models.json')
+        shutil.copy2(ROOT / 'spike/fixtures/models.release.json', bundle / 'models.json')
         shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', bundle / 'THIRD_PARTY_NOTICES')
         (generated / 'bin').mkdir(exist_ok=True)
         for name in ['vz-parser-worker', 'vectoraiz-mcp', 'vectoraiz-cli']:

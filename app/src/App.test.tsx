@@ -272,7 +272,7 @@ it("downloads only on click, streams progress, cancels, clears failure progress 
   });
   render(<App />);
   await screen.findByLabelText("Models");
-  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
   expect(await screen.findByText(/40 \/ 100 bytes/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -375,7 +375,7 @@ it("keeps per-file download states from the Channel until status refresh, withou
   modelsInvoke.mockImplementation(async command => command === "models_status" ? status : pending.promise);
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
   const channel = modelsInvoke.mock.calls.find(([command]) => command === "models_download")![1].progress;
   const send = (file: string, downloaded: number) => act(() => channel.onmessage({ file, downloaded, total: 100, attempt: 1 }));
   send("test.gguf", 40);
@@ -484,7 +484,7 @@ it("retains completed files after cancellation until the next status refresh", a
   });
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
   expect(screen.getByText(/Chat model/)).toHaveTextContent("Downloading");
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   await screen.findByText("Model acquisition cancelled");
@@ -546,7 +546,7 @@ it("retains Downloaded after download success with a failed status refresh and r
   });
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: "Download models (about 560 MB)" }));
+  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
   await screen.findByText("Status refresh failed");
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
   expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
@@ -631,4 +631,87 @@ it("ignores settled Ask tokens while Search runs and after its results arrive", 
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
   expect(answer).toBeEmptyDOMElement();
   expect(screen.getByRole("button", { name: "Search" })).toBeEnabled();
+});
+
+
+it("shows the selected model and full download total", async () => {
+  modelsInvoke.mockResolvedValue({ready: false, files: [
+    {name: "bge-m3", file: "embedding.gguf", size: 634553760, license: "MIT", source: "embedding-source", verified: false},
+    {name: "qwen3-4b-instruct-2507", file: "chat.gguf", size: 2497280448, license: "Apache-2.0", source: "chat-source", verified: false}
+  ]});
+  render(<App />);
+  expect(await screen.findByText(/qwen3-4b-instruct-2507/)).toHaveTextContent("2,497,280,448 bytes");
+  expect(screen.getByRole("button", {name: /Download models/})).toHaveTextContent("3,131,834,208 bytes total");
+});
+
+it("disables Search and Ask on a recipe mismatch at launch", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true});
+  render(<App />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Your library needs re-indexing for the new search model");
+  expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
+  expect(invoke.mock.calls.some(([command]) => command === "pipeline_search" || command === "pipeline_ask")).toBe(false);
+});
+
+it("prefills Re-index and enables search after the recipe switch", async () => {
+  modelsInvoke.mockResolvedValueOnce({...readyModels, needs_reindex: true, last_indexed_folder: "/previous/documents"})
+    .mockResolvedValue({...readyModels, needs_reindex: false});
+  render(<App />);
+  const button = await screen.findByRole("button", {name: "Re-index"});
+  expect(screen.getByPlaceholderText("Choose a folder to index")).toHaveValue("/previous/documents");
+  await userEvent.click(button);
+  await waitFor(() => expect(screen.getByRole("button", {name: "Search"})).toBeEnabled());
+  expect(invoke.mock.calls.some(([command, args]) => command === "pipeline_index" && args?.folder === "/previous/documents")).toBe(true);
+});
+
+it("asks for a folder when Re-index has no known source", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true});
+  render(<App />);
+  expect(await screen.findByRole("button", {name: "Re-index"})).toBeDisabled();
+  expect(screen.getByPlaceholderText("Choose a folder to index")).toHaveValue("");
+});
+
+it("keeps Search disabled when Re-index is cancelled", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/previous/documents"});
+  const pending = deferred();
+  invoke.mockImplementation((command: string) => command === "pipeline_index" ? pending.promise : Promise.resolve({available: false}));
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  await userEvent.click(screen.getByRole("button", {name: "Cancel indexing"}));
+  expect(modelsInvoke.mock.calls.some(([command]) => command === "models_cancel")).toBe(true);
+  await act(async () => pending.resolve(Promise.reject("Indexing cancelled; Re-index to resume")));
+  expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
+});
+
+it.each([true, false])("reports unfinished Re-index with counts and allows retry while Search stays disabled (backend counts=%s)", async backendCounts => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "pipeline_index") {
+      args.progress.onmessage({completed: 1, skipped: 0, failed: 1, total: 2, path: "file.pdf"});
+      throw backendCounts ? "Re-index did not finish: 1 indexed, 0 skipped, 1 failed (1 infrastructure), 2 total; file.pdf: PDFium asset missing; Re-index to resume" : "file.pdf: PDFium asset missing";
+    }
+    return {available: false};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  const error = await screen.findByText(/Re-index did not finish: 1 indexed, 0 skipped, 1 failed/);
+  expect(error).toHaveTextContent("file.pdf: PDFium asset missing");
+  expect(error.textContent?.match(/Re-index did not finish/g)).toHaveLength(1);
+  expect(screen.getByRole("button", {name: "Search"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeDisabled();
+  expect(screen.getByRole("button", {name: "Re-index"})).toBeEnabled();
+});
+
+it("reports setup failure without invented zero counts", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_index") throw "engine load failed";
+    return {available: false};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
+  expect(await screen.findByText("Re-index did not finish: engine load failed")).toBeInTheDocument();
+  expect(screen.queryByText(/0 indexed/)).not.toBeInTheDocument();
 });

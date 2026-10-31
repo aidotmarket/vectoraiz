@@ -14,3 +14,12 @@ for path in [pdfium / 'LICENSE', *sorted((pdfium / 'licenses').iterdir())]:
         print(text)
 print('\nProvisional model licences and source notices:')
 print((root / 'spike/fixtures/models.json').read_text())
+
+print('\nRelease model licences and source notices:')
+print((root / 'spike/fixtures/models.release.json').read_text())
+for path in sorted((root / 'docs/phase0/model-licenses').glob('*.txt')):
+    print(f'\n{path.name}\n')
+    print(path.read_text())
+
+print('\nPinned model source/distributor NOTICE inventory:')
+print((root / 'docs/phase0/model-licenses/inventory.json').read_text())

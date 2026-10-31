@@ -22,6 +22,7 @@ PDFIUM = {
 
 def fetch(url, digest, output, size=None):
     if output.exists() and (size is None or output.stat().st_size == size) and hashlib.file_digest(output.open('rb'), 'sha256').hexdigest() == digest:
+        print(f'{output.name}: sha256 OK {digest} ({output.stat().st_size} bytes; cached)', flush=True)
         return
     output.parent.mkdir(parents=True, exist_ok=True)
     partial = output.with_suffix(output.suffix + '.part')
@@ -44,15 +45,34 @@ def fetch(url, digest, output, size=None):
         if actual != digest:
             raise ValueError(f'{output.name}: sha256 mismatch: {actual}')
         os.replace(partial, output)
+        print(f'{output.name}: sha256 OK {actual} ({output.stat().st_size} bytes)', flush=True)
     finally:
         partial.unlink(missing_ok=True)
 
 
+def rounded_ram_gib(ram_bytes):
+    return (ram_bytes + (512 << 20)) // (1 << 30)
+
+def select_tier(tiers, ram_bytes):
+    return max((t for t in tiers if t["min_ram_gb"] <= rounded_ram_gib(ram_bytes)),
+               key=lambda t: t["min_ram_gb"])["pin"]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', type=Path, default=ROOT / '.assets')
+    parser.add_argument('--models', type=Path, default=ROOT / 'spike/fixtures/models.json')
+    parser.add_argument('--ram-gb', type=float, help='Explicit tier for a local release verification')
+    parser.add_argument('--selected-out', type=Path, help='Write resolved pins for the offline CLI')
     args = parser.parse_args()
-    for pin in json.loads((ROOT / 'spike/fixtures/models.json').read_text()).values():
+    pins = json.loads(args.models.read_text())
+    if 'chat_tiers' in pins:
+        if args.ram_gb is None:
+            parser.error('--ram-gb is required for release verification')
+        tiers = pins.pop('chat_tiers')
+        pins['chat'] = select_tier(tiers, int(args.ram_gb * (1 << 30)))
+    if args.selected_out:
+        args.selected_out.write_text(json.dumps(pins, indent=2) + '\n')
+    for pin in pins.values():
         fetch(pin['url'], pin['sha256'], args.out / pin['file'], pin['size'])
     target, digest = PDFIUM[platform.system()]
     archive = args.out / f'pdfium-{target}.tgz'

@@ -76,9 +76,12 @@ mod tests {
     }
 }
 
+pub mod active_index;
 pub mod engine;
 pub mod index;
 pub mod parsers;
 pub mod pipeline;
 pub mod storage;
 pub mod worker;
+
+pub mod failures;

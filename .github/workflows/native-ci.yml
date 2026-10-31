@@ -14,7 +14,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     env:
       PYTHONUTF8: '1'
@@ -79,6 +79,16 @@ jobs:
           key: ${{ steps.minio-cache.outputs.cache-primary-key }}
       - name: Install pinned Rust
         run: rustup show active-toolchain
+      # The pinned llama.cpp httplib requires the OpenSSL 3 API. New runner
+      # images also ship OpenSSL 4; select 3 before rust-cache hashes CMAKE_*.
+      - name: Select OpenSSL 3 for pinned llama.cpp
+        if: runner.os == 'macOS'
+        run: |
+          brew list --versions openssl@3 >/dev/null || brew install openssl@3
+          openssl_root="$(brew --prefix openssl@3)"
+          echo "OPENSSL_ROOT_DIR=$openssl_root" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$openssl_root" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$openssl_root/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -172,7 +182,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, windows-2022]
+        os: [macos-15, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -200,7 +210,7 @@ jobs:
             msi-uninstall.log
           if-no-files-found: warn
   ui-test-macos:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 35
     env:
       CARGO_INCREMENTAL: '0'
@@ -220,6 +230,16 @@ jobs:
         run: python scripts/install-protoc.py
       - name: Install pinned Rust
         run: rustup show active-toolchain
+      # The pinned llama.cpp httplib requires the OpenSSL 3 API. New runner
+      # images also ship OpenSSL 4; select 3 before rust-cache hashes CMAKE_*.
+      - name: Select OpenSSL 3 for pinned llama.cpp
+        if: runner.os == 'macOS'
+        run: |
+          brew list --versions openssl@3 >/dev/null || brew install openssl@3
+          openssl_root="$(brew --prefix openssl@3)"
+          echo "OPENSSL_ROOT_DIR=$openssl_root" >> "$GITHUB_ENV"
+          echo "CMAKE_PREFIX_PATH=$openssl_root" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$openssl_root/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true

@@ -10970,6 +10970,7 @@ dependencies = [
 name = "vz-parser-worker"
 version = "0.0.9"
 dependencies = [
+ "pdfium-render",
  "serde_json",
  "tempfile",
  "vz-core",
