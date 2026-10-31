@@ -75,6 +75,7 @@ unsupported formats as document failures for callers bypassing the scanner.
 | --- | --- | --- |
 | Corrupt/password-protected/unsupported document, empty text, needs OCR | Document | Allowed |
 | Successfully spawned worker crashes, times out, or exceeds memory budget on a file | Document | Allowed |
+| macOS sandbox-exec exits 64–78 (sysexits) with no response bytes before worker startup | Infrastructure | Blocked |
 | Source changes during parsing | Document (retry on next run) | Allowed |
 | Source I/O, including permission/missing-file/device errors | Infrastructure | Blocked |
 | Worker spawn/missing binary; PDFium binding; OCR engine unavailable; engine/model load; storage errors | Infrastructure | Blocked |
