@@ -9,7 +9,7 @@ interface SelfTestResult { status: string; version: string; os: string; arch: st
 
 interface ModelFile { name: string; file: string; size: number; license: string; source: string; verified: boolean }
 interface ModelsStatus { last_indexed_folder?: string; needs_reindex?: boolean; ready: boolean; files: ModelFile[] }
-interface ModelProgress { file: string; downloaded: number; total: number; attempt: number; retry?: boolean }
+interface ModelProgress { file: string; downloaded: number; total: number; attempt: number; retry?: boolean; stage?: "checking" | "verified" }
 interface ImportResult { file: string; result: string }
 
 interface UpdateCheck { available: boolean; version?: string }
@@ -110,7 +110,7 @@ export default function App() {
     let receivedProgress = false;
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
+    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) {
       const detail = String(cause);
@@ -176,6 +176,11 @@ export default function App() {
         const channel = new Channel<ModelProgress>();
         channel.onmessage = p => {
           if (!active) return;
+          if (p.stage) {
+            setModelProgress(p.stage === "checking" ? `Checking ${p.file}…` : `${p.file}: Verified`);
+            setDownloadStates(states => ({ ...states, [p.file]: p.stage === "checking" ? "Checking…" : "Verified" }));
+            return;
+          }
           setModelProgress(`${p.file}: ${p.downloaded} / ${p.total} bytes · attempt ${p.attempt}${p.retry ? " · Retrying…" : ""}`);
           setDownloadStates(states => ({ ...states, [p.file]: p.downloaded === p.total ? "Downloaded" : "Downloading" }));
         };
@@ -184,13 +189,13 @@ export default function App() {
         setImportResults(await invoke<ImportResult[]>("models_import", { folder: importFolder }));
       }
       const status = await refreshModels();
-      if (source === "import" && status.ready) {
-        setImportResults([]); setShowImport(false); setModelMessage("Models imported and verified.");
+      if (source !== "status" && status.ready) {
+        setImportResults([]); setShowImport(false); setModelMessage(source === "import" ? "Models imported and verified." : "Models downloaded and verified.");
       }
     } catch (cause) { setModelError(String(cause)); }
     finally {
       active = false; modelBusyRef.current = false; setModelBusy(false); setModelProgress("");
-      setDownloadStates(states => Object.fromEntries(Object.entries(states).filter(([, status]) => status === "Downloaded")));
+      setDownloadStates(states => Object.fromEntries(Object.entries(states).filter(([, status]) => status === "Downloaded" || status === "Verified")));
     }
   }
   async function cancelModels() {

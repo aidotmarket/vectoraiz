@@ -85,3 +85,5 @@ pub mod storage;
 pub mod worker;
 
 pub mod failures;
+
+pub mod verification;

@@ -81,7 +81,7 @@ it("indexes with progress then runs a search and a streaming chat", async () => 
   render(<App />);
   await userEvent.type(screen.getByLabelText("Folder"), "/documents");
   await userEvent.click(screen.getByRole("button", { name: "Index folder" }));
-  expect(screen.getByRole("status")).toHaveTextContent("1/1");
+  expect(screen.getByRole("status")).toHaveTextContent("1/1 · 1 indexed · 0 skipped · 0 failed · fixture.txt");
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
   expect(await screen.findByText("thirty days")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", { name: "Ask" }));
@@ -714,4 +714,22 @@ it("reports setup failure without invented zero counts", async () => {
   await userEvent.click(await screen.findByRole("button", {name: "Re-index"}));
   expect(await screen.findByText("Re-index did not finish: engine load failed")).toBeInTheDocument();
   expect(screen.queryByText(/0 indexed/)).not.toBeInTheDocument();
+});
+
+it("shows checking and verified download stages and a completion message", async () => {
+  const pending = deferred();
+  modelsInvoke.mockImplementation(async command => command === "models_status" ? missingModels : pending.promise);
+  render(<App />);
+  await screen.findByText(/Embedding model/);
+  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
+  const channel = modelsInvoke.mock.calls.find(([command]) => command === "models_download")![1].progress;
+  act(() => channel.onmessage({file: "test.gguf", stage: "checking"}));
+  expect(screen.getByText("Checking test.gguf…")).toBeInTheDocument();
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Checking…");
+  act(() => channel.onmessage({file: "test.gguf", stage: "verified"}));
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Verified");
+  modelsInvoke.mockResolvedValue(readyModels);
+  await act(async () => pending.resolve(undefined));
+  expect(await screen.findByText("Models downloaded and verified.")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Models")).not.toBeInTheDocument();
 });
