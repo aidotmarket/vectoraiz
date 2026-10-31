@@ -101,17 +101,24 @@ fn run_command(
     let request_error = write_frame(&mut stdin, request).err();
     drop(stdin);
     let stdout = child.stdout.take().context("worker stdout")?;
-    let reader = std::thread::spawn(move || {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
         let mut stdout = BufReader::new(stdout);
         let no_response_bytes = matches!(stdout.fill_buf(), Ok([]));
-        (no_response_bytes, read_frame::<Response>(stdout))
+        let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
     });
     let start = Instant::now();
     loop {
         if let Some(status) = child.try_wait()? {
-            let response = reader
-                .join()
-                .map_err(|_| anyhow::anyhow!("worker reader panic"));
+            // A descendant can keep stdout open after the worker exits. The
+            // whole group goes with the worker, and collection stays bounded.
+            let _ = terminate(&mut child);
+            let remaining = timeout
+                .saturating_sub(start.elapsed())
+                .max(Duration::from_millis(250));
+            let response = receiver
+                .recv_timeout(remaining)
+                .map_err(|_| anyhow::anyhow!("worker response not received in time"));
             if !status.success() {
                 if sandboxed
                     && status.code().is_some_and(|code| (64..=78).contains(&code))
@@ -144,7 +151,6 @@ fn run_command(
         if resident_bytes(child.id()) > MEMORY_BYTES {
             terminate(&mut child)?;
             child.wait()?;
-            let _ = reader.join();
             return Err(crate::failures::content(
                 "worker resident memory exceeds 1.5 GiB",
             ));
@@ -152,7 +158,6 @@ fn run_command(
         if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
-            let _ = reader.join();
             return Err(crate::failures::content(format!(
                 "worker timeout after {}ms",
                 timeout.as_millis()
@@ -312,6 +317,22 @@ mod tests {
         assert!(!crate::failures::is_content(&failed_command(
             "exit 71", true
         )));
+    }
+
+    #[test]
+    fn descendant_holding_stdout_does_not_outlast_the_worker() {
+        // stdin closed before the request (forcing BrokenPipe when the write
+        // loses the race), and a descendant keeps stdout open after exit.
+        for (code, content) in [(71, false), (1, true)] {
+            let start = Instant::now();
+            let error = failed_command(&format!("exec 0<&-; /bin/sleep 5 & exit {code}"), true);
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                start.elapsed()
+            );
+            assert_eq!(crate::failures::is_content(&error), content, "{error:#}");
+        }
     }
 
     #[test]
