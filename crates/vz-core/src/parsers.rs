@@ -152,7 +152,7 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
     let document = pdfium.load_pdf_from_file(&request.path, None)?;
     let mut pages = Vec::new();
     for (i, pdf_page) in document.pages().iter().enumerate() {
-        let text = pdf_page.text()?.all();
+        let text = pdf_page.text().map_err(crate::failures::pdf_page)?.all();
         if !text.trim().is_empty() {
             pages.push(page(i as u32 + 1, text));
             continue;
@@ -160,7 +160,8 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
         #[cfg(target_os = "macos")]
         {
             let image = pdf_page
-                .render_with_config(&PdfRenderConfig::new().set_target_width(1600))?
+                .render_with_config(&PdfRenderConfig::new().set_target_width(1600))
+                .map_err(crate::failures::pdf_page)?
                 .as_image();
             let mut png = std::io::Cursor::new(Vec::new());
             image.write_to(&mut png, image::ImageFormat::Png)?;
