@@ -512,7 +512,18 @@ fn status_checks_size_and_hash_and_space_counts_only_remaining_bytes() {
         .contains("bytes needed"));
     fs::write(dir.0.join(&pin.file), [b'x'; 100]).unwrap();
     assert_eq!(status(&dir.0, &[pin.clone()])["ready"], true);
-    fs::write(dir.0.join(&pin.file), [b'y'; 100]).unwrap();
+    // Same-size rewrite: the verification record keys on size + mtime + file identity, so an
+    // in-place rewrite inside one filesystem timestamp tick (seen on Windows CI) would be trusted
+    // by design. Move the mtime forward explicitly so the test does not depend on clock granularity.
+    let path = dir.0.join(&pin.file);
+    let before = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, [b'y'; 100]).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(before + std::time::Duration::from_secs(2))
+        .unwrap();
     assert!(!verified(&dir.0, &pin));
     fs::write(dir.0.join(&pin.file), [b'x'; 99]).unwrap();
     assert!(!verified(&dir.0, &pin));
