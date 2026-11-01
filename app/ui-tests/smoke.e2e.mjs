@@ -12,7 +12,7 @@ describe('native first launch (offline)', () => {
     await browser.waitUntil(async () => /Checking models…|Models/.test(await models.getText()),
       { timeoutMsg: 'Expected model checking or first-run models screen' });
     // Wait for the real status IPC to finish, so startup errors cannot pass unnoticed.
-    await browser.waitUntil(async () => (await $('main').getText()).includes('Models needed: download or import them first.'),
+    await browser.waitUntil(async () => (await $('main').getText()).includes('Search model needed: download or import it first.'),
       { timeoutMsg: 'Fresh offline launch must need models' });
     const evidence = await browser.execute(() => window.__VZ_UI_TEST__);
     assert.ok(evidence, 'Startup error observer must be installed before frontend scripts');
