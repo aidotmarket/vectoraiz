@@ -64,8 +64,16 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       try { await ipc('delete_unused_model', {sha256:status.offer[0].pin.sha256}); }
       catch (error) { if (String(error) !== 'A download is running') throw error; refused = true; }
       if (!refused) throw new Error('Delete raced pending activation');
+      await ipc('models_cancel',{kind:'transfer'});
+      let cancelledSwitch = '';
+      try { await switching; } catch (error) { cancelledSwitch = String(error); }
+      const cancelledStatus = await ipc('models_status');
+      if (cancelledSwitch !== 'Switch cancelled' || cancelledStatus.target || !cancelledStatus.files.some(file => file.sha256 === status.offer[1].pin.sha256 && file.installed_bytes === status.offer[1].pin.size)) throw new Error('Pending activation cancellation left a busy target or lost the installed file');
+      await report('activation: pending switch cancelled before held Search released');
+      const retrySwitch = ipc('answer_switch',{tierIndex:1});
+      await statusWait(s => s.target?.state === 'verified');
       await report('release-search');
-      await heldSearch; await switching;
+      await heldSearch; await retrySwitch;
       await statusWait(s => s.answer.state === 'ready' && s.answer.pin.sha256 === s.offer[1].pin.sha256 && !s.target);
       const answer = await ipc('pipeline_ask', {question:query,tokens:progress});
       if (answer.kind !== 'answer' || !answer.citations.length || !/(?:thirty|30) days/i.test(answer.text)) throw new Error('Switched answer lost citations');
@@ -100,6 +108,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         await report('release-transfer');
         const [indexed,transferred] = await Promise.all([indexing,transfer]);
         if (kind === 'transfer' ? indexed !== 'complete' || !transferred.toLowerCase().includes('cancelled') : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
+        if (kind === 'transfer' && (await ipc('models_status')).target?.state !== 'paused') throw new Error('Cancelled smoke hold did not pause the target');
         if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Cancellation blocked Search');
         if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Cancellation blocked the current answer');
         await report('independent cancellation: '+kind);
@@ -112,6 +121,19 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         try { await ipc('delete_unused_model',{sha256}); } catch { refused = true; }
         if (!refused) throw new Error('Deleted search or active answer model');
       }
+      // The current tier 1 answer is loaded. A real failed acquisition of the
+      // now-deleted tier 0 must preserve it and the search engine.
+      await report('fail-next-transfer');
+      let failed = false;
+      try { await ipc('answer_add',{tierIndex:0}); }
+      catch { failed = true; }
+      const failedStatus = await ipc('models_status');
+      if (!failed || failedStatus.target?.state !== 'failed' || failedStatus.answer.pin?.sha256 !== status.offer[1].pin.sha256) throw new Error('Failed acquisition changed selection or target state');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Failed acquisition blocked Search');
+      const afterFailure = await ipc('pipeline_ask',{question:query,tokens:progress});
+      if (afterFailure.kind !== 'answer' || !afterFailure.citations.length) throw new Error('Failed acquisition blocked current Ask');
+      await report('failure: Search and loaded Ask survived unreachable answer_add with failed target');
+      await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256});
       await ipc('answer_turn_off');
       if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'no_answer') throw new Error('Turn off did not remove answer selection');
       const removed = await ipc('delete_unused_model',{sha256:status.offer[1].pin.sha256});
@@ -211,12 +233,13 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (noAnswer.kind !== 'no_answer') throw new Error('Search-only Ask must return no_answer');
     await report('search-only: Index and Search passed; Ask returned no_answer');
   }
-  let changed = false;
-  const eventHandler = window.__TAURI_INTERNALS__.transformCallback(() => {changed = true;});
+  let changed = 0;
+  const eventHandler = window.__TAURI_INTERNALS__.transformCallback(() => {changed += 1;});
   const eventId = await ipc('plugin:event|listen',{event:'models_changed',target:{kind:'Any'},handler:eventHandler});
   await ipc('answer_add',{tierIndex:0});
   await statusWait(status => status.answer.state === 'ready',240000);
-  if (window.__VZ_SMOKE__.acquisition && !changed) throw new Error('answer_add emitted no models_changed');
+  if (changed > 20 || (window.__VZ_SMOKE__.acquisition && changed < 1)) throw new Error('answer_add models_changed count outside expected bound: ' + changed);
+  await report('answer_add: models_changed count ' + changed + ' (bound 20)');
   await ipc('plugin:event|unlisten',{event:'models_changed',eventId});
   await report('offline: start');
   const offlineStart = await ipc('models_status');
