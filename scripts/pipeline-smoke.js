@@ -148,6 +148,12 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     }
     await report('acquisition: verified downloads; beginning separate pipeline budget');
   }
+  if (window.__VZ_SMOKE__.acquisition) {
+    // No Index/Search has loaded an engine yet, and no index exists.
+    const emptyCacheAsk = await ipc('pipeline_ask',{question:query,tokens:progress});
+    if (emptyCacheAsk.kind !== 'no_answer') throw new Error('Empty-cache Ask loaded a model instead of returning no_answer');
+    await report('search-only: empty-cache Ask returned no_answer before indexing');
+  }
   const pipelineDeadline = Date.now() + 300000;
   const pipelineWait = predicate => wait(predicate, Math.max(1, pipelineDeadline - Date.now()));
   const folder = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Folder')).querySelector('input');
@@ -209,11 +215,19 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await statusWait(status => status.answer.state === 'ready',240000);
   if (window.__VZ_SMOKE__.acquisition && !changed) throw new Error('answer_add emitted no models_changed');
   await ipc('plugin:event|unlisten',{event:'models_changed',eventId});
+  await report('offline: start');
+  const offlineStart = await ipc('models_status');
+  if (offlineStart.target || offlineStart.files.some(file => file.partial_bytes > 0)) throw new Error('Offline pipeline began with acquisition state');
+  await ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress});
+  if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Offline Search failed');
   button('Ask').click();
   await pipelineWait(() => document.querySelector('section ol:last-of-type li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');
   const secondAnswer = await window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress });
   if (secondAnswer.kind !== 'answer' || !secondAnswer.text.toLowerCase().includes('thirty days') || !secondAnswer.citations.length) throw new Error('Repeated Ask lost its answer or citations');
   await report('answered again');
+  const offlineEnd = await ipc('models_status');
+  if (offlineEnd.target || offlineEnd.files.some(file => file.partial_bytes > 0)) throw new Error('Offline pipeline acquired a model');
+  await report('offline: complete');
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));

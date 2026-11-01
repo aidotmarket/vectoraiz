@@ -115,6 +115,11 @@ try:
                     child.kill()
                     child.wait(timeout=10)
         assert 'VECTORAIZ_PIPELINE_SMOKE_TEST_OK' in Path('installed-pipeline.log').read_text(encoding='utf-8'), 'No pipeline completion marker'
+        pipeline_output = Path('installed-pipeline.log').read_text(encoding='utf-8')
+        assert 'search-only: empty-cache Ask returned no_answer before indexing' in pipeline_output
+        offline_output = pipeline_output.split('offline: start', 1)[1].split('offline: complete', 1)[0]
+        assert 'VECTORAIZ_MODEL_TRANSFER:' not in offline_output, 'Offline pipeline emitted acquisition progress'
+        assert not list(models.glob('*.partial')), 'Offline pipeline left a partial file'
         loaded = {Path(item['path']).resolve(): item for item in json.loads(loaded_report.read_text())}
         model_hashes = {}
         for pin in json.loads(Path('spike/fixtures/models.json').read_text()).values():

@@ -798,17 +798,25 @@ fn release_tiers_and_fixture_compatibility() {
     let candidates: Value =
         serde_json::from_slice(&std::fs::read(root.join("spike/bakeoff/candidates.json")).unwrap())
             .unwrap();
-    for (bytes, name) in [
-        (15u64 << 30, "qwen3-4b-instruct-2507"),
-        (16u64 << 30, "ministral-3-8b"),
-        (63u64 << 30, "ministral-3-8b"),
-        (32u64 << 30, "ministral-3-8b"),
-        (64u64 << 30, "qwen3.6-35b-a3b"),
-        (17_000_000_000, "ministral-3-8b"),
-        (34_000_000_000, "ministral-3-8b"),
+    let manifest = Manifest::read(&release).unwrap();
+    for (bytes, name, count) in [
+        (15u64 << 30, "qwen3-4b-instruct-2507", 1),
+        (16u64 << 30, "ministral-3-8b", 2),
+        (63u64 << 30, "ministral-3-8b", 2),
+        (32u64 << 30, "ministral-3-8b", 2),
+        (64u64 << 30, "qwen3.6-35b-a3b", 3),
+        (17_000_000_000, "ministral-3-8b", 2),
+        (34_000_000_000, "ministral-3-8b", 2),
     ] {
         let selected = selected_pins(&release, bytes).unwrap();
         assert_eq!(selected["chat"]["name"], name);
+        let offer = manifest.offer(bytes);
+        assert_eq!(
+            offer.len(),
+            count,
+            "include every smaller tier, no larger tier"
+        );
+        assert_eq!(offer.last().unwrap()["pin"]["name"], name);
         for key in ["embedding", "chat"] {
             let pin = &selected[key];
             assert_eq!(
