@@ -248,7 +248,10 @@ fn cancel_keeps_partial_and_refused_overlap_cannot_touch_its_staging() {
         cancel,
         &mut progress,
     ));
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Download paused. vectorAIz kept the partial download and can resume it."
+    );
     assert_eq!(
         fs::read(dir.0.join("test.gguf.partial")).unwrap(),
         [b'x'; 40]
@@ -1075,7 +1078,10 @@ fn cancelling_transfer_during_hash_keeps_partial_and_pipeline_token() {
             }
         },
     ));
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Download paused. vectorAIz kept the partial download and can resume it."
+    );
     assert!(!*pipeline.borrow());
     assert!(installed.0.join(format!("{}.partial", pin.file)).exists());
     assert!(!installed.0.join(&pin.file).exists());
