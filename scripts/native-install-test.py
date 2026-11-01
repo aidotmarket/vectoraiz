@@ -201,8 +201,9 @@ try:
                     selection = json.loads((seed_models / 'settings.json').read_text())
                     assert selection['answer'] == {'local_pin_sha256':answers[0]['sha256'],'selection_initialised':True}
                 if scenario == 'selected-without-records':
-                    # Ensure the unused target has no record so checking is observable
-                    # while Search is held, without a network-dependent 10s deadline.
+                    # Finish the installed target's cold verification outside the held
+                    # Search's 10s deadline. The smoke hold makes its checking/transfer
+                    # phase observable before the short record check and activation.
                     target_pins = Path(fixture_dir) / 'target-selected.json'
                     target_pins.write_text(json.dumps({'embedding':tiers_manifest['embedding'],'chat':answers[1]}))
                     with Path('installed-migration-target-check.log').open('w',encoding='utf-8') as log:
@@ -217,6 +218,25 @@ try:
                             if child.poll() is None:
                                 child.kill(); child.wait(timeout=10)
                     assert not (seed_models / answers[0]['file']).exists(), 'Unused old model was not deleted'
+        with tempfile.TemporaryDirectory(prefix='vz-import-three-') as import_dir:
+            import_root = Path(import_dir)
+            source = import_root / 'source'
+            source.mkdir()
+            for pin in [tiers_manifest['embedding'], *answers]:
+                original = second_file if pin['sha256'] == second['sha256'] else models / pin['file']
+                shutil.copy2(original, source / pin['file'])
+            import_env = dict(env, VZ_SMOKE_DATA_ROOT=str(import_root / 'library'),
+                              WEBVIEW2_USER_DATA_FOLDER=str(import_root / 'webview2'),
+                              VZ_SMOKE_MODELS=str(Path('spike/fixtures/models.tiers.json').resolve()),
+                              VZ_PIPELINE_FIXTURE=str(Path('spike/fixtures/documents').resolve()),
+                              VZ_SMOKE_IMPORT_FOLDER=str(source), VZ_MIGRATION_SMOKE='import')
+            with Path('installed-import-three.log').open('w',encoding='utf-8') as log:
+                child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=import_env,stdout=log,stderr=subprocess.STDOUT)
+                try:
+                    assert child.wait(timeout=480) == 0, 'Installed three-pin import failed'
+                finally:
+                    if child.poll() is None:
+                        child.kill(); child.wait(timeout=10)
     step('Installed migrations kept selection, model stamps and the seeded index across restarts; switch/delete passed')
     step('Check persistent data sentinel before uninstall')
     sentinel = data / 'install-self-test.json'

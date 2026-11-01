@@ -29,6 +29,21 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   const query = 'What is the orbital archive retention policy?';
   const progress = '__CHANNEL__:' + window.__TAURI_INTERNALS__.transformCallback(() => {});
   if (window.__VZ_SMOKE__.migration) {
+    if (window.__VZ_SMOKE__.migration === 'import') {
+      const imported = await ipc('models_import',{folder:window.__VZ_SMOKE__.importFolder});
+      if (imported.length !== 3 || imported.some(file => file.result !== 'imported')) throw new Error('Three-pin import failed: '+JSON.stringify(imported));
+      const status = await ipc('models_status');
+      if (!status.ready || status.answer.state !== 'none' || status.target) throw new Error('Import did not leave a search-ready optional answer selection');
+      await ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress});
+      const skipped = await ipc('models_import',{folder:window.__VZ_SMOKE__.importFolder});
+      if (skipped.length !== 3 || skipped.some(file => file.result !== 'already installed')) throw new Error('Import rewrote verified models');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Import changed Search');
+      await ipc('answer_add',{tierIndex:0});
+      if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Imported answer could not be activated');
+      await report('import: all three distinct pins, verified skips, Search and Ask passed');
+      await ipc('self_test');
+      return;
+    }
     const status = await ipc('models_status');
     if (status.offer.length !== 2 || status.offer[0].pin.sha256 === status.offer[1].pin.sha256 || status.offer[0].pin.file === status.offer[1].pin.file) throw new Error('Distinct answer fixture pins not offered');
     if (status.target || status.needs_reindex || status.answer.pin?.sha256 !== status.offer[0].pin.sha256) throw new Error('Migration changed the selection or index');

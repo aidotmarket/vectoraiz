@@ -235,6 +235,7 @@ export default function App() {
     modelBusyRef.current = true;
     setModelBusy(true); setModelMessage(""); setDownloadStates({}); setModelError(""); setModelProgress(""); setImportResults([]); setRetry(source);
     let active = true;
+    let importFailed = false;
     try {
       if (source === "download") {
         const channel = new Channel<ModelProgress>();
@@ -250,10 +251,12 @@ export default function App() {
         };
         await invoke("models_download", { progress: channel });
       } else if (source === "import") {
-        setImportResults(await invoke<ImportResult[]>("models_import", { folder: importFolder }));
+        const results = await invoke<ImportResult[]>("models_import", { folder: importFolder });
+        importFailed = results.some(result => !["imported", "already installed", "missing"].includes(result.result));
+        setImportResults(results);
       }
       const status = await refreshModels();
-      if (source !== "status" && status.ready) {
+      if (source !== "status" && status.ready && !importFailed) {
         setImportResults([]); setShowImport(false); setModelMessage(source === "import" ? "Models imported and verified." : "Models downloaded and verified.");
       }
     } catch (cause) { setModelError(String(cause)); }
@@ -294,7 +297,7 @@ export default function App() {
       {!models && !modelError ? <p>Checking models…</p> : <>
       <h2 className="text-xl font-semibold">Models</h2>
       <ul>{(models?.search ? [models.search.pin] : models?.files.slice(0, 1))?.map(file => <li key={file.file} className="mb-3">
-        <p>{M1_COPY.searchModel(file.size)} · {file.name} · {file.license} · {downloadStates[file.file] ?? (file.verified ? "Verified" : "Needed")}</p>
+        <p>{M1_COPY.searchModel(file.size)} · {file.name} · {file.license} · {downloadStates[file.file] ?? ((file.verified || (file.sha256 === models?.search?.pin.sha256 && models?.search?.verified)) ? "Verified" : "Needed")}</p>
         <span className="text-teal-300">{file.source}</span>
       </li>)}</ul>
       <button className={buttonStyle} disabled={transferBusy || installing || !models} onClick={() => void acquireModels("download")}>{M1_COPY.downloadSearch(models?.files[0]?.size ?? 0)}</button>
@@ -344,7 +347,7 @@ export default function App() {
         <span>{file.name} · {size((file.installed_bytes ?? 0) + (file.partial_bytes ?? 0))}</span>
         <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setDeleteFile(file)}>{M1_COPY.delete}</button>
       </div>)}
-      {showImport && <>
+      {showImport && importResults.length === 0 && <>
         <label>Model folder <input className="bg-white text-slate-950 p-2 w-full" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
         <button className={buttonStyle} disabled={transferBusy || installing || !importFolder.trim()} onClick={() => void acquireModels("import")}>Import models</button>
       </>}
@@ -371,7 +374,7 @@ export default function App() {
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
       <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={ask}>Ask</button></div>
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
-      {askState === "checking" && <p>{M1_COPY.checking}</p>}
+      {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
       {askState === "answer" && <p>{M1_COPY.answered}</p>}
       <p aria-live="polite">{answer}</p>
       <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>

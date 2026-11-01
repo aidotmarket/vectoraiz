@@ -778,3 +778,26 @@ it("sends only the transfer cancel while adding answers and keeps Search enabled
   expect(modelsInvoke).toHaveBeenCalledWith("models_cancel",{kind:"transfer"});
   await act(async () => pending.resolve(undefined));
 });
+
+it("keeps import failures visible while the verified search model remains usable", async () => {
+  modelsInvoke.mockImplementation(async command => command === "models_status" ? readyModels : [{file:"answer.gguf",result:"sha256 mismatch"}]);
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Search"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Import from a folder"}));
+  await userEvent.type(screen.getByLabelText("Model folder"),"/offline/models");
+  await userEvent.click(screen.getByRole("button",{name:"Import models"}));
+  expect(await screen.findByText("answer.gguf: sha256 mismatch")).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled();
+  expect(screen.queryByText("Models imported and verified.")).not.toBeInTheDocument();
+});
+
+it("shows one checking message when Ask returns checking", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"checking",pin:answerPin}});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"checking"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(screen.getAllByText("Checking your answer model")).toHaveLength(1);
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+});

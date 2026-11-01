@@ -342,7 +342,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                 let fixture = std::env::var("VZ_PIPELINE_FIXTURE").unwrap_or_else(|_| {
                     std::env::current_dir().expect("cwd").join("spike/fixtures/documents").to_string_lossy().into_owned()
                 });
-                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok()});
+                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok(), "importFolder": std::env::var("VZ_SMOKE_IMPORT_FOLDER").ok()});
                 webview.eval(format!("window.__VZ_SMOKE__ = {config};\n{}", include_str!("../../../scripts/pipeline-smoke.js"))).expect("pipeline smoke clicks");
             } else { webview.eval(
                 "const timer = setInterval(() => { const button = document.querySelector('button'); if (button) { clearInterval(timer); button.click(); } }, 50);"
