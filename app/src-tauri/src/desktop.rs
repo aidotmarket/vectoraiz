@@ -928,7 +928,8 @@ async fn acquire_pin<R: tauri::Runtime>(
             while !RELEASE_TRANSFER.load(std::sync::atomic::Ordering::SeqCst) {
                 if *cancel.borrow() {
                     return Err(
-                        "Model acquisition cancelled. Partial download kept for resume".into(),
+                        "Download paused. vectorAIz kept the partial download and can resume it."
+                            .into(),
                     );
                 }
                 if std::time::Instant::now() >= deadline {
@@ -938,7 +939,10 @@ async fn acquire_pin<R: tauri::Runtime>(
             }
             // Release and Cancel can arrive in the same scheduler turn.
             if *cancel.borrow() {
-                return Err("Model acquisition cancelled. Partial download kept for resume".into());
+                return Err(
+                    "Download paused. vectorAIz kept the partial download and can resume it."
+                        .into(),
+                );
             }
         }
         transfer_target(app, operations, pin, "checking", None);
