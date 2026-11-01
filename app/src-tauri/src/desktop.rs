@@ -936,6 +936,10 @@ async fn acquire_pin<R: tauri::Runtime>(
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(2)).await;
             }
+            // Release and Cancel can arrive in the same scheduler turn.
+            if *cancel.borrow() {
+                return Err("Model acquisition cancelled. Partial download kept for resume".into());
+            }
         }
         transfer_target(app, operations, pin, "checking", None);
         let check_dir = dir.clone();
