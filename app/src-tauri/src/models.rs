@@ -129,9 +129,40 @@ impl<E: CachedEngine> OperationState<E> {
     pub fn cancel_transfer(&self) {
         self.transfer_cancel.lock().unwrap().send_replace(true);
     }
-    pub fn set_target(&self, pin: &Pin, state: &str, progress: Option<Value>) {
-        *self.target.write().unwrap() =
-            Some(json!({"pin":pin.metadata,"state":state,"progress":progress}));
+    // Return whether the state changed, while retaining every progress update.
+    pub fn set_target(&self, pin: &Pin, state: &str, progress: Option<Value>) -> bool {
+        let mut target = self.target.write().unwrap();
+        let changed = target
+            .as_ref()
+            .is_none_or(|current| current["pin"] != pin.metadata || current["state"] != state);
+        *target = Some(json!({"pin":pin.metadata,"state":state,"progress":progress}));
+        changed
+    }
+    // The file is already installed. Every activation exit releases the busy
+    // target and notifies the UI, including cancellation and persistence errors.
+    pub async fn activate_answer(
+        &self,
+        mut cancel: watch::Receiver<bool>,
+        activate: impl FnOnce(&mut EngineCache<E>) -> Result<(), String>,
+        changed: impl FnOnce(),
+    ) -> Result<(), String> {
+        let result = async {
+            if *cancel.borrow() {
+                return Err("Switch cancelled".into());
+            }
+            let mut cache = tokio::select! {
+                cache = self.wait_inference() => cache,
+                _ = cancel.changed() => return Err("Switch cancelled".into()),
+            };
+            if *cancel.borrow() {
+                return Err("Switch cancelled".into());
+            }
+            activate(&mut cache)
+        }
+        .await;
+        *self.target.write().unwrap() = None;
+        changed();
+        result
     }
     pub fn cancel(&self) {
         self.checks.lock().unwrap().clear();

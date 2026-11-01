@@ -1115,3 +1115,85 @@ fn search_and_current_answer_survive_target_download_pause_check_cancel_and_fail
     assert_eq!(counts.chat.get(), 1);
     assert_eq!(counts.drops.get(), 0);
 }
+
+#[test]
+fn cancel_pending_activation_clears_target_and_notifies_without_waiting_for_search() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    let mut search = ops.acquire().unwrap();
+    search.get_or_load(true, || fake_load(&counts)).unwrap();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let pin = pin("https://unused.invalid");
+    ops.set_target(&pin, "verified", None);
+    let notified = std::cell::Cell::new(false);
+    runtime().block_on(async {
+        let activation = ops.activate_answer(
+            cancel,
+            |_| panic!("cancelled switch activated"),
+            || notified.set(true),
+        );
+        tokio::pin!(activation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut activation)
+                .await
+                .is_err()
+        );
+        ops.cancel_transfer();
+        let error = tokio::time::timeout(Duration::from_secs(1), activation)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, "Switch cancelled");
+    });
+    assert!(ops.target.read().unwrap().is_none());
+    assert!(notified.get());
+    assert_eq!(counts.drops.get(), 0);
+    drop(search);
+}
+
+#[test]
+fn failed_activation_settings_write_clears_target_and_preserves_current_engine() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    ops.acquire()
+        .unwrap()
+        .get_or_load(true, || fake_load(&counts))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = crate::settings::Settings::read(dir.path()).unwrap();
+    settings.select(Some("new"));
+    // A directory at the destination makes the actual atomic rename fail on both platforms.
+    fs::create_dir(dir.path().join("settings.json")).unwrap();
+    let expected = settings.save(dir.path()).unwrap_err().to_string();
+    ops.set_target(&pin("https://unused.invalid"), "verified", None);
+    let notified = std::cell::Cell::new(false);
+    let error = runtime()
+        .block_on(ops.activate_answer(
+            ops.start_transfer(),
+            |_| settings.save(dir.path()).map_err(|e| e.to_string()),
+            || notified.set(true),
+        ))
+        .unwrap_err();
+    assert_eq!(error, expected);
+    assert!(ops.target.read().unwrap().is_none());
+    assert!(notified.get());
+    assert_eq!(counts.drops.get(), 0);
+}
+
+#[test]
+fn cancel_before_activation_keeps_verified_file_and_reports_switch_cancelled() {
+    let ops = OperationState::<FakeEngines>::default();
+    let dir = tempfile::tempdir().unwrap();
+    let pin = pin("https://unused.invalid");
+    fs::write(dir.path().join(&pin.file), [b'x'; 100]).unwrap();
+    ops.set_target(&pin, "verified", None);
+    let cancel = ops.start_transfer();
+    ops.cancel_transfer();
+    let error = runtime()
+        .block_on(ops.activate_answer(cancel, |_| panic!("cancelled switch activated"), || {}))
+        .unwrap_err();
+    assert_eq!(error, "Switch cancelled");
+    assert!(verified(dir.path(), &pin));
+    assert!(ops.target.read().unwrap().is_none());
+}

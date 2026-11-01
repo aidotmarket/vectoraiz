@@ -7,6 +7,9 @@ static HOLD_NEXT_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::Atom
 static RELEASE_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 #[cfg(feature = "smoke-test")]
+static FAIL_NEXT_TRANSFER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
 static HOLD_NEXT_TRANSFER: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "smoke-test")]
@@ -126,6 +129,9 @@ fn self_test<R: tauri::Runtime>(
                 HOLD_NEXT_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
             } else if checkpoint == "release-index" {
                 RELEASE_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if checkpoint == "fail-next-transfer" {
+                FAIL_NEXT_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             if checkpoint == "hold-next-transfer" {
                 HOLD_NEXT_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -868,6 +874,19 @@ async fn models_status<R: tauri::Runtime>(
     )
 }
 
+fn transfer_target<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    operations: &models::Operations,
+    pin: &models::Pin,
+    state: &str,
+    progress: Option<serde_json::Value>,
+) {
+    use tauri::Emitter;
+    if operations.set_target(pin, state, progress) {
+        let _ = app.emit("models_changed", ());
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn acquire_pin<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
@@ -878,95 +897,111 @@ async fn acquire_pin<R: tauri::Runtime>(
     progress: &mut (impl FnMut(serde_json::Value) + Send),
     protects_in_use: bool,
 ) -> Result<(), String> {
-    use tauri::Emitter;
-    let dir = model_dir(app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
-    if !settings.initialised() {
-        settings.select(None);
-        settings.save(&dir).map_err(|e| e.to_string())?;
-    }
+    // Exercise the real downloader's connection-failure path in installed smoke.
     #[cfg(feature = "smoke-test")]
-    if smoke_test_requested() && HOLD_NEXT_TRANSFER.swap(false, std::sync::atomic::Ordering::SeqCst)
+    let failed_pin = if smoke_test_requested()
+        && FAIL_NEXT_TRANSFER.swap(false, std::sync::atomic::Ordering::SeqCst)
     {
-        operations.set_target(pin, "downloading", None);
-        RELEASE_TRANSFER.store(false, std::sync::atomic::Ordering::SeqCst);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !RELEASE_TRANSFER.load(std::sync::atomic::Ordering::SeqCst) {
-            if *cancel.borrow() {
-                return Err("Model acquisition cancelled; partial download kept for resume".into());
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err("Smoke transfer release timed out".into());
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let mut failed = pin.clone();
+        failed.metadata["url"] = serde_json::json!("https://127.0.0.1:1/unreachable.gguf");
+        Some(failed)
+    } else {
+        None
+    };
+    #[cfg(feature = "smoke-test")]
+    let pin = failed_pin.as_ref().unwrap_or(pin);
+    let result = async {
+        let dir = model_dir(app)?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+        if !settings.initialised() {
+            settings.select(None);
+            settings.save(&dir).map_err(|e| e.to_string())?;
         }
-    }
-    operations.set_target(pin, "checking", None);
-    let check_dir = dir.clone();
-    let check_pin = pin.clone();
-    let verified =
-        tauri::async_runtime::spawn_blocking(move || models::verified(&check_dir, &check_pin))
-            .await
-            .map_err(|e| e.to_string())?;
-    if !verified {
-        let needed = if source.is_some() {
-            pin.size.saturating_add(pin.size.div_ceil(10))
-        } else {
-            models::space_needed(&dir, std::slice::from_ref(pin), false)
-                .map_err(|e| e.to_string())?
-        };
-        if let Err(error) = models::check_space(&dir, needed) {
-            operations.set_target(pin, "failed", None);
-            return Err(error.to_string());
-        }
-        operations.set_target(pin, "downloading", None);
-        let client = models::client().map_err(|e| e.to_string())?;
-        let source = match source {
-            Some(file) => models::Source::Import(file),
-            None => models::Source::Download(&client),
-        };
-        let result = models::stage_verify_promote_guarded(
-            &dir,
-            pin,
-            source,
-            cancel.clone(),
-            &mut |value| {
-                let state = value["stage"].as_str().unwrap_or("downloading");
-                operations.set_target(pin, state, Some(value.clone()));
-                #[cfg(feature = "smoke-test")]
-                if smoke_test_requested()
-                    && (value["stage"].is_string() || value["downloaded"] == 0)
-                {
-                    println!("VECTORAIZ_MODEL_TRANSFER: {value}");
+        #[cfg(feature = "smoke-test")]
+        if smoke_test_requested()
+            && HOLD_NEXT_TRANSFER.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            transfer_target(app, operations, pin, "downloading", None);
+            RELEASE_TRANSFER.store(false, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !RELEASE_TRANSFER.load(std::sync::atomic::Ordering::SeqCst) {
+                if *cancel.borrow() {
+                    return Err(
+                        "Model acquisition cancelled. Partial download kept for resume".into(),
+                    );
                 }
-                progress(value);
-                let _ = app.emit("models_changed", ());
-            },
-            if protects_in_use {
-                Some(operations.promotion_lock())
-            } else {
-                None
-            },
-        )
-        .await;
-        if let Err(error) = result {
-            operations.set_target(
-                pin,
-                if *cancel.borrow() { "paused" } else { "failed" },
-                None,
-            );
-            let _ = app.emit("models_changed", ());
-            return Err(format!("{error:#}"));
+                if std::time::Instant::now() >= deadline {
+                    return Err("Smoke transfer release timed out".into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
         }
+        transfer_target(app, operations, pin, "checking", None);
+        let check_dir = dir.clone();
+        let check_pin = pin.clone();
+        let verified =
+            tauri::async_runtime::spawn_blocking(move || models::verified(&check_dir, &check_pin))
+                .await
+                .map_err(|e| e.to_string())?;
+        if !verified {
+            let needed = if source.is_some() {
+                pin.size.saturating_add(pin.size.div_ceil(10))
+            } else {
+                models::space_needed(&dir, std::slice::from_ref(pin), false)
+                    .map_err(|e| e.to_string())?
+            };
+            if let Err(error) = models::check_space(&dir, needed) {
+                transfer_target(app, operations, pin, "failed", None);
+                return Err(error.to_string());
+            }
+            transfer_target(app, operations, pin, "downloading", None);
+            let client = models::client().map_err(|e| e.to_string())?;
+            let source = match source {
+                Some(file) => models::Source::Import(file),
+                None => models::Source::Download(&client),
+            };
+            let result = models::stage_verify_promote_guarded(
+                &dir,
+                pin,
+                source,
+                cancel.clone(),
+                &mut |value| {
+                    let state = value["stage"].as_str().unwrap_or("downloading");
+                    transfer_target(app, operations, pin, state, Some(value.clone()));
+                    #[cfg(feature = "smoke-test")]
+                    if smoke_test_requested()
+                        && (value["stage"].is_string() || value["downloaded"] == 0)
+                    {
+                        println!("VECTORAIZ_MODEL_TRANSFER: {value}");
+                    }
+                    progress(value);
+                },
+                if protects_in_use {
+                    Some(operations.promotion_lock())
+                } else {
+                    None
+                },
+            )
+            .await;
+            if let Err(error) = result {
+                return Err(format!("{error:#}"));
+            }
+        }
+        transfer_target(app, operations, pin, "verified", None);
+        Ok(())
     }
-    if *cancel.borrow() {
-        operations.set_target(pin, "paused", None);
-        return Err("Model acquisition cancelled; partial download kept for resume".into());
+    .await;
+    if result.is_err() {
+        transfer_target(
+            app,
+            operations,
+            pin,
+            if *cancel.borrow() { "paused" } else { "failed" },
+            None,
+        );
     }
-    operations.set_target(pin, "verified", None);
-    let _ = app.emit("models_changed", ());
-    Ok(())
+    result
 }
 
 #[tauri::command]
@@ -1006,18 +1041,19 @@ async fn answer_acquire<R: tauri::Runtime>(
     let _transfer = operations.acquire_transfer()?;
     let cancel = operations.start_transfer();
     let (manifest, settings) = manifest_selection(&app)?;
-    let tier = manifest
+    if !manifest
         .offer(models::total_ram_bytes().map_err(|e| e.to_string())?)
-        .into_iter()
-        .find(|tier| tier["tier_index"] == tier_index)
-        .ok_or("Answer tier unavailable for this computer")?;
+        .iter()
+        .any(|tier| tier["tier_index"] == tier_index)
+    {
+        return Err("Answer tier unavailable for this computer".into());
+    }
     let pin = manifest
         .answers()
         .map_err(|e| e.to_string())?
         .get(tier_index)
         .cloned()
         .ok_or("Unknown answer tier")?;
-    let _ = tier;
     if !switch && settings.selected() == Some(pin.sha256.as_str()) {
         return Ok(());
     }
@@ -1031,30 +1067,26 @@ async fn answer_acquire<R: tauri::Runtime>(
         settings.selected() == Some(pin.sha256.as_str()),
     )
     .await?;
-    if switch
-        || settings::Settings::read(&model_dir(&app)?)
-            .map_err(|e| e.to_string())?
-            .selected()
-            .is_none()
-    {
-        let cache = operations.wait_inference().await;
-        if *cancel.borrow() {
-            operations.set_target(&pin, "paused", None);
-            return Err("Model acquisition cancelled; partial download kept for resume".into());
-        }
-        let dir = model_dir(&app)?;
-        let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
-        if switch || settings.selected().is_none() {
-            settings.select(Some(&pin.sha256));
-            settings.save(&dir).map_err(|e| e.to_string())?;
-            cache
-                .set_chat(Some(pin.metadata))
-                .map_err(|e| e.to_string())?;
-        }
-    }
-    *operations.target.write().unwrap() = None;
-    let _ = app.emit("models_changed", ());
-    Ok(())
+    operations
+        .activate_answer(
+            cancel,
+            |cache| {
+                let dir = model_dir(&app)?;
+                let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+                if switch || settings.selected().is_none() {
+                    settings.select(Some(&pin.sha256));
+                    settings.save(&dir).map_err(|e| e.to_string())?;
+                    cache
+                        .set_chat(Some(pin.metadata))
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            },
+            || {
+                let _ = app.emit("models_changed", ());
+            },
+        )
+        .await
 }
 #[tauri::command]
 async fn answer_add<R: tauri::Runtime>(

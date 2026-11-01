@@ -14,7 +14,11 @@ impl Settings {
     pub fn read(dir: &Path) -> Result<Self> {
         match fs::read(dir.join("settings.json")) {
             Ok(bytes) => {
-                let value: Value = serde_json::from_slice(&bytes)?;
+                let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "Settings file could not be read. Use Start over or delete settings.json."
+                    )
+                })?;
                 ensure!(
                     value["version"] == 1 && value["answer"].is_object(),
                     "Unsupported settings file"
@@ -124,6 +128,15 @@ mod tests {
             sha256: file.into(),
             metadata: json!({}),
         }
+    }
+    #[test]
+    fn corrupt_settings_has_plain_recovery_message() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("settings.json"), b"{broken").unwrap();
+        assert_eq!(
+            Settings::read(dir.path()).unwrap_err().to_string(),
+            "Settings file could not be read. Use Start over or delete settings.json."
+        );
     }
     #[test]
     fn migration_table_and_turned_off_selection() {
