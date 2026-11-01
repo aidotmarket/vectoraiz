@@ -1,4 +1,6 @@
-use crate::{desktop_pipeline, models, settings};
+use crate::{cloud, desktop_pipeline, models, settings};
+use cloud::{cloud_failure, lifecycle_failure};
+use vz_core::cloud_gate::{self, Provider, SendError};
 
 // The overlap smoke test must not depend on Search being slower than its UI poll.
 #[cfg(feature = "smoke-test")]
@@ -165,6 +167,7 @@ fn self_test<R: tauri::Runtime>(
             let resources = _app.path().resource_dir().expect("installed resources");
             assert!(resources.join("THIRD_PARTY_NOTICES").is_file());
             assert!(resources.join("models.json").is_file());
+            assert!(resources.join("providers.json").is_file());
             assert!(resources.join("assets/pdfium").is_dir());
             assert!(!resources.join("assets/bge-small-f16.gguf").exists());
             assert!(!resources
@@ -329,6 +332,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
             }
         }))
         .manage(models::Operations::default())
+        .manage(cloud::Cloud::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(feature = "smoke-test")]
@@ -360,6 +364,13 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         pipeline_index,
         pipeline_search,
         pipeline_ask,
+        cloud_status,
+        api_key_disclosure,
+        api_key_confirm,
+        api_key_set,
+        api_key_stop,
+        api_key_cleanup_retry,
+        answer_path_set,
         update_check,
         update_install,
         models_status,
@@ -379,6 +390,7 @@ fn smoke_test_requested() -> bool {
 }
 
 pub(crate) fn run() {
+    let _ = vz_core::credentials::init();
     let context = tauri::generate_context!();
     #[cfg(all(feature = "ui-test", debug_assertions))]
     let context = {
@@ -441,6 +453,9 @@ pub(crate) fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            if let Ok(dir) = model_dir(app) {
+                let _ = cloud::revoke(&dir, false);
+            }
             use tauri::Manager;
             app.state::<models::Operations>().cancel();
             app.state::<models::Operations>().cancel_transfer();
@@ -630,6 +645,19 @@ async fn pipeline_ask<R: tauri::Runtime>(
     tokens: tauri::ipc::Channel<String>,
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_ask_total");
+    let settings = manifest_selection(&app)?.1;
+    if question.chars().count() > 2000 {
+        return Ok(cloud_failure(
+            SendError::QuestionTooLong,
+            Provider::Anthropic,
+        ));
+    }
+    if settings.default_path() == Some("api_key") {
+        return pipeline_ask_cloud(&app, &operations, &question, tokens).await;
+    }
+    if settings.default_path().is_none() {
+        return Ok(serde_json::json!({"kind":"no_answer","answered_by":null}));
+    }
     let guard = operations.acquire()?;
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
@@ -644,12 +672,12 @@ async fn pipeline_ask<R: tauri::Runtime>(
         .iter()
         .find(|pin| Some(pin.sha256.as_str()) == settings.selected())
     else {
-        return Ok(serde_json::json!({"kind":"no_answer"}));
+        return Ok(serde_json::json!({"kind":"no_answer","answered_by":null}));
     };
     match answer_state(&app, &operations, pin).as_str() {
-        "checking" => return Ok(serde_json::json!({"kind":"checking"})),
+        "checking" => return Ok(serde_json::json!({"kind":"checking","answered_by":null})),
         "ready" => {}
-        state => return Ok(serde_json::json!({"kind":"failed","state":state})),
+        state => return Ok(serde_json::json!({"kind":"failed","state":state,"answered_by":null})),
     }
 
     desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(&app)?))?;
@@ -674,6 +702,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
             let names = desktop_pipeline::file_names(&state);
             let mut value = serde_json::to_value(answer)?;
             value["kind"] = serde_json::json!("answer");
+            value["answered_by"] = serde_json::json!("local");
             if let Some(citations) = value["citations"].as_array_mut() {
                 for citation in citations {
                     citation["file_name"] = citation["doc_id"]
@@ -913,10 +942,12 @@ async fn acquire_pin<R: tauri::Runtime>(
     let result = async {
         let dir = model_dir(app)?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+        let settings = settings::read(&dir)?;
         if !settings.initialised() {
-            settings.select(None);
-            settings.save(&dir).map_err(|e| e.to_string())?;
+            settings::update(&dir, |state| {
+                state.settings.select(None);
+                Ok::<(), String>(())
+            })?;
         }
         #[cfg(feature = "smoke-test")]
         if smoke_test_requested()
@@ -1081,10 +1112,12 @@ async fn answer_acquire<R: tauri::Runtime>(
             switch,
             |cache| {
                 let dir = model_dir(&app)?;
-                let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+                let settings = settings::read(&dir)?;
                 if switch || settings.selected().is_none() {
-                    settings.select(Some(&pin.sha256));
-                    settings.save(&dir).map_err(|e| e.to_string())?;
+                    settings::update(&dir, |state| {
+                        state.settings.select(Some(&pin.sha256));
+                        Ok::<(), String>(())
+                    })?;
                     cache
                         .set_chat(Some(pin.metadata))
                         .map_err(|e| e.to_string())?;
@@ -1121,21 +1154,24 @@ async fn answer_turn_off<R: tauri::Runtime>(
     use tauri::Emitter;
     let cache = operations.wait_inference().await;
     let dir = model_dir(&app)?;
-    let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
-    settings.select(None);
-    settings.save(&dir).map_err(|e| e.to_string())?;
+    settings::update(&dir, |state| {
+        state.settings.select(None);
+        Ok::<(), String>(())
+    })?;
     cache.set_chat(None).map_err(|e| e.to_string())?;
     let _ = app.emit("models_changed", ());
     Ok(())
 }
 #[tauri::command]
-fn models_cancel(
+fn models_cancel<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     operations: tauri::State<'_, models::Operations>,
     kind: String,
 ) -> Result<(), String> {
     match kind.as_str() {
         "transfer" => operations.cancel_transfer(),
         "pipeline" => operations.cancel(),
+        "cloud" | "cloud_setup" => return cloud::cancel(&model_dir(&app)?, &kind),
         _ => return Err("Unknown operation kind".into()),
     }
     Ok(())
@@ -1297,4 +1333,118 @@ fn record_loaded_models(
         std::fs::write(report, serde_json::to_vec(&files)?)?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn cloud_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<serde_json::Value, String> {
+    cloud::status(&model_dir(&app)?)
+}
+#[tauri::command]
+fn api_key_disclosure(provider: Provider) -> serde_json::Value {
+    cloud_gate::disclosure(provider)
+}
+#[tauri::command]
+async fn api_key_confirm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    cloud: tauri::State<'_, cloud::Cloud>,
+    provider: Provider,
+    disclosure_version: String,
+) -> Result<serde_json::Value, String> {
+    let dir = model_dir(&app)?;
+    cloud.confirm(&dir, provider, disclosure_version).await
+}
+#[tauri::command]
+async fn api_key_set<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    cloud: tauri::State<'_, cloud::Cloud>,
+    provider: Provider,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    Ok(cloud
+        .set(
+            &model_dir(&app)?,
+            provider,
+            vz_core::credentials::Secret::new(key),
+        )
+        .await
+        .unwrap_or_else(|e| lifecycle_failure(e, provider)))
+}
+#[tauri::command]
+async fn api_key_stop<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    cloud: tauri::State<'_, cloud::Cloud>,
+) -> Result<serde_json::Value, String> {
+    cloud.stop(&model_dir(&app)?).await
+}
+#[tauri::command]
+async fn api_key_cleanup_retry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    cloud: tauri::State<'_, cloud::Cloud>,
+) -> Result<serde_json::Value, String> {
+    cloud.retry(&model_dir(&app)?).await
+}
+#[tauri::command]
+fn answer_path_set<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: String,
+) -> Result<serde_json::Value, String> {
+    cloud::path_set(&model_dir(&app)?, &path)
+}
+async fn pipeline_ask_cloud<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    operations: &models::Operations,
+    question: &str,
+    tokens: tauri::ipc::Channel<String>,
+) -> Result<serde_json::Value, String> {
+    use tauri::Manager;
+    let dir = model_dir(app)?;
+    let cloud = app.state::<cloud::Cloud>();
+    cloud
+        .ask(
+            &dir,
+            question,
+            async {
+                let guard = operations.acquire()?;
+                desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(app)?))?;
+                let (root, assets, pins) = pipeline_paths(app)?;
+                let question_owned = question.to_owned();
+                let (context, citations, names) =
+                    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+                        let mut cache = guard;
+                        let engines = cache
+                            .get_or_load(false, || {
+                                vz_core::engine::Engines::load_embedding(
+                                    &assets,
+                                    &pins,
+                                    pipeline_cpu_requested(),
+                                )
+                            })
+                            .map_err(|e| e.to_string())?;
+                        let (state, _) =
+                            vz_core::storage::State::open_index(&root, &engines.recipe)
+                                .map_err(|e| e.to_string())?;
+                        let hits = tokio::runtime::Runtime::new()
+                            .map_err(|e| e.to_string())?
+                            .block_on(
+                                state.search(
+                                    &question_owned,
+                                    &engines
+                                        .vector(&question_owned, true)
+                                        .map_err(|e| e.to_string())?,
+                                    3,
+                                ),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        let (context, citations) = vz_core::index::cloud_passages(&hits);
+                        Ok((context, citations, desktop_pipeline::file_names(&state)))
+                    })
+                    .await
+                    .map_err(|e| e.to_string())??;
+                Ok((context, citations, names))
+            },
+            |token| {
+                let _ = tokens.send(token.to_owned());
+            },
+        )
+        .await
 }

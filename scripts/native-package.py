@@ -72,6 +72,7 @@ def main():
         shutil.copy2(ROOT / '.assets/pdfium' / ('bin' if windows else 'lib') / library, runtime / library)
         assert not list(bundle.rglob('*.gguf')), 'Models must be imported or downloaded separately'
         shutil.copy2(ROOT / 'spike/fixtures/models.release.json', bundle / 'models.json')
+        shutil.copy2(ROOT / 'spike/fixtures/providers.json', bundle / 'providers.json')
         shutil.copy2(ROOT / 'THIRD_PARTY_NOTICES', bundle / 'THIRD_PARTY_NOTICES')
         (generated / 'bin').mkdir(exist_ok=True)
         for name in ['vz-parser-worker', 'vectoraiz-mcp', 'vectoraiz-cli']:

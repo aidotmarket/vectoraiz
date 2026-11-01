@@ -442,6 +442,8 @@ class PackageGate(unittest.TestCase):
             self.assertEqual(sleep.call_count, 3)
 
     def test_prepare_drops_cached_models_and_stale_resources(self):
+        config = json.loads((Path(__file__).resolve().parents[1] / 'app/src-tauri/tauri.stage1.conf.json').read_text())
+        self.assertEqual(config['bundle']['resources']['gen/bundle/providers.json'], 'providers.json')
         module_spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
         package = importlib.util.module_from_spec(module_spec)
         module_spec.loader.exec_module(package)
@@ -449,7 +451,7 @@ class PackageGate(unittest.TestCase):
             root = Path(temporary)
             for name in ['.assets/pdfium/bin/pdfium.dll', '.assets/huge.gguf',
                          'app/src-tauri/gen/bundle/assets/stale.gguf',
-                         'spike/fixtures/models.json', 'spike/fixtures/models.release.json', 'THIRD_PARTY_NOTICES',
+                         'spike/fixtures/models.json', 'spike/fixtures/models.release.json', 'spike/fixtures/providers.json', 'THIRD_PARTY_NOTICES',
                          'target/debug/vz-parser-worker.exe', 'target/debug/vectoraiz-mcp.exe',
                          'target/debug/vectoraiz-cli.exe']:
                 file = root / name
@@ -465,6 +467,8 @@ class PackageGate(unittest.TestCase):
             bundle = root / 'app/src-tauri/gen/bundle'
             self.assertEqual((bundle / 'models.json').read_bytes(),
                              (root / 'spike/fixtures/models.release.json').read_bytes())
+            self.assertEqual((bundle / 'providers.json').read_bytes(),
+                             (root / 'spike/fixtures/providers.json').read_bytes())
             self.assertEqual(list(bundle.rglob('*.gguf')), [])
             self.assertTrue((bundle / 'assets/pdfium/bin/pdfium.dll').is_file())
 
