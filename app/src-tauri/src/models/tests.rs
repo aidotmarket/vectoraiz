@@ -330,7 +330,10 @@ fn import_space_counts_only_present_regular_pins_and_reports_missing_chat() {
     chat.file = "chat.gguf".into();
     fs::write(source.0.join(&embedding.file), [b'x'; 100]).unwrap();
     let pins = [embedding, chat];
-    assert_eq!(space_needed(&source.0, &pins, true).unwrap(), pins[0].size);
+    assert_eq!(
+        space_needed(&source.0, &pins, true).unwrap(),
+        pins[0].size + pins[0].size.div_ceil(10)
+    );
     let ops = Operations::default();
     let results = runtime()
         .block_on(import(&installed.0, &pins, &source.0, ops.start()))
@@ -504,7 +507,7 @@ fn status_checks_size_and_hash_and_space_counts_only_remaining_bytes() {
     pin.metadata["sha256"] = json!(pin.sha256);
     assert_eq!(status(&dir.0, &[pin.clone()])["ready"], false);
     fs::write(dir.0.join("test.gguf.partial"), [b'x'; 40]).unwrap();
-    assert_eq!(space_needed(&dir.0, &[pin.clone()], false).unwrap(), 60);
+    assert_eq!(space_needed(&dir.0, &[pin.clone()], false).unwrap(), 66);
     assert_eq!(space_needed(&dir.0, &[pin.clone()], true).unwrap(), 0);
     assert!(check_space(&dir.0, u64::MAX)
         .unwrap_err()
@@ -796,13 +799,13 @@ fn release_tiers_and_fixture_compatibility() {
         serde_json::from_slice(&std::fs::read(root.join("spike/bakeoff/candidates.json")).unwrap())
             .unwrap();
     for (bytes, name) in [
-        (8u64 << 30, "qwen3-4b-instruct-2507"),
+        (15u64 << 30, "qwen3-4b-instruct-2507"),
         (16u64 << 30, "ministral-3-8b"),
-        (24u64 << 30, "ministral-3-8b"),
-        (32u64 << 30, "qwen3.6-35b-a3b"),
+        (63u64 << 30, "ministral-3-8b"),
+        (32u64 << 30, "ministral-3-8b"),
         (64u64 << 30, "qwen3.6-35b-a3b"),
         (17_000_000_000, "ministral-3-8b"),
-        (34_000_000_000, "qwen3.6-35b-a3b"),
+        (34_000_000_000, "ministral-3-8b"),
     ] {
         let selected = selected_pins(&release, bytes).unwrap();
         assert_eq!(selected["chat"]["name"], name);
@@ -977,4 +980,95 @@ fn acquisition_succeeds_when_post_promotion_record_fails() {
     assert_eq!(fs::read(installed.0.join(&pin.file)).unwrap(), [b'x'; 100]);
     assert!(!installed.0.join("models.verified.json").exists());
     assert!(verified(&installed.0, &pin));
+}
+
+#[test]
+fn index_and_transfer_have_separate_cancels_and_activation_waits() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    let mut index = ops.acquire().unwrap();
+    index.get_or_load(false, || fake_load(&counts)).unwrap();
+    let pipeline = ops.start();
+    let transfer = ops
+        .acquire_transfer()
+        .expect("transfer must overlap indexing");
+    let transfer_cancel = ops.start_transfer();
+    ops.cancel_transfer();
+    assert!(*transfer_cancel.borrow());
+    assert!(!*pipeline.borrow());
+    assert_eq!(counts.drops.get(), 0);
+    drop(transfer);
+    let _next_transfer = ops.acquire_transfer().unwrap();
+    let next_transfer_cancel = ops.start_transfer();
+    assert!(
+        *transfer_cancel.borrow(),
+        "new operation must not uncancel the older transfer"
+    );
+    assert!(!*next_transfer_cancel.borrow());
+    ops.cancel();
+    assert!(*pipeline.borrow());
+    assert!(!*next_transfer_cancel.borrow());
+    let _next_pipeline = ops.start();
+    assert!(
+        *pipeline.borrow(),
+        "new pipeline must not uncancel the older index"
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), ops.wait_inference())
+                .await
+                .is_err()
+        );
+        drop(index);
+        let _activation =
+            tokio::time::timeout(std::time::Duration::from_secs(2), ops.wait_inference())
+                .await
+                .unwrap();
+    });
+}
+
+#[test]
+fn tier_fixture_has_distinct_pins_and_search_only_pins_are_valid() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = Manifest::read(&root.join("spike/fixtures/models.tiers.json")).unwrap();
+    let answers = manifest.answers().unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_ne!(answers[0].file, answers[1].file);
+    assert_ne!(answers[0].sha256, answers[1].sha256);
+    assert_eq!(manifest.offer(8 << 30).len(), 2);
+    assert_eq!(manifest.offer(0).len(), 1);
+    let search_only = manifest.selected(None).unwrap();
+    assert_eq!(pins_from_value(&search_only).unwrap().len(), 1);
+    assert!(search_only.get("chat").is_none());
+}
+
+#[test]
+fn cancelling_transfer_during_hash_keeps_partial_and_pipeline_token() {
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(
+        installed.0.join(format!("{}.partial", pin.file)),
+        [b'x'; 100],
+    )
+    .unwrap();
+    let ops = Operations::default();
+    let pipeline = ops.start();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let result = runtime().block_on(stage_verify_promote(
+        &installed.0,
+        &pin,
+        Source::Download(&client().unwrap()),
+        cancel,
+        &mut |value| {
+            if value["stage"] == "checking" {
+                ops.cancel_transfer();
+            }
+        },
+    ));
+    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert!(!*pipeline.borrow());
+    assert!(installed.0.join(format!("{}.partial", pin.file)).exists());
+    assert!(!installed.0.join(&pin.file).exists());
 }

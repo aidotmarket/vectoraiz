@@ -28,11 +28,17 @@ class DefaultPinsFold(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('fetch_assets', Path(__file__).with_name('fetch-assets.py'))
         fetcher = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fetcher)
-        tiers = json.loads((version.ROOT / 'spike/fixtures/models.release.json').read_text())['chat_tiers']
+        tiers = json.loads((version.ROOT / 'spike/fixtures/models.release.json').read_text())['answer_tiers']
+        manifest = json.loads((version.ROOT / 'spike/fixtures/models.release.json').read_text())
+        self.assertEqual(set(manifest), {'embedding', 'answer_tiers'})
+        self.assertEqual(manifest['embedding']['name'], 'bge-m3')
+        for tier in tiers:
+            self.assertGreater(tier['memory']['bytes'], 0)
+            self.assertEqual(tier['memory']['measured'], bool(tier['memory']['source']))
         for size, expected in [(8 << 30, 'qwen3-4b-instruct-2507'),
                                (16 << 30, 'ministral-3-8b'), (24 << 30, 'ministral-3-8b'),
-                               (32 << 30, 'qwen3.6-35b-a3b'), (64 << 30, 'qwen3.6-35b-a3b'),
-                               (17_000_000_000, 'ministral-3-8b'), (34_000_000_000, 'qwen3.6-35b-a3b')]:
+                               (32 << 30, 'ministral-3-8b'), (64 << 30, 'qwen3.6-35b-a3b'),
+                               (17_000_000_000, 'ministral-3-8b'), (34_000_000_000, 'ministral-3-8b')]:
             with self.subTest(bytes=size):
                 self.assertEqual(fetcher.select_tier(tiers, size)['name'], expected)
 

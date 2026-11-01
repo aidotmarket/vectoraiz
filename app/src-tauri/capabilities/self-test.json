@@ -16,6 +16,12 @@
     "allow-models-status",
     "allow-models-download",
     "allow-models-cancel",
-    "allow-models-import"
+    "allow-models-import",
+    "allow-answer-add",
+    "allow-answer-switch",
+    "allow-answer-turn-off",
+    "allow-delete-unused-model",
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
   ]
 }

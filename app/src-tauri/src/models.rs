@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc,
+        Arc, RwLock,
     },
     time::Duration,
 };
@@ -45,10 +45,15 @@ impl<E: CachedEngine> EngineCache<E> {
     }
 }
 pub type Operations = OperationState<vz_core::engine::Engines>;
+pub type CheckResults = std::collections::BTreeMap<String, (vz_core::verification::Stamp, String)>;
 pub struct OperationState<E> {
     lock: Arc<Mutex<EngineCache<E>>>,
     generation: AtomicU64,
-    cancel: watch::Sender<bool>,
+    cancel: std::sync::Mutex<watch::Sender<bool>>,
+    transfer: Arc<Mutex<()>>,
+    transfer_cancel: std::sync::Mutex<watch::Sender<bool>>,
+    pub target: RwLock<Option<Value>>,
+    pub checks: Arc<std::sync::Mutex<CheckResults>>,
 }
 impl<E> Default for OperationState<E> {
     fn default() -> Self {
@@ -58,7 +63,11 @@ impl<E> Default for OperationState<E> {
                 generation: 0,
             })),
             generation: AtomicU64::new(0),
-            cancel: watch::channel(false).0,
+            cancel: std::sync::Mutex::new(watch::channel(false).0),
+            transfer: Arc::new(Mutex::new(())),
+            transfer_cancel: std::sync::Mutex::new(watch::channel(false).0),
+            target: RwLock::new(None),
+            checks: Arc::default(),
         }
     }
 }
@@ -76,22 +85,55 @@ impl<E: CachedEngine> OperationState<E> {
         }
         Ok(cache)
     }
+    #[cfg(test)]
     pub fn acquire_mutation(&self) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
         let mut cache = self.acquire()?;
         cache.invalidate();
         Ok(cache)
     }
+    #[cfg(test)]
     pub fn acquire_import(&self, folder: &Path) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
         validate_import_folder(folder).map_err(|e| e.to_string())?;
         self.acquire_mutation()
     }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     pub fn start(&self) -> watch::Receiver<bool> {
-        self.cancel.send_replace(false);
-        self.cancel.subscribe()
+        let (sender, receiver) = watch::channel(false);
+        *self.cancel.lock().unwrap() = sender;
+        receiver
+    }
+    pub fn promotion_lock(&self) -> Arc<Mutex<EngineCache<E>>> {
+        self.lock.clone()
+    }
+    pub fn acquire_transfer(&self) -> Result<OwnedMutexGuard<()>, String> {
+        self.transfer
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| BUSY.to_owned())
+    }
+    pub async fn wait_inference(&self) -> OwnedMutexGuard<EngineCache<E>> {
+        let mut cache = self.lock.clone().lock_owned().await;
+        let generation = self.generation.load(Ordering::Acquire);
+        if cache.generation != generation {
+            cache.invalidate();
+            cache.generation = generation;
+        }
+        cache
+    }
+    pub fn start_transfer(&self) -> watch::Receiver<bool> {
+        let (sender, receiver) = watch::channel(false);
+        *self.transfer_cancel.lock().unwrap() = sender;
+        receiver
+    }
+    pub fn cancel_transfer(&self) {
+        self.transfer_cancel.lock().unwrap().send_replace(true);
+    }
+    pub fn set_target(&self, pin: &Pin, state: &str, progress: Option<Value>) {
+        *self.target.write().unwrap() =
+            Some(json!({"pin":pin.metadata,"state":state,"progress":progress}));
     }
     pub fn cancel(&self) {
-        self.cancel.send_replace(true);
+        self.cancel.lock().unwrap().send_replace(true);
         self.generation.fetch_add(1, Ordering::AcqRel);
         // During acquisition the cache is already empty. During inference it
         // must remain alive until the operation ends; acquire invalidates next.
@@ -108,6 +150,7 @@ pub struct Pin {
     pub sha256: String,
     pub metadata: Value,
 }
+#[cfg(any(test, feature = "smoke-test"))]
 pub fn pins(path: &Path) -> Result<Vec<Pin>> {
     let value = selected_pins(path, total_ram_bytes()?)?;
     pins_from_value(&value)
@@ -115,6 +158,7 @@ pub fn pins(path: &Path) -> Result<Vec<Pin>> {
 pub fn pins_from_value(value: &Value) -> Result<Vec<Pin>> {
     ["embedding", "chat"]
         .iter()
+        .filter(|key| **key == "embedding" || value.get(**key).is_some_and(Value::is_object))
         .map(|key| {
             let p = &value[key];
             let file = p["file"].as_str().context("model file pin")?;
@@ -132,11 +176,93 @@ pub fn pins_from_value(value: &Value) -> Result<Vec<Pin>> {
         .collect()
 }
 
+#[derive(Clone, Debug)]
+pub struct Manifest {
+    pub embedding: Pin,
+    pub tiers: Vec<Value>,
+}
+impl Manifest {
+    pub fn read(path: &Path) -> Result<Self> {
+        let value: Value = serde_json::from_slice(&fs::read(path)?)?;
+        let embedding = pins_from_value(&json!({"embedding":value["embedding"]}))?.remove(0);
+        let tiers = match value.get("answer_tiers") {
+            Some(tiers) => tiers.as_array().context("answer_tiers list")?.clone(),
+            None if value["chat"].is_object() => vec![json!({"min_ram_gb":0,"pin":value["chat"]})],
+            None => vec![],
+        };
+        let mut previous = None;
+        for tier in &tiers {
+            ensure!(tier["pin"].is_object(), "answer tier pin");
+            let minimum = tier["min_ram_gb"].as_u64().context("RAM threshold")?;
+            ensure!(
+                previous.is_none_or(|p| minimum > p),
+                "answer tiers must be ascending"
+            );
+            ensure!(
+                previous.is_some() || minimum == 0,
+                "first answer tier must start at zero"
+            );
+            previous = Some(minimum);
+            pins_from_value(&json!({"embedding":value["embedding"],"chat":tier["pin"]}))?;
+        }
+        Ok(Self { embedding, tiers })
+    }
+    pub fn answers(&self) -> Result<Vec<Pin>> {
+        self.tiers
+            .iter()
+            .map(|tier| {
+                let mut pins = pins_from_value(
+                    &json!({"embedding":self.embedding.metadata,"chat":tier["pin"]}),
+                )?;
+                pins.pop().context("answer pin")
+            })
+            .collect()
+    }
+    pub fn selected(&self, sha: Option<&str>) -> Result<Value> {
+        let mut value = json!({"embedding":self.embedding.metadata});
+        if let Some(pin) = self
+            .answers()?
+            .into_iter()
+            .find(|pin| Some(pin.sha256.as_str()) == sha)
+        {
+            value["chat"] = pin.metadata;
+        }
+        Ok(value)
+    }
+    pub fn offer(&self, ram: u64) -> Vec<Value> {
+        let gib = ram.saturating_add(512 << 20) / (1 << 30);
+        self.tiers
+            .iter()
+            .enumerate()
+            .filter(|(_, tier)| {
+                tier["min_ram_gb"]
+                    .as_u64()
+                    .is_some_and(|minimum| minimum <= gib)
+            })
+            .map(|(index, tier)| {
+                let mut tier = tier.clone();
+                tier["tier_index"] = json!(index);
+                tier
+            })
+            .collect()
+    }
+}
+
+impl EngineCache<vz_core::engine::Engines> {
+    pub fn set_chat(&self, pin: Option<Value>) -> Result<()> {
+        if let Some(engine) = &self.engine {
+            engine.set_chat(pin)?;
+        }
+        Ok(())
+    }
+}
+
 /// Resolve release tiers in the shell; the offline engine still consumes `chat`.
+#[cfg(any(test, feature = "smoke-test"))]
 pub fn selected_pins(path: &Path, ram_bytes: u64) -> Result<Value> {
     let mut value: Value = serde_json::from_slice(&fs::read(path)?)?;
-    if let Some(tiers) = value.get("chat_tiers") {
-        let tiers = tiers.as_array().context("chat_tiers list")?;
+    if let Some(tiers) = value.get("answer_tiers") {
+        let tiers = tiers.as_array().context("answer_tiers list")?;
         let mut chosen = None;
         let mut previous = None;
         for tier in tiers {
@@ -156,7 +282,7 @@ pub fn selected_pins(path: &Path, ram_bytes: u64) -> Result<Value> {
             }
         }
         value["chat"] = chosen.context("no chat RAM tier")?;
-        value.as_object_mut().unwrap().remove("chat_tiers");
+        value.as_object_mut().unwrap().remove("answer_tiers");
     }
     Ok(value)
 }
@@ -242,6 +368,7 @@ pub use vz_core::verification::regular;
 pub fn verified(dir: &Path, pin: &Pin) -> bool {
     vz_core::verification::verify(&dir.join(&pin.file), &pin.sha256, Some(pin.size)).is_ok()
 }
+#[cfg(test)]
 pub fn status(dir: &Path, pins: &[Pin]) -> Value {
     let files: Vec<_> = pins
         .iter()
@@ -303,7 +430,7 @@ pub fn space_needed(dir: &Path, pins: &[Pin], importing: bool) -> Result<u64> {
         };
         needed += pin.size - have;
     }
-    Ok(needed)
+    Ok(needed.saturating_add(needed.div_ceil(10)))
 }
 pub fn check_space(dir: &Path, needed: u64) -> Result<()> {
     let available = free_space(dir)?;
@@ -423,6 +550,7 @@ impl Drop for Stage {
 /// The sole acquisition path: stage on the target filesystem, verify size and
 /// hash, and atomically replace. The target is never opened
 /// for writing. Only this operation owns this stage (the caller holds the lock).
+#[cfg(test)]
 pub async fn stage_verify_promote(
     dir: &Path,
     pin: &Pin,
@@ -441,13 +569,47 @@ pub async fn stage_verify_promote(
     .await
 }
 
+pub async fn stage_verify_promote_guarded(
+    dir: &Path,
+    pin: &Pin,
+    source: Source<'_>,
+    cancel: watch::Receiver<bool>,
+    progress: &mut (impl FnMut(Value) + Send),
+    promotion: Option<Arc<Mutex<EngineCache<vz_core::engine::Engines>>>>,
+) -> Result<()> {
+    stage_with_promotion(
+        dir,
+        pin,
+        source,
+        cancel,
+        progress,
+        vz_core::verification::record_verified,
+        promotion,
+    )
+    .await
+}
+
+#[cfg(test)]
 async fn stage_verify_promote_with_record(
+    dir: &Path,
+    pin: &Pin,
+    source: Source<'_>,
+    cancel: watch::Receiver<bool>,
+    progress: &mut (impl FnMut(Value) + Send),
+    record: impl FnOnce(&Path, &str, &File, &fs::Metadata) -> Result<()> + Send,
+) -> Result<()> {
+    stage_with_promotion(dir, pin, source, cancel, progress, record, None).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn stage_with_promotion(
     dir: &Path,
     pin: &Pin,
     source: Source<'_>,
     mut cancel: watch::Receiver<bool>,
     progress: &mut (impl FnMut(Value) + Send),
     record: impl FnOnce(&Path, &str, &File, &fs::Metadata) -> Result<()> + Send,
+    promotion: Option<Arc<Mutex<EngineCache<vz_core::engine::Engines>>>>,
 ) -> Result<()> {
     let download = matches!(source, Source::Download(_));
     let path = if download {
@@ -539,6 +701,15 @@ async fn stage_verify_promote_with_record(
         stage.keep = download;
     }
     cancelled(&cancel)?;
+    let _promotion = match promotion {
+        Some(lock) => {
+            let mut cache = lock.lock_owned().await;
+            cancelled(&cancel)?;
+            cache.invalidate();
+            Some(cache)
+        }
+        None => None,
+    };
     fs::rename(&stage.path, dir.join(&pin.file))
         .with_context(|| format!("{}: could not promote verified model", pin.file))?;
     if let Err(error) = record(
@@ -667,6 +838,7 @@ async fn transfer(
     }
 }
 
+#[cfg(test)]
 pub async fn download(
     dir: &Path,
     pins: &[Pin],
@@ -690,12 +862,13 @@ pub async fn download(
     }
     Ok(())
 }
-fn validate_import_folder(folder: &Path) -> Result<()> {
+pub fn validate_import_folder(folder: &Path) -> Result<()> {
     ensure!(folder.is_absolute(), "Type an absolute folder path");
     ensure!(folder.is_dir(), "Import folder not found");
     Ok(())
 }
 
+#[cfg(test)]
 pub async fn import(
     dir: &Path,
     pins: &[Pin],
