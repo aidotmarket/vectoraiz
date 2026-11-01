@@ -106,6 +106,14 @@ impl Store for NativeStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn cmdkey_lists_target(stdout: &[u8]) -> bool {
+        String::from_utf8_lossy(stdout).lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("Target:") && line.contains("anthropic.market.ai.vectoraiz")
+        })
+    }
     use std::process::Command;
     #[cfg(target_os = "macos")]
     fn security(args: &[&str]) -> std::process::Output {
@@ -222,9 +230,7 @@ mod tests {
                 .output()
                 .unwrap();
             assert!(result.status.success());
-            assert!(
-                String::from_utf8_lossy(&result.stdout).contains("anthropic.market.ai.vectoraiz")
-            );
+            assert!(cmdkey_lists_target(&result.stdout));
         }
         child("remove");
         #[cfg(target_os = "macos")]
@@ -244,9 +250,9 @@ mod tests {
                 .args(["/list:anthropic.market.ai.vectoraiz"])
                 .output()
                 .unwrap();
-            assert!(
-                !String::from_utf8_lossy(&result.stdout).contains("anthropic.market.ai.vectoraiz")
-            );
+            // cmdkey echoes the filter in its header even when nothing matches,
+            // so only a "Target:" line counts as a stored credential.
+            assert!(!cmdkey_lists_target(&result.stdout));
         }
     }
 }
