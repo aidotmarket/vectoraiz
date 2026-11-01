@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -124,13 +125,99 @@ try:
             assert digest == pin['sha256'], f'Wrong acquired model hash: {path}'
             assert loaded[path]['size'] == pin['size'] and loaded[path]['sha256'] == digest, 'Engine loaded different model files'
             model_hashes[path] = digest
-        step('Downloaded pins are the exact files passed to the engine')
+        step('Fixture embedding model and added answer model are the exact files passed to the engine')
         spec = importlib.util.spec_from_file_location('single_instance', Path('scripts/native-single-instance-test.py').resolve())
         single_instance = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(single_instance)
         focus_results = single_instance.test(binary, cwd=cwd, env=env,
                                              result_path='installed-single-instance.json')
         Path('installed-single-instance.json').write_text(json.dumps(focus_results, indent=2))
+    # Only the installed job fetches the second pin. Keep CLI fixtures unchanged.
+    fixture_spec = importlib.util.spec_from_file_location('fetch_assets', Path('scripts/fetch-assets.py').resolve())
+    fetcher = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fetcher)
+    tiers_manifest = json.loads(Path('spike/fixtures/models.tiers.json').read_text())
+    answers = [tier['pin'] for tier in tiers_manifest['answer_tiers']]
+    second = answers[1]
+    with tempfile.TemporaryDirectory(prefix='vz-migration-fixtures-') as fixture_dir:
+        second_file = Path(fixture_dir) / second['file']
+        fetcher.fetch(second['url'], second['sha256'], second_file, second['size'])
+        cli = binary.parent / ('vectoraiz-cli.exe' if windows else 'vectoraiz-cli')
+        assert cli.is_file(), 'Installed same-commit CLI missing'
+        for scenario in ['selected-with-records', 'single-no-selected', 'selected-without-records']:
+            with tempfile.TemporaryDirectory(prefix='vz-legacy-' + scenario + '-') as seed_dir:
+                seed = Path(seed_dir)
+                seed_models = seed / 'models'
+                seed_models.mkdir()
+                shutil.copytree(models / 'pdfium', seed_models / 'pdfium')
+                pins = [tiers_manifest['embedding'], answers[0]]
+                if scenario != 'single-no-selected':
+                    pins.append(answers[1])
+                for pin in pins:
+                    source = second_file if pin['sha256'] == second['sha256'] else models / pin['file']
+                    shutil.copy2(source, seed_models / pin['file'])
+                # Same recipe and document ids/generations as a legacy 0.0.13 index.
+                legacy = seed / 'phase0-index'
+                resolved = seed_models / 'models.selected.json'
+                resolved.write_text(json.dumps({'embedding':tiers_manifest['embedding'],'chat':answers[0]}))
+                with Path('installed-migration-' + scenario + '-seed.log').open('w', encoding='utf-8') as log:
+                    seeded = subprocess.run([str(cli),'--cpu','--state',str(legacy),'--assets',str(seed_models),'--models',str(resolved),'index',str(Path('spike/fixtures/documents').resolve())],stdout=log,stderr=subprocess.STDOUT,timeout=120,check=False)
+                    assert seeded.returncode == 0, 'Legacy fixture index failed'
+                    # Save a verify-once answer record, as 0.0.13 would have done.
+                    checked = subprocess.run([str(cli),'--cpu','--state',str(legacy),'--assets',str(seed_models),'--models',str(resolved),'ask','What is the orbital archive retention policy?'],stdout=log,stderr=subprocess.STDOUT,timeout=120,check=False)
+                    assert checked.returncode == 0, 'Legacy fixture Ask failed'
+                if scenario == 'single-no-selected':
+                    resolved.unlink()
+                if scenario == 'selected-without-records':
+                    (seed_models / 'models.verified.json').unlink()
+                def logical_index():
+                    with sqlite3.connect(legacy / 'state.sqlite') as database:
+                        documents = database.execute('SELECT doc_id,generation FROM documents ORDER BY doc_id').fetchall()
+                    return (legacy.joinpath('recipe.json').read_bytes(), documents)
+                before_index = logical_index()
+                stamps = {pin['file']:(seed_models / pin['file']).stat() for pin in pins}
+                migration_env = dict(env, VZ_SMOKE_DATA_ROOT=str(seed),
+                                     WEBVIEW2_USER_DATA_FOLDER=str(seed / 'webview2'),
+                                     VZ_SMOKE_MODELS=str(Path('spike/fixtures/models.tiers.json').resolve()),
+                                     VZ_PIPELINE_FIXTURE=str(Path('spike/fixtures/documents').resolve()))
+                for launch in range(2):
+                    migration_env['VZ_MIGRATION_SMOKE'] = 'check'
+                    migration_log = Path(f'installed-migration-{scenario}-{launch}.log')
+                    with migration_log.open('w',encoding='utf-8') as log:
+                        child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=migration_env,stdout=log,stderr=subprocess.STDOUT)
+                        try:
+                            assert child.wait(timeout=150) == 0, 'Installed migration failed'
+                        finally:
+                            if child.poll() is None:
+                                child.kill(); child.wait(timeout=10)
+                    output = migration_log.read_text(encoding='utf-8')
+                    assert 'migration: searched before indexing with adopted tier 0' in output
+                    assert 'VECTORAIZ_MODEL_TRANSFER:' not in output, 'Migration acquired a model'
+                    assert not list(seed_models.glob('*.partial')), 'Migration left a partial'
+                    assert logical_index() == before_index, 'Migration changed index recipe or documents/generations'
+                    for filename,stamp in stamps.items():
+                        current = (seed_models / filename).stat()
+                        assert (current.st_size,current.st_mtime_ns,current.st_ino) == (stamp.st_size,stamp.st_mtime_ns,stamp.st_ino), 'Migration changed model stamps'
+                    selection = json.loads((seed_models / 'settings.json').read_text())
+                    assert selection['answer'] == {'local_pin_sha256':answers[0]['sha256'],'selection_initialised':True}
+                if scenario == 'selected-without-records':
+                    # Ensure the unused target has no record so checking is observable
+                    # while Search is held, without a network-dependent 10s deadline.
+                    target_pins = Path(fixture_dir) / 'target-selected.json'
+                    target_pins.write_text(json.dumps({'embedding':tiers_manifest['embedding'],'chat':answers[1]}))
+                    with Path('installed-migration-target-check.log').open('w',encoding='utf-8') as log:
+                        checked = subprocess.run([str(cli),'--cpu','--state',str(legacy),'--assets',str(seed_models),'--models',str(target_pins),'ask','What is the orbital archive retention policy?'],stdout=log,stderr=subprocess.STDOUT,timeout=240,check=False)
+                        assert checked.returncode == 0, 'Target verify-once preparation failed'
+                    migration_env['VZ_MIGRATION_SMOKE'] = 'switch'
+                    with Path('installed-migration-switch.log').open('w',encoding='utf-8') as log:
+                        child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=migration_env,stdout=log,stderr=subprocess.STDOUT)
+                        try:
+                            assert child.wait(timeout=150) == 0, 'Installed migration switch/delete failed'
+                        finally:
+                            if child.poll() is None:
+                                child.kill(); child.wait(timeout=10)
+                    assert not (seed_models / answers[0]['file']).exists(), 'Unused old model was not deleted'
+    step('Installed migrations kept selection, model stamps and the seeded index across restarts; switch/delete passed')
     step('Check persistent data sentinel before uninstall')
     sentinel = data / 'install-self-test.json'
     before = sentinel.read_bytes()

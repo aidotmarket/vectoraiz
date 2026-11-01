@@ -2,7 +2,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
 (async () => {
   await report('started');
   const button = label => [...document.querySelectorAll('button')].find(b => b.textContent === label);
-  const downloadButton = () => [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Download models ('));
+  const downloadButton = () => [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Download search model ('));
   const wait = async (predicate, budget = 240000) => {
     const deadline = Date.now() + budget;
     let logged = Date.now();
@@ -16,6 +16,76 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   };
+  const ipc = (command, args) => window.__TAURI_INTERNALS__.invoke(command, args);
+  const statusWait = async (predicate, budget = 8000) => {
+    const deadline = Date.now() + budget;
+    while (Date.now() < deadline) {
+      const status = await ipc('models_status');
+      if (predicate(status)) return status;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error('Model status timed out: ' + predicate);
+  };
+  const query = 'What is the orbital archive retention policy?';
+  const progress = '__CHANNEL__:' + window.__TAURI_INTERNALS__.transformCallback(() => {});
+  if (window.__VZ_SMOKE__.migration) {
+    const status = await ipc('models_status');
+    if (status.offer.length !== 2 || status.offer[0].pin.sha256 === status.offer[1].pin.sha256 || status.offer[0].pin.file === status.offer[1].pin.file) throw new Error('Distinct answer fixture pins not offered');
+    if (status.target || status.needs_reindex || status.answer.pin?.sha256 !== status.offer[0].pin.sha256) throw new Error('Migration changed the selection or index');
+    const hits = await ipc('pipeline_search', {query});
+    if (!hits[0]?.chunk.text.includes('thirty days')) throw new Error('Migration Search lost seeded hits');
+    await report('migration: searched before indexing with adopted tier 0');
+    if (window.__VZ_SMOKE__.migration === 'switch') {
+      await report('hold-next-transfer');
+      await report('hold-next-search');
+      window.__VZ_SMOKE__.searchLocked = false;
+      const heldSearch = ipc('pipeline_search', {query});
+      await wait(() => window.__VZ_SMOKE__.searchLocked, 2000);
+      const switching = ipc('answer_switch', {tierIndex:1});
+      await statusWait(s => ['checking','downloading'].includes(s.target?.state));
+      await report('release-transfer');
+      await statusWait(s => s.target?.state === 'verified' && s.answer.pin.sha256 === s.offer[0].pin.sha256);
+      let refused = false;
+      try { await ipc('delete_unused_model', {sha256:status.offer[0].pin.sha256}); }
+      catch (error) { if (String(error) !== 'A download is running') throw error; refused = true; }
+      if (!refused) throw new Error('Delete raced pending activation');
+      await report('release-search');
+      await heldSearch; await switching;
+      await statusWait(s => s.answer.state === 'ready' && s.answer.pin.sha256 === s.offer[1].pin.sha256 && !s.target);
+      const answer = await ipc('pipeline_ask', {question:query,tokens:progress});
+      if (answer.kind !== 'answer' || !answer.citations.length || !answer.text.toLowerCase().includes('thirty days')) throw new Error('Switched answer lost citations');
+      await report('migration: verified tier 1 answered');
+      // Independent transfer exclusion, with no Search held and no activation wait.
+      await report('hold-next-transfer');
+      const adding = ipc('answer_add', {tierIndex:0});
+      await statusWait(s => s.target?.state === 'downloading');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Transfer blocked Search');
+      const currentAnswer = await ipc('pipeline_ask',{question:query,tokens:progress});
+      if (currentAnswer.kind !== 'answer' || !currentAnswer.citations.length) throw new Error('Transfer blocked the current answer');
+      for (const [command,args] of [['answer_switch',{tierIndex:0}],['models_import',{folder:window.__VZ_SMOKE__.fixture}]]) {
+        let refused = false;
+        try { await ipc(command,args); } catch (error) { if (String(error) !== 'Another model or index operation is running') throw error; refused = true; }
+        if (!refused) throw new Error('Concurrent transfer was accepted');
+      }
+      await report('release-transfer'); await adding;
+      const freed = await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256});
+      if (freed !== status.offer[0].pin.size) throw new Error('Delete freed wrong bytes');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Delete changed Search');
+      for (const sha256 of [status.search.pin.sha256,status.offer[1].pin.sha256]) {
+        let refused = false;
+        try { await ipc('delete_unused_model',{sha256}); } catch { refused = true; }
+        if (!refused) throw new Error('Deleted search or active answer model');
+      }
+      await ipc('answer_turn_off');
+      if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'no_answer') throw new Error('Turn off did not remove answer selection');
+      const removed = await ipc('delete_unused_model',{sha256:status.offer[1].pin.sha256});
+      if (removed !== status.offer[1].pin.size) throw new Error('Turned-off model deletion freed wrong bytes');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Turning off changed Search');
+      await report('migration: transfer exclusion, delete refusals, turn off and unused model deletion passed');
+    }
+    await ipc('self_test');
+    return;
+  }
   await wait(() => button('Index folder'));
   if (window.__VZ_SMOKE__.acquisition) {
     await report('acquisition: empty model directory, awaiting model status');
@@ -48,12 +118,10 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   button('Search').click();
   await pipelineWait(() => document.querySelector('section li')?.textContent.includes('thirty days') && !button('Ask').disabled);
   const previousSearch = [...document.querySelectorAll('section ol:first-of-type li')].map(li => li.textContent);
-  const query = 'What is the orbital archive retention policy?';
   const repeatedHits = await window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
   if (!repeatedHits[0]?.chunk.text.includes('thirty days')) throw new Error('Repeated Search lost its result');
   await report('searched again');
   await report('guard-before');
-  const progress = '__CHANNEL__:' + window.__TAURI_INTERNALS__.transformCallback(() => {});
   for (const invalid of ['', '   ', window.__VZ_SMOKE__.fixture + '/directory-that-does-not-exist']) {
     let refused = false;
     try { await window.__TAURI_INTERNALS__.invoke('pipeline_index', { folder: invalid, progress }); }
@@ -73,8 +141,6 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   const overlaps = await Promise.allSettled([
     window.__TAURI_INTERNALS__.invoke('pipeline_search', { query }),
     window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress }),
-    window.__TAURI_INTERNALS__.invoke('models_download', { progress }),
-    window.__TAURI_INTERNALS__.invoke('models_import', { folder: window.__VZ_SMOKE__.fixture }),
   ]);
   await report('release-search');
   for (const result of overlaps) {
@@ -84,12 +150,26 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   const rendered = nextHits.map(hit => `${hit.chunk.text} · ${hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page ${hit.chunk.page}`);
   if (JSON.stringify(rendered) !== JSON.stringify(previousSearch)) throw new Error('Invalid Folder changed search results');
   await report('searched; empty/blank/missing-folder IPC preserved seeded index');
-  await report('shared lock refused pipeline and mutation IPC overlaps');
+  await report('inference lock refused Search and Ask overlaps');
+  if (window.__VZ_SMOKE__.acquisition) {
+    const searchOnly = await ipc('models_status');
+    if (!searchOnly.ready || searchOnly.answer.state !== 'none' || searchOnly.files.filter(file => file.installed_bytes > 0).length !== 1) throw new Error('Fresh install acquired more than the search model');
+    const noAnswer = await ipc('pipeline_ask',{question:query,tokens:progress});
+    if (noAnswer.kind !== 'no_answer') throw new Error('Search-only Ask must return no_answer');
+    await report('search-only: Index and Search passed; Ask returned no_answer');
+  }
+  let changed = false;
+  const eventHandler = window.__TAURI_INTERNALS__.transformCallback(() => {changed = true;});
+  const eventId = await ipc('plugin:event|listen',{event:'models_changed',target:{kind:'Any'},handler:eventHandler});
+  await ipc('answer_add',{tierIndex:0});
+  await statusWait(status => status.answer.state === 'ready',240000);
+  if (window.__VZ_SMOKE__.acquisition && !changed) throw new Error('answer_add emitted no models_changed');
+  await ipc('plugin:event|unlisten',{event:'models_changed',eventId});
   button('Ask').click();
   await pipelineWait(() => document.querySelector('section ol:last-of-type li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');
   const secondAnswer = await window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress });
-  if (!secondAnswer.text.toLowerCase().includes('thirty days') || !secondAnswer.citations.length) throw new Error('Repeated Ask lost its answer or citations');
+  if (secondAnswer.kind !== 'answer' || !secondAnswer.text.toLowerCase().includes('thirty days') || !secondAnswer.citations.length) throw new Error('Repeated Ask lost its answer or citations');
   await report('answered again');
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));
