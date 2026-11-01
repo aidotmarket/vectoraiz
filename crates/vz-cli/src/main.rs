@@ -173,7 +173,10 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
-    let engines = if matches!(args.command, Operation::BakeoffSearch { .. }) {
+    let engines = if matches!(
+        args.command,
+        Operation::BakeoffSearch { .. } | Operation::Index { .. } | Operation::Search { .. }
+    ) {
         Engines::load_embedding(&args.assets, &args.models, args.cpu)?
     } else {
         Engines::load(&args.assets, &args.models, args.cpu)?
