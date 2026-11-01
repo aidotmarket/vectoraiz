@@ -438,7 +438,9 @@ async fn crash_intent_and_stored_replacement_reconcile_before_restart_ask() {
         let c = Cloud {
             cloud_lock: Mutex::new(()),
             store: Arc::new(ProcessStore(vault.clone())),
-            transport: Transport::new(),
+            transport: Transport::connect(Path::new(
+                &std::env::var_os("VZ_CLOUD_CRASH_TRANSPORT").unwrap(),
+            )),
             hook: Arc::new(move |phase| {
                 if phase == "intent"
                     && std::env::var("VZ_CLOUD_CRASH_PHASE").as_deref() == Ok("intent")
@@ -472,11 +474,25 @@ async fn crash_intent_and_stored_replacement_reconcile_before_restart_ask() {
         panic!("crash hook did not terminate child");
     }
     for phase in ["intent", "store"] {
+        // The surviving parent owns the server. A server spawned in the crash
+        // child survives process::exit (no Drop) and on Windows can retain the
+        // child's captured pipe handles, so Command::output never reaches EOF.
+        let transport = Transport::new();
         let root = tempfile::tempdir().unwrap();
         std::fs::create_dir(root.path().join("models")).unwrap();
         std::fs::create_dir(root.path().join("vault")).unwrap();
         let child = |phase: &str| {
-            let output=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","cloud::tests::crash_intent_and_stored_replacement_reconcile_before_restart_ask","--nocapture"]).env("VZ_CLOUD_CRASH_ROOT",root.path()).env("VZ_CLOUD_CRASH_PHASE",phase).output().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cloud::tests::crash_intent_and_stored_replacement_reconcile_before_restart_ask",
+                    "--nocapture",
+                ])
+                .env("VZ_CLOUD_CRASH_ROOT", root.path())
+                .env("VZ_CLOUD_CRASH_PHASE", phase)
+                .env("VZ_CLOUD_CRASH_TRANSPORT", &transport.root)
+                .output()
+                .unwrap();
             assert!(!String::from_utf8_lossy(&output.stdout).contains("sk-test-"));
             assert!(!String::from_utf8_lossy(&output.stderr).contains("sk-test-"));
             assert!(
@@ -486,6 +502,7 @@ async fn crash_intent_and_stored_replacement_reconcile_before_restart_ask() {
             );
         };
         child(phase);
+        assert_eq!(transport.requests().len(), 2);
         assert_eq!(
             disk(&root.path().join("models"))["paths"]["api_key"]["pending"],
             "anthropic"
@@ -495,6 +512,7 @@ async fn crash_intent_and_stored_replacement_reconcile_before_restart_ask() {
             if phase == "intent" { "1234" } else { "5678" }
         );
         child("recover");
+        assert_eq!(transport.requests().len(), 2, "recovery must not send HTTP");
         assert_eq!(
             disk(&root.path().join("models"))["paths"]["api_key"]["pending"],
             Value::Null
@@ -505,8 +523,9 @@ async fn crash_intent_and_stored_replacement_reconcile_before_restart_ask() {
 /// Owns a real TLS fixture for the lifetime of each lifecycle instance.
 pub struct Transport {
     pub client: cloud_gate::TestTransport,
-    child: std::sync::Mutex<std::process::Child>,
-    root: tempfile::TempDir,
+    child: Option<std::process::Child>,
+    root: PathBuf,
+    _owner: Option<tempfile::TempDir>,
 }
 impl Transport {
     pub fn new() -> Self {
@@ -528,32 +547,40 @@ impl Transport {
         std::io::BufReader::new(child.stdout.take().unwrap())
             .read_line(&mut port)
             .unwrap();
+        std::fs::write(root.path().join("port"), port).unwrap();
+        let mut transport = Self::connect(root.path());
+        transport.child = Some(child);
+        transport._owner = Some(root);
+        transport
+    }
+    fn connect(root: &Path) -> Self {
+        let port = std::fs::read_to_string(root.join("port")).unwrap();
         let addr = format!("127.0.0.1:{}", port.trim()).parse().unwrap();
-        let client = cloud_gate::TestTransport::new(
-            addr,
-            &std::fs::read(root.path().join("cert.pem")).unwrap(),
-        );
+        let client =
+            cloud_gate::TestTransport::new(addr, &std::fs::read(root.join("cert.pem")).unwrap());
         Self {
             client,
-            child: std::sync::Mutex::new(child),
-            root,
+            child: None,
+            root: root.to_owned(),
+            _owner: None,
         }
     }
     fn requests(&self) -> Vec<Value> {
-        std::fs::read(self.root.path().join("requests.json"))
+        std::fs::read(self.root.join("requests.json"))
             .ok()
             .map(|b| serde_json::from_slice(&b).unwrap())
             .unwrap_or_default()
     }
     async fn closed(&self) {
-        wait_for(|| self.root.path().join("closed").exists()).await;
+        wait_for(|| self.root.join("closed").exists()).await;
     }
 }
 impl Drop for Transport {
     fn drop(&mut self) {
-        let child = self.child.get_mut().unwrap();
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Some(child) = &mut self.child {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 async fn wait_for(check: impl Fn() -> bool) {
@@ -623,7 +650,7 @@ async fn production_ask_boundaries_stop_provider_and_replacement() {
                 consent(&c, dir.path(), p).await;
                 set(&c, dir.path(), p).await.unwrap();
                 if boundary == "mid_stream" {
-                    std::fs::write(c.transport.root.path().join("stall"), b"").unwrap();
+                    std::fs::write(c.transport.root.join("stall"), b"").unwrap();
                 }
                 let tokens = Arc::new(StdMutex::new(Vec::<String>::new()));
                 let emitted = tokens.clone();
@@ -637,7 +664,7 @@ async fn production_ask_boundaries_stop_provider_and_replacement() {
                 });
                 if boundary == "mid_stream" {
                     wait_for(|| !tokens.lock().unwrap().is_empty()).await;
-                    wait_for(|| c.transport.root.path().join("streaming").exists()).await;
+                    wait_for(|| c.transport.root.join("streaming").exists()).await;
                 } else {
                     pause.entered().await;
                 }
