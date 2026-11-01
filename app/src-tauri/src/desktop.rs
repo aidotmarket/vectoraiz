@@ -1,5 +1,6 @@
 use crate::{cloud, desktop_pipeline, models, settings};
-use vz_core::cloud_gate::{self, Op, Provider, SendError};
+use cloud::{cloud_failure, lifecycle_failure};
+use vz_core::cloud_gate::{self, Provider, SendError};
 
 // The overlap smoke test must not depend on Search being slower than its UI poll.
 #[cfg(feature = "smoke-test")]
@@ -1330,35 +1331,6 @@ fn record_loaded_models(
     Ok(())
 }
 
-fn cloud_failure(error: SendError, provider: Provider) -> serde_json::Value {
-    if matches!(error, SendError::Cancelled | SendError::Revoked) {
-        return serde_json::json!({"kind":"cancelled","answered_by":null});
-    }
-    serde_json::json!({"kind":"cloud_error","reason":error.reason(),"message":error.message(provider),"answered_by":null})
-}
-fn lifecycle_failure(error: String, provider: Provider) -> serde_json::Value {
-    let typed = match error.as_str() {
-        "consent_required" => Some(SendError::ConsentRequired),
-        "no_key" => Some(SendError::NoKey),
-        "path_off" => Some(SendError::PathOff),
-        "revoked" => Some(SendError::Revoked),
-        "cancelled" => Some(SendError::Cancelled),
-        "quota" => Some(SendError::Quota),
-        "rate_limited" => Some(SendError::RateLimited),
-        "unreachable" => Some(SendError::Unreachable),
-        "provider_error" => Some(SendError::ProviderError),
-        "request_rejected" => Some(SendError::RequestRejected),
-        "model_unavailable" => Some(SendError::ModelUnavailable),
-        "incomplete" => Some(SendError::Incomplete),
-        "declined" => Some(SendError::Declined),
-        "bad_citation" => Some(SendError::BadCitation),
-        _ => None,
-    };
-    typed.map_or_else(
-        || serde_json::json!({"kind":"cloud_error","message":error,"answered_by":null}),
-        |e| cloud_failure(e, provider),
-    )
-}
 #[tauri::command]
 fn cloud_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<serde_json::Value, String> {
     cloud::status(&model_dir(&app)?)
@@ -1422,112 +1394,53 @@ async fn pipeline_ask_cloud<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     use tauri::Manager;
     let dir = model_dir(app)?;
-    let mut op = cloud::register(&dir, "cloud")?;
-    let (state, _) = cloud::snapshot(&dir);
-    let Some(provider) = state.provider else {
-        return Ok(cloud_failure(SendError::NoKey, Provider::Anthropic));
-    };
-    if let Err(e) = cloud_gate::check(&state, provider, Op::Ask) {
-        return Ok(cloud_failure(e.into(), provider));
-    }
     let cloud = app.state::<cloud::Cloud>();
-    let key = match cloud.load_for_ask(&op, provider).await {
-        Ok(key) => key,
-        Err(e) => return Ok(lifecycle_failure(e, provider)),
-    };
-    let guard = operations.acquire()?;
-    desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(app)?))?;
-    let (root, assets, pins) = pipeline_paths(app)?;
-    let question_owned = question.to_owned();
-    let (context, citations, names) =
-        tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
-            let mut cache = guard;
-            let engines = cache
-                .get_or_load(false, || {
-                    vz_core::engine::Engines::load_embedding(
-                        &assets,
-                        &pins,
-                        pipeline_cpu_requested(),
-                    )
-                })
-                .map_err(|e| e.to_string())?;
-            let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)
-                .map_err(|e| e.to_string())?;
-            let hits = tokio::runtime::Runtime::new()
-                .map_err(|e| e.to_string())?
-                .block_on(
-                    state.search(
-                        &question_owned,
-                        &engines
-                            .vector(&question_owned, true)
-                            .map_err(|e| e.to_string())?,
-                        3,
-                    ),
-                )
-                .map_err(|e| e.to_string())?;
-            let (context, citations) = vz_core::index::cloud_passages(&hits);
-            Ok((context, citations, desktop_pipeline::file_names(&state)))
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-    let body = match cloud_gate::request(provider, question, &context) {
-        Ok(b) => b,
-        Err(e) => return Ok(cloud_failure(e, provider)),
-    };
-    let stream = match cloud_gate::send(
-        || cloud::snapshot(&dir),
-        provider,
-        Op::Ask,
-        &key,
-        Some(body),
-        &op.epoch,
-        &mut op.cancel,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(e) => return Ok(cloud_failure(e, provider)),
-    };
-    let epoch = op.epoch;
-    let id = op.id.clone();
-    let valid = || {
-        settings::with_state(&dir, |s| {
-            s.cloud_epoch == epoch
-                && s.ops
-                    .get(&id)
-                    .is_some_and(|o| o.mark == settings::Mark::Running)
-        })
-        .unwrap_or(false)
-    };
-    let answer = match stream
-        .answer(
-            valid,
-            &mut op.cancel,
-            |t| {
-                if valid() {
-                    let _ = tokens.send(t.to_owned());
-                }
+    cloud
+        .ask(
+            &dir,
+            question,
+            async {
+                let guard = operations.acquire()?;
+                desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(app)?))?;
+                let (root, assets, pins) = pipeline_paths(app)?;
+                let question_owned = question.to_owned();
+                let (context, citations, names) =
+                    tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+                        let mut cache = guard;
+                        let engines = cache
+                            .get_or_load(false, || {
+                                vz_core::engine::Engines::load_embedding(
+                                    &assets,
+                                    &pins,
+                                    pipeline_cpu_requested(),
+                                )
+                            })
+                            .map_err(|e| e.to_string())?;
+                        let (state, _) =
+                            vz_core::storage::State::open_index(&root, &engines.recipe)
+                                .map_err(|e| e.to_string())?;
+                        let hits = tokio::runtime::Runtime::new()
+                            .map_err(|e| e.to_string())?
+                            .block_on(
+                                state.search(
+                                    &question_owned,
+                                    &engines
+                                        .vector(&question_owned, true)
+                                        .map_err(|e| e.to_string())?,
+                                    3,
+                                ),
+                            )
+                            .map_err(|e| e.to_string())?;
+                        let (context, citations) = vz_core::index::cloud_passages(&hits);
+                        Ok((context, citations, desktop_pipeline::file_names(&state)))
+                    })
+                    .await
+                    .map_err(|e| e.to_string())??;
+                Ok((context, citations, names))
             },
-            citations,
+            |token| {
+                let _ = tokens.send(token.to_owned());
+            },
         )
         .await
-    {
-        Ok(a) => a,
-        Err(e) => return Ok(cloud_failure(e, provider)),
-    };
-    if !valid() {
-        return Ok(cloud_failure(SendError::Cancelled, provider));
-    }
-    let mut value = serde_json::to_value(answer).map_err(|e| e.to_string())?;
-    value["kind"] = serde_json::json!("answer");
-    value["answered_by"] = serde_json::json!(provider.id());
-    if let Some(citations) = value["citations"].as_array_mut() {
-        for citation in citations {
-            citation["file_name"] = citation["doc_id"]
-                .as_str()
-                .and_then(|id| names.get(id))
-                .map_or(serde_json::Value::Null, |name| serde_json::json!(name));
-        }
-    }
-    Ok(value)
 }

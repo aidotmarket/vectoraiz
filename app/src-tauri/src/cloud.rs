@@ -16,6 +16,8 @@ pub struct Cloud {
     pub store: Arc<dyn Store>,
     #[cfg(test)]
     pub hook: Arc<dyn Fn(&str) + Send + Sync>,
+    #[cfg(test)]
+    pub transport: tests::Transport,
 }
 impl Default for Cloud {
     fn default() -> Self {
@@ -24,6 +26,8 @@ impl Default for Cloud {
             store: Arc::new(NativeStore),
             #[cfg(test)]
             hook: Arc::new(|_| {}),
+            #[cfg(test)]
+            transport: tests::Transport::new(),
         }
     }
 }
@@ -133,15 +137,18 @@ pub fn status(dir: &Path) -> Result<Value, String> {
     })
 }
 fn pending(s: &SettingsState) -> bool {
-    !s.settings.api()["pending"].is_null()
+    !s.cleanup_memory.is_empty()
+        || !s.settings.api()["pending"].is_null()
         || s.settings.api()["cleanup"]
             .as_array()
             .is_some_and(|a| !a.is_empty())
 }
 fn targets(s: &SettingsState) -> Vec<Provider> {
-    let mut result = vec![];
+    let mut result = s.cleanup_memory.clone();
     if let Ok(p) = serde_json::from_value(s.settings.api()["pending"].clone()) {
-        result.push(p);
+        if !result.contains(&p) {
+            result.push(p);
+        }
     }
     if let Some(a) = s.settings.api()["cleanup"].as_array() {
         for v in a {
@@ -175,6 +182,7 @@ impl Cloud {
         for p in accounts {
             if self.remove(p).await.is_ok() {
                 settings::update(dir, |s| {
+                    s.cleanup_memory.retain(|target| *target != p);
                     if s.settings.api()["pending"] == json!(p) {
                         s.settings.api_mut()["pending"] = Value::Null;
                     }
@@ -208,14 +216,14 @@ impl Cloud {
         })?;
         status(dir)
     }
-    pub async fn set(&self, dir: &Path, p: Provider, key: Secret) -> Result<Value, String> {
+    pub async fn set(&self, dir: &Path, p: Provider, key: Secret) -> Result<Value, LifecycleError> {
         #[cfg(test)]
         (self.hook)("before_register");
         let mut op = register(dir, "cloud_setup")?;
         let _lock = self.cloud_lock.lock().await;
         self.reconcile(dir).await?;
         if let Some(account) = settings::with_state(dir, |s| targets(s).first().copied())? {
-            return Err(cleanup_message(account));
+            return Err(cleanup_message(account).into());
         }
         op.epoch = settings::with_state(dir, |s| {
             mark(s, &op.id)?;
@@ -230,23 +238,7 @@ impl Cloud {
         })??;
         #[cfg(test)]
         (self.hook)("key_check");
-        #[cfg(not(test))]
-        let checked = cloud_gate::send(
-            || snapshot(dir),
-            p,
-            Op::KeyCheck,
-            &key,
-            None,
-            &op.epoch,
-            &mut op.cancel,
-        )
-        .await;
-        #[cfg(test)]
-        let checked: Result<(), SendError> = if key.last4() == "ject" {
-            Err(SendError::KeyRejected)
-        } else {
-            Ok(())
-        };
+        let checked = self.send(&mut op, p, Op::KeyCheck, &key, None).await;
         if let Err(e) = checked {
             settings::with_state(dir, |s| mark(s, &op.id))??;
             return Err(if e == SendError::KeyRejected {
@@ -274,7 +266,7 @@ impl Cloud {
             .and_then(|r| r);
         if stored.is_err() {
             let _ = self.reconcile(dir).await;
-            return Err(credential_message(p));
+            return Err(LifecycleError::CredentialUnavailable(p));
         }
         #[cfg(test)]
         (self.hook)("before_commit");
@@ -303,7 +295,7 @@ impl Cloud {
         });
         if let Err(error) = commit {
             let _ = self.reconcile(dir).await;
-            return Err(error.to_string());
+            return Err(error.to_string().into());
         }
         #[cfg(test)]
         (self.hook)("after_commit");
@@ -318,12 +310,12 @@ impl Cloud {
             let _ = tx.send(true);
         }
         self.reconcile(dir).await?;
-        status(dir)
+        Ok(status(dir)?)
     }
     pub async fn stop(&self, dir: &Path) -> Result<Value, String> {
         revoke(dir, true)?;
         let _lock = self.cloud_lock.lock().await;
-        let (mut accounts, provider) = settings::with_state(dir, |s| {
+        let (accounts, provider) = settings::with_state(dir, |s| {
             let mut a = targets(s);
             let p = serde_json::from_value::<Provider>(s.settings.api()["provider"].clone()).ok();
             if let Some(p) = p {
@@ -353,8 +345,15 @@ impl Cloud {
         if stopped.is_err() {
             settings::with_state(dir, |s| s.stop_failed = true)?;
             let mut removed = true;
-            for p in accounts.drain(..) {
-                removed &= self.remove(p).await.is_ok();
+            for p in accounts {
+                if self.remove(p).await.is_err() {
+                    removed = false;
+                    settings::with_state(dir, |s| {
+                        if !s.cleanup_memory.contains(&p) {
+                            s.cleanup_memory.push(p);
+                        }
+                    })?;
+                }
             }
             let mut result = status(dir)?;
             result["message"] = json!(format!(
@@ -366,6 +365,9 @@ impl Cloud {
                     "."
                 }
             ));
+            if !removed {
+                result["message"] = status(dir)?["message"].clone();
+            }
             return Ok(result);
         }
         self.reconcile(dir).await?;
@@ -385,7 +387,7 @@ impl Cloud {
         status(dir)
     }
     /// Called only by pipeline_ask, while holding cloud_lock, after reconciliation.
-    pub async fn load_for_ask(&self, op: &Running, p: Provider) -> Result<Secret, String> {
+    pub async fn load_for_ask(&self, op: &Running, p: Provider) -> Result<Secret, LifecycleError> {
         let _lock = self.cloud_lock.lock().await;
         self.reconcile(&op.dir).await?;
         let s = settings::with_state(&op.dir, |s| s.clone())?;
@@ -397,14 +399,14 @@ impl Cloud {
             return Err("no_key".into());
         }
         if pending(&s) {
-            return Err(cleanup_message(p));
+            return Err(cleanup_message(p).into());
         }
         cloud_gate::check(&s.consent_state(), p, Op::Ask)
             .map_err(|e| SendError::from(e).reason().to_owned())?;
         let store = self.store.clone();
         let key = tokio::task::spawn_blocking(move || store.load(p))
             .await
-            .map_err(|_| credential_message(p))?;
+            .map_err(|_| LifecycleError::CredentialUnavailable(p))?;
         settings::with_state(&op.dir, |s| mark(s, &op.id))??;
         match key {
             Err(CredError::Missing) => {
@@ -415,7 +417,7 @@ impl Cloud {
                 })?;
                 Err("no_key".into())
             }
-            Err(_) => Err(credential_message(p)),
+            Err(_) => Err(LifecycleError::CredentialUnavailable(p)),
             Ok(key) => Ok(key),
         }
     }
@@ -470,3 +472,186 @@ fn now() -> String {
 }
 #[cfg(test)]
 mod tests;
+
+#[derive(Debug)]
+pub enum LifecycleError {
+    Message(String),
+    CredentialUnavailable(Provider),
+}
+impl From<String> for LifecycleError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+impl From<&str> for LifecycleError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.into())
+    }
+}
+impl From<settings::UpdateError<String>> for LifecycleError {
+    fn from(error: settings::UpdateError<String>) -> Self {
+        Self::Message(error.to_string())
+    }
+}
+impl std::fmt::Display for LifecycleError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Message(s) => f.write_str(s),
+            Self::CredentialUnavailable(p) => f.write_str(&credential_message(*p)),
+        }
+    }
+}
+pub fn cloud_failure(error: SendError, provider: Provider) -> serde_json::Value {
+    if matches!(error, SendError::Cancelled | SendError::Revoked) {
+        return serde_json::json!({"kind":"cancelled","answered_by":null});
+    }
+    serde_json::json!({"kind":"cloud_error","reason":error.reason(),"message":error.message(provider),"answered_by":null})
+}
+pub fn lifecycle_failure(error: LifecycleError, provider: Provider) -> serde_json::Value {
+    if let LifecycleError::CredentialUnavailable(p) = error {
+        return json!({"kind":"cloud_error","reason":"credential_unavailable","message":credential_message(p),"answered_by":null});
+    }
+    let LifecycleError::Message(error) = error else {
+        unreachable!()
+    };
+    let typed = match error.as_str() {
+        "consent_required" => Some(SendError::ConsentRequired),
+        "no_key" => Some(SendError::NoKey),
+        "path_off" => Some(SendError::PathOff),
+        "revoked" => Some(SendError::Revoked),
+        "cancelled" => Some(SendError::Cancelled),
+        "quota" => Some(SendError::Quota),
+        "rate_limited" => Some(SendError::RateLimited),
+        "unreachable" => Some(SendError::Unreachable),
+        "provider_error" => Some(SendError::ProviderError),
+        "request_rejected" => Some(SendError::RequestRejected),
+        "model_unavailable" => Some(SendError::ModelUnavailable),
+        "incomplete" => Some(SendError::Incomplete),
+        "declined" => Some(SendError::Declined),
+        "bad_citation" => Some(SendError::BadCitation),
+        _ => None,
+    };
+    typed.map_or_else(
+        || serde_json::json!({"kind":"cloud_error","message":error,"answered_by":null}),
+        |e| cloud_failure(e, provider),
+    )
+}
+
+pub type Retrieved = (
+    String,
+    Vec<vz_core::index::Citation>,
+    std::collections::HashMap<String, String>,
+);
+
+impl Cloud {
+    async fn send(
+        &self,
+        op: &mut Running,
+        p: Provider,
+        kind: Op,
+        key: &Secret,
+        body: Option<Value>,
+    ) -> Result<cloud_gate::Stream, SendError> {
+        #[cfg(test)]
+        return self
+            .transport
+            .client
+            .send(
+                || snapshot(&op.dir),
+                p,
+                kind,
+                key,
+                body,
+                &op.epoch,
+                &mut op.cancel,
+            )
+            .await;
+        #[cfg(not(test))]
+        cloud_gate::send(
+            || snapshot(&op.dir),
+            p,
+            kind,
+            key,
+            body,
+            &op.epoch,
+            &mut op.cancel,
+        )
+        .await
+    }
+    pub async fn ask(
+        &self,
+        dir: &Path,
+        question: &str,
+        retrieve: impl std::future::Future<Output = Result<Retrieved, String>>,
+        mut emit: impl FnMut(&str),
+    ) -> Result<Value, String> {
+        let mut op = register(dir, "cloud")?;
+        let (state, _) = snapshot(dir);
+        let Some(provider) = state.provider else {
+            return Ok(cloud_failure(SendError::NoKey, Provider::Anthropic));
+        };
+        if let Err(e) = cloud_gate::check(&state, provider, Op::Ask) {
+            return Ok(cloud_failure(e.into(), provider));
+        }
+        let key = match self.load_for_ask(&op, provider).await {
+            Ok(key) => key,
+            Err(e) => return Ok(lifecycle_failure(e, provider)),
+        };
+        let (context, citations, names) = retrieve.await?;
+        let body = match cloud_gate::request(provider, question, &context) {
+            Ok(body) => body,
+            Err(e) => return Ok(cloud_failure(e, provider)),
+        };
+        #[cfg(test)]
+        (self.hook)("before_dispatch");
+        let stream = match self
+            .send(&mut op, provider, Op::Ask, &key, Some(body))
+            .await
+        {
+            Ok(stream) => stream,
+            Err(e) => return Ok(cloud_failure(e, provider)),
+        };
+        let valid = || {
+            settings::with_state(dir, |s| {
+                s.cloud_epoch == op.epoch
+                    && s.ops.get(&op.id).is_some_and(|o| o.mark == Mark::Running)
+            })
+            .unwrap_or(false)
+        };
+        let answer = match stream
+            .answer(
+                valid,
+                &mut op.cancel,
+                |t| {
+                    #[cfg(test)]
+                    (self.hook)("before_token");
+                    if valid() {
+                        emit(t);
+                    }
+                },
+                citations,
+            )
+            .await
+        {
+            Ok(answer) => answer,
+            Err(e) => return Ok(cloud_failure(e, provider)),
+        };
+        #[cfg(test)]
+        (self.hook)("before_final");
+        if !valid() {
+            return Ok(cloud_failure(SendError::Cancelled, provider));
+        }
+        let mut value = serde_json::to_value(answer).map_err(|e| e.to_string())?;
+        value["kind"] = json!("answer");
+        value["answered_by"] = json!(provider.id());
+        if let Some(citations) = value["citations"].as_array_mut() {
+            for citation in citations {
+                citation["file_name"] = citation["doc_id"]
+                    .as_str()
+                    .and_then(|id| names.get(id))
+                    .map_or(Value::Null, |name| json!(name));
+            }
+        }
+        Ok(value)
+    }
+}

@@ -948,3 +948,26 @@ it("labels the chosen provider and replaces partial tokens on failure", async ()
  invoke.mockImplementation(async(command)=>command==="pipeline_ask"?{kind:"answer",text:"Answer",citations:[],answered_by:"anthropic"}:{available:false});
  await userEvent.click(screen.getByRole("button",{name:"Ask"}));expect(await screen.findByText("Answered by Anthropic")).toBeInTheDocument();
 });
+
+it("completes a local Ask and releases the pipeline after cloud Stop", async () => {
+ const local = {...apiReady, default:"local"};
+ cloudInvoke.mockImplementation(async command => command === "api_key_stop" ? {...local,api_key:{...local.api_key,enabled:false,key_present:false}} : local);
+ modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:{sha256:"local"}}});
+ const pending = deferred(); let tokens: {onmessage:(t:string)=>void} | undefined;
+ invoke.mockImplementation(async (command,args) => {
+  if(command === "pipeline_ask") {tokens=args.tokens;tokens!.onmessage("Local start");return pending.promise;}
+  return {available:false};
+ });
+ render(<App />);
+ await screen.findByText("Saved key ending in 1234",{exact:false});
+ await userEvent.type(screen.getByLabelText("Folder"),"/documents");
+ await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+ expect(await screen.findByText("Local start")).toBeInTheDocument();
+ expect(screen.getByRole("button",{name:"Search"})).toBeDisabled();
+ await userEvent.click(screen.getByRole("button",{name:"Stop using Anthropic"}));
+ expect(cloudInvoke).toHaveBeenCalledWith("api_key_stop",undefined);
+ await act(async () => {tokens!.onmessage(" complete");pending.resolve({kind:"answer",text:"Local start complete",citations:[],answered_by:"local"});});
+ expect(await screen.findByText("Local start complete")).toBeInTheDocument();
+ expect(screen.getByText("Answered on this computer")).toBeInTheDocument();
+ for(const name of ["Index folder","Search","Ask"]) expect(screen.getByRole("button",{name})).toBeEnabled();
+});

@@ -211,7 +211,7 @@ impl ProviderClient {
             .map(Self)
             .map_err(|_| SendError::Unreachable)
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn for_test(resolve: std::net::SocketAddr, cert: reqwest::Certificate) -> Self {
         Self(
             Self::builder()
@@ -599,3 +599,30 @@ pub fn request(p: Provider, question: &str, passages: &str) -> Result<Value, Sen
 }
 #[cfg(test)]
 mod tests;
+
+/// Loopback TLS client for lifecycle tests. Production uses the private singleton.
+#[cfg(feature = "test-support")]
+pub struct TestTransport(ProviderClient);
+#[cfg(feature = "test-support")]
+impl TestTransport {
+    pub fn new(resolve: std::net::SocketAddr, pem: &[u8]) -> Self {
+        assert!(resolve.ip().is_loopback());
+        Self(ProviderClient::for_test(
+            resolve,
+            reqwest::Certificate::from_pem(pem).unwrap(),
+        ))
+    }
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send(
+        &self,
+        state_fn: impl Fn() -> (ConsentState, Epoch),
+        provider: Provider,
+        op: Op,
+        key: &Secret,
+        body: Option<Value>,
+        epoch: &Epoch,
+        cancel: &mut watch::Receiver<bool>,
+    ) -> Result<Stream, SendError> {
+        dispatch(&self.0, state_fn, provider, op, key, body, epoch, cancel).await
+    }
+}

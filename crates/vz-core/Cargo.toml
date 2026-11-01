@@ -43,6 +43,8 @@ apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 llama-cpp-2 = { version = "=0.1.142", default-features = false, features = ["metal"] }
 
 [features]
+# Only dev-dependencies enable the loopback transport seam.
+test-support = []
 vulkan = ["llama-cpp-2/vulkan"]
 
 [dev-dependencies]

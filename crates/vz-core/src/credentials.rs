@@ -10,6 +10,10 @@ impl Secret {
     pub(crate) fn expose(&self) -> &str {
         &self.0
     }
+    #[cfg(feature = "test-support")]
+    pub fn copy_for_test(&self) -> Self {
+        Self::new(self.0.to_string())
+    }
     pub fn last4(&self) -> String {
         self.0
             .chars()

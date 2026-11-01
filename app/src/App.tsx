@@ -88,6 +88,7 @@ export default function App() {
   const [answerRunning, setAnswerRunning] = useState(false);
   const answerActive = useRef(false);
   const answerGeneration = useRef(0);
+  const activeAnswerPath = useRef<"local" | "api_key" | null>(null);
   const [answeredBy, setAnsweredBy] = useState<"local" | Provider>("local");
   const [cloud, setCloud] = useState<CloudStatus>();
   const [setup, setSetup] = useState(false);
@@ -217,6 +218,7 @@ export default function App() {
     const cloudAsk = cloud?.default === "api_key";
     const generation = ++answerGeneration.current;
     answerActive.current = true;
+    activeAnswerPath.current = cloudAsk ? "api_key" : "local";
     if (cloudAsk) setAnswerRunning(true); else setRunning(true);
     const unrecordedAnswer = !cloudAsk && models?.answer?.state === "ready" && models.answer.pin &&
       !models.files.some(file => file.sha256 === models.answer?.pin?.sha256 && file.verified);
@@ -286,7 +288,7 @@ export default function App() {
     finally { await refreshCloud(); }
   }
   async function cloudAction(command: "api_key_stop" | "api_key_cleanup_retry") {
-    if (command === "api_key_stop" && answerActive.current) { ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); }
+    if (command === "api_key_stop" && answerActive.current && activeAnswerPath.current === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); }
     if (command === "api_key_stop") setStopping(true);
     try {const next = await invoke<CloudStatus>(command); setCloud(next); setCloudMessage(next.message ?? "");}
     catch (cause) {setCloudMessage(String(cause)); await refreshCloud();}

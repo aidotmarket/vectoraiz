@@ -122,6 +122,7 @@ pub struct SettingsState {
     pub cloud_epoch: u64,
     pub cloud_stopped: bool,
     pub stop_failed: bool,
+    pub cleanup_memory: Vec<Provider>,
     pub ops: HashMap<String, Operation>,
 }
 impl SettingsState {
@@ -152,6 +153,7 @@ pub fn with_state<T>(dir: &Path, f: impl FnOnce(&mut SettingsState) -> T) -> Res
                 cloud_epoch: 0,
                 cloud_stopped: false,
                 stop_failed: false,
+                cleanup_memory: vec![],
                 ops: HashMap::new(),
             },
         );
