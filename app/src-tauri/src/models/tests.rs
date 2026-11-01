@@ -1124,39 +1124,47 @@ fn search_and_current_answer_survive_target_download_pause_check_cancel_and_fail
 
 #[test]
 fn cancel_pending_activation_clears_target_and_notifies_without_waiting_for_search() {
-    let ops = OperationState::<FakeEngines>::default();
-    let counts = std::rc::Rc::new(Loads::default());
-    let mut search = ops.acquire().unwrap();
-    search.get_or_load(true, || fake_load(&counts)).unwrap();
-    let _transfer = ops.acquire_transfer().unwrap();
-    let cancel = ops.start_transfer();
-    let pin = pin("https://unused.invalid");
-    ops.set_target(&pin, "verified", None);
-    let notified = std::cell::Cell::new(false);
-    runtime().block_on(async {
-        let activation = ops.activate_answer(
-            cancel,
-            true,
-            |_| panic!("cancelled switch activated"),
-            || notified.set(true),
-        );
-        tokio::pin!(activation);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), &mut activation)
+    for (switch, expected) in [
+        (
+            false,
+            "Add cancelled. The answer model is downloaded and ready to add.",
+        ),
+        (true, "Switch cancelled"),
+    ] {
+        let ops = OperationState::<FakeEngines>::default();
+        let counts = std::rc::Rc::new(Loads::default());
+        let mut search = ops.acquire().unwrap();
+        search.get_or_load(true, || fake_load(&counts)).unwrap();
+        let _transfer = ops.acquire_transfer().unwrap();
+        let cancel = ops.start_transfer();
+        let pin = pin("https://unused.invalid");
+        ops.set_target(&pin, "verified", None);
+        let notified = std::cell::Cell::new(false);
+        runtime().block_on(async {
+            let activation = ops.activate_answer(
+                cancel,
+                switch,
+                |_| panic!("cancelled command activated"),
+                || notified.set(true),
+            );
+            tokio::pin!(activation);
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), &mut activation)
+                    .await
+                    .is_err()
+            );
+            ops.cancel_transfer();
+            let error = tokio::time::timeout(Duration::from_secs(1), activation)
                 .await
-                .is_err()
-        );
-        ops.cancel_transfer();
-        let error = tokio::time::timeout(Duration::from_secs(1), activation)
-            .await
-            .unwrap()
-            .unwrap_err();
-        assert_eq!(error, "Switch cancelled");
-    });
-    assert!(ops.target.read().unwrap().is_none());
-    assert!(notified.get());
-    assert_eq!(counts.drops.get(), 0);
-    drop(search);
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error, expected);
+        });
+        assert!(ops.target.read().unwrap().is_none());
+        assert!(notified.get());
+        assert_eq!(counts.drops.get(), 0);
+        drop(search);
+    }
 }
 
 #[test]
@@ -1191,7 +1199,13 @@ fn failed_activation_settings_write_clears_target_and_preserves_current_engine()
 
 #[test]
 fn cancel_before_activation_keeps_verified_file_and_reports_command_cancellation() {
-    for (switch, expected) in [(false, "Download cancelled"), (true, "Switch cancelled")] {
+    for (switch, expected) in [
+        (
+            false,
+            "Add cancelled. The answer model is downloaded and ready to add.",
+        ),
+        (true, "Switch cancelled"),
+    ] {
         let ops = OperationState::<FakeEngines>::default();
         let dir = tempfile::tempdir().unwrap();
         let pin = pin("https://unused.invalid");

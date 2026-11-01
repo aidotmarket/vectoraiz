@@ -147,21 +147,21 @@ impl<E: CachedEngine> OperationState<E> {
         activate: impl FnOnce(&mut EngineCache<E>) -> Result<(), String>,
         changed: impl FnOnce(),
     ) -> Result<(), String> {
-        let cancelled = if switch {
+        let cancel_message = if switch {
             "Switch cancelled"
         } else {
-            "Download cancelled"
+            "Add cancelled. The answer model is downloaded and ready to add."
         };
         let result = async {
             if *cancel.borrow() {
-                return Err(cancelled.into());
+                return Err(cancel_message.into());
             }
             let mut cache = tokio::select! {
                 cache = self.wait_inference() => cache,
-                _ = cancel.changed() => return Err(cancelled.into()),
+                _ = cancel.changed() => return Err(cancel_message.into()),
             };
             if *cancel.borrow() {
-                return Err(cancelled.into());
+                return Err(cancel_message.into());
             }
             activate(&mut cache)
         }
