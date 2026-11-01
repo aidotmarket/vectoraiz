@@ -68,6 +68,22 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         if (!refused) throw new Error('Concurrent transfer was accepted');
       }
       await report('release-transfer'); await adding;
+      // Real IPC Index + transfer, cancelling each side independently.
+      for (const kind of ['transfer','pipeline']) {
+        await report('hold-next-index');
+        window.__VZ_SMOKE__.indexLocked = false;
+        const indexing = ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress}).then(() => 'complete', error => String(error));
+        await wait(() => window.__VZ_SMOKE__.indexLocked,2000);
+        await report('hold-next-transfer');
+        const transfer = ipc('answer_add',{tierIndex:0}).then(() => 'complete',error => String(error));
+        await statusWait(s => s.target?.state === 'downloading');
+        await ipc('models_cancel',{kind});
+        await report('release-index');
+        await report('release-transfer');
+        const [indexed,transferred] = await Promise.all([indexing,transfer]);
+        if (kind === 'transfer' ? indexed !== 'complete' || !transferred.toLowerCase().includes('cancelled') : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
+        await report('independent cancellation: '+kind);
+      }
       const freed = await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256});
       if (freed !== status.offer[0].pin.size) throw new Error('Delete freed wrong bytes');
       if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Delete changed Search');

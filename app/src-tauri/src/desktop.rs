@@ -12,6 +12,11 @@ static HOLD_NEXT_TRANSFER: std::sync::atomic::AtomicBool =
 #[cfg(feature = "smoke-test")]
 static RELEASE_TRANSFER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
+#[cfg(feature = "smoke-test")]
+static HOLD_NEXT_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
+static RELEASE_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 // Keep the checked Update, including its version and signature, until consent.
 #[derive(Default)]
 struct PendingUpdate(tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
@@ -116,6 +121,11 @@ fn self_test<R: tauri::Runtime>(
                 HOLD_NEXT_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
             } else if checkpoint == "release-search" {
                 RELEASE_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if checkpoint == "hold-next-index" {
+                HOLD_NEXT_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else if checkpoint == "release-index" {
+                RELEASE_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             if checkpoint == "hold-next-transfer" {
                 HOLD_NEXT_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -491,10 +501,31 @@ async fn pipeline_index<R: tauri::Runtime>(
     models::validate_folder(&folder)?;
     let guard = operations.acquire()?;
     let cancel = operations.start();
+    #[cfg(feature = "smoke-test")]
+    let hold =
+        smoke_test_requested() && HOLD_NEXT_INDEX.swap(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "smoke-test")]
+    if hold {
+        RELEASE_INDEX.store(false, std::sync::atomic::Ordering::SeqCst);
+        tauri::Manager::get_webview_window(&app, "main")
+            .expect("main window")
+            .eval("window.__VZ_SMOKE__.indexLocked = true")
+            .map_err(|e| e.to_string())?;
+    }
     let data = data_root(&app)?;
     let (_, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let mut cache = guard;
+        #[cfg(feature = "smoke-test")]
+        if hold {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !RELEASE_INDEX.load(std::sync::atomic::Ordering::SeqCst) && !*cancel.borrow() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("Smoke index release timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
         let mut run = || -> anyhow::Result<serde_json::Value> {
             let engines = cache.get_or_load(false, || {
                 vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())

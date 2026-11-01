@@ -97,6 +97,7 @@ impl<E: CachedEngine> OperationState<E> {
         self.acquire_mutation()
     }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
+    // A fresh channel identifies this operation; successors cannot reset old receivers.
     pub fn start(&self) -> watch::Receiver<bool> {
         let (sender, receiver) = watch::channel(false);
         *self.cancel.lock().unwrap() = sender;
@@ -133,6 +134,7 @@ impl<E: CachedEngine> OperationState<E> {
             Some(json!({"pin":pin.metadata,"state":state,"progress":progress}));
     }
     pub fn cancel(&self) {
+        self.checks.lock().unwrap().clear();
         self.cancel.lock().unwrap().send_replace(true);
         self.generation.fetch_add(1, Ordering::AcqRel);
         // During acquisition the cache is already empty. During inference it
@@ -704,6 +706,9 @@ async fn stage_with_promotion(
     let _promotion = match promotion {
         Some(lock) => {
             let mut cache = lock.lock_owned().await;
+            if *cancel.borrow() {
+                stage.keep = download;
+            }
             cancelled(&cancel)?;
             cache.invalidate();
             Some(cache)

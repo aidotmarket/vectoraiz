@@ -44,6 +44,7 @@ export const M1_COPY = {
   waitingSearch: "Waiting for the current search to finish",
   cancel: "Cancel",
   answered: "Answered on this computer",
+  commandMessages: ["A download is running", "The search model cannot be deleted", "Turn off or switch the answer model before deleting it", "Delete cancelled", "Unknown model", "Unknown operation kind", "Answer tier unavailable for this computer", "Unknown answer tier", "Unsupported settings file", "Save migrated answer selection", "already installed"],
 };
 interface ModelProgress { file: string; downloaded: number; total: number; attempt: number; retry?: boolean; stage?: "checking" | "verified" }
 interface ImportResult { file: string; result: string }
