@@ -607,3 +607,27 @@ fn engine_load_reuses_verification_record() {
         "{error:#}"
     );
 }
+
+#[test]
+fn switching_chat_keeps_embedding_and_recipe_and_turn_off_is_typed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engines = Engines::load_embedding(
+        &root.join(".assets"),
+        &root.join("spike/fixtures/models.json"),
+        true,
+    )
+    .unwrap();
+    let embedding = &engines.embed as *const LlamaModel;
+    let recipe = engines.recipe.clone();
+    engines.load_chat().unwrap();
+    assert!(engines.chat_loaded());
+    engines
+        .set_chat(Some(serde_json::json!({"file":"different.gguf"})))
+        .unwrap();
+    assert!(!engines.chat_loaded());
+    assert_eq!(embedding, &engines.embed as *const LlamaModel);
+    assert_eq!(recipe, engines.recipe);
+    engines.set_chat(None).unwrap();
+    let error = engines.stream("question", "context", |_| {}).unwrap_err();
+    assert!(error.downcast_ref::<NoAnswerModel>().is_some());
+}

@@ -158,6 +158,10 @@ pub fn recorded(path: &Path, expected: &str, size: u64) -> bool {
 
 /// Hash the retained file from offset zero, without reopening its path.
 pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
+    sha256_reader_with_hook(reader, || {})
+}
+fn sha256_reader_with_hook(reader: &mut (impl Read + Seek), hook: impl FnOnce()) -> Result<String> {
+    let mut hook = Some(hook);
     reader.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
@@ -167,6 +171,9 @@ pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
             break;
         }
         hash.update(&buffer[..n]);
+        if let Some(hook) = hook.take() {
+            hook();
+        }
     }
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -210,8 +217,10 @@ fn verify_with_hook(
     {
         return Ok(());
     }
-    after_open();
-    ensure!(sha256_reader(&mut file)? == expected, "model hash mismatch");
+    ensure!(
+        sha256_reader_with_hook(&mut file, after_open)? == expected,
+        "model hash mismatch"
+    );
     ensure!(
         before == Stamp::of(&file)? && before == Stamp::of(&regular(path, false)?)?,
         "model changed during verification"
@@ -317,11 +326,23 @@ mod tests {
     fn different_paths_verify_while_answer_hash_is_stalled() {
         let dir = tempfile::tempdir().unwrap();
         let answer = dir.path().join("answer.gguf");
-        let search = dir.path().join("search.gguf");
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let filename = fixture["embedding"]["file"].as_str().unwrap();
+        let search = dir.path().join(filename);
+        fs::copy(root.join(".assets").join(filename), &search)
+            .expect("fetch the fixture assets before Rust tests");
+        let pins = dir.path().join("pins.json");
+        fs::write(
+            &pins,
+            serde_json::json!({"embedding":fixture["embedding"]}).to_string(),
+        )
+        .unwrap();
+        // Search was verified by status, but its engine cache is still empty.
+        verify(&search,fixture["embedding"]["sha256"].as_str().unwrap(),fixture["embedding"]["size"].as_u64()).unwrap();
         fs::write(&answer, b"answer").unwrap();
-        fs::write(&search, b"search").unwrap();
         let answer_hash = crate::pipeline::file_sha256(&answer).unwrap();
-        let search_hash = crate::pipeline::file_sha256(&search).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let held = std::thread::spawn(move || {
@@ -334,29 +355,27 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let assets = dir.path().to_owned();
         let first_search = std::thread::spawn(move || {
-            done_tx.send(verify(&search, &search_hash, None)).unwrap();
+            let result = crate::engine::Engines::load_embedding(&assets, &pins, true)
+                .and_then(|engine| engine.vector("orbital archive retention", true).map(|_| ()));
+            done_tx.send(result).unwrap();
         });
-        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(30));
         release_tx.send(()).unwrap();
         held.join().unwrap().unwrap();
         first_search.join().unwrap();
         completed
             .expect("search verification waited behind answer hash")
             .unwrap();
-        let records = records_unlocked(&dir.path().join("search.gguf"));
+        let records = records_unlocked(&search);
         assert_eq!(
             records.entries.len(),
             2,
             "parallel saves must retain both records"
         );
         forget(&dir.path().join("answer.gguf")).unwrap();
-        assert_eq!(
-            records_unlocked(&dir.path().join("search.gguf"))
-                .entries
-                .len(),
-            1
-        );
+        assert_eq!(records_unlocked(&search).entries.len(), 1);
     }
 
     #[test]
