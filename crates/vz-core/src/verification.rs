@@ -6,16 +6,27 @@ use std::{
     collections::BTreeMap,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
-    sync::Mutex,
+    path::{Path, PathBuf},
+    sync::{Arc, LazyLock, Mutex},
     time::SystemTime,
 };
 
 const RECORD: &str = "models.verified.json";
-static LOCK: Mutex<()> = Mutex::new(());
+// Map access and record updates are short; neither lock spans a model hash.
+static PATH_LOCKS: LazyLock<Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(BTreeMap::new()));
+static RECORD_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
-struct Stamp {
+fn path_lock(path: &Path) -> Result<Arc<Mutex<()>>> {
+    let path = path.canonicalize()?;
+    let mut locks = PATH_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Ok(Arc::clone(locks.entry(path).or_default()))
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Stamp {
     size: u64,
     modified: SystemTime,
     identity: Option<(u64, u64)>,
@@ -78,7 +89,7 @@ impl Default for Records {
     }
 }
 
-fn records(path: &Path) -> Records {
+fn records_unlocked(path: &Path) -> Records {
     fs::read(path.parent().unwrap().join(RECORD))
         .ok()
         .and_then(|bytes| serde_json::from_slice::<Records>(&bytes).ok())
@@ -87,7 +98,10 @@ fn records(path: &Path) -> Records {
 }
 fn save(path: &Path, sha256: &str, stamp: Stamp) -> Result<()> {
     let dir = path.parent().context("model directory")?;
-    let mut entries = records(path);
+    let _guard = RECORD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut entries = records_unlocked(path);
     entries.entries.insert(
         path.file_name()
             .context("model filename")?
@@ -98,13 +112,17 @@ fn save(path: &Path, sha256: &str, stamp: Stamp) -> Result<()> {
             stamp,
         },
     );
+    write_records(dir, &entries)
+}
+
+fn write_records(dir: &Path, entries: &Records) -> Result<()> {
     let temp = dir.join(format!(".{RECORD}.{}", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&temp)?;
-        file.write_all(&serde_json::to_vec(&entries)?)?;
+        file.write_all(&serde_json::to_vec(entries)?)?;
         file.sync_all()?;
         drop(file);
         fs::rename(&temp, dir.join(RECORD))?;
@@ -114,8 +132,36 @@ fn save(path: &Path, sha256: &str, stamp: Stamp) -> Result<()> {
     result
 }
 
+/// A cheap identity snapshot for background verification result invalidation.
+pub fn stamp(path: &Path) -> Result<Stamp> {
+    Stamp::of(&regular(path, false)?)
+}
+
+/// Check only a saved verification record, without ever hashing.
+pub fn recorded(path: &Path, expected: &str, size: u64) -> bool {
+    let Ok(stamp) = stamp(path) else {
+        return false;
+    };
+    if stamp.size != size {
+        return false;
+    }
+    let _guard = RECORD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    path.file_name().is_some_and(|name| {
+        records_unlocked(path)
+            .entries
+            .get(name.to_string_lossy().as_ref())
+            .is_some_and(|entry| entry.sha256 == expected && entry.stamp == stamp)
+    })
+}
+
 /// Hash the retained file from offset zero, without reopening its path.
 pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
+    sha256_reader_with_hook(reader, || {})
+}
+fn sha256_reader_with_hook(reader: &mut (impl Read + Seek), hook: impl FnOnce()) -> Result<String> {
+    let mut hook = Some(hook);
     reader.seek(SeekFrom::Start(0))?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
@@ -125,6 +171,9 @@ pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
             break;
         }
         hash.update(&buffer[..n]);
+        if let Some(hook) = hook.take() {
+            hook();
+        }
     }
     Ok(format!("{:x}", hash.finalize()))
 }
@@ -132,7 +181,17 @@ pub fn sha256_reader(reader: &mut (impl Read + Seek)) -> Result<String> {
 /// Trust only an unchanged regular file with a record for the current pin.
 /// If the cache cannot be persisted, future calls still hash in full.
 pub fn verify(path: &Path, expected: &str, size: Option<u64>) -> Result<()> {
-    let _guard = LOCK
+    verify_with_hook(path, expected, size, || {})
+}
+
+fn verify_with_hook(
+    path: &Path,
+    expected: &str,
+    size: Option<u64>,
+    after_open: impl FnOnce(),
+) -> Result<()> {
+    let lock = path_lock(path)?;
+    let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut file = regular(path, false)?;
@@ -145,14 +204,23 @@ pub fn verify(path: &Path, expected: &str, size: Option<u64>) -> Result<()> {
         .file_name()
         .context("model filename")?
         .to_string_lossy();
-    if records(path)
+    let entries = {
+        let _guard = RECORD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        records_unlocked(path)
+    };
+    if entries
         .entries
         .get(key.as_ref())
         .is_some_and(|entry| entry.sha256 == expected && entry.stamp == before)
     {
         return Ok(());
     }
-    ensure!(sha256_reader(&mut file)? == expected, "model hash mismatch");
+    ensure!(
+        sha256_reader_with_hook(&mut file, after_open)? == expected,
+        "model hash mismatch"
+    );
     ensure!(
         before == Stamp::of(&file)? && before == Stamp::of(&regular(path, false)?)?,
         "model changed during verification"
@@ -171,7 +239,8 @@ pub fn record_verified(
     staged: &File,
     before_hash: &fs::Metadata,
 ) -> Result<()> {
-    let _guard = LOCK
+    let lock = path_lock(path)?;
+    let _guard = lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let stamp = Stamp::of(staged)?;
@@ -185,6 +254,22 @@ pub fn record_verified(
         eprintln!("Could not save model verification record: {error:#}");
     }
     Ok(())
+}
+
+/// Remove the verification record after deleting an unused model. The caller
+/// serialises acquisition/deletion; a missing model need not canonicalise.
+pub fn forget(path: &Path) -> Result<()> {
+    let _guard = RECORD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut entries = records_unlocked(path);
+    entries.entries.remove(
+        path.file_name()
+            .context("model filename")?
+            .to_string_lossy()
+            .as_ref(),
+    );
+    write_records(path.parent().context("model directory")?, &entries)
 }
 
 // Open first, without following links, then inspect the opened handle. Windows
@@ -236,6 +321,67 @@ fn is_regular(metadata: &fs::Metadata) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn different_paths_verify_while_answer_hash_is_stalled() {
+        let dir = tempfile::tempdir().unwrap();
+        let answer = dir.path().join("answer.gguf");
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let filename = fixture["embedding"]["file"].as_str().unwrap();
+        let search = dir.path().join(filename);
+        fs::copy(root.join(".assets").join(filename), &search)
+            .expect("fetch the fixture assets before Rust tests");
+        let pins = dir.path().join("pins.json");
+        fs::write(
+            &pins,
+            serde_json::json!({"embedding":fixture["embedding"]}).to_string(),
+        )
+        .unwrap();
+        // Search was verified by status, but its engine cache is still empty.
+        verify(
+            &search,
+            fixture["embedding"]["sha256"].as_str().unwrap(),
+            fixture["embedding"]["size"].as_u64(),
+        )
+        .unwrap();
+        fs::write(&answer, b"answer").unwrap();
+        let answer_hash = crate::pipeline::file_sha256(&answer).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let held = std::thread::spawn(move || {
+            verify_with_hook(&answer, &answer_hash, None, || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let assets = dir.path().to_owned();
+        let first_search = std::thread::spawn(move || {
+            let result = crate::engine::Engines::load_embedding(&assets, &pins, true)
+                .and_then(|engine| engine.vector("orbital archive retention", true).map(|_| ()));
+            done_tx.send(result).unwrap();
+        });
+        let completed = done_rx.recv_timeout(std::time::Duration::from_secs(30));
+        release_tx.send(()).unwrap();
+        held.join().unwrap().unwrap();
+        first_search.join().unwrap();
+        completed
+            .expect("search verification waited behind answer hash")
+            .unwrap();
+        let records = records_unlocked(&search);
+        assert_eq!(
+            records.entries.len(),
+            2,
+            "parallel saves must retain both records"
+        );
+        forget(&dir.path().join("answer.gguf")).unwrap();
+        assert_eq!(records_unlocked(&search).entries.len(), 1);
+    }
 
     #[test]
     fn record_is_used_and_invalidated() {

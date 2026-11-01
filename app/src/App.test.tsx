@@ -6,7 +6,8 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { version } from "../package.json";
 
-const { invoke, modelsInvoke } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn() }));
+const { invoke, modelsInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
+vi.mock("@tauri-apps/api/event", () => ({listen: async (_: string, callback: () => void) => { modelEvents.callback = callback; return () => { if (modelEvents.callback === callback) modelEvents.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args: unknown) => command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
   Channel: class { onmessage = (_: unknown) => {}; },
@@ -74,7 +75,7 @@ it("indexes with progress then runs a search and a streaming chat", async () => 
     if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "thirty days" }, score: 1 }];
     if (command === "pipeline_ask") {
       (params.tokens as { onmessage: (p: unknown) => void }).onmessage("Thirty days [1].");
-      return { text: "Thirty days [1].", citations: [{ number: 1, doc_id: "doc", page: 1 }] };
+      return { kind: "answer", text: "Thirty days [1].", citations: [{ number: 1, doc_id: "doc", page: 1 }] };
     }
     throw new Error("Unexpected command");
   });
@@ -243,8 +244,8 @@ it("asks to check again when no Update is stored", async () => {
 it("shows model pins and disables the pipeline without ever downloading on startup", async () => {
   modelsInvoke.mockResolvedValue(missingModels);
   render(<StrictMode><App /></StrictMode>);
-  expect(await screen.findByLabelText("Models")).toHaveTextContent("Embedding model · 100 bytes · MIT");
-  expect(screen.getByText("Models needed: download or import them first.")).toBeInTheDocument();
+  expect(await screen.findByLabelText("Models")).toHaveTextContent("Search model, 1 MB · Embedding model · MIT");
+  expect(screen.getByText("Search model needed: download or import it first.")).toBeInTheDocument();
   for (const name of ["Index folder", "Search", "Ask"]) expect(screen.getByRole("button", { name })).toBeDisabled();
   expect(modelsInvoke.mock.calls.map(([command]) => command)).toEqual(["models_status"]);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -272,7 +273,7 @@ it("downloads only on click, streams progress, cancels, clears failure progress 
   });
   render(<App />);
   await screen.findByLabelText("Models");
-  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   expect(await screen.findByText(/40 \/ 100 bytes/)).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Search" })).toBeDisabled();
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
@@ -348,20 +349,20 @@ it.each([readyModels, missingModels])("shows only Checking models until the firs
   expect(panel).toHaveTextContent(/^Checking models…$/);
   expect(within(panel).queryByRole("button")).not.toBeInTheDocument();
   expect(within(panel).queryByRole("list")).not.toBeInTheDocument();
-  expect(screen.queryByText("Models needed: download or import them first.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Search model needed: download or import it first.")).not.toBeInTheDocument();
   await userEvent.type(screen.getByLabelText("Folder"), "/docs");
   for (const name of ["Index folder", "Search", "Ask"]) expect(screen.getByRole("button", { name })).toBeDisabled();
   expect(modelsInvoke).toHaveBeenCalledExactlyOnceWith("models_status", undefined);
   await act(async () => pending.resolve(status));
   expect(screen.queryByText("Checking models…")).not.toBeInTheDocument();
-  expect(!!screen.queryByText("Models needed: download or import them first.")).toBe(!status.ready);
+  expect(!!screen.queryByText("Search model needed: download or import it first.")).toBe(!status.ready);
 });
 
 it("offers retry after a startup status error without claiming models are missing", async () => {
   modelsInvoke.mockRejectedValue("Cannot read model files");
   render(<App />);
   expect(await screen.findByText("Cannot read model files")).toBeInTheDocument();
-  expect(screen.queryByText("Models needed: download or import them first.")).not.toBeInTheDocument();
+  expect(screen.queryByText("Search model needed: download or import it first.")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   modelsInvoke.mockResolvedValue(readyModels);
@@ -369,27 +370,25 @@ it("offers retry after a startup status error without claiming models are missin
   expect(screen.queryByLabelText("Models")).not.toBeInTheDocument();
 });
 
-it("keeps per-file download states from the Channel until status refresh, without polling", async () => {
+it("keeps Channel download states across models_changed until acquisition ends", async () => {
   const pending = deferred();
   const status = { ready: false, files: [missingModels.files[0], { ...missingModels.files[0], name: "Chat model", file: "chat.gguf", verified: true }] };
   modelsInvoke.mockImplementation(async command => command === "models_status" ? status : pending.promise);
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   const channel = modelsInvoke.mock.calls.find(([command]) => command === "models_download")![1].progress;
   const send = (file: string, downloaded: number) => act(() => channel.onmessage({ file, downloaded, total: 100, attempt: 1 }));
   send("test.gguf", 40);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloading");
-  expect(screen.getByText(/Chat model/)).toHaveTextContent("Verified");
+  await act(async () => { modelEvents.callback?.(); });
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloading");
   send("test.gguf", 100);
-  send("chat.gguf", 20);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
-  expect(screen.getByText(/Chat model/)).toHaveTextContent("Downloading");
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(1);
-  await act(async () => pending.resolve(undefined));
   expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+  await act(async () => pending.resolve(undefined));
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(3);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
-  expect(screen.getByText(/Chat model/)).toHaveTextContent("Verified");
 });
 
 it("closes the Models panel after a ready import and shows one plain success line", async () => {
@@ -422,7 +421,7 @@ it.each(["Index folder", "Search", "Ask"])("keeps the self-test label while %s r
 it.each(["lighthouse.txt", undefined, null, ""])("renders filenames or the ID fallback in both hits and citations (%j)", async file_name => {
   invoke.mockImplementation(async command => {
     if (command === "pipeline_search") return [{ file_name, chunk: { chunk_id: "chunk", doc_id: "1234567890", page: 2, text: "lighthouse" }, score: 1 }];
-    if (command === "pipeline_ask") return { text: "Answer [1]", citations: [{ file_name, number: 1, doc_id: "1234567890", page: 2 }] };
+    if (command === "pipeline_ask") return { kind: "answer", text: "Answer [1]", citations: [{ file_name, number: 1, doc_id: "1234567890", page: 2 }] };
     return { available: false };
   });
   render(<App />);
@@ -468,7 +467,7 @@ it.each(["Search", "Ask"])("clears busy text when %s fails before any result or 
 });
 
 
-it("retains completed files after cancellation until the next status refresh", async () => {
+it("refreshes status and clears Channel labels when acquisition is cancelled", async () => {
   const pending = deferred();
   const status = { ready: false, files: [missingModels.files[0], { ...missingModels.files[0], name: "Chat model", file: "chat.gguf" }] };
   let attempts = 0;
@@ -484,17 +483,16 @@ it("retains completed files after cancellation until the next status refresh", a
   });
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
-  expect(screen.getByText(/Chat model/)).toHaveTextContent("Downloading");
+  await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   await screen.findByText("Model acquisition cancelled");
-  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
-  expect(screen.getByText(/Chat model/)).toHaveTextContent("Needed");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
+  expect(screen.queryByText(/Chat model/)).not.toBeInTheDocument();
   expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(1);
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(3);
 });
 
 it.each([false, true])("recovers from import rejection/cancellation (cancel=%s)", async cancel => {
@@ -533,7 +531,7 @@ it.each([false, true])("recovers from import rejection/cancellation (cancel=%s)"
   expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_import")).toHaveLength(2);
 });
 
-it("retains Downloaded after download success with a failed status refresh and resets on successful refresh", async () => {
+it("clears Channel labels at acquisition end even when its status refresh fails", async () => {
   let checks = 0;
   modelsInvoke.mockImplementation(async (command, args) => {
     if (command === "models_status") {
@@ -546,9 +544,9 @@ it("retains Downloaded after download success with a failed status refresh and r
   });
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   await screen.findByText("Status refresh failed");
-  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
   expect(screen.queryByText(/100 \/ 100 bytes/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
@@ -556,7 +554,7 @@ it("retains Downloaded after download success with a failed status refresh and r
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
-  expect(checks).toBe(3);
+  expect(checks).toBe(4);
 });
 
 it.each(["Search", "Ask"])("clears the previous result when %s starts, before it completes", async name => {
@@ -566,7 +564,7 @@ it.each(["Search", "Ask"])("clears the previous result when %s starts, before it
     if (command === "update_check") return { available: false };
     if (next) return pending.promise;
     if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
-    if (command === "pipeline_ask") return { text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
+    if (command === "pipeline_ask") return { kind: "answer", text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
   });
   render(<App />);
   await waitFor(() => expect(screen.getByRole("button", { name })).toBeEnabled());
@@ -587,7 +585,7 @@ it.each(["Ask", "Search"])("clears the previous %s result when Index folder star
   invoke.mockImplementation(async command => {
     if (command === "pipeline_index") return pending.promise;
     if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
-    if (command === "pipeline_ask") return { text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
+    if (command === "pipeline_ask") return { kind: "answer", text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
     return { available: false };
   });
   render(<App />);
@@ -617,7 +615,7 @@ it("ignores settled Ask tokens while Search runs and after its results arrive", 
   await waitFor(() => expect(screen.getByRole("button", { name: "Ask" })).toBeEnabled());
   await userEvent.click(screen.getByRole("button", { name: "Ask" }));
   const channel = invoke.mock.calls.find(([command]) => command === "pipeline_ask")![1].tokens;
-  await act(async () => askPending.resolve({ text: "Completed answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Old source.txt" }] }));
+  await act(async () => askPending.resolve({ kind: "answer", text: "Completed answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Old source.txt" }] }));
   const answer = screen.getByText("Completed answer");
   await userEvent.click(screen.getByRole("button", { name: "Search" }));
   expect(answer).toBeEmptyDOMElement();
@@ -634,14 +632,15 @@ it("ignores settled Ask tokens while Search runs and after its results arrive", 
 });
 
 
-it("shows the selected model and full download total", async () => {
+it("offers only the search model on first run", async () => {
   modelsInvoke.mockResolvedValue({ready: false, files: [
     {name: "bge-m3", file: "embedding.gguf", size: 634553760, license: "MIT", source: "embedding-source", verified: false},
     {name: "qwen3-4b-instruct-2507", file: "chat.gguf", size: 2497280448, license: "Apache-2.0", source: "chat-source", verified: false}
   ]});
   render(<App />);
-  expect(await screen.findByText(/qwen3-4b-instruct-2507/)).toHaveTextContent("2,497,280,448 bytes");
-  expect(screen.getByRole("button", {name: /Download models/})).toHaveTextContent("3,131,834,208 bytes total");
+  expect(await screen.findByText(/Search model, 635 MB/)).toBeInTheDocument();
+  expect(screen.queryByText(/qwen3-4b-instruct-2507/)).not.toBeInTheDocument();
+  expect(screen.getByRole("button", {name: /Download search model/})).toHaveTextContent("635 MB");
 });
 
 it("disables Search and Ask on a recipe mismatch at launch", async () => {
@@ -721,7 +720,7 @@ it("shows checking and verified download stages and a completion message", async
   modelsInvoke.mockImplementation(async command => command === "models_status" ? missingModels : pending.promise);
   render(<App />);
   await screen.findByText(/Embedding model/);
-  await userEvent.click(screen.getByRole("button", { name: /Download models/ }));
+  await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   const channel = modelsInvoke.mock.calls.find(([command]) => command === "models_download")![1].progress;
   act(() => channel.onmessage({file: "test.gguf", stage: "checking"}));
   expect(screen.getByText("Checking test.gguf…")).toBeInTheDocument();
@@ -732,4 +731,166 @@ it("shows checking and verified download stages and a completion message", async
   await act(async () => pending.resolve(undefined));
   expect(await screen.findByText("Models downloaded and verified.")).toBeInTheDocument();
   expect(screen.queryByLabelText("Models")).not.toBeInTheDocument();
+});
+
+const answerPin = {name:"Small local model", file:"answer.gguf", sha256:"small",size:2_000_000_000,license:"Apache-2.0",source:"fixture",verified:true,installed_bytes:2_000_000_000};
+const answerTier = {tier_index:0,min_ram_gb:0,pin:answerPin,memory:{bytes:4_000_000_000,measured:false,source:null}};
+it("renders the one local answer path for no_answer without a failure", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"none"},offer:[answerTier]});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button", {name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  expect(await screen.findByText("Get written answers on this computer.")).toBeInTheDocument();
+  expect(screen.getByText(/uses about 4.0 GB of memory \(estimate\)/)).toHaveTextContent("Works offline. Search keeps working without it.");
+  expect(screen.getByText("Disk space needed: 2.2 GB")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByText(/API key|Claude|Connect another app/)).not.toBeInTheDocument();
+});
+
+it.each(["downloading","checking","paused","failed"])("keeps Search and the active answer usable during target %s", async state => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin},target:{pin:{...answerPin,sha256:"new"},state},offer:[answerTier]});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Search"})).toBeEnabled());
+  expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled();
+});
+
+it("refreshes background checking from models_changed without polling", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"checking",pin:answerPin}});
+  render(<App />);
+  expect(await screen.findByText("Checking your answer model")).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin}});
+  await act(async () => { modelEvents.callback?.(); });
+  await waitFor(() => expect(screen.queryByText("Checking your answer model")).not.toBeInTheDocument());
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+});
+
+it("sends only the transfer cancel while adding answers and keeps Search enabled", async () => {
+  const pending = deferred();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},offer:[answerTier]});
+  invoke.mockImplementation(command => command === "pipeline_ask" ? Promise.resolve({kind:"no_answer"}) : command === "answer_add" ? pending.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  await userEvent.click(await screen.findByRole("button",{name:"Add answer model"}));
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled();
+  await userEvent.click(screen.getByRole("button",{name:"Cancel"}));
+  expect(modelsInvoke).toHaveBeenCalledWith("models_cancel",{kind:"transfer"});
+  await act(async () => pending.resolve(undefined));
+});
+
+it("keeps import failures visible while the verified search model remains usable", async () => {
+  modelsInvoke.mockImplementation(async command => command === "models_status" ? readyModels : [{file:"answer.gguf",result:"sha256 mismatch"}]);
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Search"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Import from a folder"}));
+  await userEvent.type(screen.getByLabelText("Model folder"),"/offline/models");
+  await userEvent.click(screen.getByRole("button",{name:"Import models"}));
+  expect(await screen.findByText("answer.gguf: sha256 mismatch")).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled();
+  expect(screen.queryByText("Models imported and verified.")).not.toBeInTheDocument();
+});
+
+it.each(["ready", "failed"])("clears checking Ask state when models_changed reports %s", async state => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"checking",pin:answerPin}});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"checking"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(screen.getAllByText("Checking your answer model")).toHaveLength(1);
+  expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state,pin:answerPin}});
+  await act(async () => { modelEvents.callback?.(); });
+  await waitFor(() => expect(screen.queryByText("Checking your answer model")).not.toBeInTheDocument());
+  if (state === "failed") expect(screen.getByText(/Your answer model could not be checked/)).toBeInTheDocument();
+});
+
+it("shows Checking during a cold Ask when verification could not be recorded", async () => {
+  const pending = deferred();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin},files:[{...answerPin,verified:false}]});
+  invoke.mockImplementation(command => command === "pipeline_ask" ? pending.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(screen.getByRole("status")).toHaveTextContent("Checking your answer model");
+  await act(async () => pending.resolve({kind:"answer",text:"Thirty days [1].",citations:[{number:1,doc_id:"doc",page:1}]}));
+  expect(screen.getByRole("status")).not.toHaveTextContent("Checking your answer model");
+  expect(screen.getByText("Thirty days [1].")).toBeInTheDocument();
+});
+
+
+it("offers every eligible tier largest first and adds Qwen3-4B directly on a search-only 64 GiB PC", async () => {
+  const small = {...answerTier, pin:{...answerPin,name:"Qwen3-4B"}};
+  const medium = {...answerTier,tier_index:1,min_ram_gb:16,pin:{...answerPin,name:"Ministral 3 8B",size:5_000_000_000},memory:{bytes:12_000_000_000,measured:false,source:null}};
+  const large = {...answerTier,tier_index:2,min_ram_gb:64,pin:{...answerPin,name:"Qwen3.6",size:20_000_000_000},memory:{bytes:39_000_000_000,measured:true,source:"measured"}};
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},ram_bytes:64 * 2**30,offer:[small,medium,large]});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  const buttons = await screen.findAllByRole("button",{name:"Add answer model"});
+  expect(buttons).toHaveLength(3);
+  expect(buttons.map(button => button.parentElement?.textContent)).toEqual([
+    expect.stringContaining("Qwen3.6"),expect.stringContaining("Ministral 3 8B"),expect.stringContaining("Qwen3-4B")
+  ]);
+  for (const button of buttons) {
+    expect(button.parentElement).toHaveTextContent("Disk space needed:");
+    expect(button.parentElement).toHaveTextContent("of memory");
+  }
+  await userEvent.click(buttons[2]);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("answer_add",{tierIndex:0}));
+  expect(invoke.mock.calls.filter(([command]) => command === "answer_add")).toEqual([["answer_add",{tierIndex:0}]]);
+});
+
+it("refreshes a rejected answer_switch and re-enables model controls", async () => {
+  let reject!: (cause: unknown) => void;
+  const pending = {promise:new Promise((_, fail) => {reject = fail;}),reject:(cause: unknown) => reject(cause)};
+  const initial = {...readyModels,answer:{state:"ready",pin:{...answerPin,size:8_000_000_000}},offer:[answerTier]};
+  modelsInvoke.mockResolvedValue(initial);
+  invoke.mockImplementation(command => command === "answer_switch" ? pending.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Use a smaller model"}));
+  await userEvent.click(screen.getByRole("button",{name:"Switch to Small local model"}));
+  modelsInvoke.mockResolvedValue({...initial,target:{pin:answerPin,state:"verified"}});
+  await act(async () => { modelEvents.callback?.(); });
+  expect(screen.getByRole("button",{name:"Turn off"})).toBeDisabled();
+  modelsInvoke.mockResolvedValue(initial);
+  await act(async () => pending.reject("Switch cancelled"));
+  expect(await screen.findByText("Switch cancelled")).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Turn off"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Switch to Small local model"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Import from a folder"})).toBeEnabled();
+});
+
+it("shows installed RAM as 48 GB in the large-model warning", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:{...answerPin,name:"qwen3.6-35b-a3b"}},ram_bytes:48 * 2**30,offer:[answerTier]});
+  render(<App />);
+  expect(await screen.findByText("This model uses about 39 GB of memory on a PC with 48 GB. A smaller model is available.")).toBeInTheDocument();
+});
+
+
+it.each(["downloading", "checking"])("polls %s progress at most every 500 ms and stops for idle targets", async (state) => {
+  modelsInvoke.mockResolvedValue({...readyModels,target:{pin:answerPin,state}});
+  vi.useFakeTimers();
+  try {
+    await act(async () => { render(<App />); });
+    const checks = () => modelsInvoke.mock.calls.filter(([command]) => command === "models_status").length;
+    const initial = checks();
+    await act(async () => { await vi.advanceTimersByTimeAsync(499); });
+    expect(checks()).toBe(initial);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(checks()).toBe(initial + 1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(checks()).toBe(initial + 3);
+    for (const idle of ["paused", "failed", "verified", undefined]) {
+      modelsInvoke.mockResolvedValue({...readyModels, target: idle ? {pin:answerPin,state:idle} : undefined});
+      await act(async () => { modelEvents.callback?.(); });
+      const stopped = checks();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(checks()).toBe(stopped);
+    }
+  } finally { vi.useRealTimers(); }
 });

@@ -8,7 +8,10 @@ compile_error!("ui-test is restricted to debug builds");
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
 mod bundled_library;
 mod desktop_pipeline;
+#[cfg_attr(test, allow(dead_code))]
 mod models;
+#[cfg_attr(test, allow(dead_code))]
+mod settings;
 
 #[cfg(not(test))]
 mod desktop;
@@ -40,6 +43,10 @@ mod tests {
             "models_download",
             "models_cancel",
             "models_import",
+            "answer_add",
+            "answer_switch",
+            "answer_turn_off",
+            "delete_unused_model",
         ] {
             assert!(
                 authority

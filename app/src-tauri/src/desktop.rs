@@ -1,10 +1,24 @@
-use crate::{desktop_pipeline, models};
+use crate::{desktop_pipeline, models, settings};
 
 // The overlap smoke test must not depend on Search being slower than its UI poll.
 #[cfg(feature = "smoke-test")]
 static HOLD_NEXT_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 #[cfg(feature = "smoke-test")]
 static RELEASE_SEARCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(feature = "smoke-test")]
+static FAIL_NEXT_TRANSFER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
+static HOLD_NEXT_TRANSFER: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
+static RELEASE_TRANSFER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+#[cfg(feature = "smoke-test")]
+static HOLD_NEXT_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "smoke-test")]
+static RELEASE_INDEX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
 // Keep the checked Update, including its version and signature, until consent.
 #[derive(Default)]
@@ -110,6 +124,19 @@ fn self_test<R: tauri::Runtime>(
                 HOLD_NEXT_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
             } else if checkpoint == "release-search" {
                 RELEASE_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if checkpoint == "hold-next-index" {
+                HOLD_NEXT_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else if checkpoint == "release-index" {
+                RELEASE_INDEX.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if checkpoint == "fail-next-transfer" {
+                FAIL_NEXT_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if checkpoint == "hold-next-transfer" {
+                HOLD_NEXT_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
+            } else if checkpoint == "release-transfer" {
+                RELEASE_TRANSFER.store(true, std::sync::atomic::Ordering::SeqCst);
             }
             if matches!(checkpoint.as_str(), "guard-before" | "guard-after") {
                 static BEFORE: std::sync::Mutex<Option<serde_json::Value>> =
@@ -321,7 +348,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                 let fixture = std::env::var("VZ_PIPELINE_FIXTURE").unwrap_or_else(|_| {
                     std::env::current_dir().expect("cwd").join("spike/fixtures/documents").to_string_lossy().into_owned()
                 });
-                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some()});
+                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok(), "importFolder": std::env::var("VZ_SMOKE_IMPORT_FOLDER").ok()});
                 webview.eval(format!("window.__VZ_SMOKE__ = {config};\n{}", include_str!("../../../scripts/pipeline-smoke.js"))).expect("pipeline smoke clicks");
             } else { webview.eval(
                 "const timer = setInterval(() => { const button = document.querySelector('button'); if (button) { clearInterval(timer); button.click(); } }, 50);"
@@ -338,7 +365,11 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         models_status,
         models_download,
         models_cancel,
-        models_import
+        models_import,
+        answer_add,
+        answer_switch,
+        answer_turn_off,
+        delete_unused_model
     ])
 }
 
@@ -412,6 +443,7 @@ pub(crate) fn run() {
         ) {
             use tauri::Manager;
             app.state::<models::Operations>().cancel();
+            app.state::<models::Operations>().cancel_transfer();
         }
     });
 }
@@ -475,10 +507,31 @@ async fn pipeline_index<R: tauri::Runtime>(
     models::validate_folder(&folder)?;
     let guard = operations.acquire()?;
     let cancel = operations.start();
+    #[cfg(feature = "smoke-test")]
+    let hold =
+        smoke_test_requested() && HOLD_NEXT_INDEX.swap(false, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(feature = "smoke-test")]
+    if hold {
+        RELEASE_INDEX.store(false, std::sync::atomic::Ordering::SeqCst);
+        tauri::Manager::get_webview_window(&app, "main")
+            .expect("main window")
+            .eval("window.__VZ_SMOKE__.indexLocked = true")
+            .map_err(|e| e.to_string())?;
+    }
     let data = data_root(&app)?;
     let (_, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
         let mut cache = guard;
+        #[cfg(feature = "smoke-test")]
+        if hold {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !RELEASE_INDEX.load(std::sync::atomic::Ordering::SeqCst) && !*cancel.borrow() {
+                if std::time::Instant::now() >= deadline {
+                    return Err("Smoke index release timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+        }
         let mut run = || -> anyhow::Result<serde_json::Value> {
             let engines = cache.get_or_load(false, || {
                 vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())
@@ -578,6 +631,27 @@ async fn pipeline_ask<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_ask_total");
     let guard = operations.acquire()?;
+    #[cfg(feature = "smoke-test")]
+    if smoke_test_requested() {
+        tauri::Manager::get_webview_window(&app, "main")
+            .expect("main window")
+            .eval("window.__VZ_SMOKE__.askLocked = true")
+            .map_err(|e| e.to_string())?;
+    }
+    let (manifest, settings) = manifest_selection(&app)?;
+    let answers = manifest.answers().map_err(|e| e.to_string())?;
+    let Some(pin) = answers
+        .iter()
+        .find(|pin| Some(pin.sha256.as_str()) == settings.selected())
+    else {
+        return Ok(serde_json::json!({"kind":"no_answer"}));
+    };
+    match answer_state(&app, &operations, pin).as_str() {
+        "checking" => return Ok(serde_json::json!({"kind":"checking"})),
+        "ready" => {}
+        state => return Ok(serde_json::json!({"kind":"failed","state":state})),
+    }
+
     desktop_pipeline::require_index(&vz_core::active_index::resolve(&data_root(&app)?))?;
     let (root, assets, pins) = pipeline_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
@@ -599,6 +673,7 @@ async fn pipeline_ask<R: tauri::Runtime>(
             })?;
             let names = desktop_pipeline::file_names(&state);
             let mut value = serde_json::to_value(answer)?;
+            value["kind"] = serde_json::json!("answer");
             if let Some(citations) = value["citations"].as_array_mut() {
                 for citation in citations {
                     citation["file_name"] = citation["doc_id"]
@@ -673,74 +748,393 @@ fn model_pin_path<R: tauri::Runtime>(
             .join("spike/fixtures/models.json")
     })
 }
+fn manifest_selection<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<(models::Manifest, settings::Settings), String> {
+    let manifest = models::Manifest::read(&model_pin_path(app)?).map_err(|e| format!("{e:#}"))?;
+    let settings = settings::migrate(
+        &model_dir(app)?,
+        &manifest.embedding,
+        &manifest.answers().map_err(|e| e.to_string())?,
+        models::total_ram_bytes().map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    Ok((manifest, settings))
+}
 fn selected_model_pins<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, String> {
-    models::selected_pins(
-        &model_pin_path(app)?,
-        models::total_ram_bytes().map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{e:#}"))
+    let (manifest, settings) = manifest_selection(app)?;
+    manifest
+        .selected(settings.selected())
+        .map_err(|e| e.to_string())
 }
-fn model_pins<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Vec<models::Pin>, String> {
-    models::pins(&model_pin_path(app)?).map_err(|e| format!("{e:#}"))
+
+fn answer_state<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    operations: &models::Operations,
+    pin: &models::Pin,
+) -> String {
+    let Ok(dir) = model_dir(app) else {
+        return "failed".into();
+    };
+    let path = dir.join(&pin.file);
+    let Ok(stamp) = vz_core::verification::stamp(&path) else {
+        return "missing".into();
+    };
+    if vz_core::verification::recorded(&path, &pin.sha256, pin.size) {
+        return "ready".into();
+    }
+    let mut checks = operations.checks.lock().unwrap();
+    if let Some((checked_stamp, state)) = checks.get(&pin.sha256) {
+        if *checked_stamp == stamp {
+            return state.clone();
+        }
+    }
+    checks.insert(pin.sha256.clone(), (stamp.clone(), "checking".into()));
+    drop(checks);
+    let checks = operations.checks.clone();
+    let pin = pin.clone();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        use tauri::Emitter;
+        let verified = models::verified(&dir, &pin);
+        let mut checks = checks.lock().unwrap();
+        if vz_core::verification::stamp(&path).ok().as_ref() == Some(&stamp)
+            && checks
+                .get(&pin.sha256)
+                .is_some_and(|(current, _)| *current == stamp)
+        {
+            checks.insert(
+                pin.sha256,
+                (stamp, if verified { "ready" } else { "failed" }.into()),
+            );
+        }
+        drop(checks);
+        let _ = app.emit("models_changed", ());
+    });
+    "checking".into()
 }
+
 #[tauri::command]
 async fn models_status<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
 ) -> Result<serde_json::Value, String> {
     let dir = model_dir(&app)?;
-    let selected = selected_model_pins(&app)?;
-    let pins = models::pins_from_value(&selected).map_err(|e| e.to_string())?;
+    let (manifest, settings) = manifest_selection(&app)?;
+    let selected = manifest
+        .selected(settings.selected())
+        .map_err(|e| e.to_string())?;
     let root = vz_core::active_index::resolve(&data_root(&app)?);
-    tauri::async_runtime::spawn_blocking(move || -> Result<serde_json::Value, String> {
-        let mut status = models::status(&dir, &pins);
-        status["last_indexed_folder"] =
-            serde_json::json!(vz_core::active_index::last_indexed_folder(&root));
-        status["needs_reindex"] = serde_json::json!(
-            vz_core::active_index::needs_pointer_repair(&data_root(&app)?)
-                || models::needs_reindex(&root, &selected).map_err(|e| e.to_string())?
-        );
-        Ok(status)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    let search = manifest.embedding.clone();
+    let search_dir = dir.clone();
+    let verified =
+        tauri::async_runtime::spawn_blocking(move || models::verified(&search_dir, &search))
+            .await
+            .map_err(|e| e.to_string())?;
+    let answers = manifest.answers().map_err(|e| e.to_string())?;
+    let active = answers
+        .iter()
+        .find(|pin| Some(pin.sha256.as_str()) == settings.selected());
+    let answer = match active {
+        Some(pin) => {
+            serde_json::json!({"state":answer_state(&app, &operations, pin),"pin":pin.metadata})
+        }
+        None => serde_json::json!({"state":"none"}),
+    };
+    let files: Vec<_> = std::iter::once(&manifest.embedding)
+        .chain(answers.iter())
+        .map(|pin| {
+            let mut value = pin.metadata.clone();
+            value["verified"] = serde_json::json!(vz_core::verification::recorded(
+                &dir.join(&pin.file),
+                &pin.sha256,
+                pin.size
+            ));
+            value["installed_bytes"] =
+                serde_json::json!(models::regular(&dir.join(&pin.file), false)
+                    .and_then(|file| Ok(file.metadata()?.len()))
+                    .unwrap_or(0));
+            value["partial_bytes"] = serde_json::json!(models::regular(
+                &dir.join(format!("{}.partial", pin.file)),
+                false
+            )
+            .and_then(|file| Ok(file.metadata()?.len()))
+            .unwrap_or(0));
+            value
+        })
+        .collect();
+    let ram = models::total_ram_bytes().map_err(|e| e.to_string())?;
+    Ok(
+        serde_json::json!({"ready":verified,"search":{"pin":manifest.embedding.metadata,"verified":verified},"answer":answer,
+        "target":operations.target.read().unwrap().clone(),"offer":manifest.offer(ram),"ram_bytes":ram,"files":files,
+        "last_indexed_folder":vz_core::active_index::last_indexed_folder(&root),
+        "needs_reindex":vz_core::active_index::needs_pointer_repair(&data_root(&app)?) || models::needs_reindex(&root,&selected).map_err(|e| e.to_string())?}),
+    )
 }
+
+fn transfer_target<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    operations: &models::Operations,
+    pin: &models::Pin,
+    state: &str,
+    progress: Option<serde_json::Value>,
+) {
+    use tauri::Emitter;
+    if operations.set_target(pin, state, progress) {
+        let _ = app.emit("models_changed", ());
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn acquire_pin<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    operations: &models::Operations,
+    pin: &models::Pin,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    source: Option<std::fs::File>,
+    progress: &mut (impl FnMut(serde_json::Value) + Send),
+    protects_in_use: bool,
+) -> Result<(), String> {
+    // Exercise the real downloader's connection-failure path in installed smoke.
+    #[cfg(feature = "smoke-test")]
+    let failed_pin = if smoke_test_requested()
+        && FAIL_NEXT_TRANSFER.swap(false, std::sync::atomic::Ordering::SeqCst)
+    {
+        let mut failed = pin.clone();
+        failed.metadata["url"] = serde_json::json!("https://127.0.0.1:1/unreachable.gguf");
+        Some(failed)
+    } else {
+        None
+    };
+    #[cfg(feature = "smoke-test")]
+    let pin = failed_pin.as_ref().unwrap_or(pin);
+    let result = async {
+        let dir = model_dir(app)?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+        if !settings.initialised() {
+            settings.select(None);
+            settings.save(&dir).map_err(|e| e.to_string())?;
+        }
+        #[cfg(feature = "smoke-test")]
+        if smoke_test_requested()
+            && HOLD_NEXT_TRANSFER.swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            transfer_target(app, operations, pin, "downloading", None);
+            RELEASE_TRANSFER.store(false, std::sync::atomic::Ordering::SeqCst);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !RELEASE_TRANSFER.load(std::sync::atomic::Ordering::SeqCst) {
+                if *cancel.borrow() {
+                    return Err(
+                        "Model acquisition cancelled. Partial download kept for resume".into(),
+                    );
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err("Smoke transfer release timed out".into());
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+            }
+            // Release and Cancel can arrive in the same scheduler turn.
+            if *cancel.borrow() {
+                return Err("Model acquisition cancelled. Partial download kept for resume".into());
+            }
+        }
+        transfer_target(app, operations, pin, "checking", None);
+        let check_dir = dir.clone();
+        let check_pin = pin.clone();
+        let verified =
+            tauri::async_runtime::spawn_blocking(move || models::verified(&check_dir, &check_pin))
+                .await
+                .map_err(|e| e.to_string())?;
+        if !verified {
+            let needed = if source.is_some() {
+                pin.size.saturating_add(pin.size.div_ceil(10))
+            } else {
+                models::space_needed(&dir, std::slice::from_ref(pin), false)
+                    .map_err(|e| e.to_string())?
+            };
+            if let Err(error) = models::check_space(&dir, needed) {
+                transfer_target(app, operations, pin, "failed", None);
+                return Err(error.to_string());
+            }
+            transfer_target(app, operations, pin, "downloading", None);
+            let client = models::client().map_err(|e| e.to_string())?;
+            let source = match source {
+                Some(file) => models::Source::Import(file),
+                None => models::Source::Download(&client),
+            };
+            let result = models::stage_verify_promote_guarded(
+                &dir,
+                pin,
+                source,
+                cancel.clone(),
+                &mut |value| {
+                    let state = value["stage"].as_str().unwrap_or("downloading");
+                    transfer_target(app, operations, pin, state, Some(value.clone()));
+                    #[cfg(feature = "smoke-test")]
+                    if smoke_test_requested()
+                        && (value["stage"].is_string() || value["downloaded"] == 0)
+                    {
+                        println!("VECTORAIZ_MODEL_TRANSFER: {value}");
+                    }
+                    progress(value);
+                },
+                if protects_in_use {
+                    Some(operations.promotion_lock())
+                } else {
+                    None
+                },
+            )
+            .await;
+            if let Err(error) = result {
+                return Err(format!("{error:#}"));
+            }
+        }
+        transfer_target(app, operations, pin, "verified", None);
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        transfer_target(
+            app,
+            operations,
+            pin,
+            if *cancel.borrow() { "paused" } else { "failed" },
+            None,
+        );
+    }
+    result
+}
+
 #[tauri::command]
 async fn models_download<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     operations: tauri::State<'_, models::Operations>,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<(), String> {
-    let _guard = operations.acquire_mutation()?;
-    let cancel = operations.start();
-    #[cfg(feature = "smoke-test")]
-    let mut last_attempt = None;
-    models::download(
-        &model_dir(&app)?,
-        &model_pins(&app)?,
+    use tauri::Emitter;
+    let _transfer = operations.acquire_transfer()?;
+    let cancel = operations.start_transfer();
+    let (manifest, _) = manifest_selection(&app)?;
+    acquire_pin(
+        &app,
+        &operations,
+        &manifest.embedding,
         cancel,
-        &mut |value: serde_json::Value| {
-            #[cfg(feature = "smoke-test")]
-            if smoke_test_requested() {
-                let attempt = (
-                    value["file"].as_str().unwrap_or_default().to_owned(),
-                    value["attempt"].as_u64(),
-                );
-                if last_attempt.as_ref() != Some(&attempt) {
-                    println!("VECTORAIZ_MODEL_TRANSFER: {value}");
-                    last_attempt = Some(attempt);
-                }
-            }
+        None,
+        &mut |value| {
             let _ = progress.send(value);
         },
+        true,
     )
-    .await
-    .map_err(|e| format!("{e:#}"))
+    .await?;
+    *operations.target.write().unwrap() = None;
+    let _ = app.emit("models_changed", ());
+    Ok(())
+}
+
+async fn answer_acquire<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
+    tier_index: usize,
+    switch: bool,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let _transfer = operations.acquire_transfer()?;
+    let cancel = operations.start_transfer();
+    let (manifest, settings) = manifest_selection(&app)?;
+    if !manifest
+        .offer(models::total_ram_bytes().map_err(|e| e.to_string())?)
+        .iter()
+        .any(|tier| tier["tier_index"] == tier_index)
+    {
+        return Err("Answer tier unavailable for this computer".into());
+    }
+    let pin = manifest
+        .answers()
+        .map_err(|e| e.to_string())?
+        .get(tier_index)
+        .cloned()
+        .ok_or("Unknown answer tier")?;
+    if !switch && settings.selected() == Some(pin.sha256.as_str()) {
+        return Ok(());
+    }
+    acquire_pin(
+        &app,
+        &operations,
+        &pin,
+        cancel.clone(),
+        None,
+        &mut |_| {},
+        settings.selected() == Some(pin.sha256.as_str()),
+    )
+    .await?;
+    operations
+        .activate_answer(
+            cancel,
+            switch,
+            |cache| {
+                let dir = model_dir(&app)?;
+                let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+                if switch || settings.selected().is_none() {
+                    settings.select(Some(&pin.sha256));
+                    settings.save(&dir).map_err(|e| e.to_string())?;
+                    cache
+                        .set_chat(Some(pin.metadata))
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(())
+            },
+            || {
+                let _ = app.emit("models_changed", ());
+            },
+        )
+        .await
 }
 #[tauri::command]
-fn models_cancel(operations: tauri::State<'_, models::Operations>) {
-    operations.cancel();
+async fn answer_add<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
+    tier_index: usize,
+) -> Result<(), String> {
+    answer_acquire(app, operations, tier_index, false).await
+}
+#[tauri::command]
+async fn answer_switch<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
+    tier_index: usize,
+) -> Result<(), String> {
+    answer_acquire(app, operations, tier_index, true).await
+}
+#[tauri::command]
+async fn answer_turn_off<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
+) -> Result<(), String> {
+    use tauri::Emitter;
+    let cache = operations.wait_inference().await;
+    let dir = model_dir(&app)?;
+    let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;
+    settings.select(None);
+    settings.save(&dir).map_err(|e| e.to_string())?;
+    cache.set_chat(None).map_err(|e| e.to_string())?;
+    let _ = app.emit("models_changed", ());
+    Ok(())
+}
+#[tauri::command]
+fn models_cancel(
+    operations: tauri::State<'_, models::Operations>,
+    kind: String,
+) -> Result<(), String> {
+    match kind.as_str() {
+        "transfer" => operations.cancel_transfer(),
+        "pipeline" => operations.cancel(),
+        _ => return Err("Unknown operation kind".into()),
+    }
+    Ok(())
 }
 #[tauri::command]
 async fn models_import<R: tauri::Runtime>(
@@ -748,16 +1142,123 @@ async fn models_import<R: tauri::Runtime>(
     operations: tauri::State<'_, models::Operations>,
     folder: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let _guard = operations.acquire_import(std::path::Path::new(&folder))?;
-    let cancel = operations.start();
-    models::import(
-        &model_dir(&app)?,
-        &model_pins(&app)?,
-        std::path::Path::new(&folder),
-        cancel,
-    )
-    .await
-    .map_err(|e| format!("{e:#}"))
+    use tauri::Emitter;
+    models::validate_import_folder(std::path::Path::new(&folder)).map_err(|e| e.to_string())?;
+    let _transfer = operations.acquire_transfer()?;
+    let cancel = operations.start_transfer();
+    let (manifest, settings) = manifest_selection(&app)?;
+    let mut pins = manifest.answers().map_err(|e| e.to_string())?;
+    pins.insert(0, manifest.embedding.clone());
+    let mut results = Vec::new();
+    for pin in pins {
+        if *cancel.borrow() {
+            break;
+        }
+        let check_dir = model_dir(&app)?;
+        let check_pin = pin.clone();
+        if tauri::async_runtime::spawn_blocking(move || models::verified(&check_dir, &check_pin))
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            results.push(serde_json::json!({"file":pin.file,"result":"already installed"}));
+            continue;
+        }
+        let result = match models::regular(&std::path::Path::new(&folder).join(&pin.file), false) {
+            Ok(file) => {
+                if vz_core::verification::recorded(
+                    &model_dir(&app)?.join(&pin.file),
+                    &pin.sha256,
+                    pin.size,
+                ) {
+                    Ok("already installed")
+                } else {
+                    acquire_pin(
+                        &app,
+                        &operations,
+                        &pin,
+                        cancel.clone(),
+                        Some(file),
+                        &mut |_| {},
+                        pin.sha256 == manifest.embedding.sha256
+                            || Some(pin.sha256.as_str()) == settings.selected(),
+                    )
+                    .await
+                    .map(|()| "imported")
+                }
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok("missing")
+            }
+            Err(error) => Err(format!("{error:#}")),
+        };
+        results.push(serde_json::json!({"file":pin.file,"result":match result {Ok(message)=>message.into(),Err(error)=>error}}));
+    }
+    *operations.target.write().unwrap() = None;
+    let _ = app.emit("models_changed", ());
+    Ok(results)
+}
+#[tauri::command]
+async fn delete_unused_model<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    operations: tauri::State<'_, models::Operations>,
+    sha256: String,
+) -> Result<u64, String> {
+    use tauri::Emitter;
+    let _transfer = operations
+        .acquire_transfer()
+        .map_err(|_| "A download is running".to_owned())?;
+    let mut cancel = operations.start_transfer();
+    let _cache = tokio::select! { cache = operations.wait_inference() => cache, _ = cancel.changed() => return Err("Delete cancelled".into()) };
+    let (manifest, settings) = manifest_selection(&app)?;
+    if sha256 == manifest.embedding.sha256 {
+        return Err("The search model cannot be deleted".into());
+    }
+    if Some(sha256.as_str()) == settings.selected() {
+        return Err("Turn off or switch the answer model before deleting it".into());
+    }
+    let pin = manifest
+        .answers()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|pin| pin.sha256 == sha256)
+        .ok_or("Unknown model")?;
+    let dir = model_dir(&app)?;
+    let mut freed = 0;
+    for path in [
+        dir.join(&pin.file),
+        dir.join(format!("{}.partial", pin.file)),
+    ] {
+        match models::regular(&path, false) {
+            Ok(file) => {
+                let size = file.metadata().map_err(|e| e.to_string())?.len();
+                drop(file);
+                std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                freed += size;
+            }
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound) => {}
+            Err(error) => return Err(format!("{error:#}")),
+        }
+    }
+    vz_core::verification::forget(&dir.join(&pin.file)).map_err(|e| e.to_string())?;
+    operations.checks.lock().unwrap().remove(&sha256);
+    {
+        let mut target = operations.target.write().unwrap();
+        if target
+            .as_ref()
+            .is_some_and(|target| target["pin"]["sha256"].as_str() == Some(sha256.as_str()))
+        {
+            *target = None;
+        }
+    }
+    let _ = app.emit("models_changed", ());
+    Ok(freed)
 }
 #[cfg(feature = "smoke-test")]
 fn record_loaded_models(

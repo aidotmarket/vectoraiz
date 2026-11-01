@@ -65,10 +65,10 @@ def main():
     parser.add_argument('--selected-out', type=Path, help='Write resolved pins for the offline CLI')
     args = parser.parse_args()
     pins = json.loads(args.models.read_text())
-    if 'chat_tiers' in pins:
+    if 'answer_tiers' in pins:
         if args.ram_gb is None:
             parser.error('--ram-gb is required for release verification')
-        tiers = pins.pop('chat_tiers')
+        tiers = pins.pop('answer_tiers')
         pins['chat'] = select_tier(tiers, int(args.ram_gb * (1 << 30)))
     if args.selected_out:
         args.selected_out.write_text(json.dumps(pins, indent=2) + '\n')

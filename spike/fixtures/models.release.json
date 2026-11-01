@@ -19,7 +19,7 @@
     "license_terms": "Commercial use permitted; retain copyright and license notice.",
     "source_revision": "5617a9f61b028005a4858fdac845db406aefb181"
   },
-  "chat_tiers": [
+  "answer_tiers": [
     {
       "min_ram_gb": 0,
       "pin": {
@@ -40,6 +40,11 @@
         "max_output_tokens": 192,
         "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
         "source_revision": "cdbee75f17c01a7cc42f958dc650907174af0554"
+      },
+      "memory": {
+        "bytes": 6979321856,
+        "measured": false,
+        "source": null
       }
     },
     {
@@ -62,10 +67,15 @@
         "max_output_tokens": 192,
         "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
         "source_revision": "5b26027e7b19eeb4b7352e1fed3926375dd2cb4d"
+      },
+      "memory": {
+        "bytes": 11811160064,
+        "measured": false,
+        "source": null
       }
     },
     {
-      "min_ram_gb": 32,
+      "min_ram_gb": 64,
       "pin": {
         "kind": "chat",
         "name": "qwen3.6-35b-a3b",
@@ -84,6 +94,11 @@
         "max_output_tokens": 192,
         "license_terms": "Commercial use permitted; provide Apache-2.0 license, preserve attribution and NOTICE if supplied, mark modifications; patent license and termination terms apply.",
         "source_revision": "995ad96eacd98c81ed38be0c5b274b04031597b0"
+      },
+      "memory": {
+        "bytes": 38869454029,
+        "measured": true,
+        "source": "vectoraiz-native-test-builds.md, Windows by-hand section (0.0.12; search model also loaded)"
       }
     }
   ]

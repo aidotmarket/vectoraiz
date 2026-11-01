@@ -10852,7 +10852,9 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-wdio-webdriver",
+ "tempfile",
  "tokio",
+ "uuid",
  "vz-core",
  "windows-sys 0.61.2",
 ]

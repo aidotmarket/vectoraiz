@@ -15,6 +15,9 @@ for path in [pdfium / 'LICENSE', *sorted((pdfium / 'licenses').iterdir())]:
 print('\nProvisional model licences and source notices:')
 print((root / 'spike/fixtures/models.json').read_text())
 
+print('\nInstalled-app test model licences and source notices:')
+print((root / 'spike/fixtures/models.tiers.json').read_text())
+
 print('\nRelease model licences and source notices:')
 print((root / 'spike/fixtures/models.release.json').read_text())
 for path in sorted((root / 'docs/phase0/model-licenses').glob('*.txt')):

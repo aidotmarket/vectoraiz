@@ -248,7 +248,10 @@ fn cancel_keeps_partial_and_refused_overlap_cannot_touch_its_staging() {
         cancel,
         &mut progress,
     ));
-    assert!(result.unwrap_err().to_string().contains("cancelled"));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Download paused. vectorAIz kept the partial download and can resume it."
+    );
     assert_eq!(
         fs::read(dir.0.join("test.gguf.partial")).unwrap(),
         [b'x'; 40]
@@ -330,7 +333,10 @@ fn import_space_counts_only_present_regular_pins_and_reports_missing_chat() {
     chat.file = "chat.gguf".into();
     fs::write(source.0.join(&embedding.file), [b'x'; 100]).unwrap();
     let pins = [embedding, chat];
-    assert_eq!(space_needed(&source.0, &pins, true).unwrap(), pins[0].size);
+    assert_eq!(
+        space_needed(&source.0, &pins, true).unwrap(),
+        pins[0].size + pins[0].size.div_ceil(10)
+    );
     let ops = Operations::default();
     let results = runtime()
         .block_on(import(&installed.0, &pins, &source.0, ops.start()))
@@ -504,7 +510,7 @@ fn status_checks_size_and_hash_and_space_counts_only_remaining_bytes() {
     pin.metadata["sha256"] = json!(pin.sha256);
     assert_eq!(status(&dir.0, &[pin.clone()])["ready"], false);
     fs::write(dir.0.join("test.gguf.partial"), [b'x'; 40]).unwrap();
-    assert_eq!(space_needed(&dir.0, &[pin.clone()], false).unwrap(), 60);
+    assert_eq!(space_needed(&dir.0, &[pin.clone()], false).unwrap(), 66);
     assert_eq!(space_needed(&dir.0, &[pin.clone()], true).unwrap(), 0);
     assert!(check_space(&dir.0, u64::MAX)
         .unwrap_err()
@@ -795,17 +801,25 @@ fn release_tiers_and_fixture_compatibility() {
     let candidates: Value =
         serde_json::from_slice(&std::fs::read(root.join("spike/bakeoff/candidates.json")).unwrap())
             .unwrap();
-    for (bytes, name) in [
-        (8u64 << 30, "qwen3-4b-instruct-2507"),
-        (16u64 << 30, "ministral-3-8b"),
-        (24u64 << 30, "ministral-3-8b"),
-        (32u64 << 30, "qwen3.6-35b-a3b"),
-        (64u64 << 30, "qwen3.6-35b-a3b"),
-        (17_000_000_000, "ministral-3-8b"),
-        (34_000_000_000, "qwen3.6-35b-a3b"),
+    let manifest = Manifest::read(&release).unwrap();
+    for (bytes, name, count) in [
+        (15u64 << 30, "qwen3-4b-instruct-2507", 1),
+        (16u64 << 30, "ministral-3-8b", 2),
+        (63u64 << 30, "ministral-3-8b", 2),
+        (32u64 << 30, "ministral-3-8b", 2),
+        (64u64 << 30, "qwen3.6-35b-a3b", 3),
+        (17_000_000_000, "ministral-3-8b", 2),
+        (34_000_000_000, "ministral-3-8b", 2),
     ] {
         let selected = selected_pins(&release, bytes).unwrap();
         assert_eq!(selected["chat"]["name"], name);
+        let offer = manifest.offer(bytes);
+        assert_eq!(
+            offer.len(),
+            count,
+            "include every smaller tier, no larger tier"
+        );
+        assert_eq!(offer.last().unwrap()["pin"]["name"], name);
         for key in ["embedding", "chat"] {
             let pin = &selected[key];
             assert_eq!(
@@ -977,4 +991,224 @@ fn acquisition_succeeds_when_post_promotion_record_fails() {
     assert_eq!(fs::read(installed.0.join(&pin.file)).unwrap(), [b'x'; 100]);
     assert!(!installed.0.join("models.verified.json").exists());
     assert!(verified(&installed.0, &pin));
+}
+
+#[test]
+fn index_and_transfer_have_separate_cancels_and_activation_waits() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    let mut index = ops.acquire().unwrap();
+    index.get_or_load(false, || fake_load(&counts)).unwrap();
+    let pipeline = ops.start();
+    let transfer = ops
+        .acquire_transfer()
+        .expect("transfer must overlap indexing");
+    let transfer_cancel = ops.start_transfer();
+    ops.cancel_transfer();
+    assert!(*transfer_cancel.borrow());
+    assert!(!*pipeline.borrow());
+    assert_eq!(counts.drops.get(), 0);
+    drop(transfer);
+    let _next_transfer = ops.acquire_transfer().unwrap();
+    let next_transfer_cancel = ops.start_transfer();
+    assert!(
+        *transfer_cancel.borrow(),
+        "new operation must not uncancel the older transfer"
+    );
+    assert!(!*next_transfer_cancel.borrow());
+    ops.cancel();
+    assert!(*pipeline.borrow());
+    assert!(!*next_transfer_cancel.borrow());
+    let _next_pipeline = ops.start();
+    assert!(
+        *pipeline.borrow(),
+        "new pipeline must not uncancel the older index"
+    );
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), ops.wait_inference())
+                .await
+                .is_err()
+        );
+        drop(index);
+        let _activation =
+            tokio::time::timeout(std::time::Duration::from_secs(2), ops.wait_inference())
+                .await
+                .unwrap();
+    });
+}
+
+#[test]
+fn tier_fixture_has_distinct_pins_and_search_only_pins_are_valid() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = Manifest::read(&root.join("spike/fixtures/models.tiers.json")).unwrap();
+    let answers = manifest.answers().unwrap();
+    assert_eq!(answers.len(), 2);
+    assert_ne!(answers[0].file, answers[1].file);
+    assert_ne!(answers[0].sha256, answers[1].sha256);
+    assert_eq!(manifest.offer(8 << 30).len(), 2);
+    assert_eq!(manifest.offer(0).len(), 1);
+    let search_only = manifest.selected(None).unwrap();
+    assert_eq!(pins_from_value(&search_only).unwrap().len(), 1);
+    assert!(search_only.get("chat").is_none());
+}
+
+#[test]
+fn cancelling_transfer_during_hash_keeps_partial_and_pipeline_token() {
+    let installed = Temp::new();
+    let pin = pin("https://unused.invalid");
+    fs::write(
+        installed.0.join(format!("{}.partial", pin.file)),
+        [b'x'; 100],
+    )
+    .unwrap();
+    let ops = Operations::default();
+    let pipeline = ops.start();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let result = runtime().block_on(stage_verify_promote(
+        &installed.0,
+        &pin,
+        Source::Download(&client().unwrap()),
+        cancel,
+        &mut |value| {
+            if value["stage"] == "checking" {
+                ops.cancel_transfer();
+            }
+        },
+    ));
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "Download paused. vectorAIz kept the partial download and can resume it."
+    );
+    assert!(!*pipeline.borrow());
+    assert!(installed.0.join(format!("{}.partial", pin.file)).exists());
+    assert!(!installed.0.join(&pin.file).exists());
+}
+
+#[test]
+fn search_and_current_answer_survive_target_download_pause_check_cancel_and_failure() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    ops.acquire()
+        .unwrap()
+        .get_or_load(true, || fake_load(&counts))
+        .unwrap();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let target = pin("https://unused.invalid");
+    for state in ["downloading", "paused", "checking", "failed"] {
+        ops.set_target(&target, state, None);
+        for chat in [false, true] {
+            ops.acquire()
+                .unwrap()
+                .get_or_load(chat, || panic!("target state must preserve current models"))
+                .unwrap();
+        }
+    }
+    ops.cancel_transfer();
+    assert!(*cancel.borrow());
+    for chat in [false, true] {
+        ops.acquire()
+            .unwrap()
+            .get_or_load(chat, || {
+                panic!("transfer cancellation must preserve current models")
+            })
+            .unwrap();
+    }
+    assert_eq!(counts.embed.get(), 1);
+    assert_eq!(counts.chat.get(), 1);
+    assert_eq!(counts.drops.get(), 0);
+}
+
+#[test]
+fn cancel_pending_activation_clears_target_and_notifies_without_waiting_for_search() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    let mut search = ops.acquire().unwrap();
+    search.get_or_load(true, || fake_load(&counts)).unwrap();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let pin = pin("https://unused.invalid");
+    ops.set_target(&pin, "verified", None);
+    let notified = std::cell::Cell::new(false);
+    runtime().block_on(async {
+        let activation = ops.activate_answer(
+            cancel,
+            true,
+            |_| panic!("cancelled switch activated"),
+            || notified.set(true),
+        );
+        tokio::pin!(activation);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut activation)
+                .await
+                .is_err()
+        );
+        ops.cancel_transfer();
+        let error = tokio::time::timeout(Duration::from_secs(1), activation)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error, "Switch cancelled");
+    });
+    assert!(ops.target.read().unwrap().is_none());
+    assert!(notified.get());
+    assert_eq!(counts.drops.get(), 0);
+    drop(search);
+}
+
+#[test]
+fn failed_activation_settings_write_clears_target_and_preserves_current_engine() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    ops.acquire()
+        .unwrap()
+        .get_or_load(true, || fake_load(&counts))
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut settings = crate::settings::Settings::read(dir.path()).unwrap();
+    settings.select(Some("new"));
+    // A directory at the destination makes the actual atomic rename fail on both platforms.
+    fs::create_dir(dir.path().join("settings.json")).unwrap();
+    let expected = settings.save(dir.path()).unwrap_err().to_string();
+    ops.set_target(&pin("https://unused.invalid"), "verified", None);
+    let notified = std::cell::Cell::new(false);
+    let error = runtime()
+        .block_on(ops.activate_answer(
+            ops.start_transfer(),
+            true,
+            |_| settings.save(dir.path()).map_err(|e| e.to_string()),
+            || notified.set(true),
+        ))
+        .unwrap_err();
+    assert_eq!(error, expected);
+    assert!(ops.target.read().unwrap().is_none());
+    assert!(notified.get());
+    assert_eq!(counts.drops.get(), 0);
+}
+
+#[test]
+fn cancel_before_activation_keeps_verified_file_and_reports_command_cancellation() {
+    for (switch, expected) in [(false, "Download cancelled"), (true, "Switch cancelled")] {
+        let ops = OperationState::<FakeEngines>::default();
+        let dir = tempfile::tempdir().unwrap();
+        let pin = pin("https://unused.invalid");
+        fs::write(dir.path().join(&pin.file), [b'x'; 100]).unwrap();
+        ops.set_target(&pin, "verified", None);
+        let cancel = ops.start_transfer();
+        ops.cancel_transfer();
+        let error = runtime()
+            .block_on(ops.activate_answer(
+                cancel,
+                switch,
+                |_| panic!("cancelled command activated"),
+                || {},
+            ))
+            .unwrap_err();
+        assert_eq!(error, expected);
+        assert!(verified(dir.path(), &pin));
+        assert!(ops.target.read().unwrap().is_none());
+    }
 }

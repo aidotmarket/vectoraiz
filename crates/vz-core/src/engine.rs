@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     num::NonZeroU32,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, RwLock},
 };
 
 /// Opt-in private phase timing; never includes queries, sources, or answers.
@@ -162,13 +162,22 @@ fn backend() -> Result<Arc<LlamaBackend>> {
     Ok(Arc::clone(shared.as_ref().unwrap()))
 }
 
+#[derive(Debug)]
+pub struct NoAnswerModel;
+impl std::fmt::Display for NoAnswerModel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("No answer model selected")
+    }
+}
+impl std::error::Error for NoAnswerModel {}
+
 pub struct Engines {
     // Models must be dropped before the backend.
     embed: LlamaModel,
     chat: Mutex<Option<LlamaModel>>,
     backend: Arc<LlamaBackend>,
     assets: PathBuf,
-    pins: serde_json::Value,
+    pins: RwLock<serde_json::Value>,
     cpu: bool,
     pub recipe: Recipe,
 }
@@ -222,12 +231,15 @@ impl Engines {
             chat: Mutex::new(None),
             backend,
             assets: assets.to_owned(),
-            pins,
+            pins: RwLock::new(pins),
             cpu,
             recipe,
         })
     }
-    fn chat_model(&self) -> Result<MutexGuard<'_, Option<LlamaModel>>> {
+    fn chat_model(&self, pins: &serde_json::Value) -> Result<MutexGuard<'_, Option<LlamaModel>>> {
+        if !pins["chat"].is_object() {
+            return Err(NoAnswerModel.into());
+        }
         let mut chat = self
             .chat
             .lock()
@@ -236,7 +248,7 @@ impl Engines {
             *chat = Some(load_model(
                 &self.backend,
                 &self.assets,
-                &self.pins,
+                pins,
                 self.cpu,
                 "chat",
             )?);
@@ -244,7 +256,30 @@ impl Engines {
         Ok(chat)
     }
     pub fn load_chat(&self) -> Result<()> {
-        drop(self.chat_model()?);
+        let pins = self
+            .pins
+            .read()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        drop(self.chat_model(&pins)?);
+        Ok(())
+    }
+    /// Replace only the answer model. Lock order matches stream: pins, then chat.
+    pub fn set_chat(&self, pin: Option<serde_json::Value>) -> Result<()> {
+        let mut pins = self
+            .pins
+            .write()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        let mut chat = self
+            .chat
+            .lock()
+            .map_err(|_| anyhow::anyhow!("chat lock poisoned"))?;
+        pins.as_object_mut()
+            .context("model pins object")?
+            .remove("chat");
+        if let Some(pin) = pin {
+            pins["chat"] = pin;
+        }
+        *chat = None;
         Ok(())
     }
     pub fn chat_loaded(&self) -> bool {
@@ -265,7 +300,11 @@ impl Engines {
             }
         );
         let mut tokens = self.embed.str_to_token(&text, AddBos::Always)?;
-        let append_eos = pin_bool(&self.pins, "embedding", "append_eos")?;
+        let pins = self
+            .pins
+            .read()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        let append_eos = pin_bool(&pins, "embedding", "append_eos")?;
         let eos = self.embed.token_eos();
         // A vocab with add_eos_token already appended EOS in str_to_token; never
         // end with two EOS tokens (CC Gate 3 LOW-1).
@@ -309,12 +348,16 @@ impl Engines {
         context: &str,
         mut emit: impl FnMut(&str),
     ) -> Result<String> {
-        let chat_guard = self.chat_model()?;
+        let pins = self
+            .pins
+            .read()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        let chat_guard = self.chat_model(&pins)?;
         let chat = chat_guard.as_ref().unwrap();
         Ok(generate(
             chat,
             &self.backend,
-            &self.pins,
+            &pins,
             question,
             context,
             false,
@@ -563,4 +606,28 @@ fn engine_load_reuses_verification_record() {
             && !format!("{error:#}").contains("hash mismatch"),
         "{error:#}"
     );
+}
+
+#[test]
+fn switching_chat_keeps_embedding_and_recipe_and_turn_off_is_typed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engines = Engines::load_embedding(
+        &root.join(".assets"),
+        &root.join("spike/fixtures/models.json"),
+        true,
+    )
+    .unwrap();
+    let embedding = &engines.embed as *const LlamaModel;
+    let recipe = engines.recipe.clone();
+    engines.load_chat().unwrap();
+    assert!(engines.chat_loaded());
+    engines
+        .set_chat(Some(serde_json::json!({"file":"different.gguf"})))
+        .unwrap();
+    assert!(!engines.chat_loaded());
+    assert_eq!(embedding, &engines.embed as *const LlamaModel);
+    assert_eq!(recipe, engines.recipe);
+    engines.set_chat(None).unwrap();
+    let error = engines.stream("question", "context", |_| {}).unwrap_err();
+    assert!(error.downcast_ref::<NoAnswerModel>().is_some());
 }
