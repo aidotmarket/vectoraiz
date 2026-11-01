@@ -1072,3 +1072,38 @@ fn cancelling_transfer_during_hash_keeps_partial_and_pipeline_token() {
     assert!(installed.0.join(format!("{}.partial", pin.file)).exists());
     assert!(!installed.0.join(&pin.file).exists());
 }
+
+#[test]
+fn search_and_current_answer_survive_target_download_pause_check_cancel_and_failure() {
+    let ops = OperationState::<FakeEngines>::default();
+    let counts = std::rc::Rc::new(Loads::default());
+    ops.acquire()
+        .unwrap()
+        .get_or_load(true, || fake_load(&counts))
+        .unwrap();
+    let _transfer = ops.acquire_transfer().unwrap();
+    let cancel = ops.start_transfer();
+    let target = pin("https://unused.invalid");
+    for state in ["downloading", "paused", "checking", "failed"] {
+        ops.set_target(&target, state, None);
+        for chat in [false, true] {
+            ops.acquire()
+                .unwrap()
+                .get_or_load(chat, || panic!("target state must preserve current models"))
+                .unwrap();
+        }
+    }
+    ops.cancel_transfer();
+    assert!(*cancel.borrow());
+    for chat in [false, true] {
+        ops.acquire()
+            .unwrap()
+            .get_or_load(chat, || {
+                panic!("transfer cancellation must preserve current models")
+            })
+            .unwrap();
+    }
+    assert_eq!(counts.embed.get(), 1);
+    assert_eq!(counts.chat.get(), 1);
+    assert_eq!(counts.drops.get(), 0);
+}

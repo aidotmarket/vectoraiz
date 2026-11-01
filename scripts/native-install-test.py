@@ -212,7 +212,7 @@ try:
                     with Path('installed-migration-switch.log').open('w',encoding='utf-8') as log:
                         child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=migration_env,stdout=log,stderr=subprocess.STDOUT)
                         try:
-                            assert child.wait(timeout=150) == 0, 'Installed migration switch/delete failed'
+                            assert child.wait(timeout=360) == 0, 'Installed migration switch/delete failed'
                         finally:
                             if child.poll() is None:
                                 child.kill(); child.wait(timeout=10)

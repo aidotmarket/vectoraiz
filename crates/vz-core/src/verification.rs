@@ -340,7 +340,12 @@ mod tests {
         )
         .unwrap();
         // Search was verified by status, but its engine cache is still empty.
-        verify(&search,fixture["embedding"]["sha256"].as_str().unwrap(),fixture["embedding"]["size"].as_u64()).unwrap();
+        verify(
+            &search,
+            fixture["embedding"]["sha256"].as_str().unwrap(),
+            fixture["embedding"]["size"].as_u64(),
+        )
+        .unwrap();
         fs::write(&answer, b"answer").unwrap();
         let answer_hash = crate::pipeline::file_sha256(&answer).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();

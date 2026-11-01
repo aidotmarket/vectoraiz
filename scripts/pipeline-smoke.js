@@ -82,6 +82,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         await report('release-transfer');
         const [indexed,transferred] = await Promise.all([indexing,transfer]);
         if (kind === 'transfer' ? indexed !== 'complete' || !transferred.toLowerCase().includes('cancelled') : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
+        if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Cancellation blocked Search');
+        if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Cancellation blocked the current answer');
         await report('independent cancellation: '+kind);
       }
       const freed = await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256});
@@ -97,6 +99,16 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       const removed = await ipc('delete_unused_model',{sha256:status.offer[1].pin.sha256});
       if (removed !== status.offer[1].pin.size) throw new Error('Turned-off model deletion freed wrong bytes');
       if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Turning off changed Search');
+      // Cancel an actual acquisition after bytes arrive, then remove only its
+      // resumable partial through the same unused-model command.
+      const cancelledAdd = ipc('answer_add',{tierIndex:0}).then(() => 'complete',error => String(error));
+      await statusWait(s => (s.target?.progress?.downloaded ?? 0) > 0 || s.target?.progress?.stage === 'checking',240000);
+      await ipc('models_cancel',{kind:'transfer'});
+      if (!(await cancelledAdd).toLowerCase().includes('cancelled')) throw new Error('Acquisition did not cancel');
+      const partial = (await ipc('models_status')).files.find(file => file.sha256 === status.offer[0].pin.sha256)?.partial_bytes;
+      if (!(partial > 0)) throw new Error('Cancellation did not preserve resumable bytes');
+      if (await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256}) !== partial) throw new Error('Partial delete freed wrong bytes');
+      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Partial deletion changed Search');
       await report('migration: transfer exclusion, delete refusals, turn off and unused model deletion passed');
     }
     await ipc('self_test');
