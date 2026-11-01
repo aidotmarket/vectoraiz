@@ -971,3 +971,33 @@ it("completes a local Ask and releases the pipeline after cloud Stop", async () 
  expect(screen.getByText("Answered on this computer")).toBeInTheDocument();
  for(const name of ["Index folder","Search","Ask"]) expect(screen.getByRole("button",{name})).toBeEnabled();
 });
+
+it("drops a superseded paused status after resume and keeps polling the download", async () => {
+  const paused = {...readyModels,answer:{state:"missing"},target:{pin:answerPin,state:"paused"},offer:[answerTier]};
+  const downloading = {...paused,target:{pin:answerPin,state:"downloading"}};
+  const slow = deferred();
+  const adding = deferred();
+  modelsInvoke.mockResolvedValue(paused);
+  invoke.mockImplementation(command => command === "answer_add" ? adding.promise : Promise.resolve({available:false}));
+  vi.useFakeTimers();
+  try {
+    await act(async () => { render(<App />); });
+    expect(screen.getByText(/Download paused/)).toBeInTheDocument();
+    modelsInvoke.mockReturnValueOnce(slow.promise);
+    await act(async () => { modelEvents.callback?.(); });
+    await act(async () => { screen.getByRole("button",{name:"Add answer model"}).click(); });
+    expect(invoke).toHaveBeenCalledWith("answer_add",{tierIndex:0});
+    modelsInvoke.mockResolvedValue(downloading);
+    await act(async () => { modelEvents.callback?.(); });
+    expect(screen.getByText(/Downloading answer model/)).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+    await act(async () => { slow.resolve(paused); });
+    expect(screen.getByText(/Downloading answer model/)).toBeInTheDocument();
+    expect(screen.queryByText(/Download paused/)).not.toBeInTheDocument();
+    const checks = () => modelsInvoke.mock.calls.filter(([command]) => command === "models_status").length;
+    const before = checks();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+    expect(checks()).toBe(before + 10);
+    await act(async () => { adding.resolve(undefined); });
+  } finally { vi.useRealTimers(); }
+});

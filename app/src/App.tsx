@@ -125,6 +125,7 @@ export default function App() {
   const [showImport, setShowImport] = useState(false);
   const [retry, setRetry] = useState<"download" | "import" | "status">("status");
   const modelsChecked = useRef(false);
+  const modelsRequest = useRef(0);
   const [selfTestError, setSelfTestError] = useState("");
   const windows = /Windows/i.test(navigator.userAgent);
   const buttonStyle = "rounded bg-teal-300 px-5 py-3 font-medium text-slate-950 disabled:opacity-50";
@@ -308,11 +309,14 @@ export default function App() {
     }
   }
   const refreshModels = useCallback(async () => {
+    const request = ++modelsRequest.current;
     const status = await invoke<ModelsStatus>("models_status");
-    setModels(status);
-    if (!status) return status;
-    setFolder(current => current || status.last_indexed_folder || "");
-    setAskState(current => current === "checking" && ["ready", "failed"].includes(status.answer?.state ?? "") ? "" : current);
+    if (request === modelsRequest.current) {
+      setModels(status);
+      if (!status) return status;
+      setFolder(current => current || status.last_indexed_folder || "");
+      setAskState(current => current === "checking" && ["ready", "failed"].includes(status.answer?.state ?? "") ? "" : current);
+    }
     return status;
   }, []);
   useEffect(() => {

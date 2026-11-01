@@ -70,6 +70,13 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       const cancelledStatus = await ipc('models_status');
       if (cancelledSwitch !== 'Switch cancelled' || cancelledStatus.target || !cancelledStatus.files.some(file => file.sha256 === status.offer[1].pin.sha256 && file.installed_bytes === status.offer[1].pin.size)) throw new Error('Pending activation cancellation left a busy target or lost the installed file');
       await report('activation: pending switch cancelled before held Search released');
+      const pendingAdd = ipc('answer_add',{tierIndex:1}).then(() => 'complete',error => String(error));
+      await statusWait(s => s.target?.state === 'verified');
+      await ipc('models_cancel',{kind:'transfer'});
+      if (await pendingAdd !== 'Add cancelled. The answer model is downloaded and ready to add.') throw new Error('Pending add activation cancellation had the wrong message');
+      const addCancelledStatus = await ipc('models_status');
+      if (addCancelledStatus.target || !addCancelledStatus.files.some(file => file.sha256 === status.offer[1].pin.sha256 && file.installed_bytes === status.offer[1].pin.size)) throw new Error('Pending add cancellation left a busy target or lost the installed file');
+      await report('activation: pending add cancelled before held Search released');
       const retrySwitch = ipc('answer_switch',{tierIndex:1});
       await statusWait(s => s.target?.state === 'verified');
       await report('release-search');
@@ -107,7 +114,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         await report('release-index');
         await report('release-transfer');
         const [indexed,transferred] = await Promise.all([indexing,transfer]);
-        if (kind === 'transfer' ? indexed !== 'complete' || !transferred.toLowerCase().includes('cancelled') : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
+        if (kind === 'transfer' ? indexed !== 'complete' || transferred !== 'Download paused. vectorAIz kept the partial download and can resume it.' : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
         if (kind === 'transfer' && (await ipc('models_status')).target?.state !== 'paused') throw new Error('Cancelled smoke hold did not pause the target');
         if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Cancellation blocked Search');
         if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Cancellation blocked the current answer');
