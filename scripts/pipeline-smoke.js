@@ -68,7 +68,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await heldSearch; await switching;
       await statusWait(s => s.answer.state === 'ready' && s.answer.pin.sha256 === s.offer[1].pin.sha256 && !s.target);
       const answer = await ipc('pipeline_ask', {question:query,tokens:progress});
-      if (answer.kind !== 'answer' || !answer.citations.length || !answer.text.toLowerCase().includes('thirty days')) throw new Error('Switched answer lost citations');
+      if (answer.kind !== 'answer' || !answer.citations.length || !/(?:thirty|30) days/i.test(answer.text)) throw new Error('Switched answer lost citations');
       await report('migration: verified tier 1 answered');
       // Independent transfer exclusion, with no Search held and no activation wait.
       await report('hold-next-transfer');
