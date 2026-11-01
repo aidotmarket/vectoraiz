@@ -370,7 +370,7 @@ it("offers retry after a startup status error without claiming models are missin
   expect(screen.queryByLabelText("Models")).not.toBeInTheDocument();
 });
 
-it("keeps per-file download states from the Channel until status refresh, without polling", async () => {
+it("keeps Channel download states across models_changed until acquisition ends", async () => {
   const pending = deferred();
   const status = { ready: false, files: [missingModels.files[0], { ...missingModels.files[0], name: "Chat model", file: "chat.gguf", verified: true }] };
   modelsInvoke.mockImplementation(async command => command === "models_status" ? status : pending.promise);
@@ -381,11 +381,13 @@ it("keeps per-file download states from the Channel until status refresh, withou
   const send = (file: string, downloaded: number) => act(() => channel.onmessage({ file, downloaded, total: 100, attempt: 1 }));
   send("test.gguf", 40);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloading");
+  await act(async () => { modelEvents.callback?.(); });
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloading");
   send("test.gguf", 100);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(1);
-  await act(async () => pending.resolve(undefined));
   expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+  await act(async () => pending.resolve(undefined));
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(3);
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
 });
 
@@ -465,7 +467,7 @@ it.each(["Search", "Ask"])("clears busy text when %s fails before any result or 
 });
 
 
-it("retains completed files after cancellation until the next status refresh", async () => {
+it("refreshes status and clears Channel labels when acquisition is cancelled", async () => {
   const pending = deferred();
   const status = { ready: false, files: [missingModels.files[0], { ...missingModels.files[0], name: "Chat model", file: "chat.gguf" }] };
   let attempts = 0;
@@ -484,13 +486,13 @@ it("retains completed files after cancellation until the next status refresh", a
   await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
   await screen.findByText("Model acquisition cancelled");
-  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText(/Chat model/)).not.toBeInTheDocument();
   expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(1);
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
-  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(2);
+  expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_status")).toHaveLength(3);
 });
 
 it.each([false, true])("recovers from import rejection/cancellation (cancel=%s)", async cancel => {
@@ -529,7 +531,7 @@ it.each([false, true])("recovers from import rejection/cancellation (cancel=%s)"
   expect(modelsInvoke.mock.calls.filter(([command]) => command === "models_import")).toHaveLength(2);
 });
 
-it("retains Downloaded after download success with a failed status refresh and resets on successful refresh", async () => {
+it("clears Channel labels at acquisition end even when its status refresh fails", async () => {
   let checks = 0;
   modelsInvoke.mockImplementation(async (command, args) => {
     if (command === "models_status") {
@@ -544,7 +546,7 @@ it("retains Downloaded after download success with a failed status refresh and r
   await screen.findByText(/Embedding model/);
   await userEvent.click(screen.getByRole("button", { name: /Download search model/ }));
   await screen.findByText("Status refresh failed");
-  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Downloaded");
+  expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText(/ · Downloading$/)).not.toBeInTheDocument();
   expect(screen.queryByText(/100 \/ 100 bytes/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Cancel" })).not.toBeInTheDocument();
@@ -552,7 +554,7 @@ it("retains Downloaded after download success with a failed status refresh and r
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(screen.getByText(/Embedding model/)).toHaveTextContent("Needed");
   expect(screen.queryByText("Status refresh failed")).not.toBeInTheDocument();
-  expect(checks).toBe(3);
+  expect(checks).toBe(4);
 });
 
 it.each(["Search", "Ask"])("clears the previous result when %s starts, before it completes", async name => {
@@ -792,7 +794,7 @@ it("keeps import failures visible while the verified search model remains usable
   expect(screen.queryByText("Models imported and verified.")).not.toBeInTheDocument();
 });
 
-it("shows one checking message when Ask returns checking", async () => {
+it.each(["ready", "failed"])("clears checking Ask state when models_changed reports %s", async state => {
   modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"checking",pin:answerPin}});
   invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"checking"} : {available:false});
   render(<App />);
@@ -800,6 +802,10 @@ it("shows one checking message when Ask returns checking", async () => {
   await userEvent.click(screen.getByRole("button",{name:"Ask"}));
   expect(screen.getAllByText("Checking your answer model")).toHaveLength(1);
   expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state,pin:answerPin}});
+  await act(async () => { modelEvents.callback?.(); });
+  await waitFor(() => expect(screen.queryByText("Checking your answer model")).not.toBeInTheDocument());
+  if (state === "failed") expect(screen.getByText(/Your answer model could not be checked/)).toBeInTheDocument();
 });
 
 it("shows Checking during a cold Ask when verification could not be recorded", async () => {
@@ -813,4 +819,77 @@ it("shows Checking during a cold Ask when verification could not be recorded", a
   await act(async () => pending.resolve({kind:"answer",text:"Thirty days [1].",citations:[{number:1,doc_id:"doc",page:1}]}));
   expect(screen.getByRole("status")).not.toHaveTextContent("Checking your answer model");
   expect(screen.getByText("Thirty days [1].")).toBeInTheDocument();
+});
+
+
+it("offers every eligible tier largest first and adds Qwen3-4B directly on a search-only 64 GiB PC", async () => {
+  const small = {...answerTier, pin:{...answerPin,name:"Qwen3-4B"}};
+  const medium = {...answerTier,tier_index:1,min_ram_gb:16,pin:{...answerPin,name:"Ministral 3 8B",size:5_000_000_000},memory:{bytes:12_000_000_000,measured:false,source:null}};
+  const large = {...answerTier,tier_index:2,min_ram_gb:64,pin:{...answerPin,name:"Qwen3.6",size:20_000_000_000},memory:{bytes:39_000_000_000,measured:true,source:"measured"}};
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},ram_bytes:64 * 2**30,offer:[small,medium,large]});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  const buttons = await screen.findAllByRole("button",{name:"Add answer model"});
+  expect(buttons).toHaveLength(3);
+  expect(buttons.map(button => button.parentElement?.textContent)).toEqual([
+    expect.stringContaining("Qwen3.6"),expect.stringContaining("Ministral 3 8B"),expect.stringContaining("Qwen3-4B")
+  ]);
+  for (const button of buttons) {
+    expect(button.parentElement).toHaveTextContent("Disk space needed:");
+    expect(button.parentElement).toHaveTextContent("of memory");
+  }
+  await userEvent.click(buttons[2]);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("answer_add",{tierIndex:0}));
+  expect(invoke.mock.calls.filter(([command]) => command === "answer_add")).toEqual([["answer_add",{tierIndex:0}]]);
+});
+
+it("refreshes a rejected answer_switch and re-enables model controls", async () => {
+  let reject!: (cause: unknown) => void;
+  const pending = {promise:new Promise((_, fail) => {reject = fail;}),reject:(cause: unknown) => reject(cause)};
+  const initial = {...readyModels,answer:{state:"ready",pin:{...answerPin,size:8_000_000_000}},offer:[answerTier]};
+  modelsInvoke.mockResolvedValue(initial);
+  invoke.mockImplementation(command => command === "answer_switch" ? pending.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Use a smaller model"}));
+  await userEvent.click(screen.getByRole("button",{name:"Switch to Small local model"}));
+  modelsInvoke.mockResolvedValue({...initial,target:{pin:answerPin,state:"verified"}});
+  await act(async () => { modelEvents.callback?.(); });
+  expect(screen.getByRole("button",{name:"Turn off"})).toBeDisabled();
+  modelsInvoke.mockResolvedValue(initial);
+  await act(async () => pending.reject("Switch cancelled"));
+  expect(await screen.findByText("Switch cancelled")).toBeInTheDocument();
+  expect(screen.getByRole("button",{name:"Turn off"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Switch to Small local model"})).toBeEnabled();
+  expect(screen.getByRole("button",{name:"Import from a folder"})).toBeEnabled();
+});
+
+it("shows installed RAM as 48 GB in the large-model warning", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:{...answerPin,name:"qwen3.6-35b-a3b"}},ram_bytes:48 * 2**30,offer:[answerTier]});
+  render(<App />);
+  expect(await screen.findByText("This model uses about 39 GB of memory on a PC with 48 GB. A smaller model is available.")).toBeInTheDocument();
+});
+
+
+it("polls target progress at most every 500 ms and stops when target clears", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,target:{pin:answerPin,state:"downloading"}});
+  vi.useFakeTimers();
+  try {
+    await act(async () => { render(<App />); });
+    expect(screen.getByText(/Downloading answer model/)).toBeInTheDocument();
+    const checks = () => modelsInvoke.mock.calls.filter(([command]) => command === "models_status").length;
+    const initial = checks();
+    await act(async () => { await vi.advanceTimersByTimeAsync(499); });
+    expect(checks()).toBe(initial);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+    expect(checks()).toBe(initial + 1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+    expect(checks()).toBe(initial + 3);
+    modelsInvoke.mockResolvedValue(readyModels);
+    await act(async () => { modelEvents.callback?.(); });
+    const stopped = checks();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
+    expect(checks()).toBe(stopped);
+  } finally { vi.useRealTimers(); }
 });

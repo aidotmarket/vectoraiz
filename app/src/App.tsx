@@ -32,7 +32,7 @@ export const M1_COPY = {
   smaller: "Use a smaller model",
   turnOff: "Turn off",
   switch: (name: string) => `Switch to ${name}`,
-  warning: (bytes: number) => `This model uses about 39 GB of memory on a PC with ${Math.round(bytes / 1_000_000_000)} GB. A smaller model is available.`,
+  warning: (bytes: number) => `This model uses about 39 GB of memory on a PC with ${Math.round(bytes / 2**30)} GB. A smaller model is available.`,
   switchMinistral: "Switch to Ministral 3 8B",
   switching: "Switching after the current search finishes",
   targetState: {downloading: "Downloading answer model", paused: "Download paused", checking: "Checking answer model", failed: "Answer model download failed"},
@@ -203,7 +203,7 @@ export default function App() {
     const status = await invoke<ModelsStatus>("models_status");
     setModels(status);
     setFolder(current => current || status.last_indexed_folder || "");
-    setDownloadStates({});
+    setAskState(current => current === "checking" && ["ready", "failed"].includes(status.answer?.state ?? "") ? "" : current);
     return status;
   }, []);
   useEffect(() => {
@@ -221,6 +221,27 @@ export default function App() {
     return () => { disposed = true; void registered.then(unlisten => unlisten()).catch(() => {}); };
   }, [refreshModels]);
 
+  const hasTarget = !!models?.target;
+  useEffect(() => {
+    if (!hasTarget) return;
+    // State transitions arrive as events. Progress is sampled twice a second.
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try { await refreshModels(); }
+      catch (cause) { if (!disposed) setModelError(String(cause)); }
+      if (!disposed) timer = setTimeout(() => void poll(), 500);
+    };
+    timer = setTimeout(() => void poll(), 500);
+    return () => { disposed = true; clearTimeout(timer); };
+  }, [hasTarget, refreshModels]);
+
+  async function refreshAfterModelError(cause: unknown) {
+    setModelError(String(cause));
+    // Preserve the command error even if status itself cannot be read.
+    await refreshModels().catch(() => {});
+  }
+
   async function manageAnswer(command: "answer_add" | "answer_switch" | "answer_turn_off" | "delete_unused_model", args?: Record<string, unknown>) {
     if (modelBusyRef.current || installing) return;
     modelBusyRef.current = true; setModelBusy(true); setModelError("");
@@ -228,7 +249,7 @@ export default function App() {
       const freed = await invoke<number | undefined>(command, args);
       await refreshModels(); setAskState("");
       if (command === "delete_unused_model") { setModelMessage(M1_COPY.freed(freed ?? 0)); setDeleteFile(undefined); }
-    } catch (cause) { setModelError(String(cause)); }
+    } catch (cause) { await refreshAfterModelError(cause); }
     finally { modelBusyRef.current = false; setModelBusy(false); setDeleteWaiting(false); }
   }
 
@@ -261,15 +282,15 @@ export default function App() {
       if (source !== "status" && status.ready && !importFailed) {
         setImportResults([]); setShowImport(false); setModelMessage(source === "import" ? "Models imported and verified." : "Models downloaded and verified.");
       }
-    } catch (cause) { setModelError(String(cause)); }
+    } catch (cause) { await refreshAfterModelError(cause); }
     finally {
       active = false; modelBusyRef.current = false; setModelBusy(false); setModelProgress("");
-      setDownloadStates(states => Object.fromEntries(Object.entries(states).filter(([, status]) => status === "Downloaded" || status === "Verified")));
+      setDownloadStates({});
     }
   }
   async function cancelModels(kind: "transfer" | "pipeline" = "transfer") {
     try { await invoke("models_cancel", { kind }); }
-    catch (cause) { setModelError(String(cause)); }
+    catch (cause) { await refreshAfterModelError(cause); }
   }
   return <main className="min-h-screen bg-slate-950 p-10 text-slate-100">
     <h1 className="text-3xl font-semibold">vectorAIz</h1>
@@ -311,18 +332,17 @@ export default function App() {
       {modelBusy && <button className={buttonStyle} onClick={() => void cancelModels()}>Cancel</button>}
       <div aria-live="polite">
         {modelProgress && <p>{modelProgress}</p>}
-        {modelError && <p>{modelError}</p>}
         {importResults.map(result => <p key={result.file}>{result.file}: {result.result}</p>)}
       </div>
       {(modelError || (importResults.length > 0 && !models?.ready)) && <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void acquireModels(retry)}>Retry</button>}
       </>}
     </aside>}
+    {modelError && <p>{modelError}</p>}
     {modelMessage && <p>{modelMessage}</p>}
     {models && !models.ready && <p className="mt-4">{M1_COPY.searchNeeded}</p>}
     {models?.ready && !models.last_indexed_folder && <p className="mt-4">{M1_COPY.firstRun}</p>}
     {models?.ready && <aside className="mt-6 grid gap-3" aria-label={M1_COPY.settings}>
       <h2 className="text-xl">{M1_COPY.settings}</h2>
-      {modelError && <p>{modelError}</p>}
       {models.answer?.pin && <>
         <p>{models.answer.pin.name}</p>
         <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setShowSmaller(value => !value)}>{M1_COPY.smaller}</button>
@@ -332,7 +352,7 @@ export default function App() {
       {(["missing", "failed"].includes(models.answer?.state ?? "") || askState === "failed") && <p>{M1_COPY.failed}</p>}
       {(askState === "no_answer" || askState === "failed" || ["missing", "failed"].includes(models.answer?.state ?? "") || showSmaller) && offered && <>
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
-        {(showSmaller ? models.offer?.filter(tier => tier.pin.size < (models.answer?.pin?.size ?? Infinity)) : [offered])?.map(tier => <div key={tier.tier_index}>
+        {(showSmaller ? models.offer?.filter(tier => tier.pin.size < (models.answer?.pin?.size ?? Infinity)) : [...(models.offer ?? [])].reverse())?.map(tier => <div key={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
           <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
         </div>)}
