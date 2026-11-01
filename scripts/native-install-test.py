@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Fresh hosted-runner stand-in: install downloaded artifact, launch UI, uninstall."""
+import contextlib
 import hashlib
 import importlib.util
 import json
@@ -195,7 +196,9 @@ try:
                 if scenario == 'selected-without-records':
                     (seed_models / 'models.verified.json').unlink()
                 def logical_index():
-                    with sqlite3.connect(legacy / 'state.sqlite') as database:
+                    # sqlite3's context manager commits but does not close; an open
+                    # handle keeps state.sqlite locked on Windows (WinError 32).
+                    with contextlib.closing(sqlite3.connect(legacy / 'state.sqlite')) as database:
                         documents = database.execute('SELECT doc_id,generation FROM documents ORDER BY doc_id').fetchall()
                     return (legacy.joinpath('recipe.json').read_bytes(), documents)
                 before_index = logical_index()
