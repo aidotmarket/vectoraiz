@@ -31,9 +31,15 @@ arrow-schema = "56.2"
 arrow-select = "56.2"
 parquet = { version = "56.2", default-features = false, features = ["arrow", "snap"] }
 futures = "0.3"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+
+reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "system-proxy", "json"] }
+keyring-core = "=1.0.1"
+zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+apple-native-keyring-store = { version = "=1.0.2", features = ["keychain"] }
 llama-cpp-2 = { version = "=0.1.142", default-features = false, features = ["metal"] }
 
 [features]
@@ -43,4 +49,5 @@ vulkan = ["llama-cpp-2/vulkan"]
 tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
+windows-native-keyring-store = { version = "=1.1.0", default-features = false }
 windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_System_Threading"] }

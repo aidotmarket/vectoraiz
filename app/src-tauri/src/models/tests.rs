@@ -1168,18 +1168,25 @@ fn failed_activation_settings_write_clears_target_and_preserves_current_engine()
         .get_or_load(true, || fake_load(&counts))
         .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let mut settings = crate::settings::Settings::read(dir.path()).unwrap();
-    settings.select(Some("new"));
+    crate::settings::read(dir.path()).unwrap();
     // A directory at the destination makes the actual atomic rename fail on both platforms.
     fs::create_dir(dir.path().join("settings.json")).unwrap();
-    let expected = settings.save(dir.path()).unwrap_err().to_string();
+    let save = || {
+        crate::settings::update(dir.path(), |state| {
+            state.settings.select(Some("new"));
+            Ok::<(), String>(())
+        })
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    };
+    let expected = save().unwrap_err();
     ops.set_target(&pin("https://unused.invalid"), "verified", None);
     let notified = std::cell::Cell::new(false);
     let error = runtime()
         .block_on(ops.activate_answer(
             ops.start_transfer(),
             true,
-            |_| settings.save(dir.path()).map_err(|e| e.to_string()),
+            |_| save(),
             || notified.set(true),
         ))
         .unwrap_err();

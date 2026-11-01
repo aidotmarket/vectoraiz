@@ -6,16 +6,17 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { version } from "../package.json";
 
-const { invoke, modelsInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
+const { invoke, modelsInvoke, cloudInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (_: string, callback: () => void) => { modelEvents.callback = callback; return () => { if (modelEvents.callback === callback) modelEvents.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (command: string, args: unknown) => command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
+  invoke: (command: string, args: unknown) => command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
   Channel: class { onmessage = (_: unknown) => {}; },
 }));
 const readyModels = { ready: true, files: [] };
 const missingModels = { ready: false, files: [{ name: "Embedding model", file: "test.gguf", size: 100, license: "MIT", source: "https://example.com/model", verified: false }] };
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 beforeEach(() => {
+  cloudInvoke.mockResolvedValue({default:"local",api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false,cleanup_pending:false});
   invoke.mockResolvedValue({ available: false });
   modelsInvoke.mockResolvedValue(readyModels);
 });
@@ -735,7 +736,7 @@ it("shows checking and verified download stages and a completion message", async
 
 const answerPin = {name:"Small local model", file:"answer.gguf", sha256:"small",size:2_000_000_000,license:"Apache-2.0",source:"fixture",verified:true,installed_bytes:2_000_000_000};
 const answerTier = {tier_index:0,min_ram_gb:0,pin:answerPin,memory:{bytes:4_000_000_000,measured:false,source:null}};
-it("renders the one local answer path for no_answer without a failure", async () => {
+it("renders both answer paths for no_answer without a failure", async () => {
   modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"none"},offer:[answerTier]});
   invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
   render(<App />);
@@ -745,7 +746,8 @@ it("renders the one local answer path for no_answer without a failure", async ()
   expect(screen.getByText(/uses about 4.0 GB of memory \(estimate\)/)).toHaveTextContent("Works offline. Search keeps working without it.");
   expect(screen.getByText("Disk space needed: 2.2 GB")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-  expect(screen.queryByText(/API key|Claude|Connect another app/)).not.toBeInTheDocument();
+  expect(screen.getByText("With your API key.")).toBeInTheDocument();
+  expect(screen.queryByText(/Claude|Connect another app/)).not.toBeInTheDocument();
 });
 
 it.each(["downloading","checking","paused","failed"])("keeps Search and the active answer usable during target %s", async state => {
@@ -893,4 +895,56 @@ it.each(["downloading", "checking"])("polls %s progress at most every 500 ms and
       expect(checks()).toBe(stopped);
     }
   } finally { vi.useRealTimers(); }
+});
+
+const apiReady = {default:"api_key",api_key:{enabled:true,provider:"anthropic",key_present:true,key_last4:"1234"},consent_current:true,cleanup_pending:false};
+it("shows both answer paths and the ChatGPT explanation before setup", async () => {
+ cloudInvoke.mockResolvedValue({...apiReady,default:null,api_key:{enabled:false,provider:null,key_present:false,key_last4:null}});
+ render(<App />);
+ expect(await screen.findByText("How should vectorAIz write answers?")).toBeInTheDocument();
+ expect(screen.getByText("On this computer.")).toBeInTheDocument();
+ expect(screen.getByText("With your API key.")).toBeInTheDocument();
+ expect(screen.getByText(/Using ChatGPT\?/)).toHaveTextContent("Use an OpenAI API key instead.");
+ expect(invoke.mock.calls.some(([c])=>c==="pipeline_ask")).toBe(false);
+});
+it("requires disclosure, masks the key and clears it after checking", async () => {
+ const fresh={...apiReady,default:null,api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false};
+ const pending=deferred();
+ cloudInvoke.mockImplementation(async command => {
+  if(command==="cloud_status") return fresh;
+  if(command==="api_key_disclosure") return {version:"current",strings:["Use your Anthropic API key","Question and matching passages go to Anthropic.","Billed to your account.","You can stop in Settings.","Use Anthropic","Cancel"]};
+  if(command==="api_key_confirm") return fresh;
+  if(command==="api_key_set") return pending.promise;
+ });
+ render(<App />);await screen.findByText("How should vectorAIz write answers?");
+ await userEvent.click(within(screen.getByRole("complementary",{name:"Answers with your API key"})).getByRole("button",{name:"Set up"}));
+ expect(await screen.findByText("Question and matching passages go to Anthropic.")).toBeInTheDocument();expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+ await userEvent.click(screen.getByRole("button",{name:"Use Anthropic"}));
+ const field=await screen.findByLabelText("API key");expect(field).toHaveAttribute("type","password");expect(field).toHaveAttribute("autocomplete","off");
+ await userEvent.type(field,"sk-test-1234");await userEvent.click(screen.getByRole("button",{name:"Check and save key"}));expect(await screen.findByText("Checking your key")).toBeInTheDocument();
+ await act(async()=>pending.resolve({kind:"cloud_error",message:"That key was not accepted."}));await waitFor(()=>expect(field).toHaveValue(""));
+ expect(await screen.findByText("That key was not accepted.")).toBeInTheDocument();
+});
+it("keeps Search and Index enabled during cloud Ask and ignores cancelled callbacks", async () => {
+ cloudInvoke.mockResolvedValue(apiReady);const pending=deferred();let tokens:{onmessage:(t:string)=>void}|undefined;
+ invoke.mockImplementation(async(command,args)=>{
+  if(command==="pipeline_ask"){tokens=args.tokens;tokens!.onmessage("First token");return pending.promise;}
+  if(command==="pipeline_search")return [{chunk:{chunk_id:"hit",doc_id:"doc",page:1,text:"Search hit"},score:1}];
+  return {available:false};
+ });
+ render(<App />);await screen.findByText("Saved key ending in 1234",{exact:false});
+ await userEvent.type(screen.getByLabelText("Folder"),"/documents");await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+ expect(await screen.findByText("First token")).toBeInTheDocument();expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();expect(screen.getByRole("button",{name:"Index folder"})).toBeEnabled();
+ await userEvent.click(screen.getByRole("button",{name:"Search"}));expect(await screen.findByText("Search hit")).toBeInTheDocument();expect(screen.getByText("First token")).toBeInTheDocument();
+ await userEvent.click(screen.getByRole("button",{name:"Index folder"}));await waitFor(()=>expect(invoke).toHaveBeenCalledWith("pipeline_index",expect.anything()));
+ expect(screen.getByText("First token")).toBeInTheDocument();
+ await userEvent.click(screen.getByRole("button",{name:"Cancel answer"}));expect(modelsInvoke).toHaveBeenCalledWith("models_cancel",{kind:"cloud"});
+ await act(async()=>{tokens!.onmessage("stale");pending.resolve({kind:"cancelled",answered_by:null});});expect(screen.queryByText(/First token|stale/)).not.toBeInTheDocument();
+});
+it("labels the chosen provider and replaces partial tokens on failure", async () => {
+ cloudInvoke.mockResolvedValue(apiReady);
+ invoke.mockImplementation(async(command,args)=>{if(command==="pipeline_ask"){args.tokens.onmessage("Partial answer");return {kind:"cloud_error",reason:"quota",message:"Account out of credit",answered_by:null};}return {available:false};});
+ render(<App />);await screen.findByText("Saved key ending in 1234",{exact:false});await userEvent.click(screen.getByRole("button",{name:"Ask"}));expect(await screen.findByText("Account out of credit")).toBeInTheDocument();expect(screen.queryByText("Partial answer")).not.toBeInTheDocument();
+ invoke.mockImplementation(async(command)=>command==="pipeline_ask"?{kind:"answer",text:"Answer",citations:[],answered_by:"anthropic"}:{available:false});
+ await userEvent.click(screen.getByRole("button",{name:"Ask"}));expect(await screen.findByText("Answered by Anthropic")).toBeInTheDocument();
 });

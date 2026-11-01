@@ -5,6 +5,7 @@
     "resources": {
       "gen/bundle/assets/": "assets/",
       "gen/bundle/models.json": "models.json",
+      "gen/bundle/providers.json": "providers.json",
       "gen/bundle/THIRD_PARTY_NOTICES": "THIRD_PARTY_NOTICES"
     },
     "externalBin": [

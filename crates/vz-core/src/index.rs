@@ -347,7 +347,31 @@ pub fn ask(
     finish_answer(text, citations, emit)
 }
 
-fn finish_answer(
+/// Cloud context contains passage labels and text only; no filenames or pages.
+/// Drop whole low-ranked passages and keep citation numbering contiguous.
+pub fn cloud_passages(hits: &[Hit]) -> (String, Vec<Citation>) {
+    let mut context = String::new();
+    let mut citations = Vec::new();
+    for h in hits.iter().take(3) {
+        let number = citations.len() + 1;
+        let passage = format!("[{}] {}", number, h.chunk.text);
+        let separator = if context.is_empty() { "" } else { "\n\n" };
+        if context.len() + separator.len() + passage.len() > 24000 {
+            break;
+        }
+        context.push_str(separator);
+        context.push_str(&passage);
+        citations.push(Citation {
+            number,
+            doc_id: h.chunk.doc_id.clone(),
+            page: h.chunk.page,
+            chunk_id: h.chunk.chunk_id.clone(),
+        });
+    }
+    (context, citations)
+}
+
+pub(crate) fn finish_answer(
     mut text: String,
     citations: Vec<Citation>,
     mut emit: impl FnMut(&str),

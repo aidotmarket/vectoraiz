@@ -22,6 +22,13 @@
     "allow-answer-turn-off",
     "allow-delete-unused-model",
     "core:event:allow-listen",
-    "core:event:allow-unlisten"
+    "core:event:allow-unlisten",
+    "allow-cloud-status",
+    "allow-api-key-disclosure",
+    "allow-api-key-confirm",
+    "allow-api-key-set",
+    "allow-api-key-stop",
+    "allow-api-key-cleanup-retry",
+    "allow-answer-path-set"
   ]
 }

@@ -43,6 +43,7 @@ jobs:
         run: |
           python scripts/native-version.py
           python scripts/native-build-tests.py
+          python scripts/native-network-check.py
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.2'

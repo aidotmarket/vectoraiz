@@ -7,6 +7,8 @@ compile_error!("ui-test is restricted to debug builds");
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
 mod bundled_library;
+#[cfg_attr(test, allow(dead_code))]
+mod cloud;
 mod desktop_pipeline;
 #[cfg_attr(test, allow(dead_code))]
 mod models;
@@ -39,6 +41,13 @@ mod tests {
             "pipeline_index",
             "pipeline_search",
             "pipeline_ask",
+            "cloud_status",
+            "api_key_disclosure",
+            "api_key_confirm",
+            "api_key_set",
+            "api_key_stop",
+            "api_key_cleanup_retry",
+            "answer_path_set",
             "models_status",
             "models_download",
             "models_cancel",

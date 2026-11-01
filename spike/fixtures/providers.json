@@ -1,0 +1,32 @@
+{
+  "anthropic": {
+    "model": "claude-sonnet-5-5",
+    "checked": "2026-11-01",
+    "source": "https://platform.claude.com/docs/en/models/overview",
+    "parameters": {
+      "max_tokens": 4096,
+      "thinking": {
+        "type": "between_tools"
+      },
+      "output_config": {
+        "effort": "low"
+      },
+      "stream": true
+    },
+    "host": "api.anthropic.com"
+  },
+  "openai": {
+    "model": "gpt-6-astra",
+    "checked": "2026-11-01",
+    "source": "https://developers.openai.com/api/docs/models",
+    "parameters": {
+      "reasoning": {
+        "effort": "low"
+      },
+      "max_output_tokens": 16000,
+      "stream": true,
+      "store": false
+    },
+    "host": "api.openai.com"
+  }
+}

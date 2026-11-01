@@ -87,3 +87,6 @@ pub mod worker;
 pub mod failures;
 
 pub mod verification;
+
+pub mod cloud_gate;
+pub mod credentials;
