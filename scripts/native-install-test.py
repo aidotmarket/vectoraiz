@@ -164,13 +164,15 @@ try:
     tiers_manifest = json.loads(Path('spike/fixtures/models.tiers.json').read_text())
     answers = [tier['pin'] for tier in tiers_manifest['answer_tiers']]
     second = answers[1]
-    with tempfile.TemporaryDirectory(prefix='vz-migration-fixtures-') as fixture_dir:
+    with tempfile.TemporaryDirectory(prefix='vz-migration-fixtures-', ignore_cleanup_errors=True) as fixture_dir:
         second_file = Path(fixture_dir) / second['file']
         fetcher.fetch(second['url'], second['sha256'], second_file, second['size'])
         cli = binary.parent / ('vectoraiz-cli.exe' if windows else 'vectoraiz-cli')
         assert cli.is_file(), 'Installed same-commit CLI missing'
         for scenario in ['selected-with-records', 'single-no-selected', 'selected-without-records']:
-            with tempfile.TemporaryDirectory(prefix='vz-legacy-' + scenario + '-') as seed_dir:
+            # WebView2 helper processes can outlive the app briefly and hold files in
+            # the seed folder on Windows; the folder is scratch, so do not fail on cleanup.
+            with tempfile.TemporaryDirectory(prefix='vz-legacy-' + scenario + '-', ignore_cleanup_errors=True) as seed_dir:
                 seed = Path(seed_dir)
                 seed_models = seed / 'models'
                 seed_models.mkdir()
