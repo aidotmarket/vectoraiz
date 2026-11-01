@@ -208,6 +208,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));
   }
   await report('guard-after');
+  // With a local answer model the overlapping Ask needs the inference lock; without any answer path it returns the chooser result (M2 2.4).
+  const askNeedsLock = (await ipc('models_status')).answer.state === 'ready';
   await report('hold-next-search');
   window.__VZ_SMOKE__.searchLocked = false;
   const secondSearch = window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
@@ -225,13 +227,17 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     ...(result.status === 'rejected' ? { reason: String(result.reason) } : { value: result.value }),
   })));
   if (overlapSearch.status !== 'rejected' || String(overlapSearch.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Search was not refused: ' + overlapDetails);
-  // M2 2.3/2.4: no answer path means the chooser result, with no inference work.
-  if (overlapAsk.status !== 'fulfilled' || overlapAsk.value?.kind !== 'no_answer' || overlapAsk.value?.answered_by !== null) throw new Error('Overlapping Ask without an answer path did not return no_answer: ' + overlapDetails);
+  if (askNeedsLock) {
+    if (overlapAsk.status !== 'rejected' || String(overlapAsk.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Ask with a local answer model was not refused: ' + overlapDetails);
+  } else if (overlapAsk.status !== 'fulfilled' || overlapAsk.value?.kind !== 'no_answer' || overlapAsk.value?.answered_by !== null) {
+    // M2 2.3/2.4: no answer path means the chooser result, with no inference work.
+    throw new Error('Overlapping Ask without an answer path did not return no_answer: ' + overlapDetails);
+  }
   const nextHits = await secondSearch;
   const rendered = nextHits.map(hit => `${hit.chunk.text} · ${hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page ${hit.chunk.page}`);
   if (JSON.stringify(rendered) !== JSON.stringify(previousSearch)) throw new Error('Invalid Folder changed search results');
   await report('searched; empty/blank/missing-folder IPC preserved seeded index');
-  await report('inference lock refused overlapping Search; Ask without an answer path returned no_answer');
+  await report(askNeedsLock ? 'inference lock refused Search and Ask overlaps' : 'inference lock refused overlapping Search; Ask without an answer path returned no_answer');
   if (window.__VZ_SMOKE__.acquisition) {
     const searchOnly = await ipc('models_status');
     if (!searchOnly.ready || searchOnly.answer.state !== 'none' || searchOnly.files.filter(file => file.installed_bytes > 0).length !== 1) throw new Error('Fresh install acquired more than the search model');
