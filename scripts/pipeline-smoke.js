@@ -208,8 +208,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));
   }
   await report('guard-after');
-  // With a local answer model the overlapping Ask needs the inference lock; without any answer path it returns the chooser result (M2 2.4).
-  const askNeedsLock = (await ipc('models_status')).answer.state === 'ready';
+  // pipeline_ask returns the chooser result when no answer path is chosen, and otherwise needs the inference lock (M2 2.4).
+  const askNeedsLock = (await ipc('cloud_status')).default !== null;
   await report('hold-next-search');
   window.__VZ_SMOKE__.searchLocked = false;
   const secondSearch = window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
@@ -228,7 +228,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   })));
   if (overlapSearch.status !== 'rejected' || String(overlapSearch.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Search was not refused: ' + overlapDetails);
   if (askNeedsLock) {
-    if (overlapAsk.status !== 'rejected' || String(overlapAsk.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Ask with a local answer model was not refused: ' + overlapDetails);
+    if (overlapAsk.status !== 'rejected' || String(overlapAsk.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Ask with an answer path was not refused: ' + overlapDetails);
   } else if (overlapAsk.status !== 'fulfilled' || overlapAsk.value?.kind !== 'no_answer' || overlapAsk.value?.answered_by !== null) {
     // M2 2.3/2.4: no answer path means the chooser result, with no inference work.
     throw new Error('Overlapping Ask without an answer path did not return no_answer: ' + overlapDetails);
