@@ -170,7 +170,9 @@ export default function App() {
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
-    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress("Thinking…"); setHits([]); setAskState("");
+    const unrecordedAnswer = models?.answer?.state === "ready" && models.answer.pin &&
+      !models.files.some(file => file.sha256 === models.answer?.pin?.sha256 && file.verified);
+    setRunning(true); setError(""); setAnswer(""); setCitations([]); setProgress(unrecordedAnswer ? M1_COPY.checking : "Thinking…"); setHits([]); setAskState("");
     let active = true;
     const channel = new Channel<string>();
     channel.onmessage = token => {

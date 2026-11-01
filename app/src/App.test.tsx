@@ -801,3 +801,16 @@ it("shows one checking message when Ask returns checking", async () => {
   expect(screen.getAllByText("Checking your answer model")).toHaveLength(1);
   expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
 });
+
+it("shows Checking during a cold Ask when verification could not be recorded", async () => {
+  const pending = deferred();
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin},files:[{...answerPin,verified:false}]});
+  invoke.mockImplementation(command => command === "pipeline_ask" ? pending.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(screen.getByRole("status")).toHaveTextContent("Checking your answer model");
+  await act(async () => pending.resolve({kind:"answer",text:"Thirty days [1].",citations:[{number:1,doc_id:"doc",page:1}]}));
+  expect(screen.getByRole("status")).not.toHaveTextContent("Checking your answer model");
+  expect(screen.getByText("Thirty days [1].")).toBeInTheDocument();
+});
