@@ -75,14 +75,17 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       const adding = ipc('answer_add', {tierIndex:0});
       await statusWait(s => s.target?.state === 'downloading');
       if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Transfer blocked Search');
-      const currentAnswer = await ipc('pipeline_ask',{question:query,tokens:progress});
-      if (currentAnswer.kind !== 'answer' || !currentAnswer.citations.length) throw new Error('Transfer blocked the current answer');
+      window.__VZ_SMOKE__.askLocked = false;
+      const currentAnswer = ipc('pipeline_ask',{question:query,tokens:progress});
+      await wait(() => window.__VZ_SMOKE__.askLocked,2000);
       for (const [command,args] of [['answer_switch',{tierIndex:0}],['models_import',{folder:window.__VZ_SMOKE__.fixture}]]) {
         let refused = false;
         try { await ipc(command,args); } catch (error) { if (String(error) !== 'Another model or index operation is running') throw error; refused = true; }
         if (!refused) throw new Error('Concurrent transfer was accepted');
       }
-      await report('release-transfer'); await adding;
+      await report('release-transfer');
+      const [answerDuringTransfer] = await Promise.all([currentAnswer,adding]);
+      if (answerDuringTransfer.kind !== 'answer' || !answerDuringTransfer.citations.length) throw new Error('Transfer blocked the current answer');
       // Real IPC Index + transfer, cancelling each side independently.
       for (const kind of ['transfer','pipeline']) {
         await report('hold-next-index');

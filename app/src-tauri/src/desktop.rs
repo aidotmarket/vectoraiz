@@ -625,6 +625,13 @@ async fn pipeline_ask<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_ask_total");
     let guard = operations.acquire()?;
+    #[cfg(feature = "smoke-test")]
+    if smoke_test_requested() {
+        tauri::Manager::get_webview_window(&app, "main")
+            .expect("main window")
+            .eval("window.__VZ_SMOKE__.askLocked = true")
+            .map_err(|e| e.to_string())?;
+    }
     let (manifest, settings) = manifest_selection(&app)?;
     let answers = manifest.answers().map_err(|e| e.to_string())?;
     let Some(pin) = answers

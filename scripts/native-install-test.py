@@ -33,6 +33,25 @@ def run(*args, timeout=90):
     step(f'Completed: exit {result.returncode}')
 
 
+def check_app_exit(child, timeout, log_path, reason):
+    try:
+        code = child.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        print_scenario_failure(log_path)
+        raise
+    if code != 0:
+        print_scenario_failure(log_path)
+        raise AssertionError(f'{reason}: exit {code}; see {log_path}')
+
+
+def print_scenario_failure(log_path):
+    lines = Path(log_path).read_text(encoding='utf-8', errors='replace').splitlines()
+    step(f'Scenario evidence: {log_path} ({len(lines)} lines; full log appended to installed-pipeline.log)')
+    if len(lines) > 200:
+        step('Excerpt truncated to the last 200 lines; full evidence is preserved')
+    print('\n'.join(lines[-200:]), flush=True)
+
+
 step('Starting fresh hosted-runner install stand-in')
 artifacts = Path('artifacts').resolve()
 data = Path.home() / 'vectorAIz'
@@ -191,7 +210,7 @@ try:
                     with migration_log.open('w',encoding='utf-8') as log:
                         child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=migration_env,stdout=log,stderr=subprocess.STDOUT)
                         try:
-                            assert child.wait(timeout=150) == 0, 'Installed migration failed'
+                            check_app_exit(child, 150, migration_log, 'Installed migration failed')
                         finally:
                             if child.poll() is None:
                                 child.kill(); child.wait(timeout=10)
@@ -218,7 +237,7 @@ try:
                     with Path('installed-migration-switch.log').open('w',encoding='utf-8') as log:
                         child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=migration_env,stdout=log,stderr=subprocess.STDOUT)
                         try:
-                            assert child.wait(timeout=360) == 0, 'Installed migration switch/delete failed'
+                            check_app_exit(child, 360, Path('installed-migration-switch.log'), 'Installed migration switch/delete failed')
                         finally:
                             if child.poll() is None:
                                 child.kill(); child.wait(timeout=10)
@@ -238,7 +257,7 @@ try:
             with Path('installed-import-three.log').open('w',encoding='utf-8') as log:
                 child = subprocess.Popen([str(binary),'--pipeline-smoke-test','--cpu'],cwd=fixture_dir,env=import_env,stdout=log,stderr=subprocess.STDOUT)
                 try:
-                    assert child.wait(timeout=480) == 0, 'Installed three-pin import failed'
+                    check_app_exit(child, 480, Path('installed-import-three.log'), 'Installed three-pin import failed')
                 finally:
                     if child.poll() is None:
                         child.kill(); child.wait(timeout=10)
@@ -247,6 +266,12 @@ try:
     sentinel = data / 'install-self-test.json'
     before = sentinel.read_bytes()
 finally:
+    # The existing installed-pipeline artifact retains every new scenario in full,
+    # including failures before the final success marker or process timeout.
+    with Path('installed-pipeline.log').open('ab') as evidence:
+        for scenario_log in sorted([*Path('.').glob('installed-migration-*.log'), *Path('.').glob('installed-import-three.log')]):
+            evidence.write(f'\n\n=== {scenario_log.name} ===\n'.encode())
+            evidence.write(scenario_log.read_bytes())
     step('Uninstall; preserve user data')
     if windows:
         run(msiexec, '/x', installer, '/qn', '/norestart',
