@@ -123,6 +123,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       const partial = (await ipc('models_status')).files.find(file => file.sha256 === status.offer[0].pin.sha256)?.partial_bytes;
       if (!(partial > 0)) throw new Error('Cancellation did not preserve resumable bytes');
       if (await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256}) !== partial) throw new Error('Partial delete freed wrong bytes');
+      if ((await ipc('models_status')).target) throw new Error('Partial deletion left a stale download target');
       if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Partial deletion changed Search');
       await report('migration: transfer exclusion, delete refusals, turn off and unused model deletion passed');
     }

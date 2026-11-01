@@ -1204,6 +1204,15 @@ async fn delete_unused_model<R: tauri::Runtime>(
     }
     vz_core::verification::forget(&dir.join(&pin.file)).map_err(|e| e.to_string())?;
     operations.checks.lock().unwrap().remove(&sha256);
+    {
+        let mut target = operations.target.write().unwrap();
+        if target
+            .as_ref()
+            .is_some_and(|target| target["pin"]["sha256"].as_str() == Some(sha256.as_str()))
+        {
+            *target = None;
+        }
+    }
     let _ = app.emit("models_changed", ());
     Ok(freed)
 }
