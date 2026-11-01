@@ -90,7 +90,7 @@ assert binary.is_file(), f'Installed executable missing: {binary}'
 step(f'Installed executable: {binary}')
 try:
     # No checkout/assets in this working directory: exercise installed paths.
-    with tempfile.TemporaryDirectory(prefix='vz-first-run-') as cwd:
+    with tempfile.TemporaryDirectory(prefix='vz-first-run-', ignore_cleanup_errors=True) as cwd:
         # A per-machine app cannot write WebView2's default profile next to its
         # executable in Program Files. Match Tauri's user-scoped production profile.
         env['WEBVIEW2_USER_DATA_FOLDER'] = str(data / 'webview2')
@@ -115,7 +115,7 @@ try:
     # Acquisition and pipeline run while the installed binary still exists.
     # Budgets: install 240s + self-test 140s + acquisition 900s + pipeline 300s
     # + startup 30s + single-instance 180s + uninstall 120s < CI step 35 minutes.
-    with tempfile.TemporaryDirectory(prefix='vz-acquisition-run-') as cwd:
+    with tempfile.TemporaryDirectory(prefix='vz-acquisition-run-', ignore_cleanup_errors=True) as cwd:
         models = data / 'models'
         assert not models.exists(), 'Acquisition must start with an empty model directory'
         models.mkdir()
@@ -247,7 +247,7 @@ try:
                             if child.poll() is None:
                                 child.kill(); child.wait(timeout=10)
                     assert not (seed_models / answers[0]['file']).exists(), 'Unused old model was not deleted'
-        with tempfile.TemporaryDirectory(prefix='vz-import-three-') as import_dir:
+        with tempfile.TemporaryDirectory(prefix='vz-import-three-', ignore_cleanup_errors=True) as import_dir:
             import_root = Path(import_dir)
             source = import_root / 'source'
             source.mkdir()
