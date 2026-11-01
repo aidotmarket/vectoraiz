@@ -218,14 +218,20 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress }),
   ]);
   await report('release-search');
-  for (const result of overlaps) {
-    if (result.status !== 'rejected' || String(result.reason) !== 'Another model or index operation is running') throw new Error('Overlapping operation was not refused');
-  }
+  const [overlapSearch, overlapAsk] = overlaps;
+  const overlapDetails = JSON.stringify(overlaps.map((result, index) => ({
+    command: ['pipeline_search', 'pipeline_ask'][index],
+    status: result.status,
+    ...(result.status === 'rejected' ? { reason: String(result.reason) } : { value: result.value }),
+  })));
+  if (overlapSearch.status !== 'rejected' || String(overlapSearch.reason) !== 'Another model or index operation is running') throw new Error('Overlapping Search was not refused: ' + overlapDetails);
+  // M2 2.3/2.4: no answer path means the chooser result, with no inference work.
+  if (overlapAsk.status !== 'fulfilled' || overlapAsk.value?.kind !== 'no_answer' || overlapAsk.value?.answered_by !== null) throw new Error('Overlapping Ask without an answer path did not return no_answer: ' + overlapDetails);
   const nextHits = await secondSearch;
   const rendered = nextHits.map(hit => `${hit.chunk.text} · ${hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page ${hit.chunk.page}`);
   if (JSON.stringify(rendered) !== JSON.stringify(previousSearch)) throw new Error('Invalid Folder changed search results');
   await report('searched; empty/blank/missing-folder IPC preserved seeded index');
-  await report('inference lock refused Search and Ask overlaps');
+  await report('inference lock refused overlapping Search; Ask without an answer path returned no_answer');
   if (window.__VZ_SMOKE__.acquisition) {
     const searchOnly = await ipc('models_status');
     if (!searchOnly.ready || searchOnly.answer.state !== 'none' || searchOnly.files.filter(file => file.installed_bytes > 0).length !== 1) throw new Error('Fresh install acquired more than the search model');
