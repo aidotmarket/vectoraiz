@@ -872,12 +872,11 @@ it("shows installed RAM as 48 GB in the large-model warning", async () => {
 });
 
 
-it("polls target progress at most every 500 ms and stops when target clears", async () => {
-  modelsInvoke.mockResolvedValue({...readyModels,target:{pin:answerPin,state:"downloading"}});
+it.each(["downloading", "checking"])("polls %s progress at most every 500 ms and stops for idle targets", async (state) => {
+  modelsInvoke.mockResolvedValue({...readyModels,target:{pin:answerPin,state}});
   vi.useFakeTimers();
   try {
     await act(async () => { render(<App />); });
-    expect(screen.getByText(/Downloading answer model/)).toBeInTheDocument();
     const checks = () => modelsInvoke.mock.calls.filter(([command]) => command === "models_status").length;
     const initial = checks();
     await act(async () => { await vi.advanceTimersByTimeAsync(499); });
@@ -886,10 +885,12 @@ it("polls target progress at most every 500 ms and stops when target clears", as
     expect(checks()).toBe(initial + 1);
     await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
     expect(checks()).toBe(initial + 3);
-    modelsInvoke.mockResolvedValue(readyModels);
-    await act(async () => { modelEvents.callback?.(); });
-    const stopped = checks();
-    await act(async () => { await vi.advanceTimersByTimeAsync(1500); });
-    expect(checks()).toBe(stopped);
+    for (const idle of ["paused", "failed", "verified", undefined]) {
+      modelsInvoke.mockResolvedValue({...readyModels, target: idle ? {pin:answerPin,state:idle} : undefined});
+      await act(async () => { modelEvents.callback?.(); });
+      const stopped = checks();
+      await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+      expect(checks()).toBe(stopped);
+    }
   } finally { vi.useRealTimers(); }
 });

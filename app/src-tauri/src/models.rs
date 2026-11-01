@@ -143,19 +143,25 @@ impl<E: CachedEngine> OperationState<E> {
     pub async fn activate_answer(
         &self,
         mut cancel: watch::Receiver<bool>,
+        switch: bool,
         activate: impl FnOnce(&mut EngineCache<E>) -> Result<(), String>,
         changed: impl FnOnce(),
     ) -> Result<(), String> {
+        let cancelled = if switch {
+            "Switch cancelled"
+        } else {
+            "Download cancelled"
+        };
         let result = async {
             if *cancel.borrow() {
-                return Err("Switch cancelled".into());
+                return Err(cancelled.into());
             }
             let mut cache = tokio::select! {
                 cache = self.wait_inference() => cache,
-                _ = cancel.changed() => return Err("Switch cancelled".into()),
+                _ = cancel.changed() => return Err(cancelled.into()),
             };
             if *cancel.borrow() {
-                return Err("Switch cancelled".into());
+                return Err(cancelled.into());
             }
             activate(&mut cache)
         }
@@ -553,7 +559,7 @@ pub enum Source<'a> {
 fn cancelled(cancel: &watch::Receiver<bool>) -> Result<()> {
     ensure!(
         !*cancel.borrow(),
-        "Model acquisition cancelled; partial download kept for resume"
+        "Download paused. vectorAIz kept the partial download and can resume it."
     );
     Ok(())
 }
@@ -564,7 +570,7 @@ async fn cancellable<T>(
     cancelled(cancel)?;
     tokio::select! {
         value = future => Ok(value),
-        _ = cancel.changed() => bail!("Model acquisition cancelled; partial download kept for resume"),
+        _ = cancel.changed() => bail!("Download paused. vectorAIz kept the partial download and can resume it."),
     }
 }
 static STAGE_ID: AtomicU64 = AtomicU64::new(0);

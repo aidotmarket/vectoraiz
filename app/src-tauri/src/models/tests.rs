@@ -1130,6 +1130,7 @@ fn cancel_pending_activation_clears_target_and_notifies_without_waiting_for_sear
     runtime().block_on(async {
         let activation = ops.activate_answer(
             cancel,
+            true,
             |_| panic!("cancelled switch activated"),
             || notified.set(true),
         );
@@ -1171,6 +1172,7 @@ fn failed_activation_settings_write_clears_target_and_preserves_current_engine()
     let error = runtime()
         .block_on(ops.activate_answer(
             ops.start_transfer(),
+            true,
             |_| settings.save(dir.path()).map_err(|e| e.to_string()),
             || notified.set(true),
         ))
@@ -1182,18 +1184,25 @@ fn failed_activation_settings_write_clears_target_and_preserves_current_engine()
 }
 
 #[test]
-fn cancel_before_activation_keeps_verified_file_and_reports_switch_cancelled() {
-    let ops = OperationState::<FakeEngines>::default();
-    let dir = tempfile::tempdir().unwrap();
-    let pin = pin("https://unused.invalid");
-    fs::write(dir.path().join(&pin.file), [b'x'; 100]).unwrap();
-    ops.set_target(&pin, "verified", None);
-    let cancel = ops.start_transfer();
-    ops.cancel_transfer();
-    let error = runtime()
-        .block_on(ops.activate_answer(cancel, |_| panic!("cancelled switch activated"), || {}))
-        .unwrap_err();
-    assert_eq!(error, "Switch cancelled");
-    assert!(verified(dir.path(), &pin));
-    assert!(ops.target.read().unwrap().is_none());
+fn cancel_before_activation_keeps_verified_file_and_reports_command_cancellation() {
+    for (switch, expected) in [(false, "Download cancelled"), (true, "Switch cancelled")] {
+        let ops = OperationState::<FakeEngines>::default();
+        let dir = tempfile::tempdir().unwrap();
+        let pin = pin("https://unused.invalid");
+        fs::write(dir.path().join(&pin.file), [b'x'; 100]).unwrap();
+        ops.set_target(&pin, "verified", None);
+        let cancel = ops.start_transfer();
+        ops.cancel_transfer();
+        let error = runtime()
+            .block_on(ops.activate_answer(
+                cancel,
+                switch,
+                |_| panic!("cancelled command activated"),
+                || {},
+            ))
+            .unwrap_err();
+        assert_eq!(error, expected);
+        assert!(verified(dir.path(), &pin));
+        assert!(ops.target.read().unwrap().is_none());
+    }
 }

@@ -1074,6 +1074,7 @@ async fn answer_acquire<R: tauri::Runtime>(
     operations
         .activate_answer(
             cancel,
+            switch,
             |cache| {
                 let dir = model_dir(&app)?;
                 let mut settings = settings::Settings::read(&dir).map_err(|e| e.to_string())?;

@@ -221,9 +221,9 @@ export default function App() {
     return () => { disposed = true; void registered.then(unlisten => unlisten()).catch(() => {}); };
   }, [refreshModels]);
 
-  const hasTarget = !!models?.target;
+  const polling = ["downloading", "checking"].includes(models?.target?.state ?? "");
   useEffect(() => {
-    if (!hasTarget) return;
+    if (!polling) return;
     // State transitions arrive as events. Progress is sampled twice a second.
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -234,7 +234,7 @@ export default function App() {
     };
     timer = setTimeout(() => void poll(), 500);
     return () => { disposed = true; clearTimeout(timer); };
-  }, [hasTarget, refreshModels]);
+  }, [polling, refreshModels]);
 
   async function refreshAfterModelError(cause: unknown) {
     setModelError(String(cause));
