@@ -10868,7 +10868,9 @@ name = "vectoraiz"
 version = "0.0.15"
 dependencies = [
  "anyhow",
+ "chrono",
  "reqwest 0.13.5",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-build",
@@ -10877,8 +10879,10 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+ "tokio-util",
  "uuid",
  "vz-core",
+ "vz-mcp",
  "windows-sys 0.61.2",
 ]
 

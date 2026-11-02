@@ -6,16 +6,17 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { version } from "../package.json";
 
-const { invoke, modelsInvoke, cloudInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
+const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (_: string, callback: () => void) => { modelEvents.callback = callback; return () => { if (modelEvents.callback === callback) modelEvents.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (command: string, args: unknown) => command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
+  invoke: (command: string, args: unknown) => command.startsWith("app_") ? appInvoke(command, args) : command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
   Channel: class { onmessage = (_: unknown) => {}; },
 }));
 const readyModels = { ready: true, files: [] };
 const missingModels = { ready: false, files: [{ name: "Embedding model", file: "test.gguf", size: 100, license: "MIT", source: "https://example.com/model", verified: false }] };
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 beforeEach(() => {
+  appInvoke.mockResolvedValue({enabled:false,off:false,clients:[],recent:[]});
   cloudInvoke.mockResolvedValue({default:"local",api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false,cleanup_pending:false});
   invoke.mockResolvedValue({ available: false });
   modelsInvoke.mockResolvedValue(readyModels);
@@ -747,7 +748,7 @@ it("renders both answer paths for no_answer without a failure", async () => {
   expect(screen.getByText("Disk space needed: 2.2 GB")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByText("With your API key.")).toBeInTheDocument();
-  expect(screen.queryByText(/Claude|Connect another app/)).not.toBeInTheDocument();
+  expect(screen.getByText("In your AI app.")).toBeInTheDocument();
 });
 
 it.each(["downloading","checking","paused","failed"])("keeps Search and the active answer usable during target %s", async state => {
