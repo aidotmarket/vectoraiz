@@ -1,5 +1,6 @@
 //! Local-only framing and platform identity checks shared by the app and bridge.
 pub mod channel;
+pub mod protocol;
 pub const REQUEST_CAP: usize = 1024 * 1024;
 pub const RESPONSE_CAP: usize = 2 * 1024 * 1024;
 pub const NO_ACCESS: &str = "vectorAIz has not given this app access.";
