@@ -110,6 +110,13 @@ def main():
                 run(['logman','create','trace','a9','-o',Path('a9.etl').resolve(),'-ets','-p','Microsoft-Windows-Winsock-AFD','0xFFFFFFFFFFFFFFFF','0xff'],evidence)
                 started=True
             else:
+                channel = Path.home() / 'Library/Application Support/vectorAIz/mcp.sock'
+                assert channel.parent.stat().st_mode & 0o777 == 0o700, 'Installed channel directory is not 0700'
+                assert channel.stat().st_mode & 0o777 == 0o600, 'Installed socket is not 0600'
+                nobody = run(['sudo', '-n', '-u', 'nobody', '/usr/bin/id', '-u'], evidence)
+                assert int(nobody.strip()) != os.getuid(), 'Directory probe did not change uid'
+                run(['sudo', '-n', '-u', 'nobody', '/bin/test', '-x', channel.parent], evidence, accepted=(1,))
+                evidence.write('Channel security PASS: other uid cannot traverse the installed 0700 directory\n'); evidence.flush()
                 capture=subprocess.Popen(['sudo','-n','tcpdump','-i','pktap,all','-k','NP','-w',str(Path('a9.pcapng').resolve())],stdout=capture_log,stderr=subprocess.STDOUT)
                 time.sleep(.5)
                 assert capture.poll() is None, 'STOP: approved tcpdump command failed; see a9-tcpdump.log'
