@@ -91,8 +91,8 @@ async fn main() {
     }
     while tasks.join_next().await.is_some() {}
 }
-async fn send(
-    stdout: &Arc<Mutex<tokio::io::Stdout>>,
+async fn send<W: tokio::io::AsyncWrite + Unpin>(
+    stdout: &Arc<Mutex<W>>,
     value: &Value,
     token: &CancellationToken,
 ) -> std::io::Result<()> {
@@ -104,4 +104,60 @@ async fn send(
     bytes.push(b'\n');
     stdout.write_all(&bytes).await?;
     stdout.flush().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn handed_off_result_paused_before_stdout_can_arrive_after_removal() {
+        // The stdout mutex is a deterministic hook before any stdout byte is written.
+        // The app-side real-channel test proves which frames can cross handoff.
+        let (writer, reader) = tokio::io::duplex(4096);
+        let stdout = Arc::new(Mutex::new(writer));
+        let pause = stdout.lock().await;
+        let (handed_off, received) = tokio::sync::oneshot::channel();
+        let output = stdout.clone();
+        let task = tokio::spawn(async move {
+            let frame = json!({"ok":true,"result":{"hits":[{"text":"already handed off"}]}});
+            // Decode the same complete local-channel frame the bridge relays.
+            let mut wire = vec![];
+            vz_mcp::channel::write_frame(
+                &mut wire,
+                &serde_json::to_vec(&frame).unwrap(),
+                vz_mcp::RESPONSE_CAP,
+            )
+            .await
+            .unwrap();
+            let bytes = vz_mcp::channel::read_frame(&mut wire.as_slice(), vz_mcp::RESPONSE_CAP)
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            handed_off.send(()).unwrap();
+            send(
+                &output,
+                &protocol::result(json!(1), response["result"].clone(), true),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        });
+        received.await.unwrap();
+        assert!(!task.is_finished());
+        // Removal returns while the bridge is paused. It cannot recall this frame.
+        drop(pause);
+        task.await.unwrap();
+        let mut lines = BufReader::new(reader).lines();
+        let response: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(response["result"]["hits"][0]["text"], "already handed off");
+        let token = CancellationToken::new();
+        token.cancel();
+        send(&stdout, &json!({"text":"cancelled new result"}), &token)
+            .await
+            .unwrap();
+        drop(stdout);
+        assert!(lines.next_line().await.unwrap().is_none());
+    }
 }
