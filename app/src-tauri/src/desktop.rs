@@ -131,6 +131,9 @@ fn self_test<R: tauri::Runtime>(
                         serde_json::json!({"pid":std::process::id(),"client":id}).to_string(),
                     )
                     .expect("A9 ready");
+                    tauri::async_runtime::spawn(crate::a9_test_hook::pre_capture_control(
+                        control.clone(),
+                    ));
                 }
                 if checkpoint == "m3-a9-negative" {
                     let destination =

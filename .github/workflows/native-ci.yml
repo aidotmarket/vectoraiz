@@ -44,6 +44,7 @@ jobs:
           python scripts/native-version.py
           python scripts/native-build-tests.py
           python scripts/native-network-check.py
+          python scripts/native-a9-tests.py
       - uses: actions/setup-go@v5
         with:
           go-version: '1.24.2'
@@ -217,11 +218,11 @@ jobs:
             installed-single-instance.json
             msi-install.log
             msi-uninstall.log
-            a9-*
-            a9.etl
-            a9.csv
-            a9.xml
-            a9.pcapng
+            ${{ github.workspace }}/a9-*
+            ${{ github.workspace }}/a9.etl
+            ${{ github.workspace }}/a9.csv
+            ${{ github.workspace }}/a9.xml
+            ${{ github.workspace }}/a9.pcapng
           if-no-files-found: warn
   ui-test-macos:
     runs-on: macos-15

@@ -6,6 +6,8 @@ compile_error!("ui-test is restricted to debug builds");
 // Keep inference/native backend startup out of the permission-test harness.
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
+#[cfg(any(test, feature = "smoke-test"))]
+mod a9_test_hook;
 mod bundled_library;
 #[cfg_attr(test, allow(dead_code))]
 mod claude_config;
