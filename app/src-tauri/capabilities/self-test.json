@@ -29,6 +29,16 @@
     "allow-api-key-set",
     "allow-api-key-stop",
     "allow-api-key-cleanup-retry",
-    "allow-answer-path-set"
+    "allow-answer-path-set",
+    "allow-app-status",
+    "allow-app-disclosure",
+    "allow-app-connect-claude",
+    "allow-app-connect-other",
+    "allow-app-confirm",
+    "allow-app-test-connection",
+    "allow-app-disconnect",
+    "allow-app-path-set",
+    "allow-app-access-retry",
+    "allow-app-claude-continue"
   ]
 }

@@ -1,0 +1,212 @@
+[
+  {
+    "name": "list_collections",
+    "description": "List the library shared with this app.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "collections": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "documents": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "documents"
+            ]
+          }
+        }
+      },
+      "required": [
+        "collections"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "search",
+    "description": "Search passages in the library.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "collection": {
+          "type": "string",
+          "enum": [
+            "library"
+          ]
+        },
+        "top_k": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 20,
+          "default": 8
+        }
+      },
+      "required": [
+        "query"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "chunk_id": {
+                "type": "string"
+              },
+              "doc_id": {
+                "type": "string"
+              },
+              "file_name": {
+                "type": "string"
+              },
+              "page": {
+                "type": "integer"
+              },
+              "text": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "chunk_id",
+              "doc_id",
+              "file_name",
+              "page",
+              "text",
+              "score"
+            ]
+          }
+        }
+      },
+      "required": [
+        "hits"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_document",
+    "description": "Read a document, capped at 200,000 characters.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "doc_id"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "doc_id": {
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "page_count": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "doc_id",
+        "file_name",
+        "page_count",
+        "text",
+        "truncated"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "get_chunk",
+    "description": "Read a passage.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "chunk_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chunk_id"
+      ]
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "chunk_id": {
+          "type": "string"
+        },
+        "doc_id": {
+          "type": "string"
+        },
+        "file_name": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "doc_id",
+        "file_name",
+        "page",
+        "text"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
+  }
+]

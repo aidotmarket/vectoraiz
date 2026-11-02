@@ -15,6 +15,13 @@ for base in ["app/src-tauri/src", "crates/vz-core/src"]:
                 errors.append(f"{relative}:{number}: HTTP client outside transport boundary")
             if re.search(r"anthropic\.com|openai\.com", line) and relative != "crates/vz-core/src/cloud_gate.rs":
                 errors.append(f"{relative}:{number}: provider destination outside transport boundary")
+# Local MCP code may never acquire an Internet transport. The installed-test
+# negative control is confined to the existing smoke-test checkpoint in desktop.rs.
+for path in [*(ROOT / "crates/vz-mcp/src").rglob("*.rs"),
+             *(ROOT / "app/src-tauri/src").glob("mcp_*.rs")]:
+    for number, line in enumerate(path.read_text().splitlines(), 1):
+        if re.search(r"reqwest|TcpStream|TcpListener|UdpSocket|std::net|tokio::net::(tcp|udp)", line):
+            errors.append(f"{path.relative_to(ROOT)}:{number}: Internet transport in local MCP boundary")
 # UI destinations are confined to the reviewed copy list in App.tsx.
 for path in (ROOT / "app/src").rglob("*"):
     if path.is_file() and path.suffix in {".ts", ".tsx"} and path.name != "App.tsx":

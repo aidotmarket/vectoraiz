@@ -6,16 +6,17 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { version } from "../package.json";
 
-const { invoke, modelsInvoke, cloudInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
+const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (_: string, callback: () => void) => { modelEvents.callback = callback; return () => { if (modelEvents.callback === callback) modelEvents.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({
-  invoke: (command: string, args: unknown) => command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
+  invoke: (command: string, args: unknown) => command.startsWith("app_") ? appInvoke(command, args) : command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
   Channel: class { onmessage = (_: unknown) => {}; },
 }));
 const readyModels = { ready: true, files: [] };
 const missingModels = { ready: false, files: [{ name: "Embedding model", file: "test.gguf", size: 100, license: "MIT", source: "https://example.com/model", verified: false }] };
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 beforeEach(() => {
+  appInvoke.mockResolvedValue({enabled:false,off:false,clients:[],recent:[]});
   cloudInvoke.mockResolvedValue({default:"local",api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false,cleanup_pending:false});
   invoke.mockResolvedValue({ available: false });
   modelsInvoke.mockResolvedValue(readyModels);
@@ -747,7 +748,7 @@ it("renders both answer paths for no_answer without a failure", async () => {
   expect(screen.getByText("Disk space needed: 2.2 GB")).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByText("With your API key.")).toBeInTheDocument();
-  expect(screen.queryByText(/Claude|Connect another app/)).not.toBeInTheDocument();
+  expect(screen.getByText("In your AI app.")).toBeInTheDocument();
 });
 
 it.each(["downloading","checking","paused","failed"])("keeps Search and the active answer usable during target %s", async state => {
@@ -1100,4 +1101,92 @@ it("resumes setup after consent when no key has ever been saved", async () => {
   expect(await screen.findByLabelText("API key")).toBeInTheDocument();
   expect(screen.queryByText("Use your Anthropic API key")).not.toBeInTheDocument();
   expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
+});
+
+
+const connectedApp = {client_id: "a".repeat(32), app: "other", name: "Research app", created_at: "2026-11-02", revoked: false, consent_current: true};
+const appStatus = (clients = [connectedApp]) => ({enabled: true, off: false, clients, recent: []});
+it("requires the named app disclosure before exposing connection snippets", async () => {
+  appInvoke.mockImplementation(async (command, args) => {
+    if (command === "app_status") return appStatus([]);
+    if (command === "app_disclosure") return {version: "current", strings: [`Connect ${args.name}`, "Research app will be able to search your vectorAIz library and read whole documents from it.", "What vectorAIz already sent can't be taken back.", "Connect Research app"]};
+    if (command === "app_connect_other") return {client_id: connectedApp.client_id, bridge: "/Applications/vectorAIz.app/Contents/MacOS/vectoraiz-mcp", json: "JSON snippet", toml: "TOML snippet", command: "bridge --client id"};
+  });
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", {name: "Connect another app"}));
+  await userEvent.type(screen.getByLabelText("App name"), "Research app");
+  await userEvent.click(screen.getByRole("button", {name: "Continue"}));
+  expect(await screen.findByText("Your whole library")).toBeInTheDocument();
+  expect(appInvoke.mock.calls.filter(([c]) => c === "app_connect_other")).toHaveLength(0);
+  await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", {name: "Connect Research app"}));
+  expect(await screen.findByText("TOML snippet")).toBeInTheDocument();
+  expect(appInvoke).toHaveBeenCalledWith("app_connect_other", {name: "Research app", disclosureVersion: "current"});
+  expect(cloudInvoke.mock.calls.filter(([c]) => c === "answer_path_set")).toHaveLength(0);
+});
+it("reconfirms the same AI app id without creating a replacement", async () => {
+  appInvoke.mockImplementation(async command => {
+    if (command === "app_status") return appStatus([{...connectedApp, consent_current: false}]);
+    if (command === "app_disclosure") return {version: "new", strings: ["Connect Research app", "Disclosure", "Removal boundary", "Connect Research app"]};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Review and confirm"}));
+  await userEvent.click(await within(screen.getByRole("dialog")).findByRole("button", {name: "Connect Research app"}));
+  await waitFor(() => expect(appInvoke).toHaveBeenCalledWith("app_confirm", {clientId: connectedApp.client_id, disclosureVersion: "new"}));
+  expect(appInvoke.mock.calls.some(([c]) => c === "app_connect_other")).toBe(false);
+});
+it("shows the handoff boundary after removal and retains the working Ask path", async () => {
+  let removed = false;
+  appInvoke.mockImplementation(async command => {
+    if (command === "app_status") return appStatus(removed ? [] : [connectedApp]);
+    if (command === "app_disconnect") {removed = true; return {message: "Research app can no longer read your library. A result vectorAIz already sent may still arrive in Research app, and what it already has can't be taken back."};}
+  });
+  render(<App />);
+  expect(await screen.findByText("Connected to Research app. Ask in Research app, and it searches your library here.")).toBeInTheDocument();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeEnabled();
+  await userEvent.click(screen.getByRole("button", {name: "Remove Research app"}));
+  expect(await screen.findByText(/A result vectorAIz already sent may still arrive/)).toBeInTheDocument();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeEnabled();
+});
+it("shows channel and failed-save notices, activity and Retry", async () => {
+  appInvoke.mockImplementation(async command => command === "app_status" ? {...appStatus(), channel_error: "vectorAIz can't open its local channel. Restart your computer, then try again.", save_failed: "Research app can't read your library until vectorAIz restarts.", recent: [{time: "now", client: "Research app", tool: "search", allowed: false, refusal_code: "access_denied", result_count: 0}]} : {});
+  render(<App />);
+  expect(await screen.findByText(/can't open its local channel/)).toBeInTheDocument();
+  expect(screen.getByText("Research app can't read your library until vectorAIz restarts.")).toBeInTheDocument();
+  expect(screen.getByText(/now · Research app · search · Refused · access_denied · 0/)).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name: "Retry"}));
+  expect(appInvoke).toHaveBeenCalledWith("app_access_retry", undefined);
+  expect(screen.getByText("AI apps connect through a local channel on this computer. vectorAIz opens no network port for them.")).toBeInTheDocument();
+});
+it("keeps Search retryable after an MCP-held inference lock reports busy", async () => {
+  let attempts = 0;
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_search") {if (++attempts === 1) throw "vectorAIz is busy indexing. Try again in a moment."; return [{chunk: {chunk_id: "c", doc_id: "d", page: 1, text: "Available after MCP"}, score: 1}];}
+    return {};
+  });
+  render(<App />);
+  await userEvent.click(screen.getByRole("button", {name: "Search"}));
+  expect(await screen.findByRole("alert")).toHaveTextContent("vectorAIz is busy indexing. Try again in a moment.");
+  await userEvent.click(screen.getByRole("button", {name: "Search"}));
+  expect(await screen.findByText("Available after MCP")).toBeInTheDocument();
+});
+
+it("shows the connected-app line and in-app chooser when no in-app answer path is configured", async () => {
+  appInvoke.mockResolvedValue(appStatus());
+  cloudInvoke.mockResolvedValue({default: null, api_key: {enabled: false, provider: null, key_present: false}, consent_current: false});
+  render(<App />);
+  expect(await screen.findByText("Connected to Research app. Ask in Research app, and it searches your library here.")).toBeInTheDocument();
+  expect(screen.getByRole("button", {name: "Search"})).toBeEnabled();
+  expect(screen.queryByRole("button", {name: "Ask"})).not.toBeInTheDocument();
+  expect(screen.getByText("In your AI app.")).toBeInTheDocument();
+  const chooser = screen.getByRole("complementary", {name: "How should vectorAIz write answers?"});
+  expect(within(chooser).getAllByRole("heading", {level: 3}).map(h => h.textContent)).toEqual(["On this computer.", "In your AI app.", "With your API key."]);
+  expect(cloudInvoke.mock.calls.some(([c]) => c === "answer_path_set")).toBe(false);
+});
+
+it("gives generic clients the no-call connection message", async () => {
+  appInvoke.mockImplementation(async command => command === "app_status" ? appStatus() : {connected: false, reason: "no_call"});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Test the connection"}));
+  expect(await screen.findByText("No call received. Ask this app to search your library, then test again.")).toBeInTheDocument();
+  expect(screen.queryByText(/The Claude Desktop entry/)).not.toBeInTheDocument();
 });

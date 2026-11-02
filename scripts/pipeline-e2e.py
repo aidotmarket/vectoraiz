@@ -37,6 +37,13 @@ with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
     numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
     assert numbers and numbers == [c['number'] for c in answer['citations']], answer
     manifest = cli('pack', str(pack), '--query', query)
+    # object_pairs_hook runs bottom-up, including objects nested inside arrays.
+    def sorted_object(pairs):
+        keys = [key for key, _ in pairs]
+        assert keys == sorted(keys), f'JSON object keys are not sorted: {keys}'
+        return dict(pairs)
+    for name in ['examples/query.json', 'manifest.json']:
+        json.loads((pack / name).read_text(encoding='utf-8'), object_pairs_hook=sorted_object)
     docs = {doc['doc_id']: doc for doc in pq.read_table(pack / 'documents.parquet').to_pylist()}
     for hit in hits:
         chunk = hit['chunk']

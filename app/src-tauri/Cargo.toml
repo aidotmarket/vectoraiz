@@ -19,9 +19,14 @@ tauri = { version = "2", features = [] }
 vz-core.workspace = true
 
 serde_json.workspace = true
+serde.workspace = true
+vz-mcp = { path = "../../crates/vz-mcp" }
+tokio-util = { version = "0.7", features = ["rt"] }
 anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 uuid = { version = "1", features = ["v4"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+getrandom = "=0.3.4"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "io-util"] }
 tauri-plugin-wdio-webdriver = { version = "=1.5.1", optional = true }
 tauri-plugin-updater = "2.14.0"
 reqwest = { version = "=0.13.5", default-features = false, features = ["rustls", "system-proxy"] }
@@ -31,6 +36,7 @@ tauri-plugin-single-instance = "=2.4.0"
 windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }
 vz-core = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 tauri = { version = "2", features = ["test"] }

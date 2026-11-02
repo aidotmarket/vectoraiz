@@ -2,6 +2,9 @@
 from pathlib import Path
 
 root = Path(__file__).resolve().parents[1]
+print('\nModel Context Protocol schemas (dual-era bridge validation):')
+print((root / 'crates/vz-mcp/schema/PIN.md').read_text())
+print((root / 'crates/vz-mcp/schema/LICENSE').read_text())
 print('\nllama.cpp 244641955f6146f7e8474afff7772d427593a534\n')
 print((root / 'docs/phase0/llama-cpp-LICENSE.txt').read_text())
 pdfium = root / '.assets/pdfium'

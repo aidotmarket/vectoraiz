@@ -6,10 +6,22 @@ compile_error!("ui-test is restricted to debug builds");
 // Keep inference/native backend startup out of the permission-test harness.
 // On Windows the desktop-linked executable can block even on `--list`, before
 // libtest enters a test. The real desktop IPC path is exercised by native-smoke.
+#[cfg(any(test, feature = "smoke-test"))]
+mod a9_test_hook;
 mod bundled_library;
+#[cfg_attr(test, allow(dead_code))]
+mod claude_config;
 #[cfg_attr(test, allow(dead_code))]
 mod cloud;
 mod desktop_pipeline;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_apps;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_channel;
+#[cfg(test)]
+mod mcp_tests;
+#[cfg_attr(test, allow(dead_code))]
+mod mcp_tools;
 #[cfg_attr(test, allow(dead_code))]
 mod models;
 #[cfg_attr(test, allow(dead_code))]
@@ -42,6 +54,16 @@ mod tests {
             "pipeline_search",
             "pipeline_ask",
             "cloud_status",
+            "app_status",
+            "app_disclosure",
+            "app_connect_claude",
+            "app_connect_other",
+            "app_confirm",
+            "app_test_connection",
+            "app_disconnect",
+            "app_path_set",
+            "app_access_retry",
+            "app_claude_continue",
             "api_key_disclosure",
             "api_key_confirm",
             "api_key_set",

@@ -21,3 +21,10 @@ THIRD_PARTY_NOTICES
 /spike/bakeoff/results/
 
 /app/ui-test-results/
+
+/mcp-protocol-*.jsonl
+/a9-*
+/a9.etl
+/a9.csv
+/a9.xml
+/a9.pcapng

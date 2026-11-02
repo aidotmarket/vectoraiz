@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AnswerText } from "./AnswerText";
+import { AiApps, M3_COPY, type AppClient } from "./AiApps";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
@@ -108,6 +109,8 @@ export default function App() {
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
   const [progress, setProgress] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
+  const [appClients, setAppClients] = useState<AppClient[]>([]);
+  const [appSetup, setAppSetup] = useState(0);
   const [answer, setAnswer] = useState("");
   const [askState, setAskState] = useState("");
   const [showSmaller, setShowSmaller] = useState(false);
@@ -518,10 +521,13 @@ export default function App() {
       {cloudMessage && <p role="status">{cloudMessage}</p>}
       {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
     </aside>}
+    <AiApps installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
+    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? M3_COPY.connected(c.name) : M3_COPY.stale(c.name)}</p>)}
     {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
       <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
       {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
+      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p><button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>
       <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
       <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
     </aside>}
@@ -542,6 +548,7 @@ export default function App() {
     <aside className="mt-6" aria-label={M2_COPY.network}><h2>{M2_COPY.network}</h2><p>{M2_COPY.downloads}</p><p>{M2_COPY.updates}</p>
       {cloud?.api_key.provider && <p>{M2_COPY.destinations[cloud.api_key.provider]} · {cloud.api_key.enabled && cloud.consent_current ? M2_COPY.on : M2_COPY.off}</p>}
       <p>{M2_COPY.proxy}</p>
+      <p>{M3_COPY.network}</p>
     </aside>
     {deleteFile && <div role="dialog" aria-label={M1_COPY.deleteTitle}>
       <p>{M1_COPY.deleteTitle}</p><p>{M1_COPY.freed((deleteFile.installed_bytes ?? 0) + (deleteFile.partial_bytes ?? 0))}</p>
@@ -562,7 +569,7 @@ export default function App() {
       <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>{models?.needs_reindex ? "Re-index" : "Index folder"}</button>
       {indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button></div>
+      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button>{(cloud?.default || !appClients.some(c => !c.revoked)) && <button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}</div>
       {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
       {askState === "cloud_error" && <div>{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>

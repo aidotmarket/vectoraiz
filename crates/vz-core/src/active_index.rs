@@ -20,22 +20,9 @@ pub fn recipe_id(recipe: &Recipe) -> Result<String> {
     canonical_id(serde_json::to_value(recipe)?)
 }
 
-fn canonical_id(value: serde_json::Value) -> Result<String> {
-    fn sorted(value: serde_json::Value) -> serde_json::Value {
-        match value {
-            serde_json::Value::Object(map) => {
-                let entries: std::collections::BTreeMap<_, _> = map.into_iter().collect();
-                serde_json::Value::Object(
-                    entries.into_iter().map(|(k, v)| (k, sorted(v))).collect(),
-                )
-            }
-            serde_json::Value::Array(values) => {
-                serde_json::Value::Array(values.into_iter().map(sorted).collect())
-            }
-            other => other,
-        }
-    }
-    Ok(sha256(&serde_json::to_vec(&sorted(value))?)[..16].into())
+fn canonical_id(mut value: serde_json::Value) -> Result<String> {
+    value.sort_all_objects();
+    Ok(sha256(&serde_json::to_vec(&value)?)[..16].into())
 }
 
 pub fn recipe_dir(data: &Path, recipe: &Recipe) -> Result<PathBuf> {

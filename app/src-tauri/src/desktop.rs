@@ -1,4 +1,6 @@
-use crate::{cloud, desktop_pipeline, models, settings};
+use crate::{
+    claude_config, cloud, desktop_pipeline, mcp_apps, mcp_channel, mcp_tools, models, settings,
+};
 use cloud::{cloud_failure, lifecycle_failure};
 use vz_core::cloud_gate::{self, Provider, SendError};
 
@@ -121,6 +123,54 @@ fn self_test<R: tauri::Runtime>(
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
         if let Some(checkpoint) = checkpoint {
+            if let Some(control) = std::env::var_os("VZ_A9_CONTROL_DIR") {
+                let control = std::path::PathBuf::from(control);
+                if let Some(id) = checkpoint.strip_prefix("m3-a9-ready:") {
+                    std::fs::write(
+                        control.join("ready.json"),
+                        serde_json::json!({"pid":std::process::id(),"client":id}).to_string(),
+                    )
+                    .expect("A9 ready");
+                    tauri::async_runtime::spawn(crate::a9_test_hook::pre_capture_control(
+                        control.clone(),
+                    ));
+                }
+                if checkpoint == "m3-a9-negative" {
+                    let destination =
+                        std::fs::read_to_string(control.join("target")).expect("A9 target");
+                    tauri::async_runtime::spawn(async move {
+                        use tokio::io::AsyncWriteExt;
+                        let mut stream = tokio::net::TcpStream::connect(destination.trim())
+                            .await
+                            .expect("A9 negative connection");
+                        stream
+                            .write_all(b"M3 asynchronous negative control")
+                            .await
+                            .expect("A9 negative send");
+                        drop(stream);
+                        std::fs::write(control.join("negative.done"), b"done")
+                            .expect("A9 negative marker");
+                    });
+                    return result;
+                }
+                if checkpoint == "m3-a9-removed" {
+                    std::fs::write(control.join("removed"), b"removed").expect("A9 removed marker");
+                }
+                if checkpoint == "m3-a9-poll" {
+                    return vz_core::SelfTestResult {
+                        status: if control.join("done").exists() {
+                            "A9_DONE"
+                        } else if control.join("granted.done").exists() {
+                            "A9_REMOVE"
+                        } else if control.join("capture.started").exists() {
+                            "A9_CAPTURE"
+                        } else {
+                            "A9_WAIT"
+                        },
+                        ..result
+                    };
+                }
+            }
             println!("VECTORAIZ_SMOKE_STAGE: {checkpoint}");
             if checkpoint == "hold-next-search" {
                 HOLD_NEXT_SEARCH.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -333,6 +383,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         }))
         .manage(models::Operations::default())
         .manage(cloud::Cloud::default())
+        .manage(mcp_apps::Apps::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build());
     #[cfg(feature = "smoke-test")]
@@ -352,7 +403,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                 let fixture = std::env::var("VZ_PIPELINE_FIXTURE").unwrap_or_else(|_| {
                     std::env::current_dir().expect("cwd").join("spike/fixtures/documents").to_string_lossy().into_owned()
                 });
-                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok(), "importFolder": std::env::var("VZ_SMOKE_IMPORT_FOLDER").ok()});
+                let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "a9":std::env::var_os("VZ_A9_CONTROL_DIR").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok(), "importFolder": std::env::var("VZ_SMOKE_IMPORT_FOLDER").ok()});
                 webview.eval(format!("window.__VZ_SMOKE__ = {config};\n{}", include_str!("../../../scripts/pipeline-smoke.js"))).expect("pipeline smoke clicks");
             } else { webview.eval(
                 "const timer = setInterval(() => { const button = document.querySelector('button'); if (button) { clearInterval(timer); button.click(); } }, 50);"
@@ -365,6 +416,16 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         pipeline_search,
         pipeline_ask,
         cloud_status,
+        app_status,
+        app_disclosure,
+        app_connect_claude,
+        app_connect_other,
+        app_confirm,
+        app_test_connection,
+        app_disconnect,
+        app_path_set,
+        app_access_retry,
+        app_claude_continue,
         api_key_disclosure,
         api_key_confirm,
         api_key_set,
@@ -459,6 +520,13 @@ pub(crate) fn run() {
             use tauri::Manager;
             app.state::<models::Operations>().cancel();
             app.state::<models::Operations>().cancel_transfer();
+            app.state::<mcp_apps::Apps>().channel.stop.cancel();
+            #[cfg(unix)]
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Ok(path) = vz_mcp::channel::path() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
         }
     });
 }
@@ -509,6 +577,170 @@ fn pipeline_paths<R: tauri::Runtime>(
 
 fn pipeline_cpu_requested() -> bool {
     std::env::args().any(|arg| arg == "--cpu")
+}
+
+fn start_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path) {
+    use tauri::Manager;
+    let channel = app.state::<mcp_apps::Apps>().channel.clone();
+    if channel
+        .started
+        .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+        return;
+    }
+    let handle = app.clone();
+    tauri::async_runtime::spawn(mcp_channel::listen(
+        channel,
+        dir.to_owned(),
+        move |request, cancel| {
+            let handle = handle.clone();
+            async move { mcp_call(handle, request, cancel).await }
+        },
+    ));
+}
+async fn mcp_call<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    request: mcp_channel::Request,
+    cancel: tokio_util::sync::CancellationToken,
+) -> serde_json::Value {
+    use tauri::Manager;
+    let dir = match model_dir(&app) {
+        Ok(d) => d,
+        Err(_) => return mcp_channel::refusal(cloud_gate::GateError::Revoked),
+    };
+    let root = match data_root(&app) {
+        Ok(r) => vz_core::active_index::resolve(&r),
+        Err(_) => return mcp_channel::refusal(cloud_gate::GateError::Revoked),
+    };
+    let operations = app.state::<models::Operations>();
+    let apps = app.state::<mcp_apps::Apps>();
+    let handle = app.clone();
+    mcp_tools::call(
+        &dir,
+        &root,
+        &operations,
+        &apps,
+        request,
+        cancel,
+        move |cache, request| {
+            let (root, assets, pins) = pipeline_paths(&handle)?;
+            mcp_tools::execute(
+                cache,
+                &root,
+                &assets,
+                &pins,
+                pipeline_cpu_requested(),
+                &request.tool,
+                &request.args,
+            )
+            .map_err(|e| e.to_string())
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+fn app_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+) -> Result<serde_json::Value, String> {
+    apps.status(&model_dir(&app)?)
+}
+#[tauri::command]
+fn app_disclosure(app: String, name: Option<String>) -> serde_json::Value {
+    mcp_apps::disclosure(&app, name.as_deref().unwrap_or("Your app"))
+}
+#[tauri::command]
+async fn app_connect_claude<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    disclosure_version: String,
+) -> Result<serde_json::Value, String> {
+    apps.connect(
+        &model_dir(&app)?,
+        "claude_desktop",
+        "Claude Desktop",
+        &disclosure_version,
+    )
+    .await
+}
+#[tauri::command]
+async fn app_connect_other<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    name: String,
+    disclosure_version: String,
+) -> Result<serde_json::Value, String> {
+    apps.connect(&model_dir(&app)?, "other", &name, &disclosure_version)
+        .await
+}
+#[tauri::command]
+async fn app_confirm<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    client_id: String,
+    disclosure_version: String,
+) -> Result<(), String> {
+    apps.confirm(&model_dir(&app)?, &client_id, &disclosure_version)
+        .await
+}
+#[tauri::command]
+async fn app_disconnect<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    client_id: String,
+) -> Result<serde_json::Value, String> {
+    apps.disconnect(&model_dir(&app)?, &client_id).await
+}
+#[tauri::command]
+async fn app_path_set<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    enabled: bool,
+) -> Result<serde_json::Value, String> {
+    apps.path_set(&model_dir(&app)?, enabled).await
+}
+#[tauri::command]
+async fn app_access_retry<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+) -> Result<serde_json::Value, String> {
+    apps.retry(&model_dir(&app)?).await
+}
+#[tauri::command]
+async fn app_test_connection<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    apps: tauri::State<'_, mcp_apps::Apps>,
+    client_id: String,
+) -> Result<serde_json::Value, String> {
+    apps.test_connection(&model_dir(&app)?, &client_id).await
+}
+#[tauri::command]
+fn app_claude_continue<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    client_id: String,
+) -> Result<serde_json::Value, String> {
+    let dir = model_dir(&app)?;
+    // This phase changes config only, after step 1 has released app_access_lock.
+    settings::with_state(&dir, |s| {
+        vz_core::cloud_gate::check_mcp(&s.app_state(), &client_id, "setup", "library")
+    })?
+    .map_err(|_| vz_mcp::NO_ACCESS.to_owned())?;
+    if claude_config::running()? {
+        return Err("Claude Desktop is still open.".into());
+    }
+    let path = claude_config::path()?;
+    let bridge = claude_config::bridge()?;
+    Ok(
+        match claude_config::edit(&path, &client_id, Some(&bridge)) {
+            Ok(()) => {
+                serde_json::json!({"written":true,"message":"Open Claude Desktop again, then select Test the connection."})
+            }
+            Err(e) => {
+                serde_json::json!({"written":false,"path":path,"message":e,"snippet":{"mcpServers":{"vectoraiz":claude_config::entry(&bridge,&client_id)}}})
+            }
+        },
+    )
 }
 
 #[tauri::command]
@@ -895,6 +1127,7 @@ async fn models_status<R: tauri::Runtime>(
         })
         .collect();
     let ram = models::total_ram_bytes().map_err(|e| e.to_string())?;
+    start_mcp(&app, &dir);
     Ok(
         serde_json::json!({"ready":verified,"search":{"pin":manifest.embedding.metadata,"verified":verified},"answer":answer,
         "target":operations.target.read().unwrap().clone(),"offer":manifest.offer(ram),"ram_bytes":ram,"files":files,

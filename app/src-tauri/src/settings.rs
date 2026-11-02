@@ -20,6 +20,9 @@ impl Settings {
             };
             value["paths"] = json!({"default":default,"api_key":{"enabled":false,"provider":null,"key_present":false,"key_last4":null,"consent":null,"pending":null,"cleanup":[]}});
         }
+        if !value["paths"]["app"].is_object() {
+            value["paths"]["app"] = json!({"enabled":false,"clients":[]});
+        }
         Self(value)
     }
     pub fn default_path(&self) -> Option<&str> {
@@ -124,8 +127,22 @@ pub struct SettingsState {
     pub stop_failed: bool,
     pub cleanup_memory: Vec<Provider>,
     pub ops: HashMap<String, Operation>,
+    pub app_revoked: std::collections::HashSet<String>,
+    pub app_off: bool,
+    pub app_deliveries: HashMap<String, (String, tokio_util::sync::CancellationToken)>,
+    pub app_notify: std::sync::Arc<tokio::sync::Notify>,
+    pub app_events: HashMap<String, u64>,
 }
 impl SettingsState {
+    pub fn app_state(&self) -> vz_core::cloud_gate::AppPathState {
+        vz_core::cloud_gate::AppPathState {
+            enabled: self.settings.0["paths"]["app"]["enabled"] == true,
+            clients: serde_json::from_value(self.settings.0["paths"]["app"]["clients"].clone())
+                .unwrap_or_default(),
+            revoked_in_memory: self.app_revoked.clone(),
+            off_in_memory: self.app_off,
+        }
+    }
     pub fn consent_state(&self) -> ConsentState {
         let api = self.settings.api();
         ConsentState {
@@ -155,6 +172,11 @@ pub fn with_state<T>(dir: &Path, f: impl FnOnce(&mut SettingsState) -> T) -> Res
                 stop_failed: false,
                 cleanup_memory: vec![],
                 ops: HashMap::new(),
+                app_revoked: Default::default(),
+                app_off: false,
+                app_deliveries: HashMap::new(),
+                app_notify: Default::default(),
+                app_events: HashMap::new(),
             },
         );
     }

@@ -10,6 +10,12 @@ use vz_core::{
     storage::{chunks_batch, documents_batch, State},
 };
 
+fn embedding_recipe_sha256(recipe: &Recipe) -> Result<String> {
+    let mut value = serde_json::to_value(recipe)?;
+    value.sort_all_objects();
+    Ok(sha256(&serde_json::to_vec(&value)?))
+}
+
 pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Result<Value> {
     let (state, recipe) = State::open_index(root, &engines.recipe)?;
     if output.exists() {
@@ -77,7 +83,8 @@ pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Resu
             })
             .collect::<Vec<_>>();
         scores.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        let example = json!({"query":query,"query_embedding":vector,"expected_top":scores.iter().take(3).map(|v| &v.0).collect::<Vec<_>>(),"method":"cosine on L2-normalized float32 embeddings; ties by chunk_id","embedding_recipe_sha256":sha256(&serde_json::to_vec(&serde_json::to_value(&recipe)?)?)});
+        let mut example = json!({"query":query,"query_embedding":vector,"expected_top":scores.iter().take(3).map(|v| &v.0).collect::<Vec<_>>(),"method":"cosine on L2-normalized float32 embeddings; ties by chunk_id","embedding_recipe_sha256":embedding_recipe_sha256(&recipe)?});
+        example.sort_all_objects();
         std::fs::write(
             stage.join("examples/query.json"),
             serde_json::to_string_pretty(&example)? + "\n",
@@ -96,7 +103,8 @@ pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Resu
                 );
             }
         }
-        let manifest = json!({"format_version":1,"pack_id":format!("pack-{}",&sha256(serde_json::to_string(&hashes)?.as_bytes())[..24]),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
+        let mut manifest = json!({"format_version":1,"pack_id":format!("pack-{}",&sha256(serde_json::to_string(&hashes)?.as_bytes())[..24]),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
+        manifest.sort_all_objects();
         std::fs::write(
             stage.join("manifest.json"),
             serde_json::to_string_pretty(&manifest)? + "\n",
@@ -231,4 +239,20 @@ pub fn recipe(state: &State) -> Result<Recipe> {
     Ok(serde_json::from_slice(&std::fs::read(
         state.root.join("recipe.json"),
     )?)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_embedding_recipe_hash_matches_native() {
+        let pins =
+            serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+        let recipe = Recipe::from_pins(&pins, 384).unwrap();
+        assert_eq!(
+            embedding_recipe_sha256(&recipe).unwrap(),
+            "5b2e0caa8c3f0d5c5f859e365e758cbe3a438e5fe35b308326079a1c3edd42aa"
+        );
+    }
 }
