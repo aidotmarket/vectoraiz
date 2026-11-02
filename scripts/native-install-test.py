@@ -10,6 +10,7 @@ import platform
 import shutil
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -124,13 +125,22 @@ try:
                             VZ_SMOKE_MODELS=str(Path('spike/fixtures/models.json').resolve()),
                             VZ_PIPELINE_FIXTURE=str(Path('spike/fixtures/documents').resolve()),
                             VZ_LOADED_MODELS_REPORT=str(loaded_report))
+        control = Path(cwd) / 'a9-control'
+        control.mkdir()
+        pipeline_env['VZ_A9_CONTROL_DIR'] = str(control)
         with Path('installed-pipeline.log').open('w', encoding='utf-8') as log:
             step('Launch installed acquisition (900s) then pipeline (300s); process budget 1230s')
             child = subprocess.Popen([str(binary), '--pipeline-smoke-test', '--cpu'], cwd=cwd,
                                      env=pipeline_env, stdout=log, stderr=subprocess.STDOUT)
+            bridge = binary.with_name('vectoraiz-mcp.exe' if windows else 'vectoraiz-mcp')
+            a9 = subprocess.Popen([sys.executable, 'scripts/native-mcp-a9.py', '--bridge', str(bridge), '--control', str(control)])
             try:
+                assert a9.wait(timeout=1200) == 0, 'STOP: installed A9 failed; capture requirements must not be weakened (see a9 evidence)'
                 assert child.wait(timeout=1230) == 0, 'Installed acquisition/pipeline failed'
             finally:
+                if a9.poll() is None:
+                    a9.kill()
+                    a9.wait(timeout=10)
                 if child.poll() is None:
                     child.kill()
                     child.wait(timeout=10)

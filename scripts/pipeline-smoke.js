@@ -274,5 +274,20 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   const offlineEnd = await ipc('models_status');
   if (offlineEnd.target || offlineEnd.files.some(file => file.partial_bytes > 0)) throw new Error('Offline pipeline acquired a model');
   await report('offline: complete');
+  if (window.__VZ_SMOKE__.a9) {
+    const disclosure = await ipc('app_disclosure', {app:'other',name:'Installed A9 client'});
+    const connected = await ipc('app_connect_other', {name:'Installed A9 client',disclosureVersion:disclosure.version});
+    await report('m3-a9-ready:' + connected.client_id);
+    let negative = false, removed = false;
+    const deadline = Date.now() + 180000;
+    while (true) {
+      const phase = (await report('m3-a9-poll')).status;
+      if (phase === 'A9_DONE') break;
+      if (phase === 'A9_CAPTURE' && !negative) {negative = true; await report('m3-a9-negative');}
+      if (phase === 'A9_REMOVE' && !removed) {removed = true; await ipc('app_disconnect',{clientId:connected.client_id});await report('m3-a9-removed');}
+      if (Date.now() > deadline) throw new Error('A9 capture/controller timed out; check retained evidence');
+      await new Promise(resolve => setTimeout(resolve,100));
+    }
+  }
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));
