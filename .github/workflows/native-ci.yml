@@ -93,6 +93,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Regenerate restored llama CMake projects
+        run: python scripts/native-cmake-cache.py
       - name: Test branch routing
         run: node scripts/native-guard.mjs --test
       - name: Enforce native PR base
@@ -255,6 +257,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - name: Regenerate restored llama CMake projects
+        run: python scripts/native-cmake-cache.py
       - name: Prove release and stage-1 exclude UI test features
         run: python scripts/native-ui-test-gate.py
       - name: Install UI dependencies
