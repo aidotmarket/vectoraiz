@@ -150,11 +150,12 @@ fn server_matches(own: &str, server: io::Result<String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Security::{
-        Authorization::{
-            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+    use windows_sys::Win32::{
+        Security::{
+            Authorization::{GetSecurityInfo, SE_KERNEL_OBJECT},
+            GetAce, ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION,
         },
-        DACL_SECURITY_INFORMATION,
+        Storage::FileSystem::FILE_ALL_ACCESS,
     };
     #[tokio::test]
     async fn dacl_first_instance_remote_rejection_and_fail_closed_identity() {
@@ -172,6 +173,7 @@ mod tests {
         ));
         unsafe {
             let mut descriptor = ptr::null_mut();
+            let mut acl = ptr::null_mut();
             assert_eq!(
                 GetSecurityInfo(
                     server.as_raw_handle(),
@@ -179,32 +181,50 @@ mod tests {
                     DACL_SECURITY_INFORMATION,
                     ptr::null_mut(),
                     ptr::null_mut(),
+                    &mut acl,
                     ptr::null_mut(),
-                    ptr::null_mut(),
-                    &mut descriptor
+                    &mut descriptor,
                 ),
                 0
             );
             let _descriptor = Local(descriptor);
-            let mut text = ptr::null_mut();
-            assert_ne!(
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                    descriptor,
-                    1,
-                    DACL_SECURITY_INFORMATION,
-                    &mut text,
-                    ptr::null_mut()
-                ),
-                0
+            assert!(!acl.is_null(), "a NULL DACL would allow everyone");
+            assert_eq!(
+                (*acl).AceCount,
+                2,
+                "only the user and SYSTEM may have access"
             );
-            let _text = Local(text.cast());
-            let mut len = 0;
-            while *text.add(len) != 0 {
-                len += 1;
+            let mut actual = Vec::new();
+            for index in 0..u32::from((*acl).AceCount) {
+                let mut entry = ptr::null_mut();
+                assert_ne!(GetAce(acl, index, &mut entry), 0);
+                let entry = entry.cast::<ACCESS_ALLOWED_ACE>();
+                assert_eq!(
+                    (*entry).Header.AceType,
+                    0,
+                    "ACCESS_ALLOWED_ACE_TYPE required"
+                );
+                assert_eq!((*entry).Header.AceFlags, 0);
+                assert_eq!((*entry).Mask, FILE_ALL_ACCESS);
+                let mut text = ptr::null_mut();
+                assert_ne!(
+                    ConvertSidToStringSidW(ptr::addr_of_mut!((*entry).SidStart).cast(), &mut text),
+                    0
+                );
+                let _text = Local(text.cast());
+                let mut len = 0;
+                while *text.add(len) != 0 {
+                    len += 1;
+                }
+                actual.push(String::from_utf16(std::slice::from_raw_parts(text, len)).unwrap());
             }
-            let sddl = String::from_utf16(std::slice::from_raw_parts(text, len)).unwrap();
-            assert_eq!(sddl.matches("(A;").count(), 2, "{sddl}");
-            assert!(sddl.contains(&sid) && sddl.contains(";;;SY)"), "{sddl}");
+            actual.sort();
+            let mut expected = vec![sid, "S-1-5-18".to_owned()];
+            expected.sort();
+            assert_eq!(
+                actual, expected,
+                "compare numeric ACE SIDs, not SDDL aliases such as LA"
+            );
         }
         let remote = path().unwrap().replacen(r"\\.\", r"\\localhost\", 1);
         assert!(
