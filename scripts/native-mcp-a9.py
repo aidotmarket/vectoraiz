@@ -43,7 +43,8 @@ def ip(value):
 
 
 def number(value):
-    return int(value, 16) if str(value).lower().startswith('0x') else int(value)
+    value = str(value).strip()
+    return int(value, 16) if value.lower().startswith('0x') else int(value)
 
 
 def run(argv, evidence, timeout=30, accepted=(0,)):
@@ -72,7 +73,7 @@ def enumerate_sockets(pids, addresses, evidence):
         data = json.loads(run(['powershell.exe','-NoProfile','-Command',script], evidence))
         assert not data['udp'], 'UDP endpoint in app or bridge'
         assert not any(t['State'] in [2,'Listen'] for t in data['tcp']), 'TCP listener in app or bridge'
-        assert not any(t['State'] in [5,'Established'] and ip(t['RemoteAddress']) in resolved for t in data['tcp']), 'Established ai.market connection in app or bridge'
+        assert not any(ip(t['RemoteAddress']) in resolved for t in data['tcp']), 'ai.market remote in app or bridge'
         return data['tcp']
     for pid in pids:
         output = run(['lsof','-nP','-i','-a','-p',pid], evidence, accepted=(0,1))
@@ -85,68 +86,153 @@ def enumerate_sockets(pids, addresses, evidence):
     return []
 
 
+AFD_GUID = 'e53c6823-7bb8-44bb-90dc-3f86090d48a6'
+
+
+def windows_schema(schema_path, manifest_path):
+    # Both exports come from the installed provider on this runner. The .NET
+    # EventMetadata export retains task names and full templates as structured data.
+    schema = json.loads(Path(schema_path).read_text(encoding='utf-8-sig'))
+    assert schema['provider'] == 'Microsoft-Windows-Winsock-AFD' and schema['guid'].lower() == AFD_GUID, 'STOP: unknown AFD provider'
+    manifest = ET.parse(manifest_path).getroot()
+    manifest_events = {(number(e.attrib['value']), number(e.attrib.get('version', '0')))
+                       for e in manifest.iter() if e.tag.split('}')[-1] == 'event' and 'value' in e.attrib}
+    assert manifest_events, 'STOP: no events in runner AFD manifest'
+    roles = {}; templates = {}
+    for event in schema['events']:
+        key = (number(event['id']), number(event['version']))
+        assert key in manifest_events and key not in roles, 'STOP: AFD metadata/manifest mismatch'
+        task = event['task']
+        names = {e.attrib['name'] for e in ET.fromstring(event['template']).iter()
+                 if e.tag.split('}')[-1] == 'data'} if event['template'] else set()
+        role = 'unsupported'
+        if task == 'AfdCreate': role = 'create'
+        elif task in ['AfdConnect', 'AfdConnectWithAddress', 'AfdConnectEx', 'AfdConnectExWithAddress']: role = 'connect'
+        elif task in ['AfdSend', 'AfdSendTo', 'AfdSendToWithAddress', 'AfdSendMessage', 'AfdSendMessageWithAddress']: role = 'send'
+        elif task in ['AfdClose', 'AfdCleanup', 'AfdReceive', 'AfdReceiveFrom',
+                      'AfdReceiveFromWithAddress', 'AfdReceiveMessage',
+                      'AfdReceiveMessageWithAddress', 'AfdBind', 'AfdBindWithAddress',
+                      'AfdAbort', 'AfdDatagramDropWithAddress', 'AfdOption',
+                      'AfdDataIndication', 'AfdDataIndicationWithAddress', 'AfdDisconnect']:
+            role = 'other'
+        # Unknown operations, accept/listen and RIO are never silently ignored
+        # when they occur on an app/bridge process during the window.
+        if role in ['create', 'connect', 'send']:
+            required = {'Process', 'Endpoint'}
+            if role == 'create':
+                assert len(names & {'UserModePid', 'ProcessId'}) == 1, 'STOP: unknown AFD creation PID template'
+            if role == 'send': required.add('BufferLength')
+            assert required <= names, 'STOP: unknown AFD event template'
+        roles[key] = role
+        templates[key] = names
+    assert set(roles) == manifest_events, 'STOP: incomplete AFD manifest metadata'
+    assert {'create', 'connect', 'send'} <= set(roles.values()), 'STOP: unknown AFD schema roles'
+    return roles, templates
+
+
 def windows_events(path):
-    # tracerpt XML retains named provider fields; never use the header execution PID.
+    # Read only named payload fields. Execution.ProcessID is never an owner.
     root = ET.parse(path).getroot()
     events=[]
-    for event in root.iter():
-        if event.tag.split('}')[-1] != 'Event': continue
-        fields={}
-        for field in event.iter():
-            tag=field.tag.split('}')[-1]
-            if tag == 'Data' and 'Name' in field.attrib: fields[field.attrib['Name']]=field.text or ''
-            elif tag == 'TimeCreated': fields['TimeCreated'] = field.attrib['SystemTime']
-            elif not list(field) and tag not in ['Data']: fields.setdefault(tag,field.text or '')
-        if 'EventID' in fields: events.append((int(fields['EventID']),fields))
-    assert events, 'STOP: tracerpt emitted no decodable events'
+    for event in root:
+        system = event.find('{*}System')
+        assert system is not None, 'STOP: undecodable trace system record'
+        provider = system.find('{*}Provider')
+        guid = provider.attrib.get('Guid', '').strip('{}').lower()
+        if guid == '9e814aad-3204-11d2-9a82-006008a86939': continue  # ETL system header
+        assert guid == AFD_GUID, 'STOP: unexpected trace provider'
+        assert event.find('{*}ProcessingErrorData') is None, 'STOP: undecodable AFD payload'
+        fields = {f.tag.split('}')[-1]: f.text or '' for f in system}
+        fields['TimeCreated'] = system.find('{*}TimeCreated').attrib['SystemTime']
+        data = event.find('{*}EventData')
+        assert data is not None, 'STOP: missing AFD payload'
+        payload = {f.attrib['Name']: f.text or '' for f in data}
+        # Prevent payload fields (e.g. Version) overwriting system identity.
+        fields.update(payload)
+        fields['_version'] = system.find('{*}Version').text
+        fields['_payload'] = list(payload)
+        events.append((int(system.find('{*}EventID').text), fields))
+    assert events, 'STOP: tracerpt emitted no decodable AFD events'
     return events
 
 
-def check_windows(events, app_pid, bridge_pids, port, window, evidence):
-    # The in-window create control supplies the app's kernel EPROCESS identity.
-    # Use it in a second pass so pre-existing endpoint sends can precede it.
-    # https://learn.microsoft.com/windows/win32/winsock/winsock-tracing-event-details
-    process_owners = {}
+def check_windows(events, app_pid, bridge_pids, port, window, evidence, schema):
+    roles, templates = schema
+    process_owners = {}; creations = []; connections = []; sends = []
     for event_id, fields in events:
-        if event_id == 1 and all(k in fields for k in ['Process', 'UserModePid']):
-            process_owners[number(fields['Process'])] = number(fields['UserModePid'])
-    connections = []; sends = []
+        key = (event_id, number(fields['_version']))
+        assert key in roles, 'STOP: unknown AFD event/version'
+        assert templates[key] <= set(fields['_payload']), 'STOP: AFD payload does not match runner template'
+        if roles[key] == 'create':
+            pid_field = (templates[key] & {'UserModePid', 'ProcessId'}).pop()
+            process = number(fields['Process']); owner = number(fields[pid_field])
+            assert process not in process_owners or process_owners[process] == owner, 'STOP: ambiguous AFD process correlation'
+            process_owners[process] = owner
+            creations.append((owner, fields))
+    assert creations, 'STOP: zero recognised AFD creation events while controls ran'
+    assert app_pid in process_owners.values(), 'STOP: no app-owned AFD creation event'
     for event_id, fields in events:
+        role = roles[(event_id, number(fields['_version']))]
         owner = process_owners.get(number(fields['Process'])) if 'Process' in fields else None
-        if owner not in [app_pid, *bridge_pids]:
-            continue
+        if owner not in [app_pid, *bridge_pids]: continue
         in_window = window[0] <= instant(fields['TimeCreated']) <= window[1]
-        if event_id in [4, 5] or event_id in [18, 21, 22, 24, 25, 28]:
-            evidence.write(json.dumps({'pid': owner, 'event': event_id, 'in_window': in_window, 'fields': fields}) + '\n')
-        if not in_window:
-            continue
-        if event_id in [4, 5]: connections.append((owner, fields))
-        if event_id in [18, 21, 22, 24, 25, 28]: sends.append((owner, event_id, fields))
+        evidence.write(json.dumps({'pid': owner, 'event': event_id, 'role': role, 'in_window': in_window, 'fields': fields}) + '\n')
+        if not in_window: continue
+        assert role != 'unsupported', 'STOP: unsupported app/bridge AFD operation'
+        if role == 'connect': connections.append((owner, fields))
+        if role == 'send': sends.append((owner, fields))
     evidence.flush()
-    app_connections = [f for owner, f in connections if owner == app_pid]
+    # Entry/exit and fast/buffered paths may repeat an endpoint. Every record is
+    # still checked; completion records can omit the address in their template.
+    app_connections = {number(f['Endpoint']) for owner, f in connections if owner == app_pid}
     assert len(app_connections) == 1, 'Negative control missing, or extra app connection in window'
-    negative = app_connections[0]
-    address = negative['Address']
-    assert address == '127.0.0.1' or number(address) in [0x0100007f, 0x7f000001], 'Negative control address not loopback'
-    assert number(negative['Port']) in [port, socket.htons(port)], 'Negative control port not attributed to app'
-    # The listener independently receives the exact pre-control payload on the
-    # accepted pre-capture tuple. Demand one distinct app-owned send endpoint of
-    # precisely that size, with no in-window connect, and no other posted data.
-    negative_endpoint = number(negative['Endpoint'])
-    pre_endpoints = {number(f['Endpoint']) for owner, event_id, f in sends
-                     if owner == app_pid and event_id == 18
+    negative_endpoint = app_connections.pop()
+    addressed = [f for owner, f in connections if owner == app_pid and 'Address' in f]
+    assert addressed, 'STOP: negative control address missing'
+    for negative in addressed:
+        address = negative['Address'].strip()
+        if 'Port' in negative:
+            assert address == '127.0.0.1' or number(address) in [0x0100007f, 0x7f000001], 'Negative control address not loopback'
+            assert number(negative['Port']) in [port, socket.htons(port)], 'Negative control port not attributed to app'
+        else:
+            assert address == f'127.0.0.1:{port}', 'Negative control address/port not attributed to app'
+        if 'BufferLength' in negative:
+            assert number(negative['BufferLength']) == 0, 'Extra data in control connect'
+    for owner, fields in creations:
+        if window[0] <= instant(fields['TimeCreated']) <= window[1] and owner in [app_pid, *bridge_pids]:
+            assert owner == app_pid and number(fields['Endpoint']) == negative_endpoint, 'App/bridge created non-control socket in window'
+    pre_endpoints = {number(f['Endpoint']) for owner, f in sends if owner == app_pid
                      and number(f['Endpoint']) != negative_endpoint
                      and number(f['BufferLength']) == len(PRE_MESSAGE)}
     assert len(pre_endpoints) == 1, 'STOP: pre-capture send not attributed to app PID'
     pre_endpoint = pre_endpoints.pop()
-    assert any(owner == app_pid and event_id == 18 and number(f['Endpoint']) == negative_endpoint
-               and number(f['BufferLength']) == len(NEGATIVE_MESSAGE) for owner, event_id, f in sends), 'Asynchronous negative send missing'
-    for owner, event_id, fields in sends:
+    assert any(owner == app_pid and number(f['Endpoint']) == negative_endpoint
+               and number(f['BufferLength']) == len(NEGATIVE_MESSAGE) for owner, f in sends), 'Asynchronous negative send missing'
+    for owner, fields in sends:
         expected = {negative_endpoint: len(NEGATIVE_MESSAGE), pre_endpoint: len(PRE_MESSAGE)}
         assert owner == app_pid and number(fields['Endpoint']) in expected, 'App/bridge sent network data during tools'
         assert number(fields['BufferLength']) == expected[number(fields['Endpoint'])], 'Extra data on control connection'
     assert not any(owner in bridge_pids for owner, _ in connections), 'Bridge opened a network connection'
-    evidence.write(f'Pre-capture control attributed to app PID {app_pid}, endpoint {pre_endpoint:#x}\n')
+    evidence.write(f'Both controls attributed to app PID {app_pid}: negative endpoint {negative_endpoint:#x}, pre-capture endpoint {pre_endpoint:#x}; no non-control in-window creation/send\n')
+    return pre_endpoint
+
+
+def windows_mutation(events, app_pid, bridge_pids, port, window, evidence, schema, pre_endpoint):
+    # Remove every captured in-window send record for the pre-existing control.
+    # A missing write must fail even when its completion is logged more than once.
+    roles, _ = schema
+    mutated = [(event_id, f) for event_id, f in events if not (
+        roles[(event_id, number(f['_version']))] == 'send'
+        and number(f['Endpoint']) == pre_endpoint
+        and window[0] <= instant(f['TimeCreated']) <= window[1])]
+    try:
+        import io
+        check_windows(mutated, app_pid, bridge_pids, port, window, io.StringIO(), schema)
+    except AssertionError as error:
+        assert str(error) == 'STOP: pre-capture send not attributed to app PID', 'STOP: mutation failed for unexpected reason'
+        evidence.write(f'Mutation PASS: removing captured pre-control write fails: {error}\n')
+    else:
+        raise AssertionError('STOP: removing pre-control write did not fail')
 
 
 def check_macos(packets, app_pid, bridge_pids, port, pre_port, negative_port, window, evidence):
@@ -203,6 +289,8 @@ def main():
         try:
             snapshots += enumerate_sockets([ready['pid']], addresses, evidence)
             if windows:
+                schema = windows_schema('a9-afd-schema.json', 'a9-afd-manifest.xml')
+                evidence.write('Runner AFD role mapping: ' + repr(schema[0]) + '\n'); evidence.flush()
                 run(['logman','create','trace','a9','-o',Path('a9.etl').resolve(),'-ets','-p','Microsoft-Windows-Winsock-AFD','0xFFFFFFFFFFFFFFFF','0xff'],evidence)
                 started=True
             else:
@@ -268,7 +356,14 @@ def main():
                 if snapshot['State'] in [5, 'Established']:
                     snapshot['created_in_window'] = window[0] <= instant(snapshot['CreatedUtc']) <= window[1]
             Path('a9-sockets.json').write_text(json.dumps(snapshots, indent=2))
-            check_windows(windows_events('a9.xml'),ready['pid'],bridge_pids,port,window,evidence)
+            schema = windows_schema('a9-afd-schema.json', 'a9-afd-manifest.xml')
+            events = windows_events('a9.xml')
+            pre_endpoint = check_windows(events,ready['pid'],bridge_pids,port,window,evidence,schema)
+            windows_mutation(events,ready['pid'],bridge_pids,port,window,evidence,schema,pre_endpoint)
+            for snapshot in snapshots:
+                if snapshot['RemotePort']:
+                    assert snapshot['OwningProcess'] == ready['pid'], 'Bridge has a network connection'
+                    evidence.write('App remote (no in-window sends outside the two controls): ' + json.dumps(snapshot) + '\n')
             assert not any(s.get('created_in_window') and not (s['OwningProcess'] == ready['pid'] and s['RemoteAddress'] == '127.0.0.1' and s['RemotePort'] == port and s['LocalPort'] in [pre_address[1], negative_address[1]]) for s in snapshots), 'App/bridge connection created inside tool-call window'
         else:
             packets=run(['tcpdump','-r',capture_path,'-k','NPD','-nn','-tt'],evidence)

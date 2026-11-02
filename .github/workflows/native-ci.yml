@@ -202,6 +202,20 @@ jobs:
           path: artifacts
       - name: Install pinned MCP schema validator
         run: python -m pip install jsonschema==4.26.0
+      - name: Record runner AFD provider manifest and event templates
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          wevtutil gp Microsoft-Windows-Winsock-AFD /ge /gm > a9-afd-manifest.txt
+          if ($LASTEXITCODE -ne 0) { throw 'AFD manifest command failed' }
+          wevtutil gp Microsoft-Windows-Winsock-AFD /ge /gm /f:xml > a9-afd-manifest.xml
+          if ($LASTEXITCODE -ne 0) { throw 'AFD XML manifest command failed' }
+          $provider = Get-WinEvent -ListProvider Microsoft-Windows-Winsock-AFD
+          $events = @($provider.Events | ForEach-Object {
+            @{id=$_.Id; version=$_.Version; task=$_.Task.Name; opcode=$_.Opcode.Value; template=$_.Template}
+          })
+          @{provider=$provider.Name; guid=$provider.Id.ToString(); events=$events} | ConvertTo-Json -Depth 6 | Set-Content -Encoding utf8 a9-afd-schema.json
       - name: Install downloaded artifact, first-run model acquisition and pipeline, uninstall preserving data
         # Capture runs after acquisition, in native-install-test.py, on both OSes.
         timeout-minutes: 35

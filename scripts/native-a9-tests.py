@@ -7,6 +7,7 @@ from unittest.mock import patch
 from pathlib import Path
 import struct
 import unittest
+import tempfile
 
 spec = importlib.util.spec_from_file_location('a9', Path(__file__).with_name('native-mcp-a9.py'))
 a9 = importlib.util.module_from_spec(spec)
@@ -63,17 +64,28 @@ class CaptureTests(unittest.TestCase):
         def event(event_id, endpoint, **fields):
             return event_id, dict(Process='0x1234', Endpoint=str(endpoint),
                                  TimeCreated='2026-11-02T12:00:01Z', **fields)
-        return [
+        events = [
             # The pre-capture send can precede the in-window socket creation.
             event(18, 1, BufferLength=str(len(a9.PRE_MESSAGE))),
             event(1, 2, UserModePid='42'),
             event(4, 2, Address='127.0.0.1', Port='5555'),
             event(18, 2, BufferLength=str(len(a9.NEGATIVE_MESSAGE))),
         ]
+        for _, fields in events:
+            fields['_version'] = '0'
+            fields['_payload'] = list(fields)
+        return events
+
+    def fixture_schema(self):
+        templates = {1: {'Process', 'Endpoint', 'UserModePid'},
+                     4: {'Process', 'Endpoint', 'Address', 'Port'},
+                     18: {'Process', 'Endpoint', 'BufferLength'}}
+        return ({(1, 0): 'create', (4, 0): 'connect', (18, 0): 'send'},
+                {(key, 0): value for key, value in templates.items()})
 
     def check_windows(self, events):
         a9.check_windows(events, 42, [43], 5555,
-                         [a9.instant('2026-11-02T12:00:00Z'), a9.instant('2026-11-02T12:00:02Z')], io.StringIO())
+                         [a9.instant('2026-11-02T12:00:00Z'), a9.instant('2026-11-02T12:00:02Z')], io.StringIO(), self.fixture_schema())
 
     def test_windows_precapture_attribution_and_missing_send_mutation(self):
         events = self.windows_fixture()
@@ -87,6 +99,70 @@ class CaptureTests(unittest.TestCase):
         events[0][1]['TimeCreated'] = '2026-11-02T11:59:59Z'
         with self.assertRaisesRegex(AssertionError, 'pre-capture send not attributed'):
             self.check_windows(events)
+
+    def test_windows_xml_uses_payload_pid_and_rejects_decode_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'trace.xml'
+            trace = f'''<Events><Event><System>
+                <Provider Guid="{{{a9.AFD_GUID}}}"/><EventID>7300</EventID><Version>0</Version>
+                <Execution ProcessID="999"/><TimeCreated SystemTime="2026-11-02T12:00:01Z"/>
+                </System><EventData><Data Name="Process">0x1234</Data>
+                <Data Name="ProcessId">42</Data><Data Name="Endpoint">2</Data></EventData>
+                </Event></Events>'''
+            path.write_text(trace)
+            events = a9.windows_events(path)
+            self.assertEqual(events[0][1]['ProcessId'], '42')
+            self.assertNotIn('ProcessID', events[0][1])
+            path.write_text(trace.replace('<EventData>', '<ProcessingErrorData/><EventData>'))
+            with self.assertRaisesRegex(AssertionError, 'undecodable AFD'):
+                a9.windows_events(path)
+
+    def test_windows_runner_manifest_mapping_and_mutation(self):
+        # IDs are deliberately arbitrary: names/templates determine roles.
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            manifest = directory / 'manifest.xml'; schema_path = directory / 'schema.json'
+            schema = dict(provider='Microsoft-Windows-Winsock-AFD', guid=a9.AFD_GUID, events=[])
+            for event_id, task, fields in [
+                (7300, 'AfdCreate', ['Process', 'Endpoint', 'ProcessId']),
+                (7318, 'AfdConnectWithAddress', ['Process', 'Endpoint', 'Address']),
+                (7303, 'AfdSend', ['Process', 'Endpoint', 'BufferLength']),
+            ]:
+                schema['events'].append(dict(id=event_id, version=0, task=task,
+                    template='<template>' + ''.join(f'<data name="{f}"/>' for f in fields) + '</template>'))
+            manifest.write_text('<providerMetadata><events>' + ''.join(
+                f'<event value="{e["id"]}" version="0"/>' for e in schema['events']) + '</events></providerMetadata>')
+            schema_path.write_text(json.dumps(schema))
+            mapping = a9.windows_schema(schema_path, manifest)
+            events = self.windows_fixture()
+            renumber = {1: 7300, 4: 7318, 18: 7303}
+            events = [(renumber[event_id], dict(fields)) for event_id, fields in events]
+            events[1][1]['ProcessId'] = events[1][1].pop('UserModePid')
+            events[2][1]['Address'] = '127.0.0.1:5555'
+            events[2][1].pop('Port')
+            for _, fields in events: fields['_payload'] = list(fields)
+            window = [a9.instant('2026-11-02T12:00:00Z'), a9.instant('2026-11-02T12:00:02Z')]
+            evidence = io.StringIO()
+            endpoint = a9.check_windows(events, 42, [43], 5555, window, evidence, mapping)
+            a9.windows_mutation(events, 42, [43], 5555, window, evidence, mapping, endpoint)
+            self.assertIn('Mutation PASS', evidence.getvalue())
+            with self.assertRaisesRegex(AssertionError, 'zero recognised'):
+                a9.check_windows(events[:1] + events[2:], 42, [43], 5555, window, evidence, mapping)
+            with self.assertRaisesRegex(AssertionError, 'unknown AFD event/version'):
+                a9.check_windows(events + [(9999, dict(events[0][1]))], 42, [43], 5555, window, evidence, mapping)
+            with self.assertRaisesRegex(AssertionError, 'non-control socket'):
+                a9.check_windows(events + [(7300, dict(events[1][1], Endpoint='99'))], 42, [43], 5555, window, evidence, mapping)
+            with self.assertRaisesRegex(AssertionError, 'no app-owned'):
+                changed = [(i, dict(f, ProcessId='43')) if i == 7300 else (i, f) for i, f in events]
+                a9.check_windows(changed, 42, [43], 5555, window, evidence, mapping)
+            with self.assertRaisesRegex(AssertionError, 'unknown AFD creation PID template'):
+                schema['events'][0]['template'] = '<template><data name="Process"/><data name="Endpoint"/></template>'
+                schema_path.write_text(json.dumps(schema))
+                a9.windows_schema(schema_path, manifest)
+            with self.assertRaisesRegex(AssertionError, 'metadata/manifest mismatch'):
+                schema['events'][0]['id'] = 8888
+                schema_path.write_text(json.dumps(schema))
+                a9.windows_schema(schema_path, manifest)
 
     def test_macos_precapture_send_and_missing_send_mutation(self):
         packets = [
