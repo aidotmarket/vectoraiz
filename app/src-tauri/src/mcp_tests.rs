@@ -98,10 +98,10 @@ impl Fixture {
         let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
         #[cfg(windows)]
         let (mut client, server) = {
-            let server=vz_mcp::channel::create_server(false).unwrap();
-            let client=vz_mcp::channel::connect().await.unwrap();
+            let server = vz_mcp::channel::create_server(false).unwrap();
+            let client = vz_mcp::channel::connect().await.unwrap();
             server.connect().await.unwrap();
-            (client,server)
+            (client, server)
         };
         let (dir, root, ops, apps, opens) = (
             self.dir.clone(),

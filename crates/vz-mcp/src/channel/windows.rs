@@ -143,35 +143,76 @@ pub async fn connect() -> io::Result<Stream> {
     Ok(pipe)
 }
 
-fn server_matches(own:&str, server:io::Result<String>) -> bool {
-    server.is_ok_and(|sid|sid==own)
+fn server_matches(own: &str, server: io::Result<String>) -> bool {
+    server.is_ok_and(|sid| sid == own)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows_sys::Win32::Security::{Authorization::{GetSecurityInfo,ConvertSecurityDescriptorToStringSecurityDescriptorW,SE_KERNEL_OBJECT},DACL_SECURITY_INFORMATION};
+    use windows_sys::Win32::Security::{
+        Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW, GetSecurityInfo, SE_KERNEL_OBJECT,
+        },
+        DACL_SECURITY_INFORMATION,
+    };
     #[tokio::test]
     async fn dacl_first_instance_remote_rejection_and_fail_closed_identity() {
-        let server=create_server(true).unwrap();
-        assert!(create_server(true).is_err(),"a squatted first instance must never be retried");
-        let sid=current_sid().unwrap();
-        assert!(server_matches(&sid,Ok(sid.clone())));
-        assert!(!server_matches(&sid,Ok("S-1-5-18".into())));
-        assert!(!server_matches(&sid,Err(io::Error::from(io::ErrorKind::PermissionDenied))));
+        let server = create_server(true).unwrap();
+        assert!(
+            create_server(true).is_err(),
+            "a squatted first instance must never be retried"
+        );
+        let sid = current_sid().unwrap();
+        assert!(server_matches(&sid, Ok(sid.clone())));
+        assert!(!server_matches(&sid, Ok("S-1-5-18".into())));
+        assert!(!server_matches(
+            &sid,
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        ));
         unsafe {
-            let mut descriptor=ptr::null_mut();
-            assert_eq!(GetSecurityInfo(server.as_raw_handle(),SE_KERNEL_OBJECT,DACL_SECURITY_INFORMATION,ptr::null_mut(),ptr::null_mut(),ptr::null_mut(),ptr::null_mut(),&mut descriptor),0);
-            let _descriptor=Local(descriptor);
-            let mut text=ptr::null_mut();
-            assert_ne!(ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor,1,DACL_SECURITY_INFORMATION,&mut text,ptr::null_mut()),0);
-            let _text=Local(text.cast());let mut len=0;while *text.add(len)!=0{len+=1;}
-            let sddl=String::from_utf16(std::slice::from_raw_parts(text,len)).unwrap();
-            assert_eq!(sddl.matches("(A;").count(),2,"{sddl}");
-            assert!(sddl.contains(&sid) && sddl.contains(";;;SY)"),"{sddl}");
+            let mut descriptor = ptr::null_mut();
+            assert_eq!(
+                GetSecurityInfo(
+                    server.as_raw_handle(),
+                    SE_KERNEL_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    &mut descriptor
+                ),
+                0
+            );
+            let _descriptor = Local(descriptor);
+            let mut text = ptr::null_mut();
+            assert_ne!(
+                ConvertSecurityDescriptorToStringSecurityDescriptorW(
+                    descriptor,
+                    1,
+                    DACL_SECURITY_INFORMATION,
+                    &mut text,
+                    ptr::null_mut()
+                ),
+                0
+            );
+            let _text = Local(text.cast());
+            let mut len = 0;
+            while *text.add(len) != 0 {
+                len += 1;
+            }
+            let sddl = String::from_utf16(std::slice::from_raw_parts(text, len)).unwrap();
+            assert_eq!(sddl.matches("(A;").count(), 2, "{sddl}");
+            assert!(sddl.contains(&sid) && sddl.contains(";;;SY)"), "{sddl}");
         }
-        let remote=path().unwrap().replacen(r"\\.\",r"\\localhost\",1);
-        assert!(ClientOptions::new().open(remote).is_err(),"remote pipe clients must be rejected");
-        let client=connect().await.unwrap();server.connect().await.unwrap();drop(client);
+        let remote = path().unwrap().replacen(r"\\.\", r"\\localhost\", 1);
+        assert!(
+            ClientOptions::new().open(remote).is_err(),
+            "remote pipe clients must be rejected"
+        );
+        let client = connect().await.unwrap();
+        server.connect().await.unwrap();
+        drop(client);
     }
 }

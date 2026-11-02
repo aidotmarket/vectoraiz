@@ -232,8 +232,16 @@ impl Apps {
     pub fn record(&self, dir: &Path, client: &str, tool: &str, error: Option<&Value>) -> String {
         use std::io::Write;
         let call_id = uuid::Uuid::new_v4().simple().to_string();
-        let tool=if ["list_collections","search","get_document","get_chunk"].contains(&tool){tool}else{"unknown_tool"};
-        let prefix=if vz_mcp::valid_client(client){client[..8].to_owned()}else{"invalid".into()};
+        let tool = if ["list_collections", "search", "get_document", "get_chunk"].contains(&tool) {
+            tool
+        } else {
+            "unknown_tool"
+        };
+        let prefix = if vz_mcp::valid_client(client) {
+            client[..8].to_owned()
+        } else {
+            "invalid".into()
+        };
         let _lock = self.log_lock.lock().unwrap();
         let name = settings::with_state(dir, |s| {
             if error.is_none() {
