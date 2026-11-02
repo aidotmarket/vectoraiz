@@ -1031,6 +1031,25 @@ it("refreshes cloud status when models change", async () => {
   expect(cloudInvoke).toHaveBeenCalledWith("cloud_status",undefined);
 });
 
+it("offers answer models after turning off the smallest model from the smaller-model flow", async () => {
+  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",size:5_000_000_000}};
+  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",size:20_000_000_000}};
+  const initial = {...readyModels,answer:{state:"ready",pin:answerPin},offer:[answerTier,medium,large]};
+  modelsInvoke.mockResolvedValue(initial);
+  invoke.mockImplementation(async command => {
+    if (command === "answer_turn_off") modelsInvoke.mockResolvedValue({...initial,answer:{state:"none"}});
+    return command === "pipeline_ask" ? {kind:"no_answer"} : {available:false};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Use a smaller model"}));
+  expect(screen.queryByRole("button",{name:/^Switch to /})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button",{name:"Turn off"}));
+  await waitFor(() => expect(screen.queryByRole("button",{name:"Turn off"})).not.toBeInTheDocument());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"})).toBeInTheDocument();
+  expect(await screen.findAllByRole("button",{name:"Add answer model"})).toHaveLength(3);
+});
+
 it("keeps the offered tier rows in place through download, checking and completion", async () => {
   const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",size:5_000_000_000}};
   const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",size:20_000_000_000}};

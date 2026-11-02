@@ -141,6 +141,10 @@ export default function App() {
   const transferBusy = modelBusy || models?.answer?.state === "checking" || !!(models?.target && ["downloading", "checking", "verified"].includes(models.target.state));
   const offered = models?.offer?.at(-1);
   useEffect(() => {
+    // A fresh selection needs all offers; keep the snapshot during transfers.
+    if (!models?.answer?.pin && !transferBusy) setAnswerOffers(undefined);
+  }, [models?.answer?.pin, transferBusy]);
+  useEffect(() => {
     if (!answerOffers && models?.offer && (showSmaller || ["no_answer", "failed"].includes(askState) || ["missing", "failed"].includes(models.answer?.state ?? ""))) {
       setAnswerOffers(models.offer.filter(tier => !showSmaller || tier.pin.size < (models.answer?.pin?.size ?? Infinity)).sort((a, b) => b.pin.size - a.pin.size));
     }
