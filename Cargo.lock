@@ -10865,7 +10865,7 @@ dependencies = [
 
 [[package]]
 name = "vectoraiz"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10927,7 +10927,7 @@ dependencies = [
 
 [[package]]
 name = "vz-cli"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "clap",
@@ -10939,7 +10939,7 @@ dependencies = [
 
 [[package]]
 name = "vz-core"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -10979,7 +10979,7 @@ dependencies = [
 
 [[package]]
 name = "vz-mcp"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "libc",
  "serde",
@@ -10992,7 +10992,7 @@ dependencies = [
 
 [[package]]
 name = "vz-pack"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11013,7 +11013,7 @@ dependencies = [
 
 [[package]]
 name = "vz-parser-worker"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "pdfium-render",
  "serde_json",
