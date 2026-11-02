@@ -568,7 +568,7 @@ export default function App() {
       <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>{models?.needs_reindex ? "Re-index" : "Index folder"}</button>
       {indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button></div>
+      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button>{(cloud?.default || !appClients.some(c => !c.revoked)) && <button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}</div>
       {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
       {askState === "cloud_error" && <div>{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>

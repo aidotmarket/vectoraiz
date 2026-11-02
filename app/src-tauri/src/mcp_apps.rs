@@ -12,6 +12,8 @@ pub struct Apps {
     pub app_access_lock: AsyncMutex<()>,
     pub channel: Arc<crate::mcp_channel::ChannelState>,
     log_lock: Mutex<()>,
+    #[cfg(test)]
+    pub claude_path: Option<std::path::PathBuf>,
 }
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339()
@@ -83,6 +85,14 @@ pub fn persist_denials(dir: &Path) -> Result<(), String> {
     .map_err(Into::into)
 }
 impl Apps {
+    fn config_path(&self) -> Result<std::path::PathBuf, String> {
+        #[cfg(test)]
+        if let Some(path) = &self.claude_path {
+            return Ok(path.clone());
+        }
+        claude_config::path()
+    }
+
     pub fn status(&self, dir: &Path) -> Result<Value, String> {
         let mut value = settings::with_state(dir, |s| {
             let path = s.app_state();
@@ -196,7 +206,7 @@ impl Apps {
             Ok::<_, String>(())
         });
         let config = if client.app == "claude_desktop" {
-            claude_config::edit(&claude_config::path()?, id, None).err()
+            claude_config::edit(&self.config_path()?, id, None).err()
         } else {
             None
         };
@@ -342,8 +352,7 @@ impl Apps {
         {
             return Ok(json!({"connected":true}));
         }
-        let entry =
-            claude_config::read(&claude_config::path()?)?["mcpServers"]["vectoraiz"].clone();
+        let entry = claude_config::read(&self.config_path()?)?["mcpServers"]["vectoraiz"].clone();
         let reason = if entry.is_null() {
             "entry_missing"
         } else if !claude_config::holds(&entry, id) {

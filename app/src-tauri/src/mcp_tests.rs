@@ -37,7 +37,9 @@ impl Fixture {
         let root = temp.path().join("index");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("recipe.json"), "{}").unwrap();
-        let apps = Arc::new(Apps::default());
+        let mut apps = Apps::default();
+        apps.claude_path = Some(temp.path().join("claude_desktop_config.json"));
+        let apps = Arc::new(apps);
         let client = apps
             .connect(
                 &dir,
@@ -94,6 +96,10 @@ impl Fixture {
         .await
     }
     async fn channel(&self, request: Request) -> vz_mcp::channel::Stream {
+        self.channel_response(request, json!({"hits":[{"text":"private"}]}))
+            .await
+    }
+    async fn channel_response(&self, request: Request, response: Value) -> vz_mcp::channel::Stream {
         #[cfg(unix)]
         let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
         #[cfg(windows)]
@@ -116,7 +122,7 @@ impl Fixture {
             move |r, c| async move {
                 mcp_tools::call(&dir, &root, &ops, &apps, r, c, move |_, _| {
                     opens.fetch_add(1, Ordering::SeqCst);
-                    Ok(json!({"hits":[{"text":"private"}]}))
+                    Ok(response)
                 })
                 .await
             },
@@ -379,4 +385,229 @@ async fn revoke_while_waiting_for_inference_never_opens_index() {
     drop(held);
     assert_eq!(call.await.unwrap()["ok"], false);
     assert_eq!(f.opens.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn inference_wait_succeeds_times_out_and_transfer_does_not_block() {
+    let f = Fixture::new().await;
+    let held = f.ops.acquire().unwrap();
+    let call = f.call(f.request("search"));
+    let release = async {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(f.opens.load(Ordering::SeqCst), 0);
+        drop(held);
+    };
+    let (response, ()) = tokio::join!(call, release);
+    assert_eq!(response["ok"], true);
+    let _held = f.ops.acquire().unwrap();
+    let before = f.opens.load(Ordering::SeqCst);
+    let response = tokio::time::timeout(Duration::from_secs(12), f.call(f.request("search")))
+        .await
+        .unwrap();
+    assert_eq!(response["code"], "busy");
+    assert_eq!(f.opens.load(Ordering::SeqCst), before);
+    drop(_held);
+    let _transfer = f.ops.acquire_transfer().unwrap();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), f.call(f.request("search")))
+            .await
+            .unwrap()["ok"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn replacement_failed_disconnect_restart_and_retry_preserve_other_clients() {
+    use crate::claude_config;
+    let f = Fixture::new().await;
+    let version = vz_core::cloud_gate::app_disclosure_version();
+    let a = f
+        .apps
+        .connect(&f.dir, "claude_desktop", "Claude Desktop", &version)
+        .await
+        .unwrap();
+    let a = a["client_id"].as_str().unwrap();
+    let path = f.apps.claude_path.as_ref().unwrap();
+    let bridge = claude_config::bridge().unwrap();
+    claude_config::edit(path, a, Some(&bridge)).unwrap();
+    let b = f
+        .apps
+        .connect(&f.dir, "claude_desktop", "Claude Desktop", &version)
+        .await
+        .unwrap();
+    let b = b["client_id"].as_str().unwrap();
+    claude_config::edit(path, b, Some(&bridge)).unwrap();
+    let mut request = f.request("search");
+    request.client = a.into();
+    assert_eq!(f.call(request).await["ok"], false);
+    f.apps.disconnect(&f.dir, a).await.unwrap();
+    assert!(claude_config::holds(
+        &claude_config::read(path).unwrap()["mcpServers"]["vectoraiz"],
+        b
+    ));
+    let mut request = f.request("search");
+    request.client = b.into();
+    assert_eq!(f.call(request).await["ok"], true);
+    let original = std::fs::read(path).unwrap();
+    f.fail_writes();
+    assert!(f
+        .apps
+        .connect(&f.dir, "claude_desktop", "Claude Desktop", &version)
+        .await
+        .is_err());
+    assert_eq!(std::fs::read(path).unwrap(), original);
+    let removed = f.apps.disconnect(&f.dir, b).await.unwrap();
+    assert_eq!(removed["saved"], false);
+    assert!(removed["status"]["save_failed"].is_string());
+    assert_eq!(claude_config::read(path).unwrap()["mcpServers"], json!({}));
+    let mut request = f.request("search");
+    request.client = b.into();
+    assert_eq!(f.call(request).await["ok"], false);
+    f.fix_writes();
+    f.apps.retry(&f.dir).await.unwrap();
+    settings::restart(&f.dir);
+    let mut request = f.request("search");
+    request.client = b.into();
+    assert_eq!(f.call(request).await["ok"], false);
+    assert_eq!(f.call(f.request("search")).await["ok"], true);
+}
+
+#[tokio::test]
+async fn failed_revocation_without_retry_is_lost_on_restart() {
+    let f = Fixture::new().await;
+    let durable = std::fs::read(f.dir.join("settings.json")).unwrap();
+    f.fail_writes();
+    f.apps.disconnect(&f.dir, &f.id).await.unwrap();
+    assert_eq!(f.call(f.request("search")).await["ok"], false);
+    f.fix_writes();
+    std::fs::write(f.dir.join("settings.json"), durable).unwrap();
+    settings::restart(&f.dir);
+    assert_eq!(f.call(f.request("search")).await["ok"], true);
+}
+
+#[tokio::test(start_paused = true)]
+async fn test_connection_requires_a_new_event_for_the_full_id_and_detects_moved_entry() {
+    use crate::claude_config;
+    let f = Fixture::new().await;
+    let other = f
+        .apps
+        .connect(
+            &f.dir,
+            "other",
+            "Test",
+            &vz_core::cloud_gate::app_disclosure_version(),
+        )
+        .await
+        .unwrap();
+    let other = other["client_id"].as_str().unwrap();
+    // An old allowed call and a new call from a same-name client cannot satisfy this test.
+    f.apps.record(&f.dir, &f.id, "search", None);
+    let check = f.apps.test_connection(&f.dir, &f.id);
+    let event = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        f.apps.record(&f.dir, other, "search", None);
+    };
+    let (response, ()) = tokio::join!(check, event);
+    assert_eq!(response.unwrap()["reason"], "entry_missing");
+    let path = f.apps.claude_path.as_ref().unwrap();
+    claude_config::edit(path, &f.id, Some(PathBuf::from("old-location").as_path())).unwrap();
+    assert_eq!(
+        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
+        "stale_path"
+    );
+    claude_config::edit(path, &f.id, Some(&claude_config::bridge().unwrap())).unwrap();
+    assert_eq!(
+        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
+        "not_called"
+    );
+    claude_config::edit(path, other, Some(&claude_config::bridge().unwrap())).unwrap();
+    assert_eq!(
+        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
+        "another_client"
+    );
+    let check = f.apps.test_connection(&f.dir, &f.id);
+    let event = async {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        f.apps.record(&f.dir, &f.id, "search", None);
+    };
+    let (response, ()) = tokio::join!(check, event);
+    assert_eq!(response.unwrap()["connected"], true);
+}
+
+#[tokio::test]
+async fn slow_real_channel_write_cancels_and_drains_with_failed_or_successful_save() {
+    for fail in [false, true] {
+        let f = Fixture::new().await;
+        if fail {
+            f.fail_writes();
+        }
+        let (reached, resume) = mcp_channel::hook(&f.dir, "gate3");
+        let mut client = f
+            .channel_response(
+                f.request("search"),
+                json!({"hits":[{"text":"x".repeat(1_500_000)}]}),
+            )
+            .await;
+        reached.await.unwrap();
+        resume.send(()).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            settings::with_state(&f.dir, |s| !s.app_deliveries.is_empty()).unwrap(),
+            "peer must still be blocking the frame"
+        );
+        tokio::time::timeout(Duration::from_secs(1), f.apps.disconnect(&f.dir, &f.id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(settings::with_state(&f.dir, |s| s.app_deliveries.is_empty()).unwrap());
+        // A partial chunk can be handed off, but revocation forbids the complete frame.
+        assert!(
+            vz_mcp::channel::read_frame(&mut client, vz_mcp::RESPONSE_CAP)
+                .await
+                .is_err()
+        );
+    }
+}
+
+#[tokio::test]
+async fn saving_one_revocation_never_clears_another_and_logs_exclude_request_content() {
+    let f = Fixture::new().await;
+    let version = vz_core::cloud_gate::app_disclosure_version();
+    assert!(f
+        .apps
+        .connect(&f.dir, "other", "New app", "stale")
+        .await
+        .is_err());
+    let other = f
+        .apps
+        .connect(&f.dir, "other", "Other", &version)
+        .await
+        .unwrap();
+    let other = other["client_id"].as_str().unwrap();
+    f.fail_writes();
+    f.apps.disconnect(&f.dir, &f.id).await.unwrap();
+    f.apps.disconnect(&f.dir, other).await.unwrap();
+    f.fix_writes();
+    f.apps.disconnect(&f.dir, &f.id).await.unwrap();
+    assert!(settings::with_state(&f.dir, |s| s.app_revoked.contains(other)).unwrap());
+    let mut request = f.request("search");
+    request.client = other.into();
+    assert_eq!(f.call(request).await["ok"], false);
+    f.apps.record(
+        &f.dir,
+        "private malformed client text",
+        "private unknown tool text",
+        Some(&json!({"code":"access_denied"})),
+    );
+    let text = std::fs::read_to_string(f.dir.parent().unwrap().join("mcp-calls.log")).unwrap();
+    assert!(!text.contains("private malformed") && !text.contains("private unknown"));
+    let entry: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+    assert_eq!(entry["client_id"], "invalid");
+    assert_eq!(entry["tool"], "unknown_tool");
+    assert_eq!(entry["allowed"], false);
+    f.apps.retry(&f.dir).await.unwrap();
+    settings::restart(&f.dir);
+    let mut request = f.request("search");
+    request.client = other.into();
+    assert_eq!(f.call(request).await["ok"], false);
 }
