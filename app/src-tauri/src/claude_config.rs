@@ -119,6 +119,23 @@ pub fn running() -> Result<bool, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    fn file_identity(path: &Path) -> (u32, u64) {
+        use std::os::windows::io::AsRawHandle;
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn GetFileInformationByHandle(handle: *mut core::ffi::c_void, info: *mut u32) -> i32;
+        }
+        let file = fs::File::open(path).unwrap();
+        // BY_HANDLE_FILE_INFORMATION is 13 DWORDs, as in vz-core verification.
+        let mut info = [0u32; 13];
+        assert_ne!(
+            unsafe { GetFileInformationByHandle(file.as_raw_handle(), info.as_mut_ptr()) },
+            0
+        );
+        (info[7], (u64::from(info[11]) << 32) | u64::from(info[12]))
+    }
+
     #[test]
     fn shapes_backup_order_replacement_and_identity() {
         let root = tempfile::tempdir().unwrap();
@@ -132,7 +149,11 @@ mod tests {
             use std::os::unix::fs::MetadataExt;
             fs::metadata(&path).unwrap().ino()
         };
+        #[cfg(windows)]
+        let identity = file_identity(&path);
         edit(&path, "b", Some(Path::new("/new"))).unwrap();
+        #[cfg(windows)]
+        assert_eq!(file_identity(&path), identity);
         assert_eq!(
             fs::read(path.with_file_name("claude_desktop_config.json.vectoraiz-backup")).unwrap(),
             original
@@ -155,6 +176,13 @@ mod tests {
         edit(&path, "a", None).unwrap();
         assert_eq!(fs::read(&path).unwrap(), b);
         edit(&path, "b", None).unwrap();
+        #[cfg(windows)]
+        assert_eq!(file_identity(&path), identity);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(fs::metadata(&path).unwrap().ino(), inode);
+        }
         assert!(read(&path).unwrap()["mcpServers"]["other"].is_object());
         for bad in ["{bad", "[]", r#"{"mcpServers":[]}"#] {
             fs::write(&path, bad).unwrap();
