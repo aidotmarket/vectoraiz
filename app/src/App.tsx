@@ -524,9 +524,10 @@ export default function App() {
     <AiApps installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
     {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? M3_COPY.connected(c.name) : M3_COPY.stale(c.name)}</p>)}
     {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
-      <h2>{M2_COPY.chooser}</h2><h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p><button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button><h3>{M2_COPY.local}</h3>
+      <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
       {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
+      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p><button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>
       <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
       <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
     </aside>}

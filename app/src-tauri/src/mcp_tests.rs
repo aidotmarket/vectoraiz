@@ -183,6 +183,10 @@ async fn off_retry_on_and_per_client_failed_denials() {
     f.fail_writes();
     let off = f.apps.path_set(&f.dir, false).await.unwrap();
     assert_eq!(off["saved"], false);
+    assert!(off["status"]["save_failed"]
+        .as_str()
+        .unwrap()
+        .contains("Test can't read your library"));
     assert!(f.apps.path_set(&f.dir, true).await.is_err());
     assert_eq!(f.call(f.request("search")).await["ok"], false);
     f.fix_writes();
@@ -458,7 +462,10 @@ async fn replacement_failed_disconnect_restart_and_retry_preserve_other_clients(
     assert_eq!(std::fs::read(path).unwrap(), original);
     let removed = f.apps.disconnect(&f.dir, b).await.unwrap();
     assert_eq!(removed["saved"], false);
-    assert!(removed["status"]["save_failed"].is_string());
+    assert!(removed["status"]["save_failed"]
+        .as_str()
+        .unwrap()
+        .contains("Claude Desktop can't read your library"));
     assert_eq!(claude_config::read(path).unwrap()["mcpServers"], json!({}));
     let mut request = f.request("search");
     request.client = b.into();
@@ -488,7 +495,18 @@ async fn failed_revocation_without_retry_is_lost_on_restart() {
 #[tokio::test(start_paused = true)]
 async fn test_connection_requires_a_new_event_for_the_full_id_and_detects_moved_entry() {
     use crate::claude_config;
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
+    let claude = f
+        .apps
+        .connect(
+            &f.dir,
+            "claude_desktop",
+            "Claude Desktop",
+            &vz_core::cloud_gate::app_disclosure_version(),
+        )
+        .await
+        .unwrap();
+    f.id = claude["client_id"].as_str().unwrap().to_owned();
     let other = f
         .apps
         .connect(
@@ -524,6 +542,11 @@ async fn test_connection_requires_a_new_event_for_the_full_id_and_detects_moved_
     assert_eq!(
         f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
         "another_client"
+    );
+    // Generic clients must ignore even an unrelated Claude entry.
+    assert_eq!(
+        f.apps.test_connection(&f.dir, other).await.unwrap()["reason"],
+        "no_call"
     );
     let check = f.apps.test_connection(&f.dir, &f.id);
     let event = async {
@@ -586,7 +609,11 @@ async fn saving_one_revocation_never_clears_another_and_logs_exclude_request_con
     let other = other["client_id"].as_str().unwrap();
     f.fail_writes();
     f.apps.disconnect(&f.dir, &f.id).await.unwrap();
-    f.apps.disconnect(&f.dir, other).await.unwrap();
+    let denied = f.apps.disconnect(&f.dir, other).await.unwrap();
+    assert!(denied["status"]["save_failed"]
+        .as_str()
+        .unwrap()
+        .contains("Test, Other can't read your library"));
     f.fix_writes();
     f.apps.disconnect(&f.dir, &f.id).await.unwrap();
     assert!(settings::with_state(&f.dir, |s| s.app_revoked.contains(other)).unwrap());
@@ -610,4 +637,27 @@ async fn saving_one_revocation_never_clears_another_and_logs_exclude_request_con
     let mut request = f.request("search");
     request.client = other.into();
     assert_eq!(f.call(request).await["ok"], false);
+}
+
+#[tokio::test]
+async fn unreadable_index_error_response_contains_no_path() {
+    let f = Fixture::new().await;
+    let missing = f.root.join("unreadable-index");
+    let response = mcp_tools::call(
+        &f.dir,
+        &f.root,
+        &f.ops,
+        &f.apps,
+        f.request("list_collections"),
+        CancellationToken::new(),
+        move |_, _| {
+            std::fs::read(&missing)
+                .map(|_| json!({}))
+                .map_err(|e| format!("{}: {e}", missing.display()))
+        },
+    )
+    .await;
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["message"], "The library could not be read.");
+    assert!(!response.to_string().contains(['/', '\\']));
 }

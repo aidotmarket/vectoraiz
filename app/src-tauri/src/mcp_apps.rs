@@ -99,7 +99,21 @@ impl Apps {
             let clients: Vec<_> = path.clients.iter().map(|c|json!({"client_id":c.client_id,"app":c.app,"name":c.name,"created_at":c.created_at,
                 "revoked":c.revoked_at.is_some() || s.app_revoked.contains(&c.client_id),"consent_current":c.consent.disclosure_version==app_disclosure_version()})).collect();
             let failed = s.app_off || !s.app_revoked.is_empty();
-            json!({"enabled":path.enabled,"off":s.app_off,"clients":clients,"save_failed":if failed {Some(format!("vectorAIz couldn't save this change in {}. {} can't read your library until vectorAIz restarts. After a restart it can again unless the change is saved.",dir.display(), if s.app_off {"Connected apps"} else {"This app"}))}else{None}})
+            let names = path
+                .clients
+                .iter()
+                .filter(|c| {
+                    s.app_revoked.contains(&c.client_id) || (s.app_off && c.revoked_at.is_none())
+                })
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let names = if names.is_empty() {
+                "Connected apps"
+            } else {
+                &names
+            };
+            json!({"enabled":path.enabled,"off":s.app_off,"clients":clients,"save_failed":if failed {Some(format!("vectorAIz couldn't save this change in {}. {} can't read your library until vectorAIz restarts. After a restart it can again unless the change is saved.",dir.display(), names))}else{None}})
         })?;
         value["channel_error"] = json!(self.channel.error.lock().unwrap().clone());
         value["recent"] = json!(self.recent(dir));
@@ -353,6 +367,18 @@ impl Apps {
             .is_ok_and(|r| r.is_ok())
         {
             return Ok(json!({"connected":true}));
+        }
+        self.connection_diagnosis(dir, id)
+    }
+    fn connection_diagnosis(&self, dir: &Path, id: &str) -> Result<Value, String> {
+        let claude = settings::with_state(dir, |s| {
+            s.app_state()
+                .clients
+                .iter()
+                .any(|c| c.client_id == id && c.app == "claude_desktop")
+        })?;
+        if !claude {
+            return Ok(json!({"connected":false,"reason":"no_call"}));
         }
         let entry = claude_config::read(&self.config_path()?)?["mcpServers"]["vectoraiz"].clone();
         let reason = if entry.is_null() {

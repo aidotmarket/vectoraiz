@@ -94,12 +94,14 @@ class Client:
     def tools_run(self, allowed):
         hits = self.tool('search', {'query':'thirty days'}, allowed)
         hit = hits['hits'][0] if allowed else {'doc_id':'unknown', 'chunk_id':'unknown'}
-        self.tool('list_collections', {}, allowed)
+        self.tool('list_collections', None, allowed)
         self.tool('get_document', {'doc_id':hit['doc_id']}, allowed)
         self.tool('get_chunk', {'chunk_id':hit['chunk_id']}, allowed)
 
     def tool(self, name, arguments, allowed):
-        response = self.call('tools/call', {'name':name, 'arguments':arguments})['result']
+        params = {'name':name}
+        if arguments is not None: params['arguments'] = arguments
+        response = self.call('tools/call', params)['result']
         if allowed:
             assert not response.get('isError'), response
             obj = response['structuredContent']; assert isinstance(obj, dict)

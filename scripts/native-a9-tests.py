@@ -166,17 +166,22 @@ class CaptureTests(unittest.TestCase):
 
     def test_macos_precapture_send_and_missing_send_mutation(self):
         packets = [
-            f'101.0 (out, proc vectoraiz:42) IP 127.0.0.1.5556 > 127.0.0.1.5555: Flags [P.], length {len(a9.PRE_MESSAGE)}',
-            '101.1 (out, proc vectoraiz:42) IP 127.0.0.1.5557 > 127.0.0.1.5555: Flags [S], length 0',
-            f'101.2 (out, proc vectoraiz:42) IP 127.0.0.1.5557 > 127.0.0.1.5555: Flags [P.], length {len(a9.NEGATIVE_MESSAGE)}',
+            f'101.0 (proc vectoraiz:42, out) IP 127.0.0.1.5556 > 127.0.0.1.5555: Flags [P.], length {len(a9.PRE_MESSAGE)}',
+            '101.1 (proc vectoraiz:42, out) IP 127.0.0.1.5557 > 127.0.0.1.5555: Flags [S], length 0',
+            f'101.2 (proc vectoraiz:42, out) IP 127.0.0.1.5557 > 127.0.0.1.5555: Flags [P.], length {len(a9.NEGATIVE_MESSAGE)}',
         ]
         def check(lines):
             a9.check_macos('\n'.join(lines), 42, [43], 5555, 5556, 5557, [100, 102], io.StringIO())
         check(packets)
+        check(packets + ['101.3 (proc vectoraiz:42, in) IP 13.226.220.23.80 > 127.0.0.1.5558: Flags [P.], length 12'])
+        with self.assertRaisesRegex(AssertionError, 'App made a network'):
+            check(packets + ['101.3 (proc vectoraiz:42, out) IP 127.0.0.1.5558 > 13.226.220.23.80: Flags [P.], length 12 in,'])
+        with self.assertRaisesRegex(AssertionError, 'unrecognised pktap'):
+            check([line.replace(', out)', ', unknown)') for line in packets])
         with self.assertRaisesRegex(AssertionError, 'pre-capture send not attributed'):
             check(packets[1:])
         with self.assertRaisesRegex(AssertionError, 'App made a network'):
-            check(packets + ['101.3 (out, proc vectoraiz:42) IP 127.0.0.1.5558 > 13.226.220.23.80: Flags [P.], length 12'])
+            check(packets + ['101.3 (proc vectoraiz:42, out) IP 127.0.0.1.5558 > 13.226.220.23.80: Flags [P.], length 12'])
 
 
 if __name__ == '__main__':

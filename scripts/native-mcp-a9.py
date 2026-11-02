@@ -242,8 +242,14 @@ def check_macos(packets, app_pid, bridge_pids, port, pre_port, negative_port, wi
         if re.search(r'vectoraiz[:.\s]' + str(app_pid) + r'\b', line, re.I): app.append(line)
         if any(re.search(r'vectoraiz-mcp[:.\s]' + str(pid) + r'\b', line, re.I) for pid in bridge_pids): bridge.append(line)
     evidence.write('In-window app packets:\n' + '\n'.join(app) + '\nIn-window bridge packets:\n' + '\n'.join(bridge) + '\n'); evidence.flush()
+    def direction(line):
+        token = re.search(r'\(proc ([^:(),]+):(\d+), (in|out)\)', line)
+        assert token and token[1].lower() == 'vectoraiz' and int(token[2]) == app_pid, 'STOP: unrecognised pktap process/direction token'
+        return token[3]
+    for line in app:
+        direction(line)
     def outgoing(line, source_port):
-        return re.search(r'127\.0\.0\.1\.' + str(source_port) + r' > 127\.0\.0\.1\.' + str(port) + r':', line)
+        return direction(line) == 'out' and re.search(r'127\.0\.0\.1\.' + str(source_port) + r' > 127\.0\.0\.1\.' + str(port) + r':', line)
     assert any(outgoing(line, pre_port) and f'length {len(PRE_MESSAGE)}' in line for line in app), 'STOP: pre-capture send not attributed to app PID'
     assert any(outgoing(line, negative_port) and 'Flags [S]' in line for line in app), 'Negative connection missing'
     assert any(outgoing(line, negative_port) and f'length {len(NEGATIVE_MESSAGE)}' in line for line in app), 'Asynchronous negative send missing'
@@ -253,7 +259,7 @@ def check_macos(packets, app_pid, bridge_pids, port, pre_port, negative_port, wi
         allowed = any(outgoing(line, source_port) or re.search(
             r'127\.0\.0\.1\.' + str(port) + r' > 127\.0\.0\.1\.' + str(source_port) + r':', line)
             for source_port in [pre_port, negative_port])
-        assert allowed or 'in,' in line or ', in)' in line, 'App made a network connection or sent during tools'
+        assert allowed or direction(line) == 'in', 'App made a network connection or sent during tools'
     assert not bridge, 'Bridge made a network connection'
 
 

@@ -1148,9 +1148,10 @@ it("shows the handoff boundary after removal and retains the working Ask path", 
   expect(screen.getByRole("button", {name: "Ask"})).toBeEnabled();
 });
 it("shows channel and failed-save notices, activity and Retry", async () => {
-  appInvoke.mockImplementation(async command => command === "app_status" ? {...appStatus(), channel_error: "vectorAIz can't open its local channel. Restart your computer, then try again.", save_failed: "Change could not be saved", recent: [{time: "now", client: "Research app", tool: "search", allowed: false, refusal_code: "access_denied", result_count: 0}]} : {});
+  appInvoke.mockImplementation(async command => command === "app_status" ? {...appStatus(), channel_error: "vectorAIz can't open its local channel. Restart your computer, then try again.", save_failed: "Research app can't read your library until vectorAIz restarts.", recent: [{time: "now", client: "Research app", tool: "search", allowed: false, refusal_code: "access_denied", result_count: 0}]} : {});
   render(<App />);
   expect(await screen.findByText(/can't open its local channel/)).toBeInTheDocument();
+  expect(screen.getByText("Research app can't read your library until vectorAIz restarts.")).toBeInTheDocument();
   expect(screen.getByText(/now · Research app · search · Refused · access_denied · 0/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", {name: "Retry"}));
   expect(appInvoke).toHaveBeenCalledWith("app_access_retry", undefined);
@@ -1177,5 +1178,15 @@ it("shows the connected-app line and in-app chooser when no in-app answer path i
   expect(screen.getByRole("button", {name: "Search"})).toBeEnabled();
   expect(screen.queryByRole("button", {name: "Ask"})).not.toBeInTheDocument();
   expect(screen.getByText("In your AI app.")).toBeInTheDocument();
+  const chooser = screen.getByRole("complementary", {name: "How should vectorAIz write answers?"});
+  expect(within(chooser).getAllByRole("heading", {level: 3}).map(h => h.textContent)).toEqual(["On this computer.", "In your AI app.", "With your API key."]);
   expect(cloudInvoke.mock.calls.some(([c]) => c === "answer_path_set")).toBe(false);
+});
+
+it("gives generic clients the no-call connection message", async () => {
+  appInvoke.mockImplementation(async command => command === "app_status" ? appStatus() : {connected: false, reason: "no_call"});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name: "Test the connection"}));
+  expect(await screen.findByText("No call received. Ask this app to search your library, then test again.")).toBeInTheDocument();
+  expect(screen.queryByText(/The Claude Desktop entry/)).not.toBeInTheDocument();
 });

@@ -198,6 +198,38 @@ where
     }
 }
 
+// Per-connection failures do not change the listener's startup status.
+fn connection_result<T>(result: io::Result<T>) -> Option<T> {
+    match result {
+        Ok(connection) => Some(connection),
+        Err(error) => {
+            eprintln!("local channel connection failed: {error}");
+            None
+        }
+    }
+}
+
+#[cfg(any(unix, test))]
+async fn accept_next<T, F, Fut>(stop: &CancellationToken, mut accept: F) -> Option<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = io::Result<T>>,
+{
+    loop {
+        let result = tokio::select! { biased;
+            _ = stop.cancelled() => return None,
+            result = accept() => result,
+        };
+        if let Some(connection) = connection_result(result) {
+            return Some(connection);
+        }
+        tokio::select! {
+            _ = stop.cancelled() => return None,
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+        }
+    }
+}
+
 pub async fn listen<F, Fut>(state: Arc<ChannelState>, dir: PathBuf, run: F)
 where
     F: Fn(Request, CancellationToken) -> Fut + Send + Sync + 'static,
@@ -208,9 +240,8 @@ where
     let result = async {
         let listener = vz_mcp::channel::bind().await?;
         loop {
-            let (stream, _) = tokio::select! { biased;
-                _ = state.stop.cancelled() => break,
-                connection = listener.accept() => connection?,
+            let Some((stream, _)) = accept_next(&state.stop, || listener.accept()).await else {
+                break;
             };
             if vz_mcp::channel::verify_peer(&stream).is_err() {
                 continue;
@@ -229,9 +260,23 @@ where
         loop {
             tokio::select! { biased;
                 _ = state.stop.cancelled() => break,
-                result = server.connect() => result?,
+                result = server.connect() => if connection_result(result).is_none() {
+                    tokio::select! {
+                        _ = state.stop.cancelled() => break,
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                    }
+                    continue;
+                },
             };
-            let next = vz_mcp::channel::create_server(false)?;
+            let next = loop {
+                if let Some(next) = connection_result(vz_mcp::channel::create_server(false)) {
+                    break next;
+                }
+                tokio::select! {
+                    _ = state.stop.cancelled() => return Ok(()),
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {},
+                }
+            };
             let connected = std::mem::replace(&mut server, next);
             let (dir, run) = (dir.clone(), run.clone());
             tokio::spawn(async move {
@@ -246,5 +291,50 @@ where
         *state.error.lock().unwrap() = Some(
             "vectorAIz can't open its local channel. Restart your computer, then try again.".into(),
         );
+    }
+}
+
+#[cfg(test)]
+mod accept_tests {
+    use super::*;
+    #[tokio::test]
+    async fn failing_accept_then_next_connection_is_served() {
+        let state = ChannelState::default();
+        let (client, server) = tokio::io::duplex(4096);
+        let mut accepts = vec![
+            Err(io::Error::from(io::ErrorKind::ConnectionAborted)),
+            Ok(server),
+        ]
+        .into_iter();
+        let stream = accept_next(&state.stop, || std::future::ready(accepts.next().unwrap()))
+            .await
+            .unwrap();
+        let writer = tokio::spawn(async move {
+            let mut client = client;
+            vz_mcp::channel::write_frame(
+                &mut client,
+                &serde_json::to_vec(
+                    &json!({"v":1,"client":"a".repeat(32),"tool":"list_collections","args":{}}),
+                )
+                .unwrap(),
+                vz_mcp::REQUEST_CAP,
+            )
+            .await
+            .unwrap();
+            let bytes = vz_mcp::channel::read_frame(&mut client, vz_mcp::RESPONSE_CAP)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<Value>(&bytes).unwrap()["message"],
+                "test refusal"
+            );
+        });
+        serve(stream, PathBuf::new(), |_, _| async {
+            json!({"ok":false,"message":"test refusal"})
+        })
+        .await;
+        writer.await.unwrap();
+        assert!(accepts.next().is_none());
+        assert!(state.error.lock().unwrap().is_none());
     }
 }

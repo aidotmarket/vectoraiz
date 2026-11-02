@@ -22,7 +22,7 @@ async fn main() {
     let mut tasks = tokio::task::JoinSet::new();
     while let Ok(Some(line)) = lines.next_line().await {
         requests.retain(|_, t| !t.is_cancelled());
-        let request: Value = match serde_json::from_str(&line) {
+        let mut request: Value = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(_) => {
                 let _ = send(
@@ -48,6 +48,7 @@ async fn main() {
             }
             continue;
         }
+        protocol::normalize_arguments(&mut request);
         let (modern, immediate) = protocol::immediate(&request, initialized);
         if let Some(response) = immediate {
             let _ = send(&stdout, &response, &CancellationToken::new()).await;
@@ -79,9 +80,11 @@ async fn main() {
                         Err(e)=>protocol::tool_error(if matches!(e.kind(),std::io::ErrorKind::UnexpectedEof|std::io::ErrorKind::ConnectionReset) {vz_mcp::NO_ACCESS}else{vz_mcp::NOT_RUNNING}),
                     }
                 };
-                let _=send(&stdout,&protocol::result(request["id"].clone(),tool_result,modern),&token).await;
+                protocol::result(request["id"].clone(),tool_result,modern)
             };
-            tokio::select! {biased;_ = token.cancelled()=>{},_ = work=>{}}
+            if respond(&stdout, &token, work).await.is_err() {
+                std::process::exit(1); // A partial frame makes stdout unusable.
+            }
             token.cancel();
         });
         while tasks.try_join_next().is_some() {}
@@ -91,17 +94,32 @@ async fn main() {
     }
     while tasks.join_next().await.is_some() {}
 }
+async fn respond<W: tokio::io::AsyncWrite + Unpin>(
+    stdout: &Arc<Mutex<W>>,
+    token: &CancellationToken,
+    work: impl std::future::Future<Output = Value>,
+) -> std::io::Result<()> {
+    let response = tokio::select! {biased;
+        _ = token.cancelled() => return Ok(()),
+        response = work => response,
+    };
+    // Cancellation may suppress a queued frame, but never interrupt a started frame.
+    send(stdout, &response, token).await
+}
 async fn send<W: tokio::io::AsyncWrite + Unpin>(
     stdout: &Arc<Mutex<W>>,
     value: &Value,
     token: &CancellationToken,
 ) -> std::io::Result<()> {
-    let mut stdout = stdout.lock().await;
+    let mut bytes = serde_json::to_vec(value)?;
+    bytes.push(b'\n');
+    let mut stdout = tokio::select! { biased;
+        _ = token.cancelled() => return Ok(()),
+        stdout = stdout.lock() => stdout,
+    };
     if token.is_cancelled() {
         return Ok(());
     }
-    let mut bytes = serde_json::to_vec(value)?;
-    bytes.push(b'\n');
     stdout.write_all(&bytes).await?;
     stdout.flush().await
 }
@@ -109,6 +127,50 @@ async fn send<W: tokio::io::AsyncWrite + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancellation_mid_large_stdout_frame_preserves_next_response() {
+        use tokio::io::AsyncReadExt;
+        let object = json!({"doc_id":"d","file_name":"document.txt","page_count":1,"truncated":false,"text":"\u{0001}".repeat(200_000)});
+        let response = protocol::result(
+            json!(1),
+            json!({"content":[{"type":"text","text":object.to_string()}],"structuredContent":object}),
+            true,
+        );
+        assert!(serde_json::to_vec(&response).unwrap().len() > 2 * 1024 * 1024);
+        let (writer, mut reader) = tokio::io::duplex(4096);
+        let stdout = Arc::new(Mutex::new(writer));
+        let output = stdout.clone();
+        let token = CancellationToken::new();
+        let cancel = token.clone();
+        let first = tokio::spawn(async move {
+            respond(&output, &token, async { response }).await.unwrap();
+        });
+        let mut prefix = vec![0; 1024];
+        reader.read_exact(&mut prefix).await.unwrap();
+        assert!(!first.is_finished()); // A prefix is written and the remaining frame is blocked.
+        cancel.cancel();
+        let output = stdout.clone();
+        let second = tokio::spawn(async move {
+            respond(&output, &CancellationToken::new(), async {
+                protocol::result(json!(2), json!({}), true)
+            })
+            .await
+            .unwrap();
+        });
+        drop(stdout);
+        reader.read_to_end(&mut prefix).await.unwrap();
+        first.await.unwrap();
+        second.await.unwrap();
+        let lines: Vec<Value> = prefix
+            .split(|b| *b == b'\n')
+            .filter(|b| !b.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["id"], 1);
+        assert_eq!(lines[1]["id"], 2);
+    }
 
     #[tokio::test]
     async fn handed_off_result_paused_before_stdout_can_arrive_after_removal() {

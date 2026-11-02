@@ -18,6 +18,14 @@ pub fn result(id: Value, mut result: Value, modern: bool) -> Value {
 pub fn tool_error(message: &str) -> Value {
     json!({"isError":true,"content":[{"type":"text","text":message}]})
 }
+/// Only absence means an empty object; explicit null and other types stay invalid.
+pub fn normalize_arguments(request: &mut Value) {
+    if request["method"] == "tools/call" {
+        if let Some(params) = request["params"].as_object_mut() {
+            params.entry("arguments").or_insert_with(|| json!({}));
+        }
+    }
+}
 pub fn validate_args(name: &str, args: &Value) -> Result<(), &'static str> {
     if !args.is_object() {
         return Err("Tool arguments must be an object.");

@@ -1,7 +1,7 @@
 //! Exercise the shipped bridge process over real local streams and stdio.
 use serde_json::{json, Value};
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc,
     time::Duration,
@@ -15,7 +15,7 @@ struct Client {
     modern: bool,
 }
 impl Client {
-    fn new(home: &std::path::Path, modern: bool) -> Self {
+    fn raw(home: &std::path::Path, modern: bool) -> (Self, std::process::ChildStdout) {
         let mut child = Command::new(env!("CARGO_BIN_EXE_vectoraiz-mcp"))
             .args(["--client", &"a".repeat(32)])
             .env("HOME", home)
@@ -26,19 +26,28 @@ impl Client {
             .unwrap();
         let input = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+        let (_, output) = mpsc::channel();
+        (
+            Self {
+                child,
+                input,
+                output,
+                modern,
+            },
+            stdout,
+        )
+    }
+    fn new(home: &std::path::Path, modern: bool) -> Self {
+        let (mut client, stdout) = Self::raw(home, modern);
         let (send, output) = mpsc::channel();
+        client.output = output;
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 send.send(serde_json::from_str(&line.unwrap()).unwrap())
                     .unwrap();
             }
         });
-        Self {
-            child,
-            input,
-            output,
-            modern,
-        }
+        client
     }
     fn write(&mut self, value: Value) {
         writeln!(self.input, "{value}").unwrap();
@@ -87,6 +96,81 @@ fn same_bridge_revocation_cancellation_and_handoff_both_eras() {
     #[cfg(windows)]
     let mut listener = runtime.block_on(async { vz_mcp::channel::create_server(true).unwrap() });
     for modern in [true, false] {
+        // Real stdout backpressure, beyond Tokio's 2 MiB buffer. Read only a
+        // prefix until the bridge has processed cancellation and another call.
+        {
+            let (mut blocked, mut stdout) = Client::raw(home.path(), modern);
+            blocked.request(1, if modern { "server/discover" } else { "initialize" }, json!({"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"test","version":"1"}}));
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["id"], 1);
+            stdout = reader.into_inner();
+            if !modern {
+                blocked.write(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+            }
+            blocked.request(
+                2,
+                "tools/call",
+                json!({"name":"get_document","arguments":{"doc_id":"d"}}),
+            );
+            runtime.block_on(async {
+                #[cfg(unix)]
+                let mut stream = listener.accept().await.unwrap().0;
+                #[cfg(windows)]
+                let mut stream = {
+                    listener.connect().await.unwrap();
+                    let next = vz_mcp::channel::create_server(false).unwrap();
+                    std::mem::replace(&mut listener, next)
+                };
+                vz_mcp::channel::read_frame(&mut stream, vz_mcp::REQUEST_CAP)
+                    .await
+                    .unwrap();
+                let response = json!({"ok":true,"result":{"doc_id":"d","file_name":"document.txt","page_count":1,"truncated":false,"text":"\u{0001}".repeat(200_000)}});
+                vz_mcp::channel::write_frame(
+                    &mut stream,
+                    &serde_json::to_vec(&response).unwrap(),
+                    vz_mcp::RESPONSE_CAP,
+                )
+                .await
+                .unwrap();
+            });
+            let mut prefix = vec![0; 1024];
+            stdout.read_exact(&mut prefix).unwrap();
+            blocked.write(json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":2}}));
+            blocked.request(3, "tools/call", json!({"name":"list_collections"}));
+            runtime.block_on(async {
+                #[cfg(unix)]
+                let mut stream = listener.accept().await.unwrap().0;
+                #[cfg(windows)]
+                let mut stream = {
+                    listener.connect().await.unwrap();
+                    let next = vz_mcp::channel::create_server(false).unwrap();
+                    std::mem::replace(&mut listener, next)
+                };
+                let request = vz_mcp::channel::read_frame(&mut stream, vz_mcp::REQUEST_CAP)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&request).unwrap()["args"],
+                    json!({})
+                );
+                vz_mcp::channel::write_frame(
+                    &mut stream,
+                    br#"{"ok":true,"result":{"collections":[]}}"#,
+                    vz_mcp::RESPONSE_CAP,
+                )
+                .await
+                .unwrap();
+            });
+            let mut reader = BufReader::new(stdout);
+            reader.read_until(b'\n', &mut prefix).unwrap();
+            assert!(prefix.len() > 2 * 1024 * 1024);
+            assert_eq!(serde_json::from_slice::<Value>(&prefix).unwrap()["id"], 2);
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            assert_eq!(serde_json::from_str::<Value>(&line).unwrap()["id"], 3);
+        }
         let mut client = Client::new(home.path(), modern);
         if modern {
             client.request(1, "server/discover", json!({}));
@@ -97,6 +181,41 @@ fn same_bridge_revocation_cancellation_and_handoff_both_eras() {
         if !modern {
             client.write(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
         }
+        for invalid in [
+            Value::Null,
+            json!([]),
+            json!("invalid"),
+            json!(1),
+            json!(true),
+        ] {
+            client.request(
+                20,
+                "tools/call",
+                json!({"name":"list_collections","arguments":invalid}),
+            );
+            assert_eq!(client.response(20)["error"]["code"], -32602);
+        }
+        client.request(21, "tools/call", json!({"name":"list_collections"}));
+        runtime.block_on(async {
+            #[cfg(unix)]
+            let mut stream = listener.accept().await.unwrap().0;
+            #[cfg(windows)]
+            let mut stream = {
+                listener.connect().await.unwrap();
+                let next = vz_mcp::channel::create_server(false).unwrap();
+                std::mem::replace(&mut listener, next)
+            };
+            let bytes = vz_mcp::channel::read_frame(&mut stream, vz_mcp::REQUEST_CAP).await.unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["args"], json!({}));
+            assert_eq!(request["client"], "a".repeat(32));
+            let response = json!({"ok":true,"result":{"collections":[{"id":"library","name":"Documents","documents":1}]}});
+            vz_mcp::channel::write_frame(&mut stream, &serde_json::to_vec(&response).unwrap(), vz_mcp::RESPONSE_CAP).await.unwrap();
+        });
+        assert_eq!(
+            client.response(21)["result"]["structuredContent"]["collections"][0]["id"],
+            "library"
+        );
         for (id, phase) in [
             (2, "granted"),
             (3, "removed"),

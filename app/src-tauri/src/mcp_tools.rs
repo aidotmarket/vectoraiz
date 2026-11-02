@@ -62,13 +62,27 @@ where
     crate::mcp_channel::pause(dir, "after_tool").await;
     let response = match result {
         Ok(Ok(result)) => json!({"ok":true,"result":result}),
-        Ok(Err(e)) => failure("tool_error", &e),
-        Err(_) => failure("tool_error", "The library could not be read."),
+        Ok(Err(e)) => failure("tool_error", customer_error(&e)),
+        Err(error) => {
+            eprintln!("local library tool task failed: {error}");
+            failure("tool_error", "The library could not be read.")
+        }
     };
     apps.completed(dir, &call_id, &response);
     response
 }
 
+fn customer_error(detail: &str) -> &str {
+    match detail {
+        vz_mcp::NO_ACCESS | "That document isn't in your vectorAIz library." | "Unknown tool." => {
+            detail
+        }
+        _ => {
+            eprintln!("local library tool failed: {detail}");
+            "The library could not be read."
+        }
+    }
+}
 #[cfg(test)]
 pub static INDEX_OPENS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 fn open_index(root: &Path, engines: &Engines) -> anyhow::Result<State> {
@@ -139,5 +153,20 @@ pub fn execute(
             anyhow::bail!("That document isn't in your vectorAIz library.")
         }
         _ => anyhow::bail!("Unknown tool."),
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    #[test]
+    fn engine_paths_stay_local() {
+        for detail in [
+            "open /private/library/index: permission denied",
+            r"open C:\library\index: access denied",
+        ] {
+            let response = super::customer_error(detail);
+            assert_eq!(response, "The library could not be read.");
+            assert!(!response.contains(['/', '\\']));
+        }
     }
 }
