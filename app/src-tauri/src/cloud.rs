@@ -133,7 +133,11 @@ pub fn status(dir: &Path) -> Result<Value, String> {
                 c.provider == p && c.disclosure_version == cloud_gate::disclosure_version()
             })
         });
-        json!({"default":s.settings.0["paths"]["default"],"api_key":{"enabled":state.enabled&&!state.stopped,"provider":state.provider,"key_present":state.key_present,"key_last4":s.settings.api()["key_last4"]},"consent_current":current,"consent_provider":state.consent.map(|c|c.provider),"cleanup_pending":pending(s),"stop_failed":s.stop_failed,"stopped":state.stopped,"message":targets(s).first().map(|p|cleanup_message(*p))})
+        let version_current = state
+            .consent
+            .as_ref()
+            .is_some_and(|c| c.disclosure_version == cloud_gate::disclosure_version());
+        json!({"default":s.settings.0["paths"]["default"],"api_key":{"enabled":state.enabled&&!state.stopped,"provider":state.provider,"key_present":state.key_present,"key_last4":s.settings.api()["key_last4"]},"consent_current":current,"consent_version_current":version_current,"consent_provider":state.consent.map(|c|c.provider),"cleanup_pending":pending(s),"stop_failed":s.stop_failed,"stopped":state.stopped,"message":targets(s).first().map(|p|cleanup_message(*p))})
     })
 }
 fn pending(s: &SettingsState) -> bool {
@@ -242,7 +246,7 @@ impl Cloud {
         if let Err(e) = checked {
             settings::with_state(dir, |s| mark(s, &op.id))??;
             return Err(if e == SendError::KeyRejected {
-                "That key was not accepted.".into()
+                "key_rejected".into()
             } else {
                 e.reason().into()
             });
@@ -366,7 +370,11 @@ impl Cloud {
                 }
             ));
             if !removed {
-                result["message"] = status(dir)?["message"].clone();
+                result["message"] = json!(format!(
+                    "{} {}",
+                    result["message"].as_str().unwrap_or_default(),
+                    status(dir)?["message"].as_str().unwrap_or_default()
+                ));
             }
             return Ok(result);
         }
@@ -517,6 +525,9 @@ pub fn lifecycle_failure(error: LifecycleError, provider: Provider) -> serde_jso
     let typed = match error.as_str() {
         "consent_required" => Some(SendError::ConsentRequired),
         "no_key" => Some(SendError::NoKey),
+        "key_rejected" => {
+            return json!({"kind":"cloud_error","reason":"key_rejected","message":"That key was not accepted.","answered_by":null});
+        }
         "path_off" => Some(SendError::PathOff),
         "revoked" => Some(SendError::Revoked),
         "cancelled" => Some(SendError::Cancelled),

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { AnswerText } from "./AnswerText";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
@@ -47,7 +48,7 @@ export const M1_COPY = {
   commandMessages: ["A download is running", "The search model cannot be deleted", "Turn off or switch the answer model before deleting it", "Delete cancelled", "Unknown model", "Unknown operation kind", "Answer tier unavailable for this computer", "Unknown answer tier", "Unsupported settings file", "Save migrated answer selection", "already installed"],
 };
 type Provider = "anthropic" | "openai";
-interface CloudStatus { default: "local" | "api_key" | null; api_key: {enabled: boolean; provider: Provider | null; key_present: boolean; key_last4: string | null}; consent_current: boolean; consent_provider?: Provider; cleanup_pending: boolean; stop_failed?: boolean; stopped?: boolean; message?: string }
+interface CloudStatus { default: "local" | "api_key" | null; api_key: {enabled: boolean; provider: Provider | null; key_present: boolean; key_last4: string | null}; consent_current: boolean; consent_version_current: boolean; consent_provider?: Provider; cleanup_pending: boolean; stop_failed?: boolean; stopped?: boolean; message?: string }
 interface Disclosure { version: string; strings: string[] }
 export const M2_COPY = {
   chooser: "How should vectorAIz write answers?",
@@ -110,6 +111,7 @@ export default function App() {
   const [answer, setAnswer] = useState("");
   const [askState, setAskState] = useState("");
   const [showSmaller, setShowSmaller] = useState(false);
+  const [answerOffers, setAnswerOffers] = useState<AnswerTier[]>();
   const [deleteFile, setDeleteFile] = useState<ModelFile>();
   const [deleteWaiting, setDeleteWaiting] = useState(false);
   const [citations, setCitations] = useState<Citation[]>([]);
@@ -136,8 +138,17 @@ export default function App() {
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const pipelineDisabled = running || installing || !models?.ready;
-  const transferBusy = modelBusy || !!(models?.target && ["downloading", "checking", "verified"].includes(models.target.state));
+  const transferBusy = modelBusy || models?.answer?.state === "checking" || !!(models?.target && ["downloading", "checking", "verified"].includes(models.target.state));
   const offered = models?.offer?.at(-1);
+  useEffect(() => {
+    // A fresh selection needs all offers; keep the snapshot during transfers.
+    if (!models?.answer?.pin && !transferBusy) setAnswerOffers(undefined);
+  }, [models?.answer?.pin, transferBusy]);
+  useEffect(() => {
+    if (!answerOffers && models?.offer && (showSmaller || ["no_answer", "failed"].includes(askState) || ["missing", "failed"].includes(models.answer?.state ?? ""))) {
+      setAnswerOffers(models.offer.filter(tier => !showSmaller || tier.pin.size < (models.answer?.pin?.size ?? Infinity)).sort((a, b) => b.pin.size - a.pin.size));
+    }
+  }, [answerOffers, models, showSmaller, askState]);
   const [updateMessage, setUpdateMessage] = useState("");
   const [installFailure, setInstallFailure] = useState<InstallFailure>();
   const [updateProgress, setUpdateProgress] = useState("");
@@ -251,7 +262,7 @@ export default function App() {
   async function openSetup(p: Provider = "anthropic", replace = false) {
     const generation = ++setupGeneration.current;
     setDisclosure(undefined); setSetup(true); setupActive.current = true; setProvider(p); setKey(""); setCloudMessage("");
-    setConfirmed(replace || (!!cloud?.consent_current && cloud.api_key.provider === p));
+    setConfirmed(replace || (cloud?.consent_provider === p && !!cloud.consent_version_current));
     try { const text = await invoke<Disclosure>("api_key_disclosure", {provider: p}); if (generation === setupGeneration.current) setDisclosure(text); }
     catch (cause) { setCloudMessage(String(cause)); }
   }
@@ -328,6 +339,7 @@ export default function App() {
   useEffect(() => {
     let disposed = false;
     const registered = listen("models_changed", () => {
+      void refreshCloud().catch(cause => setCloudMessage(String(cause)));
       void refreshModels().catch(cause => setModelError(String(cause)));
     });
     void registered.then(unlisten => { if (disposed) unlisten(); }).catch(cause => setModelError(String(cause)));
@@ -458,14 +470,14 @@ export default function App() {
       <h2 className="text-xl">{M1_COPY.settings}</h2>
       {models.answer?.pin && <>
         <p>{models.answer.pin.name}</p>
-        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setShowSmaller(value => !value)}>{M1_COPY.smaller}</button>
+        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setAnswerOffers(undefined);setShowSmaller(value => !value);}}>{M1_COPY.smaller}</button>
         <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer("answer_turn_off")}>{M1_COPY.turnOff}</button>
       </>}
       {models.answer?.state === "checking" && <p>{M1_COPY.checking}</p>}
       {(["missing", "failed"].includes(models.answer?.state ?? "") || askState === "failed") && <p>{M1_COPY.failed}</p>}
-      {(askState === "no_answer" || askState === "failed" || ["missing", "failed"].includes(models.answer?.state ?? "") || showSmaller) && offered && <>
+      {answerOffers && answerOffers.length > 0 && <>
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
-        {(showSmaller ? models.offer?.filter(tier => tier.pin.size < (models.answer?.pin?.size ?? Infinity)) : [...(models.offer ?? [])].reverse())?.map(tier => <div key={tier.tier_index}>
+        {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
           <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
         </div>)}
@@ -509,9 +521,9 @@ export default function App() {
     {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
       <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
-      {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
+      {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
       <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
-      <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup()}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
+      <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
     </aside>}
     {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
     {setup && <div role="dialog" aria-label={M2_COPY.setup}>
@@ -552,11 +564,11 @@ export default function App() {
       <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
       <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button><button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button></div>
       {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
-      {askState === "cloud_error" && <div>{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button className={buttonStyle} onClick={() => void openSetup()}>{M2_COPY.setup}</button></div>}
+      {askState === "cloud_error" && <div>{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
       {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
       {askState === "answer" && <p>{M2_COPY.answered[answeredBy]}</p>}
-      <p aria-live="polite">{answer}</p>
+      <div aria-live="polite"><AnswerText text={answer} /></div>
       <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>
     </section>
   </main>;
