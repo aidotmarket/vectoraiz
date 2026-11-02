@@ -1001,3 +1001,84 @@ it("drops a superseded paused status after resume and keeps polling the download
     await act(async () => { adding.resolve(undefined); });
   } finally { vi.useRealTimers(); }
 });
+
+
+it.each([true, false])("resumes confirmed setup at the key field (mid-change=%s)", async midChange => {
+  const status = {...apiReady, consent_provider:"openai", consent_version_current:true, consent_current:false,
+    api_key:{enabled:midChange,provider:midChange ? "anthropic" : "openai",key_present:midChange,key_last4:null}};
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your OpenAI API key"]} : status);
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:midChange ? "Finish changing to OpenAI" : "Review and confirm"}));
+  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
+  expect(screen.queryByText("Use your OpenAI API key")).not.toBeInTheDocument();
+  expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
+});
+
+it("uses the saved OpenAI provider from the chooser", async () => {
+  const status = {...apiReady,default:null,consent_current:false,api_key:{enabled:false,provider:"openai",key_present:false,key_last4:null}};
+  cloudInvoke.mockImplementation(async (command,args) => command === "api_key_disclosure" ? {version:"current",strings:[`Use your ${args.provider === "openai" ? "OpenAI" : "Anthropic"} API key`]} : status);
+  render(<App />);
+  const chooser = await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"});
+  await userEvent.click(within(chooser).getByRole("button",{name:"Set up"}));
+  expect(await screen.findByText("Use your OpenAI API key")).toBeInTheDocument();
+});
+
+it("refreshes cloud status when models change", async () => {
+  render(<App />);
+  await waitFor(() => expect(cloudInvoke).toHaveBeenCalledWith("cloud_status",undefined));
+  cloudInvoke.mockClear();
+  await act(async () => {modelEvents.callback?.();});
+  expect(cloudInvoke).toHaveBeenCalledWith("cloud_status",undefined);
+});
+
+it("keeps the offered tier rows in place through download, checking and completion", async () => {
+  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",size:5_000_000_000}};
+  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",size:20_000_000_000}};
+  const initial = {...readyModels,answer:{state:"none"},offer:[answerTier,medium,large]};
+  modelsInvoke.mockResolvedValue(initial);
+  const pending = deferred();
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : command === "answer_add" ? pending.promise : {available:false});
+  const {container} = render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  await screen.findAllByRole("button",{name:"Add answer model"});
+  const rows = Array.from(container.querySelectorAll("[data-answer-tier]"));
+  expect(rows.map(row => row.getAttribute("data-answer-tier"))).toEqual(["2","1","0"]);
+  await userEvent.click(within(rows[2] as HTMLElement).getByRole("button"));
+  for (const state of ["downloading","checking","startup-check"]) {
+    modelsInvoke.mockResolvedValue({...initial,answer:{state:state === "downloading" ? "none" : "checking",pin:answerPin},target:state === "startup-check" ? undefined : {pin:answerPin,state}});
+    await act(async () => {modelEvents.callback?.();});
+    expect(Array.from(container.querySelectorAll("[data-answer-tier]"))).toEqual(rows);
+    for (const row of rows) expect(within(row as HTMLElement).getByRole("button")).toBeDisabled();
+  }
+  modelsInvoke.mockResolvedValue({...initial,answer:{state:"ready",pin:answerPin}});
+  await act(async () => {pending.resolve(undefined);});
+  expect(Array.from(container.querySelectorAll("[data-answer-tier]"))).toEqual(rows);
+  for (const row of rows) expect(within(row as HTMLElement).getByRole("button")).toBeEnabled();
+});
+
+it("renders safe answer Markdown and leaves citations unchanged", async () => {
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"answer",text:'**bold** and *italic* [1]\n- item\n<script>alert(1)</script> [web](https://example.com)',citations:[{number:1,doc_id:"doc",page:2}],answered_by:"local"} : {available:false});
+  const {container} = render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(await screen.findByText("bold")).toHaveProperty("tagName","STRONG");
+  expect(screen.getByText("italic")).toHaveProperty("tagName","EM");
+  expect(screen.getByText("item")).toHaveProperty("tagName","LI");
+  expect(screen.getByText('<script>alert(1)</script> [web](https://example.com)')).toBeInTheDocument();
+  expect(container.querySelector("script, a")).toBeNull();
+  expect(screen.getByText("[1] Document doc · Page 2")).toBeInTheDocument();
+});
+
+
+it("resumes setup after consent when no key has ever been saved", async () => {
+  const status = {...apiReady,default:null,consent_provider:"anthropic",consent_version_current:true,consent_current:false,
+    api_key:{enabled:false,provider:null,key_present:false,key_last4:null}};
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your Anthropic API key"]} : status);
+  render(<App />);
+  const settings = await screen.findByRole("complementary",{name:"Answers with your API key"});
+  await userEvent.click(within(settings).getByRole("button",{name:"Set up"}));
+  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
+  expect(screen.queryByText("Use your Anthropic API key")).not.toBeInTheDocument();
+  expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
+});

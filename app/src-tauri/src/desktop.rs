@@ -1364,7 +1364,7 @@ async fn api_key_set<R: tauri::Runtime>(
         .set(
             &model_dir(&app)?,
             provider,
-            vz_core::credentials::Secret::new(key),
+            vz_core::credentials::Secret::new(key.trim().to_owned()),
         )
         .await
         .unwrap_or_else(|e| lifecycle_failure(e, provider)))

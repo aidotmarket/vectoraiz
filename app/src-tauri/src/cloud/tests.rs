@@ -201,6 +201,7 @@ async fn lifecycle_recovery_cleanup_reuse_and_stop() {
         "consent_required"
     );
     consent(&c, dir.path(), p).await;
+    assert_eq!(status_at(dir.path())["consent_version_current"], true);
     let status = set(&c, dir.path(), p).await.unwrap();
     assert_eq!(status["api_key"]["key_last4"], "1234");
     assert_eq!(status["default"], "api_key");
@@ -219,6 +220,9 @@ async fn lifecycle_recovery_cleanup_reuse_and_stop() {
     c.stop(dir.path()).await.unwrap();
     assert_eq!(status_at(dir.path())["cleanup_pending"], true);
     consent(&c, dir.path(), Provider::OpenAi).await;
+    assert_eq!(status_at(dir.path())["consent_provider"], "openai");
+    assert_eq!(status_at(dir.path())["consent_version_current"], true);
+    assert_eq!(status_at(dir.path())["consent_current"], false);
     assert!(set(&c, dir.path(), Provider::OpenAi).await.is_err());
     store.fail_remove.store(false, Ordering::SeqCst);
     c.retry(dir.path()).await.unwrap();
@@ -616,7 +620,9 @@ async fn combined_stop_write_and_delete_failure_retry_and_restart() {
     store.fail_remove.store(true, Ordering::SeqCst);
     let stopped = c.stop(dir.path()).await.unwrap();
     assert_eq!(stopped["cleanup_pending"], true);
-    assert_eq!(stopped["message"], cleanup_message(p));
+    let message = stopped["message"].as_str().unwrap();
+    assert!(message.contains("Sending is off until you restart."));
+    assert!(message.ends_with(&cleanup_message(p)));
     assert_eq!(status(dir.path()).unwrap()["message"], cleanup_message(p));
     assert!(snapshot(dir.path()).0.stopped);
     std::fs::remove_dir(dir.path().join("settings.json")).unwrap();
@@ -805,7 +811,9 @@ async fn real_key_check_rejection_stores_nothing() {
         .set(dir.path(), p, Secret::new("sk-test-reject".into()))
         .await
         .unwrap_err();
-    assert_eq!(result.to_string(), "That key was not accepted.");
+    let result = lifecycle_failure(result, p);
+    assert_eq!(result["message"], "That key was not accepted.");
+    assert_eq!(result["reason"], "key_rejected");
     assert!(store.keys.lock().unwrap().is_empty());
     assert_eq!(c.transport.requests().len(), 1);
 }
