@@ -10869,6 +10869,7 @@ version = "0.0.15"
 dependencies = [
  "anyhow",
  "chrono",
+ "getrandom 0.3.4",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

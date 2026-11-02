@@ -127,7 +127,9 @@ impl Apps {
                 .collect::<Vec<_>>()
         })?;
         deny(dir, &earlier, false).await?;
-        let id = uuid::Uuid::new_v4().simple().to_string();
+        let mut random = [0u8; 16];
+        getrandom::fill(&mut random).map_err(|_| "Cannot create an AI app client id.")?;
+        let id: String = random.iter().map(|byte| format!("{byte:02x}")).collect();
         settings::update(dir, |s| {
             let mut clients = s.app_state().clients;
             for c in &mut clients {
