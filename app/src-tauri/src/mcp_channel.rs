@@ -139,9 +139,8 @@ pub async fn deliver<W: AsyncWrite + Unpin>(
         }
         Ok(())
     }).await.unwrap_or_else(|_| Err(io::Error::from(io::ErrorKind::TimedOut)));
-    if result.is_err() {
-        let _ = writer.shutdown().await;
-    }
+    // serve owns both halves and drops them on this return. Never await a
+    // peer-dependent shutdown after the write deadline or cancellation.
     result
 }
 

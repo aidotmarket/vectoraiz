@@ -93,9 +93,16 @@ impl Fixture {
         )
         .await
     }
-    #[cfg(unix)]
-    async fn channel(&self, request: Request) -> tokio::net::UnixStream {
+    async fn channel(&self, request: Request) -> vz_mcp::channel::Stream {
+        #[cfg(unix)]
         let (mut client, server) = tokio::net::UnixStream::pair().unwrap();
+        #[cfg(windows)]
+        let (mut client, server) = {
+            let server=vz_mcp::channel::create_server(false).unwrap();
+            let client=vz_mcp::channel::connect().await.unwrap();
+            server.connect().await.unwrap();
+            (client,server)
+        };
         let (dir, root, ops, apps, opens) = (
             self.dir.clone(),
             self.root.clone(),
@@ -276,7 +283,6 @@ async fn cancelled_before_write_sends_zero_bytes_and_blocked_write_drains_under_
         assert_eq!(f.call(f.request("search")).await["ok"], false);
     }
 }
-#[cfg(unix)]
 #[tokio::test]
 async fn real_channel_gate3_pause_and_handoff_with_failed_persistence() {
     for point in ["after_tool", "gate3"] {

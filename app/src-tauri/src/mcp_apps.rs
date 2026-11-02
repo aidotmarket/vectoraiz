@@ -232,6 +232,8 @@ impl Apps {
     pub fn record(&self, dir: &Path, client: &str, tool: &str, error: Option<&Value>) -> String {
         use std::io::Write;
         let call_id = uuid::Uuid::new_v4().simple().to_string();
+        let tool=if ["list_collections","search","get_document","get_chunk"].contains(&tool){tool}else{"unknown_tool"};
+        let prefix=if vz_mcp::valid_client(client){client[..8].to_owned()}else{"invalid".into()};
         let _lock = self.log_lock.lock().unwrap();
         let name = settings::with_state(dir, |s| {
             if error.is_none() {
@@ -257,7 +259,7 @@ impl Apps {
                 .append(true)
                 .open(path)
             {
-                let v = json!({"call_id":call_id,"time":now(),"client":name,"client_id":client.chars().take(8).collect::<String>(),"tool":tool,"allowed":error.is_none(),"refusal_code":error.map(|e|e["code"].clone()),"result_count":0});
+                let v = json!({"call_id":call_id,"time":now(),"client":name,"client_id":prefix,"tool":tool,"allowed":error.is_none(),"refusal_code":error.map(|e|e["code"].clone()),"result_count":0});
                 let _ = writeln!(f, "{v}");
             }
         }
