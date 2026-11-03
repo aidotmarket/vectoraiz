@@ -4,14 +4,33 @@ import type { ReactNode } from "react";
 // HTML and links, stays React text and cannot navigate the webview.
 function inline(text: string, streaming = false): ReactNode[] {
   if (streaming) {
-    // Consume complete emphasis first, then find the last opener still waiting
-    // for its closing marker. Its unfinished contents stay plain text.
-    const markers = text.matchAll(/\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_|\*\*|__|\*|_/g);
-    let opener: RegExpMatchArray | undefined;
-    for (const marker of markers) {
-      if (/^(\*\*|__|\*|_)$/.test(marker[0])) opener = marker;
+    const complete: {index: number; text: string}[] = [];
+    let opener: {index: number; text: string} | undefined;
+    let consumed = 0;
+    for (const marker of text.matchAll(/\*\*|__|\*|_/g)) {
+      const index = marker.index!;
+      if (index < consumed) continue;
+      if (/\w/.test(text[index - 1] ?? "") && /\w/.test(text[index + marker[0].length] ?? "")) continue;
+      // A single marker may be the first half of a double closer.
+      if (opener?.text.length === 2 && marker[0] === opener.text[0]) continue;
+      const closed = /^(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/.exec(text.slice(index));
+      if (closed) {
+        complete.push({index, text: closed[0]});
+        consumed = index + closed[0].length;
+      } else {
+        opener = {index, text: marker[0]};
+      }
     }
-    if (opener) return [...inline(text.slice(0, opener.index)), text.slice(opener.index! + opener[0].length)];
+    const nodes: ReactNode[] = [];
+    let offset = 0;
+    for (const span of complete) {
+      if (opener && span.index > opener.index) break;
+      nodes.push(text.slice(offset, span.index), inline(span.text));
+      offset = span.index + span.text.length;
+    }
+    if (opener) nodes.push(text.slice(offset, opener.index), text.slice(opener.index + opener.text.length));
+    else nodes.push(text.slice(offset));
+    return nodes;
   }
   return text.split(/(\*\*[^*]+\*\*|__[^_]+__|\*[^*]+\*|_[^_]+_)/g).map((part, index) => {
     if ((part.startsWith("**") && part.endsWith("**")) || (part.startsWith("__") && part.endsWith("__"))) {

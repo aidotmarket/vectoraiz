@@ -91,6 +91,7 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [answerRunning, setAnswerRunning] = useState(false);
   const answerActive = useRef(false);
+  const [answerStreaming, setAnswerStreaming] = useState(false);
   const answerGeneration = useRef(0);
   const activeAnswerPath = useRef<"local" | "api_key" | null>(null);
   const [answeredBy, setAnsweredBy] = useState<"local" | Provider>("local");
@@ -234,7 +235,7 @@ export default function App() {
     if ([...query].length > 2000) { setError(M2_COPY.limit); return; }
     const cloudAsk = cloud?.default === "api_key";
     const generation = ++answerGeneration.current;
-    answerActive.current = true;
+    answerActive.current = true; setAnswerStreaming(true);
     activeAnswerPath.current = cloudAsk ? "api_key" : "local";
     if (cloudAsk) setAnswerRunning(true); else setRunning(true);
     const unrecordedAnswer = !cloudAsk && models?.answer?.state === "ready" && models.answer.pin &&
@@ -255,10 +256,10 @@ export default function App() {
       else { setAnswer(""); setCitations([]); if (result.message) setError(result.message); }
       if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false);
     } catch (cause) { if (generation === answerGeneration.current) {setAnswer(""); setCitations([]); setError(String(cause));} }
-    finally { active = false; if (generation === answerGeneration.current) {answerActive.current = false; setAnswerRunning(false); if (!cloudAsk) setRunning(false); setProgress("");} }
+    finally { active = false; if (generation === answerGeneration.current) {answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); if (!cloudAsk) setRunning(false); setProgress("");} }
   }
   async function cancelAnswer() {
-    ++answerGeneration.current; answerActive.current = false;
+    ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false);
     setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress("");
     await invoke("models_cancel", {kind: "cloud"});
   }
@@ -275,7 +276,7 @@ export default function App() {
     if (!disclosure) return;
     const generation = setupGeneration.current;
     if (answerActive.current && cloud?.default === "api_key" && cloud.api_key.provider !== provider) {
-      ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress("");
+      ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress("");
     }
     try {
       const result = await invoke<CloudStatus & {kind?: string; disclosure?: Disclosure}>("api_key_confirm", {provider, disclosureVersion: disclosure.version});
@@ -292,8 +293,8 @@ export default function App() {
       if (result.kind) {
         if (setupActive.current) {setCloudMessage(result.message ?? result.reason ?? ""); if (result.reason === "consent_required") setConfirmed(false);}
       } else {
-        if (answerActive.current && cloud?.default === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress(""); }
-        setCloud(result); setCloudMessage([result.message ?? M2_COPY.stored, result.answers_switched ? M2_COPY.answersNow(providerName(provider)) : ""].filter(Boolean).join(" ")); setSetup(false); setupActive.current = false;}
+        if (answerActive.current && cloud?.default === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress(""); }
+        setCloud(result); setCloudMessage([M2_COPY.stored, result.answers_switched ? M2_COPY.answersNow(providerName(provider)) : ""].filter(Boolean).join(" ")); setSetup(false); setupActive.current = false;}
       await refreshCloud();
     } catch (cause) { if (setupActive.current) setCloudMessage(String(cause)); }
     finally {setKey(""); setKeyBusy(false);}
@@ -305,7 +306,7 @@ export default function App() {
     finally { await refreshCloud(); }
   }
   async function cloudAction(command: "api_key_stop" | "api_key_cleanup_retry") {
-    if (command === "api_key_stop" && answerActive.current && activeAnswerPath.current === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); }
+    if (command === "api_key_stop" && answerActive.current && activeAnswerPath.current === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); }
     if (command === "api_key_stop") setStopping(true);
     try {const next = await invoke<CloudStatus>(command); setCloud(next); setCloudMessage(next.message ?? "");}
     catch (cause) {setCloudMessage(String(cause)); await refreshCloud();}
@@ -484,7 +485,7 @@ export default function App() {
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
         {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
-          <button className={buttonStyle} disabled={transferBusy || installing || tier.pin.sha256 === models.answer?.pin?.sha256} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{tier.pin.sha256 === models.answer?.pin?.sha256 ? M1_COPY.inUse : models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
+          <button className={buttonStyle} disabled={transferBusy || installing || (models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256)} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{(models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256) ? M1_COPY.inUse : models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
         </div>)}
       </>}
       {models.answer?.pin?.name === "qwen3.6-35b-a3b" && (models.ram_bytes ?? 0) >= 32 * 2**30 && (models.ram_bytes ?? 0) < 64 * 2**30 && <>
@@ -521,6 +522,7 @@ export default function App() {
       {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
       {stopping && <p role="status">{M2_COPY.stopping}</p>}
       {cloudMessage && <p role="status">{cloudMessage}</p>}
+      {cloud?.cleanup_pending && cloud.message && cloud.message !== cloudMessage && <p role="status">{cloud.message}</p>}
       {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
     </aside>}
     <AiApps installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
@@ -577,7 +579,7 @@ export default function App() {
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
       {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
       {askState === "answer" && <p>{M2_COPY.answered[answeredBy]}</p>}
-      <div aria-live="polite"><AnswerText text={answer} streaming={answerActive.current} /></div>
+      <div aria-live="polite"><AnswerText text={answer} streaming={answerStreaming} /></div>
       <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>
     </section>
   </main>;

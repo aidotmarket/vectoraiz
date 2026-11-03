@@ -1232,3 +1232,32 @@ it("hides unfinished emphasis during Ask and restores a finished unmatched marke
   await act(async () => pending.resolve({kind:"answer",text:"price*",citations:[],answered_by:"local"}));
   expect(await screen.findByText("price*")).toBeInTheDocument();
 });
+
+it.each(["missing", "failed"])("allows reacquiring the pinned answer model when %s", async state => {
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state,pin:answerPin},offer:[answerTier]});
+  render(<App />);
+  expect(await screen.findByRole("button",{name:"Switch to Small local model"})).toBeEnabled();
+  expect(screen.queryByRole("button",{name:"In use"})).not.toBeInTheDocument();
+});
+
+it.each([
+  "Your key is stored, but vectorAIz couldn't save credential cleanup progress. Cleanup will be retried.",
+  "Your Anthropic key couldn't be removed from this computer's password store yet. vectorAIz will try again.",
+])("announces a committed provider switch separately from cleanup: %s", async warning => {
+  let saved = false;
+  const committed = {...apiReady, api_key:{...apiReady.api_key,provider:"openai"}, answers_switched:true, cleanup_pending:true, message:warning};
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "api_key_disclosure") return {version:"current", strings:["", "", "", "", "I understand"]};
+    if (command === "api_key_set") {saved = true; return committed;}
+    return saved ? committed : {...apiReady,default:"local"};
+  });
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"ready",pin:answerPin}});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Change provider"}));
+  await userEvent.click(await screen.findByRole("button",{name:"I understand"}));
+  await userEvent.type(await screen.findByLabelText("API key"),"sk-test-5678");
+  await userEvent.click(screen.getByRole("button",{name:"Check and save key"}));
+  expect(await screen.findByText("Your key is stored in this computer's password store. Answers now use OpenAI.")).toBeInTheDocument();
+  expect(screen.getByText(warning)).toBeInTheDocument();
+  expect(screen.getByLabelText("Answer path")).toHaveValue("api_key");
+});

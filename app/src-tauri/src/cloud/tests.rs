@@ -899,3 +899,66 @@ async fn every_key_save_switches_local_answers_and_announces_only_changes() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cleanup_write_failure_preserves_committed_provider_switch() {
+    let pause = Arc::new(Pause::default());
+    let hook_pause = pause.clone();
+    let inject = Arc::new(AtomicBool::new(false));
+    let hook_inject = inject.clone();
+    let (dir, c, store) = setup(move |phase| {
+        if phase == "after_commit" && hook_inject.load(Ordering::SeqCst) {
+            hook_pause.wait();
+        }
+    });
+    consent(&c, dir.path(), Provider::Anthropic).await;
+    set(&c, dir.path(), Provider::Anthropic).await.unwrap();
+    settings::update(dir.path(), |s| {
+        s.settings.select(Some("local-model"));
+        s.settings.0["paths"]["default"] = json!("local");
+        Ok::<(), String>(())
+    })
+    .unwrap();
+    consent(&c, dir.path(), Provider::OpenAi).await;
+    inject.store(true, Ordering::SeqCst);
+    let cc = c.clone();
+    let path = dir.path().to_owned();
+    let saved = tokio::spawn(async move { set(&cc, &path, Provider::OpenAi).await });
+    pause.entered().await;
+    let committed = disk(dir.path());
+    assert_eq!(committed["paths"]["default"], "api_key");
+    assert_eq!(committed["paths"]["api_key"]["provider"], "openai");
+    assert_eq!(committed["paths"]["api_key"]["key_present"], true);
+    let settings_file = dir.path().join("settings.json");
+    let preserved = dir.path().join("committed.json");
+    std::fs::rename(&settings_file, &preserved).unwrap();
+    std::fs::create_dir(&settings_file).unwrap();
+    pause.release();
+    let result = saved.await.unwrap().unwrap();
+    assert_eq!(result["answers_switched"], true);
+    assert_eq!(result["default"], "api_key");
+    assert_eq!(result["api_key"]["provider"], "openai");
+    assert_eq!(result["api_key"]["key_present"], true);
+    assert_eq!(result["cleanup_pending"], true);
+    assert!(result["message"]
+        .as_str()
+        .unwrap()
+        .contains("couldn't save credential cleanup progress"));
+    assert!(!result["message"]
+        .as_str()
+        .unwrap()
+        .contains("couldn't be removed"));
+    assert!(store.load(Provider::OpenAi).is_ok());
+    assert!(matches!(
+        store.load(Provider::Anthropic),
+        Err(CredError::Missing)
+    ));
+    assert_eq!(status_at(dir.path())["default"], "api_key");
+    assert_eq!(status_at(dir.path())["message"], result["message"]);
+    std::fs::remove_dir(&settings_file).unwrap();
+    std::fs::rename(&preserved, &settings_file).unwrap();
+    assert_eq!(disk(dir.path()), committed);
+    c.retry(dir.path()).await.unwrap();
+    assert_eq!(status_at(dir.path())["cleanup_pending"], false);
+    assert_eq!(status_at(dir.path())["message"], Value::Null);
+}
