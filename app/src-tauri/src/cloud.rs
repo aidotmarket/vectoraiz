@@ -137,7 +137,7 @@ pub fn status(dir: &Path) -> Result<Value, String> {
             .consent
             .as_ref()
             .is_some_and(|c| c.disclosure_version == cloud_gate::disclosure_version());
-        json!({"default":s.settings.0["paths"]["default"],"api_key":{"enabled":state.enabled&&!state.stopped,"provider":state.provider,"key_present":state.key_present,"key_last4":s.settings.api()["key_last4"]},"consent_current":current,"consent_version_current":version_current,"consent_provider":state.consent.map(|c|c.provider),"cleanup_pending":pending(s),"stop_failed":s.stop_failed,"stopped":state.stopped,"message":targets(s).first().map(|p|cleanup_message(*p))})
+        json!({"default":s.settings.0["paths"]["default"],"api_key":{"enabled":state.enabled&&!state.stopped,"provider":state.provider,"key_present":state.key_present,"key_last4":s.settings.api()["key_last4"]},"consent_current":current,"consent_version_current":version_current,"consent_provider":state.consent.map(|c|c.provider),"cleanup_pending":pending(s),"stop_failed":s.stop_failed,"stopped":state.stopped,"message":s.cleanup_warning.clone().or_else(|| targets(s).first().map(|p|cleanup_message(*p)))})
     })
 }
 fn pending(s: &SettingsState) -> bool {
@@ -201,6 +201,11 @@ impl Cloud {
                 })?;
             }
         }
+        settings::with_state(dir, |s| {
+            if !pending(s) {
+                s.cleanup_warning = None;
+            }
+        })?;
         Ok(())
     }
     pub async fn confirm(&self, dir: &Path, p: Provider, version: String) -> Result<Value, String> {
@@ -274,6 +279,7 @@ impl Cloud {
         }
         #[cfg(test)]
         (self.hook)("before_commit");
+        let mut answers_switched = false;
         let commit = settings::update(dir, |s| {
             mark(s, &op.id)?;
             cloud_gate::check(&s.consent_state(), p, Op::KeyCheck)
@@ -287,9 +293,8 @@ impl Cloud {
             api["key_present"] = json!(true);
             api["key_last4"] = json!(last4);
             api["enabled"] = json!(true);
-            if s.settings.default_path().is_none() {
-                s.settings.0["paths"]["default"] = json!("api_key");
-            }
+            answers_switched = s.settings.default_path() != Some("api_key");
+            s.settings.0["paths"]["default"] = json!("api_key");
             if let Some(old) = old.filter(|old| *old != p) {
                 cleanup_add(s, old);
             }
@@ -301,6 +306,9 @@ impl Cloud {
             let _ = self.reconcile(dir).await;
             return Err(error.to_string().into());
         }
+        // Preserve the published outcome even if subsequent cleanup cannot persist.
+        let mut result = status(dir)?;
+        result["answers_switched"] = json!(answers_switched);
         #[cfg(test)]
         (self.hook)("after_commit");
         let senders = settings::with_state(dir, |s| {
@@ -309,12 +317,25 @@ impl Cloud {
                 .filter(|o| o.kind == "cloud" && o.epoch < s.cloud_epoch)
                 .map(|o| o.cancel.clone())
                 .collect::<Vec<_>>()
-        })?;
+        })
+        .unwrap_or_default();
         for tx in senders {
             let _ = tx.send(true);
         }
-        self.reconcile(dir).await?;
-        Ok(status(dir)?)
+        let cleanup = self.reconcile(dir).await;
+        if let Ok(current) = status(dir) {
+            result = current;
+            result["answers_switched"] = json!(answers_switched);
+        }
+        if let Err(error) = cleanup {
+            let warning = format!(
+                "Your key is stored, but vectorAIz couldn't save credential cleanup progress. Cleanup will be retried. {error}"
+            );
+            let _ = settings::with_state(dir, |s| s.cleanup_warning = Some(warning.clone()));
+            result["cleanup_pending"] = json!(true);
+            result["message"] = json!(warning);
+        }
+        Ok(result)
     }
     pub async fn stop(&self, dir: &Path) -> Result<Value, String> {
         revoke(dir, true)?;

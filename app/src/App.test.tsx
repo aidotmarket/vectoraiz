@@ -851,7 +851,7 @@ it("offers every eligible tier largest first and adds Qwen3-4B directly on a sea
 it("refreshes a rejected answer_switch and re-enables model controls", async () => {
   let reject!: (cause: unknown) => void;
   const pending = {promise:new Promise((_, fail) => {reject = fail;}),reject:(cause: unknown) => reject(cause)};
-  const initial = {...readyModels,answer:{state:"ready",pin:{...answerPin,size:8_000_000_000}},offer:[answerTier]};
+  const initial = {...readyModels,answer:{state:"ready",pin:{...answerPin,sha256:"larger",size:8_000_000_000}},offer:[answerTier]};
   modelsInvoke.mockResolvedValue(initial);
   invoke.mockImplementation(command => command === "answer_switch" ? pending.promise : Promise.resolve({available:false}));
   render(<App />);
@@ -918,7 +918,7 @@ it("requires disclosure, masks the key and clears it after checking", async () =
   if(command==="api_key_set") return pending.promise;
  });
  render(<App />);await screen.findByText("How should vectorAIz write answers?");
- await userEvent.click(within(screen.getByRole("complementary",{name:"Answers with your API key"})).getByRole("button",{name:"Set up"}));
+ await userEvent.click(within(screen.getByRole("complementary",{name:"How should vectorAIz write answers?"})).getByRole("button",{name:"Set up"}));
  expect(await screen.findByText("Question and matching passages go to Anthropic.")).toBeInTheDocument();expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
  await userEvent.click(screen.getByRole("button",{name:"Use Anthropic"}));
  const field=await screen.findByLabelText("API key");expect(field).toHaveAttribute("type","password");expect(field).toHaveAttribute("autocomplete","off");
@@ -1033,8 +1033,8 @@ it("refreshes cloud status when models change", async () => {
 });
 
 it("offers answer models after turning off the smallest model from the smaller-model flow", async () => {
-  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",size:5_000_000_000}};
-  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",size:20_000_000_000}};
+  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",sha256:"medium",size:5_000_000_000}};
+  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",sha256:"large",size:20_000_000_000}};
   const initial = {...readyModels,answer:{state:"ready",pin:answerPin},offer:[answerTier,medium,large]};
   modelsInvoke.mockResolvedValue(initial);
   invoke.mockImplementation(async command => {
@@ -1052,8 +1052,8 @@ it("offers answer models after turning off the smallest model from the smaller-m
 });
 
 it("keeps the offered tier rows in place through download, checking and completion", async () => {
-  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",size:5_000_000_000}};
-  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",size:20_000_000_000}};
+  const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",sha256:"medium",size:5_000_000_000}};
+  const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",sha256:"large",size:20_000_000_000}};
   const initial = {...readyModels,answer:{state:"none"},offer:[answerTier,medium,large]};
   modelsInvoke.mockResolvedValue(initial);
   const pending = deferred();
@@ -1074,7 +1074,8 @@ it("keeps the offered tier rows in place through download, checking and completi
   modelsInvoke.mockResolvedValue({...initial,answer:{state:"ready",pin:answerPin}});
   await act(async () => {pending.resolve(undefined);});
   expect(Array.from(container.querySelectorAll("[data-answer-tier]"))).toEqual(rows);
-  for (const row of rows) expect(within(row as HTMLElement).getByRole("button")).toBeEnabled();
+  expect(within(rows[2] as HTMLElement).getByRole("button",{name:"In use"})).toBeDisabled();
+  for (const row of rows.slice(0,2)) expect(within(row as HTMLElement).getByRole("button")).toBeEnabled();
 });
 
 it("renders safe answer Markdown and leaves citations unchanged", async () => {
@@ -1096,8 +1097,9 @@ it("resumes setup after consent when no key has ever been saved", async () => {
     api_key:{enabled:false,provider:null,key_present:false,key_last4:null}};
   cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your Anthropic API key"]} : status);
   render(<App />);
-  const settings = await screen.findByRole("complementary",{name:"Answers with your API key"});
-  await userEvent.click(within(settings).getByRole("button",{name:"Set up"}));
+  const chooser = await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"});
+  expect(screen.getAllByRole("button",{name:"Set up"})).toHaveLength(1);
+  await userEvent.click(within(chooser).getByRole("button",{name:"Set up"}));
   expect(await screen.findByLabelText("API key")).toBeInTheDocument();
   expect(screen.queryByText("Use your Anthropic API key")).not.toBeInTheDocument();
   expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
@@ -1189,4 +1191,73 @@ it("gives generic clients the no-call connection message", async () => {
   await userEvent.click(await screen.findByRole("button", {name: "Test the connection"}));
   expect(await screen.findByText("No call received. Ask this app to search your library, then test again.")).toBeInTheDocument();
   expect(screen.queryByText(/The Claude Desktop entry/)).not.toBeInTheDocument();
+});
+
+
+it.each([false, true])("labels stopped and externally missing keys separately (enabled=%s)", async enabled => {
+  cloudInvoke.mockResolvedValue({...apiReady, api_key:{...apiReady.api_key, enabled, key_present:false, key_last4:null}});
+  render(<App />);
+  expect(await screen.findByRole("button",{name:enabled ? "Add your Anthropic API key" : "Set up Anthropic again"})).toBeEnabled();
+});
+
+it.each([true, false])("announces a saved-key answer switch only when committed (switched=%s)", async switched => {
+  let saved = false;
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "api_key_disclosure") return {version:"current", strings:[]};
+    if (command === "api_key_set") {saved = true; return {...apiReady, answers_switched:switched};}
+    return {...apiReady, default:saved || !switched ? "api_key" : "local"};
+  });
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"ready",pin:answerPin}});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Replace key"}));
+  await userEvent.type(await screen.findByLabelText("API key"),"sk-test-5678");
+  await userEvent.click(screen.getByRole("button",{name:"Check and save key"}));
+  expect(await screen.findByText(/Your key is stored/)).toHaveTextContent(switched ? "Answers now use Anthropic." : "Your key is stored in this computer's password store.");
+  expect(screen.getByLabelText("Answer path")).toHaveValue("api_key");
+  if (!switched) expect(screen.queryByText(/Answers now use/)).not.toBeInTheDocument();
+});
+
+it("hides unfinished emphasis during Ask and restores a finished unmatched marker", async () => {
+  const pending = deferred();
+  let tokens: {onmessage:(text:string)=>void} | undefined;
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "pipeline_ask") {tokens = args.tokens; tokens!.onmessage("**Key fa"); return pending.promise;}
+    return {available:false};
+  });
+  render(<App />);
+  await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
+  await userEvent.click(screen.getByRole("button",{name:"Ask"}));
+  expect(await screen.findByText("Key fa")).toBeInTheDocument();
+  expect(screen.queryByText("**Key fa")).not.toBeInTheDocument();
+  await act(async () => pending.resolve({kind:"answer",text:"price*",citations:[],answered_by:"local"}));
+  expect(await screen.findByText("price*")).toBeInTheDocument();
+});
+
+it.each(["missing", "failed"])("allows reacquiring the pinned answer model when %s", async state => {
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state,pin:answerPin},offer:[answerTier]});
+  render(<App />);
+  expect(await screen.findByRole("button",{name:"Switch to Small local model"})).toBeEnabled();
+  expect(screen.queryByRole("button",{name:"In use"})).not.toBeInTheDocument();
+});
+
+it.each([
+  "Your key is stored, but vectorAIz couldn't save credential cleanup progress. Cleanup will be retried.",
+  "Your Anthropic key couldn't be removed from this computer's password store yet. vectorAIz will try again.",
+])("announces a committed provider switch separately from cleanup: %s", async warning => {
+  let saved = false;
+  const committed = {...apiReady, api_key:{...apiReady.api_key,provider:"openai"}, answers_switched:true, cleanup_pending:true, message:warning};
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "api_key_disclosure") return {version:"current", strings:["", "", "", "", "I understand"]};
+    if (command === "api_key_set") {saved = true; return committed;}
+    return saved ? committed : {...apiReady,default:"local"};
+  });
+  modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"ready",pin:answerPin}});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Change provider"}));
+  await userEvent.click(await screen.findByRole("button",{name:"I understand"}));
+  await userEvent.type(await screen.findByLabelText("API key"),"sk-test-5678");
+  await userEvent.click(screen.getByRole("button",{name:"Check and save key"}));
+  expect(await screen.findByText("Your key is stored in this computer's password store. Answers now use OpenAI.")).toBeInTheDocument();
+  expect(screen.getByText(warning)).toBeInTheDocument();
+  expect(screen.getByLabelText("Answer path")).toHaveValue("api_key");
 });

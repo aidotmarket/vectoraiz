@@ -96,7 +96,7 @@ pub fn disclosure(p: Provider) -> Value {
 }
 pub fn stopped_message(p: Provider) -> String {
     format!(
-        "vectorAIz has stopped sending to {}. What was already sent can't be taken back.",
+        "vectorAIz has stopped sending to {} and removed your key from this computer. What was already sent can't be taken back.",
         p.name()
     )
 }

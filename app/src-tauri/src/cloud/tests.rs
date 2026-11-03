@@ -217,8 +217,13 @@ async fn lifecycle_recovery_cleanup_reuse_and_stop() {
     assert!(store.keys.lock().unwrap().is_empty());
     set(&c, dir.path(), p).await.unwrap();
     store.fail_remove.store(true, Ordering::SeqCst);
-    c.stop(dir.path()).await.unwrap();
-    assert_eq!(status_at(dir.path())["cleanup_pending"], true);
+    let stopped = c.stop(dir.path()).await.unwrap();
+    assert_eq!(stopped["cleanup_pending"], true);
+    assert_eq!(stopped["message"], cleanup_message(p));
+    assert!(!stopped["message"]
+        .as_str()
+        .unwrap()
+        .contains("and removed your key"));
     consent(&c, dir.path(), Provider::OpenAi).await;
     assert_eq!(status_at(dir.path())["consent_provider"], "openai");
     assert_eq!(status_at(dir.path())["consent_version_current"], true);
@@ -227,7 +232,9 @@ async fn lifecycle_recovery_cleanup_reuse_and_stop() {
     store.fail_remove.store(false, Ordering::SeqCst);
     c.retry(dir.path()).await.unwrap();
     set(&c, dir.path(), Provider::OpenAi).await.unwrap();
-    c.stop(dir.path()).await.unwrap();
+    let stopped = c.stop(dir.path()).await.unwrap();
+    assert_eq!(stopped["cleanup_pending"], false);
+    assert_eq!(stopped["message"], "vectorAIz has stopped sending to OpenAI and removed your key from this computer. What was already sent can't be taken back.");
     assert!(store.keys.lock().unwrap().is_empty());
     assert_eq!(
         disk(dir.path())["paths"]["api_key"]["consent"]["provider"],
@@ -291,6 +298,11 @@ async fn commit_order_cancel_and_failed_write_publish_nothing() {
             }
         });
         consent(&c, dir.path(), Provider::Anthropic).await;
+        settings::update(dir.path(), |s| {
+            s.settings.select(Some("local-model"));
+            Ok::<(), String>(())
+        })
+        .unwrap();
         let cc = c.clone();
         let path = dir.path().to_owned();
         let first = tokio::spawn(async move { set(&cc, &path, Provider::Anthropic).await });
@@ -325,11 +337,18 @@ async fn commit_order_cancel_and_failed_write_publish_nothing() {
             assert!(result.is_ok());
             assert_eq!(cancelled.unwrap_err(), "already finished");
             assert!(!store.keys.lock().unwrap().is_empty());
+            let status = status_at(dir.path());
+            assert_eq!(status["default"], "api_key");
+            assert_eq!(status["api_key"]["key_present"], true);
+            assert_eq!(disk(dir.path())["paths"]["default"], "api_key");
+            assert_eq!(disk(dir.path())["paths"]["api_key"]["key_present"], true);
+            assert_eq!(result.unwrap()["answers_switched"], true);
         } else {
             assert!(result.is_err());
             assert_ne!(cancelled.err().as_deref(), Some("already finished"));
             assert!(store.keys.lock().unwrap().is_empty());
             assert_eq!(status_at(dir.path())["api_key"]["key_present"], false);
+            assert_eq!(status_at(dir.path())["default"], "local");
         }
     }
 }
@@ -857,4 +876,89 @@ async fn dispatch_epoch_guard_without_cancel_delivery() {
         "dispatch epoch guard allowed a stale request"
     );
     drop(held_sender);
+}
+
+#[tokio::test]
+async fn every_key_save_switches_local_answers_and_announces_only_changes() {
+    let (dir, c, _) = setup(|_| {});
+    for p in [Provider::Anthropic, Provider::Anthropic, Provider::OpenAi] {
+        consent(&c, dir.path(), p).await;
+        settings::update(dir.path(), |s| {
+            s.settings.select(Some("local-model"));
+            s.settings.0["paths"]["default"] = json!("local");
+            Ok::<(), String>(())
+        })
+        .unwrap();
+        let saved = set(&c, dir.path(), p).await.unwrap();
+        assert_eq!(saved["default"], "api_key");
+        assert_eq!(saved["api_key"]["key_present"], true);
+        assert_eq!(saved["answers_switched"], true);
+        assert_eq!(
+            set(&c, dir.path(), p).await.unwrap()["answers_switched"],
+            false
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cleanup_write_failure_preserves_committed_provider_switch() {
+    let pause = Arc::new(Pause::default());
+    let hook_pause = pause.clone();
+    let inject = Arc::new(AtomicBool::new(false));
+    let hook_inject = inject.clone();
+    let (dir, c, store) = setup(move |phase| {
+        if phase == "after_commit" && hook_inject.load(Ordering::SeqCst) {
+            hook_pause.wait();
+        }
+    });
+    consent(&c, dir.path(), Provider::Anthropic).await;
+    set(&c, dir.path(), Provider::Anthropic).await.unwrap();
+    settings::update(dir.path(), |s| {
+        s.settings.select(Some("local-model"));
+        s.settings.0["paths"]["default"] = json!("local");
+        Ok::<(), String>(())
+    })
+    .unwrap();
+    consent(&c, dir.path(), Provider::OpenAi).await;
+    inject.store(true, Ordering::SeqCst);
+    let cc = c.clone();
+    let path = dir.path().to_owned();
+    let saved = tokio::spawn(async move { set(&cc, &path, Provider::OpenAi).await });
+    pause.entered().await;
+    let committed = disk(dir.path());
+    assert_eq!(committed["paths"]["default"], "api_key");
+    assert_eq!(committed["paths"]["api_key"]["provider"], "openai");
+    assert_eq!(committed["paths"]["api_key"]["key_present"], true);
+    let settings_file = dir.path().join("settings.json");
+    let preserved = dir.path().join("committed.json");
+    std::fs::rename(&settings_file, &preserved).unwrap();
+    std::fs::create_dir(&settings_file).unwrap();
+    pause.release();
+    let result = saved.await.unwrap().unwrap();
+    assert_eq!(result["answers_switched"], true);
+    assert_eq!(result["default"], "api_key");
+    assert_eq!(result["api_key"]["provider"], "openai");
+    assert_eq!(result["api_key"]["key_present"], true);
+    assert_eq!(result["cleanup_pending"], true);
+    assert!(result["message"]
+        .as_str()
+        .unwrap()
+        .contains("couldn't save credential cleanup progress"));
+    assert!(!result["message"]
+        .as_str()
+        .unwrap()
+        .contains("couldn't be removed"));
+    assert!(store.load(Provider::OpenAi).is_ok());
+    assert!(matches!(
+        store.load(Provider::Anthropic),
+        Err(CredError::Missing)
+    ));
+    assert_eq!(status_at(dir.path())["default"], "api_key");
+    assert_eq!(status_at(dir.path())["message"], result["message"]);
+    std::fs::remove_dir(&settings_file).unwrap();
+    std::fs::rename(&preserved, &settings_file).unwrap();
+    assert_eq!(disk(dir.path()), committed);
+    c.retry(dir.path()).await.unwrap();
+    assert_eq!(status_at(dir.path())["cleanup_pending"], false);
+    assert_eq!(status_at(dir.path())["message"], Value::Null);
 }
