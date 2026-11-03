@@ -33,6 +33,7 @@ export const M1_COPY = {
   add: "Add answer model",
   smaller: "Use a smaller model",
   turnOff: "Turn off",
+  inUse: "In use",
   switch: (name: string) => `Switch to ${name}`,
   warning: (bytes: number) => `This model uses about 39 GB of memory on a PC with ${Math.round(bytes / 2**30)} GB. A smaller model is available.`,
   switchMinistral: "Switch to Ministral 3 8B",
@@ -63,7 +64,8 @@ export const M2_COPY = {
   setUp: "Set up", provider: "Provider", key: "API key", checking: "Checking your key", save: "Check and save key",
   replace: "Replace key", replaceNote: "If this key doesn't work, add it again.", change: "Change provider", cancel: "Cancel",
   stopping: "Stopping…",
-  stop: (p: string) => `Stop using ${p}`, again: (p: string) => `Use ${p} again`,
+  stop: (p: string) => `Stop using ${p}`, again: (p: string) => `Set up ${p} again`, addKey: (p: string) => `Add your ${p} API key`,
+  answersNow: (p: string) => `Answers now use ${p}.`,
   changeNote: (p: string) => `Your ${p} key will be removed once the new key works.`,
   finish: (p: string) => `Finish changing to ${p}`, cancelChange: "Cancel change (re-confirm previous provider)", review: "Review and confirm",
   last4: (s: string) => `Saved key ending in ${s}`, stored: "Your key is stored in this computer's password store.",
@@ -286,12 +288,12 @@ export default function App() {
     if (keyBusy) return;
     setKeyBusy(true); setCloudMessage("");
     try {
-      const result = await invoke<CloudStatus & {kind?: string; reason?: string}>("api_key_set", {provider, key});
+      const result = await invoke<CloudStatus & {kind?: string; reason?: string; answers_switched?: boolean}>("api_key_set", {provider, key});
       if (result.kind) {
         if (setupActive.current) {setCloudMessage(result.message ?? result.reason ?? ""); if (result.reason === "consent_required") setConfirmed(false);}
       } else {
         if (answerActive.current && cloud?.default === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress(""); }
-        setCloud(result); setCloudMessage(result.message ?? M2_COPY.stored); setSetup(false); setupActive.current = false;}
+        setCloud(result); setCloudMessage([result.message ?? M2_COPY.stored, result.answers_switched ? M2_COPY.answersNow(providerName(provider)) : ""].filter(Boolean).join(" ")); setSetup(false); setupActive.current = false;}
       await refreshCloud();
     } catch (cause) { if (setupActive.current) setCloudMessage(String(cause)); }
     finally {setKey(""); setKeyBusy(false);}
@@ -482,7 +484,7 @@ export default function App() {
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
         {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
-          <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
+          <button className={buttonStyle} disabled={transferBusy || installing || tier.pin.sha256 === models.answer?.pin?.sha256} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{tier.pin.sha256 === models.answer?.pin?.sha256 ? M1_COPY.inUse : models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
         </div>)}
       </>}
       {models.answer?.pin?.name === "qwen3.6-35b-a3b" && (models.ram_bytes ?? 0) >= 32 * 2**30 && (models.ram_bytes ?? 0) < 64 * 2**30 && <>
@@ -511,11 +513,11 @@ export default function App() {
           <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.consent_provider)}>{M2_COPY.finish(providerName(cloud.consent_provider))}</button>
           <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.api_key.provider!)}>{M2_COPY.cancelChange}</button>
         </> : <>
-          <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!, !!cloud.consent_current)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
+          <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!, !!cloud.consent_current)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : cloud.api_key.enabled ? M2_COPY.addKey(providerName(cloud.api_key.provider)) : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
           {cloud.api_key.enabled && <button className={buttonStyle} disabled={stopping} onClick={() => void cloudAction("api_key_stop")}>{M2_COPY.stop(providerName(cloud.api_key.provider))}</button>}
         </>}
         <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button>
-      </> : <><p>{M2_COPY.setup}</p><button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} onClick={() => void openSetup()}>{M2_COPY.setUp}</button></>}
+      </> : <><p>{M2_COPY.setup}</p>{!(askState === "no_answer" || (cloud && !cloud.default)) && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
       {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
       {stopping && <p role="status">{M2_COPY.stopping}</p>}
       {cloudMessage && <p role="status">{cloudMessage}</p>}
@@ -575,7 +577,7 @@ export default function App() {
       <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
       {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
       {askState === "answer" && <p>{M2_COPY.answered[answeredBy]}</p>}
-      <div aria-live="polite"><AnswerText text={answer} /></div>
+      <div aria-live="polite"><AnswerText text={answer} streaming={answerActive.current} /></div>
       <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>
     </section>
   </main>;

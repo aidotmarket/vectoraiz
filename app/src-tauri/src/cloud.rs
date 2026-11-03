@@ -274,6 +274,7 @@ impl Cloud {
         }
         #[cfg(test)]
         (self.hook)("before_commit");
+        let mut answers_switched = false;
         let commit = settings::update(dir, |s| {
             mark(s, &op.id)?;
             cloud_gate::check(&s.consent_state(), p, Op::KeyCheck)
@@ -287,9 +288,8 @@ impl Cloud {
             api["key_present"] = json!(true);
             api["key_last4"] = json!(last4);
             api["enabled"] = json!(true);
-            if s.settings.default_path().is_none() {
-                s.settings.0["paths"]["default"] = json!("api_key");
-            }
+            answers_switched = s.settings.default_path() != Some("api_key");
+            s.settings.0["paths"]["default"] = json!("api_key");
             if let Some(old) = old.filter(|old| *old != p) {
                 cleanup_add(s, old);
             }
@@ -314,7 +314,9 @@ impl Cloud {
             let _ = tx.send(true);
         }
         self.reconcile(dir).await?;
-        Ok(status(dir)?)
+        let mut result = status(dir)?;
+        result["answers_switched"] = json!(answers_switched);
+        Ok(result)
     }
     pub async fn stop(&self, dir: &Path) -> Result<Value, String> {
         revoke(dir, true)?;
