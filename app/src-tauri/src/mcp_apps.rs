@@ -575,19 +575,29 @@ mod extension_tests {
         let root = tempfile::tempdir_in(profile).unwrap();
         let client = root.path().join("ai-apps/claude-desktop.client");
         atomic_write(&client, b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
-        let quoted = client.to_str().unwrap().replace('\'', "''");
-        let script=format!("$ErrorActionPreference='Stop'; $file=Get-Acl -LiteralPath '{quoted}'; $folder=Get-Acl -LiteralPath (Split-Path -LiteralPath '{quoted}'); if ($file.AreAccessRulesProtected -or $folder.AreAccessRulesProtected) {{ throw 'ACL inheritance disabled' }}; @($file,$folder) | ForEach-Object {{ $_.Access | Select-Object IdentityReference,FileSystemRights,AccessControlType,IsInherited }} | ConvertTo-Json");
-        let output = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", &script])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "ACL observation failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        let mut observations = Vec::new();
+        for path in [client.as_path(), client.parent().unwrap()] {
+            // icacls marks inherited entries with (I), without PowerShell modules.
+            let output = std::process::Command::new("icacls")
+                .arg(path)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "ACL observation failed for {}: {}",
+                path.display(),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let acl = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                acl.contains("(I)"),
+                "ACL inheritance disabled for {}: {acl}",
+                path.display()
+            );
+            observations.push(json!({"path": path, "icacls": acl}));
+        }
         let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mcpb-acl.json");
-        std::fs::write(target, output.stdout).unwrap();
+        std::fs::write(target, serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
     }
     #[test]
     fn generated_manifest_for_pinned_ci_validator() {
