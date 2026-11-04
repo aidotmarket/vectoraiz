@@ -126,6 +126,8 @@ jobs:
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
+      - name: Validate generated MCPB manifest (pinned 2.1.2)
+        run: npx --yes @anthropic-ai/mcpb@2.1.2 validate target/mcpb-manifest.json
       - name: Build CLI workers and Tauri debug app
         run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol ${{ env.NATIVE_FEATURES }}
       - name: Validate both MCP eras against pinned official schemas
@@ -181,6 +183,8 @@ jobs:
             minio-test.log
             windows-test-dependents.log
             mcp-protocol-*.jsonl
+            target/mcpb-manifest.json
+            target/mcpb-acl.json
           if-no-files-found: ignore
   install:
     timeout-minutes: 40

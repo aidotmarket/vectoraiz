@@ -325,8 +325,10 @@ def main():
                 negative_connection.settimeout(5)
                 assert negative_connection.recv(1024) == NEGATIVE_MESSAGE, 'Negative control did not reach test address'
             wait(control/'negative.done',30)
-            for era in ['modern','legacy']:
-                bridge=protocol.Client(args.bridge,ready['client'],era,evidence);bridges.append(bridge);bridge_pids.append(bridge.child.pid)
+            client_file = control/'a9.client'
+            client_file.write_text(ready['client'])
+            for era, file_mode in [('modern',False),('legacy',False),('modern',True)]:
+                bridge=protocol.Client(args.bridge,ready['client'],era,evidence,client_file=client_file if file_mode else None);bridges.append(bridge);bridge_pids.append(bridge.child.pid)
                 bridge.startup();bridge.tools_run(True)
             snapshots += enumerate_sockets([ready['pid'],*bridge_pids],addresses,evidence)
             (control/'granted.done').touch();wait(control/'removed',30)

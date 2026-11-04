@@ -44,7 +44,7 @@ fn main() {
                 "app_disconnect",
                 "app_path_set",
                 "app_access_retry",
-                "app_claude_continue",
+                "app_show_extension",
                 "api_key_disclosure",
                 "api_key_confirm",
                 "api_key_set",

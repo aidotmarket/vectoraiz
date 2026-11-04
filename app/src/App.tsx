@@ -36,7 +36,6 @@ export const M1_COPY = {
   inUse: "In use",
   switch: (name: string) => `Switch to ${name}`,
   warning: (bytes: number) => `This model uses about 39 GB of memory on a PC with ${Math.round(bytes / 2**30)} GB. A smaller model is available.`,
-  switchMinistral: "Switch to Ministral 3 8B",
   switching: "Switching after the current search finishes",
   targetState: {downloading: "Downloading answer model", paused: "Download paused", checking: "Checking answer model", failed: "Answer model download failed"},
   delete: "Delete",
@@ -113,6 +112,7 @@ export default function App() {
   const [progress, setProgress] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
   const [appClients, setAppClients] = useState<AppClient[]>([]);
+  const [claudeDisclosure, setClaudeDisclosure] = useState(false);
   const [appSetup, setAppSetup] = useState(0);
   const [answer, setAnswer] = useState("");
   const [askState, setAskState] = useState("");
@@ -481,17 +481,15 @@ export default function App() {
       </>}
       {models.answer?.state === "checking" && <p>{M1_COPY.checking}</p>}
       {(["missing", "failed"].includes(models.answer?.state ?? "") || askState === "failed") && <p>{M1_COPY.failed}</p>}
+      {models.answer?.state === "ready" && models.answer.pin && !answerOffers?.some(t => t.pin.sha256 === models.answer?.pin?.sha256) && <div><p>{models.answer.pin.name}</p><button className={buttonStyle} disabled>{M1_COPY.inUse}</button></div>}
       {answerOffers && answerOffers.length > 0 && <>
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
         {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
-          <button className={buttonStyle} disabled={transferBusy || installing || (models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256)} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{(models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256) ? M1_COPY.inUse : models.answer?.pin ? M1_COPY.switch(tier.pin.name) : M1_COPY.add}</button>
+          <button className={buttonStyle} disabled={transferBusy || installing || (models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256)} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{(models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256) ? M1_COPY.inUse : models.files.some(f => f.sha256 === tier.pin.sha256 && f.verified && (f.installed_bytes ?? 0) >= tier.pin.size) ? M1_COPY.switch(tier.pin.name) : `${M1_COPY.add} · ${size(tier.pin.size)}`}</button>
         </div>)}
       </>}
-      {models.answer?.pin?.name === "qwen3.6-35b-a3b" && (models.ram_bytes ?? 0) >= 32 * 2**30 && (models.ram_bytes ?? 0) < 64 * 2**30 && <>
-        <p>{M1_COPY.warning(models.ram_bytes ?? 0)}</p>
-        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer("answer_switch", {tierIndex: 1})}>{M1_COPY.switchMinistral}</button>
-      </>}
+      {models.answer?.pin?.name === "qwen3.6-35b-a3b" && (models.ram_bytes ?? 0) >= 32 * 2**30 && (models.ram_bytes ?? 0) < 64 * 2**30 && <p>{M1_COPY.warning(models.ram_bytes ?? 0)}</p>}
       {models.target && <div aria-live="polite"><p>{models.target.pin.name} · {models.target.state === "verified" ? M1_COPY.switching : M1_COPY.targetState[models.target.state as keyof typeof M1_COPY.targetState]}</p>
         {models.target.progress?.total && <p>{size(models.target.progress.downloaded ?? 0)} / {size(models.target.progress.total)}</p>}
       </div>}
@@ -519,23 +517,6 @@ export default function App() {
         </>}
         <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button>
       </> : <><p>{M2_COPY.setup}</p>{!(askState === "no_answer" || (cloud && !cloud.default)) && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
-      {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
-      {stopping && <p role="status">{M2_COPY.stopping}</p>}
-      {cloudMessage && <p role="status">{cloudMessage}</p>}
-      {cloud?.cleanup_pending && cloud.message && cloud.message !== cloudMessage && <p role="status">{cloud.message}</p>}
-      {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
-    </aside>}
-    <AiApps installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
-    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? M3_COPY.connected(c.name) : M3_COPY.stale(c.name)}</p>)}
-    {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
-      <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
-      {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
-      {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
-      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p><button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>
-      <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
-      <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
-    </aside>}
-    {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
     {setup && <div role="dialog" aria-label={M2_COPY.setup}>
       <label>{M2_COPY.provider}<select aria-label={M2_COPY.provider} value={provider} disabled={keyBusy} onChange={event => void openSetup(event.target.value as Provider)}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
       {!confirmed ? <>
@@ -549,6 +530,23 @@ export default function App() {
       </>}
       <button className={buttonStyle} onClick={() => void closeSetup()}>{M2_COPY.cancel}</button>
     </div>}
+      {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
+      {stopping && <p role="status">{M2_COPY.stopping}</p>}
+      {cloudMessage && <p role="status">{cloudMessage}</p>}
+      {cloud?.cleanup_pending && cloud.message && cloud.message !== cloudMessage && <p role="status">{cloud.message}</p>}
+      {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
+    </aside>}
+    <AiApps chooserOpen={!!models?.ready && (askState === "no_answer" || !!(cloud && !cloud.default))} onDisclosure={setClaudeDisclosure} installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
+    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? c.last_call ? M3_COPY.connected(c.name) : `${c.name} is set up. Ask it to search your vectorAIz library.` : M3_COPY.stale(c.name)}</p>)}
+    {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
+      <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
+      {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
+      {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
+      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && <button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>}
+      <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
+      <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
+    </aside>}
+    {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
     <aside className="mt-6" aria-label={M2_COPY.network}><h2>{M2_COPY.network}</h2><p>{M2_COPY.downloads}</p><p>{M2_COPY.updates}</p>
       {cloud?.api_key.provider && <p>{M2_COPY.destinations[cloud.api_key.provider]} · {cloud.api_key.enabled && cloud.consent_current ? M2_COPY.on : M2_COPY.off}</p>}
       <p>{M2_COPY.proxy}</p>

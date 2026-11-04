@@ -10,11 +10,19 @@ use vz_mcp::protocol;
 #[tokio::main]
 async fn main() {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--client") && args.iter().any(|a| a == "--client-file") {
+        eprintln!("--client and --client-file are mutually exclusive");
+        std::process::exit(2);
+    }
     let client = args
         .windows(2)
         .find(|w| w[0] == "--client")
         .map(|w| w[1].clone())
         .unwrap_or_default();
+    let client_file = args
+        .windows(2)
+        .find(|w| w[0] == "--client-file")
+        .map(|w| std::path::PathBuf::from(&w[1]));
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
     let mut requests: HashMap<String, CancellationToken> = HashMap::new();
@@ -66,9 +74,10 @@ async fn main() {
         }
         let token = CancellationToken::new();
         requests.insert(key, token.clone());
-        let (stdout, client) = (stdout.clone(), client.clone());
+        let (stdout, client, client_file) = (stdout.clone(), client.clone(), client_file.clone());
         tasks.spawn(async move {
             let work=async {
+                let client = client_file.as_deref().map(vz_mcp::read_client_file).unwrap_or(client);
                 let tool_result=if !vz_mcp::valid_client(&client) {protocol::tool_error(vz_mcp::NO_ACCESS)} else {
                     let bytes=serde_json::to_vec(&json!({"v":1,"client":client,"tool":request["params"]["name"],"args":request["params"]["arguments"]})).unwrap();
                     match vz_mcp::channel::call(&bytes).await {

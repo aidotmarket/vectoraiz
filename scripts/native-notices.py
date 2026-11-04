@@ -29,3 +29,5 @@ for path in sorted((root / 'docs/phase0/model-licenses').glob('*.txt')):
 
 print('\nPinned model source/distributor NOTICE inventory:')
 print((root / 'docs/phase0/model-licenses/inventory.json').read_text())
+
+print('\ntauri-plugin-opener 2.7.2: MIT OR Apache-2.0; Rust dependency licence text is included by cargo-about above.\nhttps://github.com/tauri-apps/plugins-workspace/tree/opener-v2.7.2/plugins/opener')

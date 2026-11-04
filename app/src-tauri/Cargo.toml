@@ -15,6 +15,9 @@ vulkan = ["vz-core/vulkan"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+tempfile = "3"
+tauri-plugin-opener = "=2.7.2"
+zip = { version = "2", default-features = false }
 tauri = { version = "2", features = [] }
 vz-core.workspace = true
 
@@ -38,5 +41,4 @@ windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_W
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 vz-core = { workspace = true, features = ["test-support"] }
-tempfile = "3"
 tauri = { version = "2", features = ["test"] }
