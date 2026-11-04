@@ -568,18 +568,78 @@ mod extension_tests {
         assert!(called);
         assert_eq!(value["bundle"], "/test/vectoraiz-claude.mcpb");
     }
+    // icacls prints the requested filename, then one principal:(flags)(rights)
+    // per line, followed by a blank line and its processing summary.
+    fn private_acl_entries(acl: &str, name: &str, user: &str) -> Result<Vec<Value>, String> {
+        let rules = acl.strip_prefix(name).ok_or("missing icacls path header")?;
+        let mut entries = Vec::new();
+        let mut allows = 0;
+        for line in rules.lines().take_while(|line| !line.trim().is_empty()) {
+            let (principal, flags) = line.trim().split_once(":(").ok_or("invalid ACL entry")?;
+            let permissions = format!("({flags}");
+            let allow = !permissions.contains("(DENY)");
+            if allow {
+                allows += 1;
+                if !["NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators", user]
+                    .iter()
+                    .any(|allowed| principal.eq_ignore_ascii_case(allowed))
+                {
+                    return Err(format!("unexpected access-allow principal: {principal}"));
+                }
+            }
+            entries.push(json!({"principal": principal, "allow": allow,
+                "inherited": permissions.contains("(I)"), "permissions": permissions}));
+        }
+        if allows == 0 {
+            return Err("no access-allow entries observed".into());
+        }
+        Ok(entries)
+    }
+    #[test]
+    fn private_acl_accepts_explicit_and_inherited_entries() {
+        let acl = "client NT AUTHORITY\\SYSTEM:(F)\n  BUILTIN\\Administrators:(I)(F)\n  HOST\\alice:(F)\n\nSuccessfully processed 1 files";
+        let entries = private_acl_entries(acl, "client", "host\\alice").unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0]["inherited"], false);
+        assert_eq!(entries[1]["inherited"], true);
+        assert!(private_acl_entries("client \n\n", "client", "host\\alice").is_err());
+    }
+    #[test]
+    fn private_acl_rejects_every_other_allow_principal() {
+        for principal in [
+            "Everyone",
+            "BUILTIN\\Users",
+            "NT AUTHORITY\\Authenticated Users",
+            "HOST\\another-user",
+        ] {
+            for flags in ["(F)", "(I)(RX)", "(OI)(CI)(IO)(F)"] {
+                let acl = format!("client HOST\\alice:(F)\n  {principal}:{flags}\n\n");
+                assert!(private_acl_entries(&acl, "client", "host\\alice").is_err());
+            }
+        }
+        let acl = "client HOST\\alice:(F)\n  Everyone:(I)(DENY)(W)\n\n";
+        assert!(private_acl_entries(acl, "client", "host\\alice").is_ok());
+    }
     #[cfg(windows)]
     #[test]
-    fn client_file_inherits_profile_acl() {
+    fn client_file_and_folder_have_user_only_acl() {
+        let output = std::process::Command::new("whoami").output().unwrap();
+        assert!(output.status.success(), "whoami failed");
+        let user = String::from_utf8(output.stdout).unwrap();
+        let user = user.trim();
+        assert!(!user.is_empty(), "whoami returned no current user");
         let profile = std::env::var_os("USERPROFILE").unwrap();
         let root = tempfile::tempdir_in(profile).unwrap();
         let client = root.path().join("ai-apps/claude-desktop.client");
         atomic_write(&client, b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let mut observations = Vec::new();
-        for path in [client.as_path(), client.parent().unwrap()] {
-            // icacls marks inherited entries with (I), without PowerShell modules.
+        let mut failures = Vec::new();
+        let mut observe = |stage: &str, path: &Path| {
+            // A relative filename makes the header independent of path separators.
+            let name = path.file_name().unwrap().to_str().unwrap();
             let output = std::process::Command::new("icacls")
-                .arg(path)
+                .current_dir(path.parent().unwrap())
+                .arg(name)
                 .output()
                 .unwrap();
             assert!(
@@ -588,16 +648,30 @@ mod extension_tests {
                 path.display(),
                 String::from_utf8_lossy(&output.stderr)
             );
-            let acl = String::from_utf8_lossy(&output.stdout);
-            assert!(
-                acl.contains("(I)"),
-                "ACL inheritance disabled for {}: {acl}",
-                path.display()
-            );
-            observations.push(json!({"path": path, "icacls": acl}));
-        }
+            let acl = String::from_utf8(output.stdout).expect("icacls output must be UTF-8");
+            let entries = private_acl_entries(&acl, name, user);
+            if let Err(error) = &entries {
+                failures.push(format!("{}: {error}: {acl}", path.display()));
+            }
+            observations.push(json!({"stage": stage, "path": path, "current_user": user,
+                "icacls": acl, "entries": entries.as_ref().ok(), "error": entries.as_ref().err()}));
+        };
+        observe("atomic_write", &client);
+        observe("folder", client.parent().unwrap());
+        // Diagnose creation versus rename without modifying the production writer.
+        // tempfile 3.27 uses OpenOptions (no custom security descriptor), then
+        // SetFileAttributesW + MoveFileExW(REPLACE_EXISTING) on the same volume.
+        let temp = tempfile::NamedTempFile::new_in(client.parent().unwrap()).unwrap();
+        observe("before_persist", temp.path());
+        let persisted = client.with_file_name("acl-probe");
+        temp.persist(&persisted).unwrap();
+        observe("after_persist", &persisted);
+        atomic_write(&client, b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
+        observe("atomic_replace", &client);
         let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mcpb-acl.json");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(target, serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
     fn generated_manifest_for_pinned_ci_validator() {
