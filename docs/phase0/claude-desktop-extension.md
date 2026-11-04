@@ -12,6 +12,8 @@ Removing access in vectorAIz stops new library requests. To remove the extension
 
 Reconnect after moving or reinstalling vectorAIz, then install the generated file in Claude again. If Claude keeps the old extension, uninstall it in Claude first and install the file again.
 
+After updating, every connected app, including **Connect another app** clients, asks you to confirm the updated terms once.
+
 Other apps still use **Connect another app**. If your organisation disables Claude extensions, the config-file route has not been proven with the Microsoft Store build of Claude.
 
 The local account is the trust boundary: another process running as the same user can read the client file. On Unix the folder is private to the user and the file has mode 0600; on Windows they inherit the user profile ACL. Removing access revokes the client regardless of who has read its id.

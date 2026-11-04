@@ -36,7 +36,6 @@ export const M1_COPY = {
   inUse: "In use",
   switch: (name: string) => `Switch to ${name}`,
   warning: (bytes: number) => `This model uses about 39 GB of memory on a PC with ${Math.round(bytes / 2**30)} GB. A smaller model is available.`,
-  switchMinistral: "Switch to Ministral 3 8B",
   switching: "Switching after the current search finishes",
   targetState: {downloading: "Downloading answer model", paused: "Download paused", checking: "Checking answer model", failed: "Answer model download failed"},
   delete: "Delete",
@@ -482,7 +481,7 @@ export default function App() {
       </>}
       {models.answer?.state === "checking" && <p>{M1_COPY.checking}</p>}
       {(["missing", "failed"].includes(models.answer?.state ?? "") || askState === "failed") && <p>{M1_COPY.failed}</p>}
-      {models.answer?.pin && !answerOffers?.some(t => t.pin.sha256 === models.answer?.pin?.sha256) && <div><p>{models.answer.pin.name}</p><button className={buttonStyle} disabled>{M1_COPY.inUse}</button></div>}
+      {models.answer?.state === "ready" && models.answer.pin && !answerOffers?.some(t => t.pin.sha256 === models.answer?.pin?.sha256) && <div><p>{models.answer.pin.name}</p><button className={buttonStyle} disabled>{M1_COPY.inUse}</button></div>}
       {answerOffers && answerOffers.length > 0 && <>
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
         {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>

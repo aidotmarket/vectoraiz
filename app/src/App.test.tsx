@@ -1347,6 +1347,16 @@ it("A3.3.7 keeps the active model outside offered tiers and offers download for 
   expect(await screen.findByRole("button",{name:/^Add answer model · /})).toBeEnabled();
   expect(screen.queryByRole("button",{name:/^Switch to /})).not.toBeInTheDocument();
 });
+it.each(["ready", "checking", "missing", "failed"])("shows In use for an unlisted pin only when ready (%s)", async state => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state,pin:{...answerPin,name:"Unlisted active model",sha256:"active"}},offer:[answerTier]});
+  render(<App />);
+  await screen.findByRole("button",{name:"Use a smaller model"});
+  if (state === "ready") {
+    expect(screen.getByRole("button",{name:"In use"})).toBeDisabled();
+  } else {
+    expect(screen.queryByRole("button",{name:"In use"})).not.toBeInTheDocument();
+  }
+});
 it.each(["/data/ai-apps/vectoraiz-claude.mcpb", "C:\\Users\\Test User\\ai-apps\\vectoraiz-claude.mcpb"])("keeps extension fallback after an unsuccessful OS open and reveals only the generated file (%s)", async bundle => {
   appInvoke.mockImplementation(async command => {
     if(command === "app_status") return appStatus([]);

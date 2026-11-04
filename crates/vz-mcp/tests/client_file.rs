@@ -82,10 +82,13 @@ fn flags_and_invalid_files_preserve_discovery_and_deny_calls() {
         Some("".to_owned()),
         Some("malformed".to_owned()),
         Some("a".repeat(257)),
+        // Without the cap, trim() would accept the valid id after these spaces.
+        Some(format!("{}{}", " ".repeat(300), "a".repeat(32))),
     ] {
         if let Some(text) = contents {
             std::fs::write(&path, text).unwrap();
         }
+        assert!(vz_mcp::read_client_file(&path).is_empty());
         assert!(bridge.request("server/discover").get("result").is_some());
         assert!(bridge.request("tools/list").get("result").is_some());
         assert_eq!(

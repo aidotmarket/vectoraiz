@@ -17,6 +17,9 @@ class Client:
         self.schema = json.loads((ROOT / f'crates/vz-mcp/schema/{era}.json').read_text())
         self.validator = jsonschema.Draft202012Validator(self.schema)
         self.log = evidence
+        if client_file:
+            self.log.write(json.dumps({'bridge': str(binary), 'argv': ['--client-file', str(client_file)]}) + '\n')
+            self.log.flush()
         self.child = subprocess.Popen([str(binary), *(['--client-file', str(client_file)] if client_file else ['--client', client])], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=evidence, text=True,
                                       encoding='utf-8', env=environment)
