@@ -78,7 +78,8 @@ async fn main() {
         tasks.spawn(async move {
             let work=async {
                 let client = client_file.as_deref().map(vz_mcp::read_client_file).unwrap_or(client);
-                let tool_result=if !vz_mcp::valid_client(&client) {protocol::tool_error(vz_mcp::NO_ACCESS)} else {
+                let client = if vz_mcp::valid_client(&client) { client } else { String::new() };
+                let tool_result={
                     let bytes=serde_json::to_vec(&json!({"v":1,"client":client,"tool":request["params"]["name"],"args":request["params"]["arguments"]})).unwrap();
                     match vz_mcp::channel::call(&bytes).await {
                         Ok(bytes)=>match serde_json::from_slice::<Value>(&bytes) {

@@ -741,6 +741,11 @@ async fn last_call_uses_creation_prefix_and_rotation_not_reconfirmation() {
     )
     .unwrap();
     assert!(time >= created);
+    let status = f.apps.status(&f.dir).unwrap();
+    assert_eq!(
+        status["clients"][0]["last_call_display"],
+        crate::local_time::format_local(&time, None)
+    );
     assert_eq!(
         f.apps.status(&f.dir).unwrap()["clients"][0]["last_call"],
         time
@@ -810,4 +815,73 @@ async fn delayed_search_refreshes_count_and_error_on_completion() {
             assert_eq!(status["recent"][0]["result_count"], 2);
         }
     }
+}
+
+#[tokio::test(start_paused = true)]
+async fn connection_wait_is_exactly_120_seconds() {
+    let f = Fixture::new().await;
+    let wait = f.apps.test_connection(&f.dir, &f.id);
+    tokio::pin!(wait);
+    assert!(tokio::time::timeout(Duration::from_secs(119), &mut wait)
+        .await
+        .is_err());
+    let start = tokio::time::Instant::now();
+    assert_eq!(wait.await.unwrap()["reason"], "no_call");
+    assert_eq!(start.elapsed(), Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn empty_client_is_refused_logged_and_recent() {
+    let f = Fixture::new().await;
+    let mut request = f.request("search");
+    request.client.clear();
+    assert_eq!(f.call(request).await["code"], "access_denied");
+    assert_eq!(f.opens.load(Ordering::SeqCst), 0);
+    let status = f.apps.status(&f.dir).unwrap();
+    let line = &status["recent"][0];
+    assert_eq!(line["client_id"], "invalid");
+    assert_eq!(line["client"], "Unknown app");
+    assert_eq!(line["allowed"], false);
+    assert_eq!(line["refusal_code"], "access_denied");
+    let root = f.dir.parent().unwrap();
+    let log = std::fs::read_to_string(root.join("mcp-calls.log")).unwrap();
+    let stored: Value = serde_json::from_str(log.trim()).unwrap();
+    assert_eq!(&stored, &{
+        let mut v = line.clone();
+        v.as_object_mut().unwrap().remove("time_display");
+        v
+    });
+    assert!(line["time_display"].as_str().is_some_and(|s| !s.is_empty()));
+    assert_eq!(
+        status["clients"][0]["created_at_display"],
+        crate::local_time::format_local(status["clients"][0]["created_at"].as_str().unwrap(), None)
+    );
+    assert!(!root.join("ai-apps/mcp-calls.log").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn call_log_private_on_create_rotation_and_existing_files() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = Fixture::new().await;
+    let root = f.dir.parent().unwrap();
+    let log = root.join("mcp-calls.log");
+    let old = root.join("mcp-calls.log.old");
+    let mode =
+        |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    f.apps.record(&f.dir, &f.id, "search", None);
+    assert_eq!(mode(&log), 0o600);
+    std::fs::write(&old, "old").unwrap();
+    for path in [&log, &old] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+    f.apps.record(&f.dir, &f.id, "search", None);
+    assert_eq!(mode(&log), 0o600);
+    assert_eq!(mode(&old), 0o600);
+    std::fs::write(&log, vec![b' '; 1024 * 1024]).unwrap();
+    std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+    f.apps.record(&f.dir, &f.id, "search", None);
+    assert_eq!(mode(&log), 0o600);
+    assert_eq!(mode(&old), 0o600);
+    assert!(!root.join("ai-apps/mcp-calls.log").exists());
 }

@@ -1106,7 +1106,7 @@ it("resumes setup after consent when no key has ever been saved", async () => {
 });
 
 
-const connectedApp = {client_id: "a".repeat(32), app: "other", name: "Research app", created_at: "2026-11-02", last_call: "2026-11-02T12:00:00Z", revoked: false, consent_current: true};
+const connectedApp = {client_id: "a".repeat(32), app: "other", name: "Research app", created_at: "2026-11-02", created_at_display:"OS connected", last_call_display:"OS last", last_call: "2026-11-02T12:00:00Z", revoked: false, consent_current: true};
 const appStatus = (clients: (Omit<typeof connectedApp,"last_call"> & {last_call?: string | null})[] = [connectedApp]) => ({enabled: true, off: false, clients, recent: []});
 it("requires the named app disclosure before exposing connection snippets", async () => {
   appInvoke.mockImplementation(async (command, args) => {
@@ -1273,7 +1273,7 @@ it("A3.3.1 keeps exactly one Claude connect button with chooser and open disclos
   expect(screen.getAllByRole("button",{name:"Connect Claude Desktop"})).toHaveLength(1);
   expect(within(screen.getByRole("dialog")).getByRole("button",{name:"Connect Claude Desktop"})).toBeInTheDocument();
 });
-it("A3.3.2 Remove clears the connection dialog and every snippet", async () => {
+it("A4.4 Done clears the connection dialog and every snippet", async () => {
   let connected=false;
   appInvoke.mockImplementation(async command => {
     if(command === "app_status") return appStatus(connected ? [connectedApp] : []);
@@ -1287,26 +1287,18 @@ it("A3.3.2 Remove clears the connection dialog and every snippet", async () => {
   await userEvent.click(screen.getByRole("button",{name:"Continue"}));
   await userEvent.click(await screen.findByRole("button",{name:"Connect Research app"}));
   await screen.findByText("private JSON");
-  await userEvent.click(screen.getByRole("button",{name:"Remove Research app"}));
-  expect(await screen.findByText("Removed")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button",{name:"Done"}));
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(screen.queryByText(/private/)).not.toBeInTheDocument();
   expect(screen.queryByRole("button",{name:"Cancel"})).not.toBeInTheDocument();
 });
-it("A3.3.3 formats connected and activity dates in local time to the minute", async () => {
-  // The explicit timezone is independent of the CI runner's locale.
-  const original = Date.prototype.toLocaleString;
-  const local = vi.spyOn(Date.prototype,"toLocaleString").mockImplementation(function(this: Date, options, format) {
-    return original.call(this,options,{...format,timeZone:"Europe/Madrid"});
-  });
-  appInvoke.mockResolvedValue({...appStatus([{...connectedApp,created_at:"2026-11-04T11:32:45.123456Z",last_call:"2026-11-04T11:32:45.123456Z"}]),recent:[{time:"2026-11-04T11:32:45.123456Z",client:"Research app",tool:"search",allowed:true,result_count:2}]});
+it("A4.5 renders OS display strings unchanged", async () => {
+  appInvoke.mockResolvedValue({...appStatus([{...connectedApp,created_at_display:"OS connected",last_call_display:"OS last"}]),recent:[{time:"2026-11-04T11:32:45.123456Z",time_display:"OS activity",client:"Research app",tool:"search",allowed:true,result_count:2}]});
   render(<App />);
-  expect(await screen.findByText(/Research app · .*12:32/)).toBeInTheDocument();
-  expect(screen.getByText(/Last request .*12:32/)).toBeInTheDocument();
-  expect(screen.getByText(/12:32.*Research app · search/)).toBeInTheDocument();
+  expect(await screen.findByText("Research app · OS connected")).toBeInTheDocument();
+  expect(screen.getByText("Last request OS last")).toBeInTheDocument();
+  expect(screen.getByText("OS activity · Research app · search · Allowed · 2")).toBeInTheDocument();
   expect(screen.queryByText(/123456Z/)).not.toBeInTheDocument();
-  expect(local).toHaveBeenCalledWith(undefined,expect.objectContaining({hour:"2-digit",minute:"2-digit"}));
-  local.mockRestore();
 });
 it("A3.3.4 uses set up until an allowed request and keeps Test waiting for a fresh event", async () => {
   const pending=deferred();
@@ -1361,14 +1353,14 @@ it.each(["/data/ai-apps/vectoraiz-claude.mcpb", "C:\\Users\\Test User\\ai-apps\\
   appInvoke.mockImplementation(async command => {
     if(command === "app_status") return appStatus([]);
     if(command === "app_disclosure") return {version:"current",strings:["Connect Claude Desktop","Disclosure","Removal","Connect Claude Desktop"]};
-    if(command === "app_connect_claude") return {client_id:"a".repeat(32),bundle,moved:true};
+    if(command === "app_connect_claude") return {client_id:"a".repeat(32),bundle,moved:true,opened:"reveal"};
   });
   render(<App />);
   await userEvent.click(screen.getByRole("button",{name:"Connect Claude Desktop"}));
   await userEvent.click(await within(screen.getByRole("dialog")).findByRole("button",{name:"Connect Claude Desktop"}));
-  expect(await screen.findByText(/If Claude Desktop doesn't open it/)).toBeInTheDocument();
+  expect(await screen.findByText(/^Drag this file onto Claude Desktop/)).toBeInTheDocument();
   expect(screen.getByText(bundle)).toBeInTheDocument();
-  expect(screen.getByText("vectorAIz has moved. Install the file in Claude again.")).toBeInTheDocument();
+  expect(screen.getByText("vectorAIz has moved. In Claude Desktop, uninstall vectorAIz under Settings → Desktop app → Extensions, then install this file.")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Show the file"}));
   expect(appInvoke).toHaveBeenCalledWith("app_show_extension",undefined);
 });
