@@ -10,8 +10,6 @@ compile_error!("ui-test is restricted to debug builds");
 mod a9_test_hook;
 mod bundled_library;
 #[cfg_attr(test, allow(dead_code))]
-mod claude_config;
-#[cfg_attr(test, allow(dead_code))]
 mod cloud;
 mod desktop_pipeline;
 #[cfg_attr(test, allow(dead_code))]
@@ -63,7 +61,7 @@ mod tests {
             "app_disconnect",
             "app_path_set",
             "app_access_retry",
-            "app_claude_continue",
+            "app_show_extension",
             "api_key_disclosure",
             "api_key_confirm",
             "api_key_set",

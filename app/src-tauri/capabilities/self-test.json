@@ -39,6 +39,6 @@
     "allow-app-disconnect",
     "allow-app-path-set",
     "allow-app-access-retry",
-    "allow-app-claude-continue"
+    "allow-app-show-extension"
   ]
 }

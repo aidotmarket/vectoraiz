@@ -1,6 +1,4 @@
-use crate::{
-    claude_config, cloud, desktop_pipeline, mcp_apps, mcp_channel, mcp_tools, models, settings,
-};
+use crate::{cloud, desktop_pipeline, mcp_apps, mcp_channel, mcp_tools, models, settings};
 use cloud::{cloud_failure, lifecycle_failure};
 use vz_core::cloud_gate::{self, Provider, SendError};
 
@@ -383,6 +381,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         }))
         .manage(models::Operations::default())
         .manage(cloud::Cloud::default())
+        .plugin(tauri_plugin_opener::init())
         .manage(mcp_apps::Apps::default())
         .manage(PendingUpdate::default())
         .plugin(tauri_plugin_updater::Builder::new().build());
@@ -425,7 +424,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         app_disconnect,
         app_path_set,
         app_access_retry,
-        app_claude_continue,
+        app_show_extension,
         api_key_disclosure,
         api_key_confirm,
         api_key_set,
@@ -581,7 +580,13 @@ fn pipeline_cpu_requested() -> bool {
 
 fn start_mcp<R: tauri::Runtime>(app: &tauri::AppHandle<R>, dir: &std::path::Path) {
     use tauri::Manager;
-    let channel = app.state::<mcp_apps::Apps>().channel.clone();
+    let apps = app.state::<mcp_apps::Apps>();
+    let handle = app.clone();
+    *apps.activity.lock().unwrap() = Some(Box::new(move || {
+        use tauri::Emitter;
+        let _ = handle.emit("mcp-activity", ());
+    }));
+    let channel = apps.channel.clone();
     if channel
         .started
         .swap(true, std::sync::atomic::Ordering::SeqCst)
@@ -656,13 +661,21 @@ async fn app_connect_claude<R: tauri::Runtime>(
     apps: tauri::State<'_, mcp_apps::Apps>,
     disclosure_version: String,
 ) -> Result<serde_json::Value, String> {
-    apps.connect(
-        &model_dir(&app)?,
-        "claude_desktop",
-        "Claude Desktop",
-        &disclosure_version,
-    )
-    .await
+    let result = apps
+        .connect(
+            &model_dir(&app)?,
+            "claude_desktop",
+            "Claude Desktop",
+            &disclosure_version,
+        )
+        .await?;
+    use tauri_plugin_opener::OpenerExt;
+    mcp_apps::open_extension(&result, |path| {
+        app.opener()
+            .open_path(path, None::<&str>)
+            .map_err(|e| e.to_string())
+    });
+    Ok(result)
 }
 #[tauri::command]
 async fn app_connect_other<R: tauri::Runtime>(
@@ -716,31 +729,11 @@ async fn app_test_connection<R: tauri::Runtime>(
     apps.test_connection(&model_dir(&app)?, &client_id).await
 }
 #[tauri::command]
-fn app_claude_continue<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    client_id: String,
-) -> Result<serde_json::Value, String> {
-    let dir = model_dir(&app)?;
-    // This phase changes config only, after step 1 has released app_access_lock.
-    settings::with_state(&dir, |s| {
-        vz_core::cloud_gate::check_mcp(&s.app_state(), &client_id, "setup", "library")
-    })?
-    .map_err(|_| vz_mcp::NO_ACCESS.to_owned())?;
-    if claude_config::running()? {
-        return Err("Claude Desktop is still open.".into());
-    }
-    let path = claude_config::path()?;
-    let bridge = claude_config::bridge()?;
-    Ok(
-        match claude_config::edit(&path, &client_id, Some(&bridge)) {
-            Ok(()) => {
-                serde_json::json!({"written":true,"message":"Open Claude Desktop again, then select Test the connection."})
-            }
-            Err(e) => {
-                serde_json::json!({"written":false,"path":path,"message":e,"snippet":{"mcpServers":{"vectoraiz":claude_config::entry(&bridge,&client_id)}}})
-            }
-        },
-    )
+fn app_show_extension<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .reveal_item_in_dir(mcp_apps::bundle_path(&model_dir(&app)?))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

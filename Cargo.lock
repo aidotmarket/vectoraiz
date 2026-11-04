@@ -1515,7 +1515,7 @@ dependencies = [
  "log",
  "quick-xml 0.37.5",
  "serde",
- "zip",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -4830,6 +4830,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "791930b43c0d5973160d90a8f3894509f2b273430f5c5c73b668636d0287c5c0"
 
 [[package]]
+name = "is-docker"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928bae27f42bc99b60d9ac7334e3a21d10ad8f1835a4e12ec3ec0464765ed1b3"
+dependencies = [
+ "once_cell",
+]
+
+[[package]]
+name = "is-wsl"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "173609498df190136aa7dea1a91db051746d339e18476eed5ca40521f02d7aa5"
+dependencies = [
+ "is-docker",
+ "once_cell",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6785,6 +6804,17 @@ name = "oneshot"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "269bca4c2591a28585d6bf10d9ed0332b7d76900a1b02bec41bdc3a2cdcda107"
+
+[[package]]
+name = "open"
+version = "5.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d8c8b8e725ad26404d6896eb2f064294a0a7b4f1d9120210d85544684c4ca95"
+dependencies = [
+ "dunce",
+ "is-wsl",
+ "libc",
+]
 
 [[package]]
 name = "opendal"
@@ -10037,6 +10067,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tauri-plugin-opener"
+version = "2.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53810be1b4fed22bb6ac3f4cab5a2b80d9391d1af436bda145607532bc0bb219"
+dependencies = [
+ "dunce",
+ "glob",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "open",
+ "schemars 0.8.22",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.21",
+ "url",
+ "windows",
+ "zbus",
+]
+
+[[package]]
 name = "tauri-plugin-single-instance"
 version = "2.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10082,7 +10134,7 @@ dependencies = [
  "tokio",
  "url",
  "windows-sys 0.61.2",
- "zip",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -10875,6 +10927,7 @@ dependencies = [
  "serde_json",
  "tauri",
  "tauri-build",
+ "tauri-plugin-opener",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-wdio-webdriver",
@@ -10885,6 +10938,7 @@ dependencies = [
  "vz-core",
  "vz-mcp",
  "windows-sys 0.61.2",
+ "zip 2.6.1",
 ]
 
 [[package]]
@@ -10974,7 +11028,7 @@ dependencies = [
  "windows-native-keyring-store",
  "windows-sys 0.61.2",
  "zeroize",
- "zip",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -11008,7 +11062,7 @@ dependencies = [
  "vz-core",
  "walkdir",
  "windows-sys 0.61.2",
- "zip",
+ "zip 4.6.1",
 ]
 
 [[package]]
@@ -12022,6 +12076,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "zip"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1dcb24d0152526ae49b9b96c1dcf71850ca1e0b882e4e28ed898a93c41334744"
+dependencies = [
+ "arbitrary",
+ "crc32fast",
+ "crossbeam-utils",
+ "indexmap 2.14.2",
+ "memchr",
 ]
 
 [[package]]

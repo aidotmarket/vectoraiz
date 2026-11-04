@@ -5,6 +5,7 @@
 - [Parser coverage and platform limits](parsers.md)
 - [Gateway folder and SFTP export](gateway-export.md)
 - [Model bake-off and picks](model-bakeoff.md)
+- [Claude Desktop extension release notes](claude-desktop-extension.md)
 - [Deep-link length](deep-link.md)
 - [Budgets](budgets.md)
 - [Re-estimate](re-estimate.md)

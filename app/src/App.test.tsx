@@ -6,8 +6,8 @@ import userEvent from "@testing-library/user-event";
 import App from "./App";
 import { version } from "../package.json";
 
-const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), modelEvents: { callback: undefined as undefined | (() => void) } }));
-vi.mock("@tauri-apps/api/event", () => ({listen: async (_: string, callback: () => void) => { modelEvents.callback = callback; return () => { if (modelEvents.callback === callback) modelEvents.callback = undefined; }; }}));
+const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents, appEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), appEvents: { callback: undefined as undefined | (() => void) }, modelEvents: { callback: undefined as undefined | (() => void) } }));
+vi.mock("@tauri-apps/api/event", () => ({listen: async (event: string, callback: () => void) => { const target = event === "mcp-activity" ? appEvents : modelEvents; target.callback = callback; return () => { if (target.callback === callback) target.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: (command: string, args: unknown) => command.startsWith("app_") ? appInvoke(command, args) : command === "cloud_status" || command.startsWith("api_key_") || command === "answer_path_set" ? cloudInvoke(command, args) : command.startsWith("models_") ? modelsInvoke(command, args) : invoke(command, args),
   Channel: class { onmessage = (_: unknown) => {}; },
@@ -776,7 +776,7 @@ it("sends only the transfer cancel while adding answers and keeps Search enabled
   render(<App />);
   await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
   await userEvent.click(screen.getByRole("button",{name:"Ask"}));
-  await userEvent.click(await screen.findByRole("button",{name:"Add answer model"}));
+  await userEvent.click(await screen.findByRole("button",{name:/^Add answer model/}));
   expect(screen.getByRole("button",{name:"Search"})).toBeEnabled();
   expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled();
   await userEvent.click(screen.getByRole("button",{name:"Cancel"}));
@@ -834,7 +834,7 @@ it("offers every eligible tier largest first and adds Qwen3-4B directly on a sea
   render(<App />);
   await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
   await userEvent.click(screen.getByRole("button",{name:"Ask"}));
-  const buttons = await screen.findAllByRole("button",{name:"Add answer model"});
+  const buttons = await screen.findAllByRole("button",{name:/^Add answer model/});
   expect(buttons).toHaveLength(3);
   expect(buttons.map(button => button.parentElement?.textContent)).toEqual([
     expect.stringContaining("Qwen3.6"),expect.stringContaining("Ministral 3 8B"),expect.stringContaining("Qwen3-4B")
@@ -851,7 +851,7 @@ it("offers every eligible tier largest first and adds Qwen3-4B directly on a sea
 it("refreshes a rejected answer_switch and re-enables model controls", async () => {
   let reject!: (cause: unknown) => void;
   const pending = {promise:new Promise((_, fail) => {reject = fail;}),reject:(cause: unknown) => reject(cause)};
-  const initial = {...readyModels,answer:{state:"ready",pin:{...answerPin,sha256:"larger",size:8_000_000_000}},offer:[answerTier]};
+  const initial = {...readyModels,files:[{...answerPin,verified:true,installed_bytes:answerPin.size}],answer:{state:"ready",pin:{...answerPin,sha256:"larger",size:8_000_000_000}},offer:[answerTier]};
   modelsInvoke.mockResolvedValue(initial);
   invoke.mockImplementation(command => command === "answer_switch" ? pending.promise : Promise.resolve({available:false}));
   render(<App />);
@@ -986,7 +986,7 @@ it("drops a superseded paused status after resume and keeps polling the download
     expect(screen.getByText(/Download paused/)).toBeInTheDocument();
     modelsInvoke.mockReturnValueOnce(slow.promise);
     await act(async () => { modelEvents.callback?.(); });
-    await act(async () => { screen.getByRole("button",{name:"Add answer model"}).click(); });
+    await act(async () => { screen.getByRole("button",{name:/^Add answer model/}).click(); });
     expect(invoke).toHaveBeenCalledWith("answer_add",{tierIndex:0});
     modelsInvoke.mockResolvedValue(downloading);
     await act(async () => { modelEvents.callback?.(); });
@@ -1048,7 +1048,7 @@ it("offers answer models after turning off the smallest model from the smaller-m
   await waitFor(() => expect(screen.queryByRole("button",{name:"Turn off"})).not.toBeInTheDocument());
   await userEvent.click(screen.getByRole("button",{name:"Ask"}));
   expect(await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"})).toBeInTheDocument();
-  expect(await screen.findAllByRole("button",{name:"Add answer model"})).toHaveLength(3);
+  expect(await screen.findAllByRole("button",{name:/^Add answer model/})).toHaveLength(3);
 });
 
 it("keeps the offered tier rows in place through download, checking and completion", async () => {
@@ -1061,7 +1061,7 @@ it("keeps the offered tier rows in place through download, checking and completi
   const {container} = render(<App />);
   await waitFor(() => expect(screen.getByRole("button",{name:"Ask"})).toBeEnabled());
   await userEvent.click(screen.getByRole("button",{name:"Ask"}));
-  await screen.findAllByRole("button",{name:"Add answer model"});
+  await screen.findAllByRole("button",{name:/^Add answer model/});
   const rows = Array.from(container.querySelectorAll("[data-answer-tier]"));
   expect(rows.map(row => row.getAttribute("data-answer-tier"))).toEqual(["2","1","0"]);
   await userEvent.click(within(rows[2] as HTMLElement).getByRole("button"));
@@ -1106,8 +1106,8 @@ it("resumes setup after consent when no key has ever been saved", async () => {
 });
 
 
-const connectedApp = {client_id: "a".repeat(32), app: "other", name: "Research app", created_at: "2026-11-02", revoked: false, consent_current: true};
-const appStatus = (clients = [connectedApp]) => ({enabled: true, off: false, clients, recent: []});
+const connectedApp = {client_id: "a".repeat(32), app: "other", name: "Research app", created_at: "2026-11-02", last_call: "2026-11-02T12:00:00Z", revoked: false, consent_current: true};
+const appStatus = (clients: (Omit<typeof connectedApp,"last_call"> & {last_call?: string | null})[] = [connectedApp]) => ({enabled: true, off: false, clients, recent: []});
 it("requires the named app disclosure before exposing connection snippets", async () => {
   appInvoke.mockImplementation(async (command, args) => {
     if (command === "app_status") return appStatus([]);
@@ -1154,7 +1154,7 @@ it("shows channel and failed-save notices, activity and Retry", async () => {
   render(<App />);
   expect(await screen.findByText(/can't open its local channel/)).toBeInTheDocument();
   expect(screen.getByText("Research app can't read your library until vectorAIz restarts.")).toBeInTheDocument();
-  expect(screen.getByText(/now · Research app · search · Refused · access_denied · 0/)).toBeInTheDocument();
+  expect(screen.getByText(/Research app · search · Refused · access_denied · 0/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", {name: "Retry"}));
   expect(appInvoke).toHaveBeenCalledWith("app_access_retry", undefined);
   expect(screen.getByText("AI apps connect through a local channel on this computer. vectorAIz opens no network port for them.")).toBeInTheDocument();
@@ -1189,7 +1189,7 @@ it("gives generic clients the no-call connection message", async () => {
   appInvoke.mockImplementation(async command => command === "app_status" ? appStatus() : {connected: false, reason: "no_call"});
   render(<App />);
   await userEvent.click(await screen.findByRole("button", {name: "Test the connection"}));
-  expect(await screen.findByText("No call received. Ask this app to search your library, then test again.")).toBeInTheDocument();
+  expect(await screen.findByText("No request from this app yet. Ask it to search your vectorAIz library during the test.")).toBeInTheDocument();
   expect(screen.queryByText(/The Claude Desktop entry/)).not.toBeInTheDocument();
 });
 
@@ -1236,8 +1236,8 @@ it("hides unfinished emphasis during Ask and restores a finished unmatched marke
 it.each(["missing", "failed"])("allows reacquiring the pinned answer model when %s", async state => {
   modelsInvoke.mockResolvedValue({...readyModels, answer:{state,pin:answerPin},offer:[answerTier]});
   render(<App />);
-  expect(await screen.findByRole("button",{name:"Switch to Small local model"})).toBeEnabled();
-  expect(screen.queryByRole("button",{name:"In use"})).not.toBeInTheDocument();
+  expect(await screen.findByRole("button",{name:/^Add answer model/})).toBeEnabled();
+  expect(screen.queryByRole("button",{name:/^Switch to /})).not.toBeInTheDocument();
 });
 
 it.each([
@@ -1260,4 +1260,104 @@ it.each([
   expect(await screen.findByText("Your key is stored in this computer's password store. Answers now use OpenAI.")).toBeInTheDocument();
   expect(screen.getByText(warning)).toBeInTheDocument();
   expect(screen.getByLabelText("Answer path")).toHaveValue("api_key");
+});
+
+it("A3.3.1 keeps exactly one Claude connect button with chooser and open disclosure", async () => {
+  cloudInvoke.mockResolvedValue({default:null,api_key:{enabled:false},consent_current:false});
+  appInvoke.mockImplementation(async command => command === "app_disclosure" ? {version:"current", strings:["Connect Claude Desktop","Disclosure","Removal","Connect Claude Desktop"], extension:"Extension disclosure"} : appStatus([]));
+  render(<App />);
+  await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"});
+  expect(screen.getAllByRole("button",{name:"Connect Claude Desktop"})).toHaveLength(1);
+  await userEvent.click(screen.getByRole("button",{name:"Connect Claude Desktop"}));
+  expect(await screen.findByText("Extension disclosure")).toBeInTheDocument();
+  expect(screen.getAllByRole("button",{name:"Connect Claude Desktop"})).toHaveLength(1);
+  expect(within(screen.getByRole("dialog")).getByRole("button",{name:"Connect Claude Desktop"})).toBeInTheDocument();
+});
+it("A3.3.2 Remove clears the connection dialog and every snippet", async () => {
+  let connected=false;
+  appInvoke.mockImplementation(async command => {
+    if(command === "app_status") return appStatus(connected ? [connectedApp] : []);
+    if(command === "app_disclosure") return {version:"current",strings:["Connect Research app","Disclosure","Removal","Connect Research app"]};
+    if(command === "app_connect_other") { connected=true; return {client_id:connectedApp.client_id,bridge:"private bridge",json:"private JSON",toml:"private TOML",command:"private command"}; }
+    if(command === "app_disconnect") {connected=false; return {message:"Removed"};}
+  });
+  render(<App />);
+  await userEvent.click(screen.getByRole("button",{name:"Connect another app"}));
+  await userEvent.type(screen.getByLabelText("App name"),"Research app");
+  await userEvent.click(screen.getByRole("button",{name:"Continue"}));
+  await userEvent.click(await screen.findByRole("button",{name:"Connect Research app"}));
+  await screen.findByText("private JSON");
+  await userEvent.click(screen.getByRole("button",{name:"Remove Research app"}));
+  expect(await screen.findByText("Removed")).toBeInTheDocument();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(screen.queryByText(/private/)).not.toBeInTheDocument();
+  expect(screen.queryByRole("button",{name:"Cancel"})).not.toBeInTheDocument();
+});
+it("A3.3.3 formats connected and activity dates in local time to the minute", async () => {
+  // The explicit timezone is independent of the CI runner's locale.
+  const original = Date.prototype.toLocaleString;
+  const local = vi.spyOn(Date.prototype,"toLocaleString").mockImplementation(function(this: Date, options, format) {
+    return original.call(this,options,{...format,timeZone:"Europe/Madrid"});
+  });
+  appInvoke.mockResolvedValue({...appStatus([{...connectedApp,created_at:"2026-11-04T11:32:45.123456Z",last_call:"2026-11-04T11:32:45.123456Z"}]),recent:[{time:"2026-11-04T11:32:45.123456Z",client:"Research app",tool:"search",allowed:true,result_count:2}]});
+  render(<App />);
+  expect(await screen.findByText(/Research app · .*12:32/)).toBeInTheDocument();
+  expect(screen.getByText(/Last request .*12:32/)).toBeInTheDocument();
+  expect(screen.getByText(/12:32.*Research app · search/)).toBeInTheDocument();
+  expect(screen.queryByText(/123456Z/)).not.toBeInTheDocument();
+  expect(local).toHaveBeenCalledWith(undefined,expect.objectContaining({hour:"2-digit",minute:"2-digit"}));
+  local.mockRestore();
+});
+it("A3.3.4 uses set up until an allowed request and keeps Test waiting for a fresh event", async () => {
+  const pending=deferred();
+  const claude={...connectedApp,app:"claude_desktop",name:"Claude Desktop",last_call:null};
+  appInvoke.mockImplementation(async command => command === "app_status" ? appStatus([claude]) : pending.promise);
+  render(<App />);
+  expect(await screen.findByText("Claude Desktop is set up. Ask it to search your vectorAIz library.")).toBeInTheDocument();
+  expect(screen.queryByText(/^Connected to/)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button",{name:"Test the connection"}));
+  expect(screen.getByText("Waiting for Claude Desktop. In a new chat in Claude Desktop, ask it to search your vectorAIz library.")).toBeInTheDocument();
+  await act(async () => pending.resolve({connected:false}));
+  expect(await screen.findByText(/^No request from Claude Desktop yet/)).toBeInTheDocument();
+});
+it("A3.3.5 refreshes delayed completion counts and tool errors on activity events", async () => {
+  let count=0; let error:string|undefined;
+  appInvoke.mockImplementation(async () => ({...appStatus(),recent:[{time:"2026-11-04T12:00:00Z",client:"Research app",tool:"search",allowed:true,result_count:count,refusal_code:error}]}));
+  render(<App />);
+  await screen.findByText(/Research app · search · Allowed · 0/);
+  await act(async () => {count=3; appEvents.callback?.();});
+  expect(await screen.findByText(/Research app · search · Allowed · 3/)).toBeInTheDocument();
+  await act(async () => {error="tool_error"; appEvents.callback?.();});
+  expect(await screen.findByText(/Research app · search · Allowed · tool_error · 3/)).toBeInTheDocument();
+});
+it("A3.3.6 opens the API key panel inside Answers with your API key", async () => {
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your Anthropic API key","Disclosure","Billing","Removal","Use Anthropic"]} : {default:"local",api_key:{enabled:false}});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button",{name:"Set up"}));
+  const panel=await screen.findByRole("dialog",{name:"Use your Anthropic or OpenAI API key"});
+  expect(within(screen.getByRole("complementary",{name:"Answers with your API key"})).getByRole("dialog")).toBe(panel);
+});
+it("A3.3.7 keeps the active model outside offered tiers and offers download for missing models", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:{...answerPin,name:"Unlisted active model",sha256:"active",size:8_000_000_000}},offer:[answerTier]});
+  render(<App />);
+  const inUse=await screen.findByRole("button",{name:"In use"});
+  expect(inUse).toBeDisabled();
+  expect(inUse.parentElement).toHaveTextContent("Unlisted active model");
+  await userEvent.click(screen.getByRole("button",{name:"Use a smaller model"}));
+  expect(await screen.findByRole("button",{name:/^Add answer model · /})).toBeEnabled();
+  expect(screen.queryByRole("button",{name:/^Switch to /})).not.toBeInTheDocument();
+});
+it("keeps extension fallback after an unsuccessful OS open and reveals only the generated file", async () => {
+  appInvoke.mockImplementation(async command => {
+    if(command === "app_status") return appStatus([]);
+    if(command === "app_disclosure") return {version:"current",strings:["Connect Claude Desktop","Disclosure","Removal","Connect Claude Desktop"]};
+    if(command === "app_connect_claude") return {client_id:"a".repeat(32),bundle:"/data/ai-apps/vectoraiz-claude.mcpb",moved:true};
+  });
+  render(<App />);
+  await userEvent.click(screen.getByRole("button",{name:"Connect Claude Desktop"}));
+  await userEvent.click(await within(screen.getByRole("dialog")).findByRole("button",{name:"Connect Claude Desktop"}));
+  expect(await screen.findByText(/If Claude Desktop doesn't open it/)).toBeInTheDocument();
+  expect(screen.getByText("vectorAIz has moved. Install the file in Claude again.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button",{name:"Show the file"}));
+  expect(appInvoke).toHaveBeenCalledWith("app_show_extension",undefined);
 });

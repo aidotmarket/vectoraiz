@@ -37,8 +37,10 @@ impl Fixture {
         let root = temp.path().join("index");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("recipe.json"), "{}").unwrap();
+        let bridge = temp.path().join("vectoraiz-mcp");
+        std::fs::write(&bridge, b"bridge fixture").unwrap();
         let mut apps = Apps::default();
-        apps.claude_path = Some(temp.path().join("claude_desktop_config.json"));
+        apps.bridge_path = Some(bridge);
         let apps = Arc::new(apps);
         let client = apps
             .connect(
@@ -422,7 +424,6 @@ async fn inference_wait_succeeds_times_out_and_transfer_does_not_block() {
 
 #[tokio::test]
 async fn replacement_failed_disconnect_restart_and_retry_preserve_other_clients() {
-    use crate::claude_config;
     let f = Fixture::new().await;
     let version = vz_core::cloud_gate::app_disclosure_version();
     let a = f
@@ -431,42 +432,36 @@ async fn replacement_failed_disconnect_restart_and_retry_preserve_other_clients(
         .await
         .unwrap();
     let a = a["client_id"].as_str().unwrap();
-    let path = f.apps.claude_path.as_ref().unwrap();
-    let bridge = claude_config::bridge().unwrap();
-    claude_config::edit(path, a, Some(&bridge)).unwrap();
+    let path = crate::mcp_apps::client_path(&f.dir);
     let b = f
         .apps
         .connect(&f.dir, "claude_desktop", "Claude Desktop", &version)
         .await
         .unwrap();
     let b = b["client_id"].as_str().unwrap();
-    claude_config::edit(path, b, Some(&bridge)).unwrap();
     let mut request = f.request("search");
     request.client = a.into();
     assert_eq!(f.call(request).await["ok"], false);
     f.apps.disconnect(&f.dir, a).await.unwrap();
-    assert!(claude_config::holds(
-        &claude_config::read(path).unwrap()["mcpServers"]["vectoraiz"],
-        b
-    ));
+    assert_eq!(vz_mcp::read_client_file(&path), b);
     let mut request = f.request("search");
     request.client = b.into();
     assert_eq!(f.call(request).await["ok"], true);
-    let original = std::fs::read(path).unwrap();
+    let original = std::fs::read(&path).unwrap();
     f.fail_writes();
     assert!(f
         .apps
         .connect(&f.dir, "claude_desktop", "Claude Desktop", &version)
         .await
         .is_err());
-    assert_eq!(std::fs::read(path).unwrap(), original);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
     let removed = f.apps.disconnect(&f.dir, b).await.unwrap();
     assert_eq!(removed["saved"], false);
     assert!(removed["status"]["save_failed"]
         .as_str()
         .unwrap()
         .contains("Claude Desktop can't read your library"));
-    assert_eq!(claude_config::read(path).unwrap()["mcpServers"], json!({}));
+    assert!(!path.exists());
     let mut request = f.request("search");
     request.client = b.into();
     assert_eq!(f.call(request).await["ok"], false);
@@ -493,8 +488,7 @@ async fn failed_revocation_without_retry_is_lost_on_restart() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn test_connection_requires_a_new_event_for_the_full_id_and_detects_moved_entry() {
-    use crate::claude_config;
+async fn test_connection_requires_a_new_event_for_the_full_id() {
     let mut f = Fixture::new().await;
     let claude = f
         .apps
@@ -526,24 +520,7 @@ async fn test_connection_requires_a_new_event_for_the_full_id_and_detects_moved_
         f.apps.record(&f.dir, other, "search", None);
     };
     let (response, ()) = tokio::join!(check, event);
-    assert_eq!(response.unwrap()["reason"], "entry_missing");
-    let path = f.apps.claude_path.as_ref().unwrap();
-    claude_config::edit(path, &f.id, Some(PathBuf::from("old-location").as_path())).unwrap();
-    assert_eq!(
-        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
-        "stale_path"
-    );
-    claude_config::edit(path, &f.id, Some(&claude_config::bridge().unwrap())).unwrap();
-    assert_eq!(
-        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
-        "not_called"
-    );
-    claude_config::edit(path, other, Some(&claude_config::bridge().unwrap())).unwrap();
-    assert_eq!(
-        f.apps.test_connection(&f.dir, &f.id).await.unwrap()["reason"],
-        "another_client"
-    );
-    // Generic clients must ignore even an unrelated Claude entry.
+    assert_eq!(response.unwrap()["reason"], "no_call");
     assert_eq!(
         f.apps.test_connection(&f.dir, other).await.unwrap()["reason"],
         "no_call"
@@ -660,4 +637,173 @@ async fn unreadable_index_error_response_contains_no_path() {
     assert_eq!(response["ok"], false);
     assert_eq!(response["message"], "The library could not be read.");
     assert!(!response.to_string().contains(['/', '\\']));
+}
+
+#[tokio::test]
+async fn connects_serialize_before_client_file_write() {
+    let f = Fixture::new().await;
+    let (reached, resume) = mcp_channel::hook(&f.dir, "connect_before_file");
+    let (apps, dir) = (f.apps.clone(), f.dir.clone());
+    let a = tokio::spawn(async move {
+        apps.connect(
+            &dir,
+            "claude_desktop",
+            "Claude Desktop",
+            &vz_core::cloud_gate::app_disclosure_version(),
+        )
+        .await
+    });
+    reached.await.unwrap();
+    let (apps, dir) = (f.apps.clone(), f.dir.clone());
+    let (started, waiting) = tokio::sync::oneshot::channel();
+    let b = tokio::spawn(async move {
+        started.send(()).unwrap();
+        apps.connect(
+            &dir,
+            "claude_desktop",
+            "Claude Desktop",
+            &vz_core::cloud_gate::app_disclosure_version(),
+        )
+        .await
+    });
+    waiting.await.unwrap();
+    assert!(!b.is_finished());
+    assert!(f.apps.app_access_lock.try_lock().is_err());
+    resume.send(()).unwrap();
+    let a = a.await.unwrap().unwrap();
+    let b = b.await.unwrap().unwrap();
+    let id = b["client_id"].as_str().unwrap();
+    assert_eq!(
+        vz_mcp::read_client_file(&crate::mcp_apps::client_path(&f.dir)),
+        id
+    );
+    let mut request = f.request("search");
+    request.client = id.into();
+    assert_eq!(f.call(request).await["ok"], true);
+    f.apps
+        .disconnect(&f.dir, a["client_id"].as_str().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        vz_mcp::read_client_file(&crate::mcp_apps::client_path(&f.dir)),
+        id
+    );
+}
+#[tokio::test]
+async fn extension_write_failures_keep_the_granted_client() {
+    for file in ["claude-desktop.client", "vectoraiz-claude.mcpb"] {
+        let f = Fixture::new().await;
+        let path = f.dir.parent().unwrap().join("ai-apps").join(file);
+        std::fs::create_dir_all(&path).unwrap();
+        let error = f
+            .apps
+            .connect(
+                &f.dir,
+                "claude_desktop",
+                "Claude Desktop",
+                &vz_core::cloud_gate::app_disclosure_version(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!("vectorAIz couldn't write {}.", path.display())
+        );
+        let status = f.apps.status(&f.dir).unwrap();
+        assert!(status["clients"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["app"] == "claude_desktop" && c["revoked"] == false));
+    }
+}
+#[tokio::test]
+async fn last_call_uses_creation_prefix_and_rotation_not_reconfirmation() {
+    let f = Fixture::new().await;
+    let created =
+        settings::with_state(&f.dir, |s| s.app_state().clients[0].created_at.clone()).unwrap();
+    let log = f.dir.parent().unwrap().join("mcp-calls.log.old");
+    let prefix = &f.id[..8];
+    let time = crate::mcp_apps::now();
+    let lines = [
+        json!({"time":"2000-01-01T00:00:00Z","client_id":prefix,"allowed":true}),
+        json!({"time":time,"client_id":"ffffffff","allowed":true}),
+        json!({"time":"2999-01-01T00:00:00Z","client_id":prefix,"allowed":false}),
+        json!({"time":time,"client_id":prefix,"allowed":true}),
+    ];
+    std::fs::write(
+        log,
+        lines.iter().map(|v| format!("{v}\n")).collect::<String>(),
+    )
+    .unwrap();
+    assert!(time >= created);
+    assert_eq!(
+        f.apps.status(&f.dir).unwrap()["clients"][0]["last_call"],
+        time
+    );
+    f.apps
+        .confirm(
+            &f.dir,
+            &f.id,
+            &vz_core::cloud_gate::app_disclosure_version(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        f.apps.status(&f.dir).unwrap()["clients"][0]["last_call"],
+        time
+    );
+}
+
+#[tokio::test]
+async fn delayed_search_refreshes_count_and_error_on_completion() {
+    for error in [false, true] {
+        let f = Fixture::new().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        *f.apps.activity.lock().unwrap() = Some(Box::new(move || {
+            tx.send(()).unwrap();
+        }));
+        let (reached, resume) = mcp_channel::hook(&f.dir, "after_tool");
+        let (apps, dir, root, ops, request) = (
+            f.apps.clone(),
+            f.dir.clone(),
+            f.root.clone(),
+            f.ops.clone(),
+            f.request("search"),
+        );
+        let task = tokio::spawn(async move {
+            mcp_tools::call(
+                &dir,
+                &root,
+                &ops,
+                &apps,
+                request,
+                CancellationToken::new(),
+                move |_, _| {
+                    if error {
+                        Err("That document isn't in your vectorAIz library.".into())
+                    } else {
+                        Ok(json!({"hits":[{},{}]}))
+                    }
+                },
+            )
+            .await
+        });
+        rx.recv().await.unwrap();
+        reached.await.unwrap();
+        assert_eq!(
+            f.apps.status(&f.dir).unwrap()["recent"][0]["result_count"],
+            0
+        );
+        assert!(!task.is_finished());
+        resume.send(()).unwrap();
+        task.await.unwrap();
+        rx.recv().await.unwrap();
+        let status = f.apps.status(&f.dir).unwrap();
+        if error {
+            assert_eq!(status["recent"][0]["refusal_code"], "tool_error");
+        } else {
+            assert_eq!(status["recent"][0]["result_count"], 2);
+        }
+    }
 }

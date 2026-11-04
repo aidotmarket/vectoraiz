@@ -2,12 +2,13 @@ use super::GateError;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const APP_DISCLOSURE: [&str; 6] = [
+pub const APP_DISCLOSURE: [&str; 7] = [
     "Connect {App}",
     "{App} will be able to search your vectorAIz library and read whole documents from it. {App}'s provider handles what {App} reads.",
     "Claude Desktop will be able to search your vectorAIz library and read whole documents from it. Anthropic handles what Claude reads.",
     "You can remove the connection at any time in Settings. What vectorAIz already sent to {App} can't be taken back.",
     "Connect {App}", "Cancel",
+    "Claude Desktop then asks you to install vectorAIz's extension, and warns that an extension installed from a file can access your computer. The extension sends Claude's search and read requests to vectorAIz on this computer and returns the results to Claude.",
 ];
 const fn hash() -> u64 {
     let mut h = 0xcbf29ce484222325u64;

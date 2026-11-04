@@ -12,12 +12,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class Client:
-    def __init__(self, binary, client, era, evidence, environment=None):
+    def __init__(self, binary, client, era, evidence, environment=None, client_file=None):
         self.era = era
         self.schema = json.loads((ROOT / f'crates/vz-mcp/schema/{era}.json').read_text())
         self.validator = jsonschema.Draft202012Validator(self.schema)
         self.log = evidence
-        self.child = subprocess.Popen([str(binary), '--client', client], stdin=subprocess.PIPE,
+        self.child = subprocess.Popen([str(binary), *(['--client-file', str(client_file)] if client_file else ['--client', client])], stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=evidence, text=True,
                                       encoding='utf-8', env=environment)
         self.messages = queue.Queue()
