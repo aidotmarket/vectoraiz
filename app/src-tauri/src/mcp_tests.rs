@@ -37,7 +37,11 @@ impl Fixture {
         let root = temp.path().join("index");
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("recipe.json"), "{}").unwrap();
-        let bridge = temp.path().join("vectoraiz-mcp");
+        let bridge = temp.path().join(if cfg!(windows) {
+            "vectoraiz-mcp.exe"
+        } else {
+            "vectoraiz-mcp"
+        });
         std::fs::write(&bridge, b"bridge fixture").unwrap();
         let mut apps = Apps::default();
         apps.bridge_path = Some(bridge);

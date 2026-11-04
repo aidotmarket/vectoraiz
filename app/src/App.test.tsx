@@ -1347,16 +1347,17 @@ it("A3.3.7 keeps the active model outside offered tiers and offers download for 
   expect(await screen.findByRole("button",{name:/^Add answer model · /})).toBeEnabled();
   expect(screen.queryByRole("button",{name:/^Switch to /})).not.toBeInTheDocument();
 });
-it("keeps extension fallback after an unsuccessful OS open and reveals only the generated file", async () => {
+it.each(["/data/ai-apps/vectoraiz-claude.mcpb", "C:\\Users\\Test User\\ai-apps\\vectoraiz-claude.mcpb"])("keeps extension fallback after an unsuccessful OS open and reveals only the generated file (%s)", async bundle => {
   appInvoke.mockImplementation(async command => {
     if(command === "app_status") return appStatus([]);
     if(command === "app_disclosure") return {version:"current",strings:["Connect Claude Desktop","Disclosure","Removal","Connect Claude Desktop"]};
-    if(command === "app_connect_claude") return {client_id:"a".repeat(32),bundle:"/data/ai-apps/vectoraiz-claude.mcpb",moved:true};
+    if(command === "app_connect_claude") return {client_id:"a".repeat(32),bundle,moved:true};
   });
   render(<App />);
   await userEvent.click(screen.getByRole("button",{name:"Connect Claude Desktop"}));
   await userEvent.click(await within(screen.getByRole("dialog")).findByRole("button",{name:"Connect Claude Desktop"}));
   expect(await screen.findByText(/If Claude Desktop doesn't open it/)).toBeInTheDocument();
+  expect(screen.getByText(bundle)).toBeInTheDocument();
   expect(screen.getByText("vectorAIz has moved. Install the file in Claude again.")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Show the file"}));
   expect(appInvoke).toHaveBeenCalledWith("app_show_extension",undefined);

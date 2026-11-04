@@ -94,8 +94,10 @@ fn flags_and_invalid_files_preserve_discovery_and_deny_calls() {
         );
     }
     let id = "a".repeat(32);
-    std::fs::write(&path, format!(" {id}\n")).unwrap();
-    assert_eq!(vz_mcp::read_client_file(&path), id);
+    for ending in ["\n", "\r\n"] {
+        std::fs::write(&path, format!(" {id}{ending}")).unwrap();
+        assert_eq!(vz_mcp::read_client_file(&path), id);
+    }
     assert!(!bridge.stop().contains(&id));
 }
 #[cfg(unix)]

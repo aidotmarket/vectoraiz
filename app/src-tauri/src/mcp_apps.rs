@@ -430,7 +430,10 @@ pub fn entry(bridge: &Path, client: &str) -> Value {
 }
 
 pub fn client_path(dir: &Path) -> PathBuf {
-    dir.parent().unwrap().join("ai-apps/claude-desktop.client")
+    dir.parent()
+        .unwrap()
+        .join("ai-apps")
+        .join("claude-desktop.client")
 }
 /// Opening is best effort: the response always retains the drag/install fallback.
 pub fn open_extension(value: &Value, open: impl FnOnce(&str) -> Result<(), String>) {
@@ -439,7 +442,10 @@ pub fn open_extension(value: &Value, open: impl FnOnce(&str) -> Result<(), Strin
     }
 }
 pub fn bundle_path(dir: &Path) -> PathBuf {
-    dir.parent().unwrap().join("ai-apps/vectoraiz-claude.mcpb")
+    dir.parent()
+        .unwrap()
+        .join("ai-apps")
+        .join("vectoraiz-claude.mcpb")
 }
 pub fn manifest(bridge: &Path, client: &Path) -> Value {
     json!({"manifest_version":"0.3","name":"vectoraiz","display_name":"vectorAIz",
@@ -507,7 +513,12 @@ mod extension_tests {
         std::fs::write(&bridge, b"bridge fixture").unwrap();
         let a = "a".repeat(32);
         let b = "b".repeat(32);
+        let client = root.path().join("ai-apps").join("claude-desktop.client");
+        let bundle = root.path().join("ai-apps").join("vectoraiz-claude.mcpb");
+        assert_eq!(client_path(&dir), client);
+        assert_eq!(bundle_path(&dir), bundle);
         let first = write_extension(&dir, &bridge, &a).unwrap();
+        assert_eq!(first["bundle"], json!(bundle));
         assert_eq!(first["moved"], false);
         let bytes = std::fs::read(bundle_path(&dir)).unwrap();
         write_extension(&dir, &bridge, &b).unwrap();
@@ -523,7 +534,7 @@ mod extension_tests {
         assert_eq!(value["server"]["mcp_config"]["command"], json!(bridge));
         assert_eq!(
             value["server"]["mcp_config"]["args"],
-            json!(["--client-file", client_path(&dir)])
+            json!(["--client-file", client])
         );
         drop(file);
         assert!(zip
@@ -558,15 +569,17 @@ mod extension_tests {
     }
     #[test]
     fn failed_opener_keeps_bundle_fallback() {
-        let value = json!({"bundle":"/test/vectoraiz-claude.mcpb"});
+        let root = tempfile::tempdir().unwrap();
+        let bundle = root.path().join("ai-apps").join("vectoraiz-claude.mcpb");
+        let value = json!({"bundle":bundle});
         let mut called = false;
         open_extension(&value, |path| {
             called = true;
-            assert_eq!(path, "/test/vectoraiz-claude.mcpb");
+            assert_eq!(path, bundle.to_str().unwrap());
             Err("no default handler".into())
         });
         assert!(called);
-        assert_eq!(value["bundle"], "/test/vectoraiz-claude.mcpb");
+        assert_eq!(value["bundle"], json!(bundle));
     }
     // icacls prints the requested filename, then one principal:(flags)(rights)
     // per line, followed by a blank line and its processing summary.
@@ -598,10 +611,12 @@ mod extension_tests {
     #[test]
     fn private_acl_accepts_explicit_and_inherited_entries() {
         let acl = "client NT AUTHORITY\\SYSTEM:(F)\n  BUILTIN\\Administrators:(I)(F)\n  HOST\\alice:(F)\n\nSuccessfully processed 1 files";
-        let entries = private_acl_entries(acl, "client", "host\\alice").unwrap();
-        assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0]["inherited"], false);
-        assert_eq!(entries[1]["inherited"], true);
+        for acl in [acl.to_owned(), acl.replace('\n', "\r\n")] {
+            let entries = private_acl_entries(&acl, "client", "host\\alice").unwrap();
+            assert_eq!(entries.len(), 3);
+            assert_eq!(entries[0]["inherited"], false);
+            assert_eq!(entries[1]["inherited"], true);
+        }
         assert!(private_acl_entries("client \n\n", "client", "host\\alice").is_err());
     }
     #[test]
@@ -630,7 +645,7 @@ mod extension_tests {
         assert!(!user.is_empty(), "whoami returned no current user");
         let profile = std::env::var_os("USERPROFILE").unwrap();
         let root = tempfile::tempdir_in(profile).unwrap();
-        let client = root.path().join("ai-apps/claude-desktop.client");
+        let client = root.path().join("ai-apps").join("claude-desktop.client");
         atomic_write(&client, b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").unwrap();
         let mut observations = Vec::new();
         let mut failures = Vec::new();
@@ -668,15 +683,22 @@ mod extension_tests {
         observe("after_persist", &persisted);
         atomic_write(&client, b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").unwrap();
         observe("atomic_replace", &client);
-        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mcpb-acl.json");
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("mcpb-acl.json");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         std::fs::write(target, serde_json::to_vec_pretty(&observations).unwrap()).unwrap();
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
     #[test]
     fn generated_manifest_for_pinned_ci_validator() {
-        let target =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/mcpb-manifest.json");
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("target")
+            .join("mcpb-manifest.json");
         std::fs::create_dir_all(target.parent().unwrap()).unwrap();
         let value = manifest(
             &bridge().unwrap(),
