@@ -30,13 +30,11 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   const [message, setMessageState] = useState("");
   type Attempt = {client: string; attempt: number; clicked: number; phase: "waiting" | "timeout"};
   const owner = useRef<Attempt | undefined>(undefined);
-  const attempts = useRef(new Map<string, Attempt>());
   const sequence = useRef(0);
   const [testing, setTesting] = useState<Set<string>>(new Set());
   function setMessage(text: string) {
     const previous = owner.current;
     if (previous) {
-      attempts.current.delete(previous.client);
       setTesting(current => { const next = new Set(current); next.delete(previous.client); return next; });
     }
     owner.current = undefined;
@@ -46,13 +44,12 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     setMessage("");
     const attempt = ++sequence.current;
     const started: Attempt = {client: c.client_id, attempt, clicked: Date.now(), phase: "waiting"};
-    attempts.current.set(c.client_id, started);
     owner.current = started;
     setTesting(current => new Set([...current, c.client_id]));
     setMessageState(c.app === "claude_desktop" ? "Waiting for Claude Desktop. In a new chat in Claude Desktop, ask it to search your vectorAIz library." : `Waiting for ${c.name}. Ask it to search your vectorAIz library.`);
     try {
       const result = await invoke<{connected: boolean}>("app_test_connection", {clientId: c.client_id});
-      if (attempts.current.get(c.client_id)?.attempt !== attempt || owner.current?.attempt !== attempt) return;
+      if (owner.current?.attempt !== attempt) return;
       if (result.connected) setMessage("Connection works.");
       else {
         owner.current.phase = "timeout";
@@ -60,9 +57,9 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
       }
       await refresh();
     } catch (e) {
-      if (attempts.current.get(c.client_id)?.attempt === attempt && owner.current?.attempt === attempt) setMessage(String(e));
+      if (owner.current?.attempt === attempt) setMessage(String(e));
     } finally {
-      if (attempts.current.get(c.client_id)?.attempt === attempt) setTesting(current => { const next = new Set(current); next.delete(c.client_id); return next; });
+      if (owner.current?.attempt === attempt) setTesting(current => { const next = new Set(current); next.delete(c.client_id); return next; });
     }
   }
 
@@ -73,7 +70,7 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     if (next && Array.isArray(next.clients)) {
       setStatus(next); onClients(next.clients);
       const line = owner.current;
-      if (line?.phase === "timeout" && attempts.current.get(line.client)?.attempt === line.attempt) {
+      if (line?.phase === "timeout") {
         const client = next.clients.find(c => c.client_id === line.client);
         if (client?.last_call && Date.parse(client.last_call) > line.clicked) setMessage("");
       }
@@ -101,12 +98,12 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     const subscription = listen("mcp-activity", () => { void refresh().catch(e => setMessage(String(e))); });
     return () => { void subscription.then(unlisten => unlisten()); };
   }, [refresh]);
-  useEffect(() => { onDisclosure(kind === "claude_desktop" && !!disclosure && !connection); }, [kind, disclosure, connection, onDisclosure]);
+  useEffect(() => { onDisclosure(!!kind); }, [kind, onDisclosure]);
   return <aside className="mt-6 grid gap-3" aria-label={M3_COPY.title}>
     <h2>{M3_COPY.title}</h2>
     <label>AI apps <input type="checkbox" aria-label="AI apps On/Off" checked={!!status?.enabled && !status.off} disabled={locked} onChange={e => { void action(async () => {const result = await invoke<{message?: string}>("app_path_set", {enabled: e.target.checked}); setMessage(result.message ?? "");});}} /> {status?.enabled && !status.off ? "On" : "Off"}</label>
-    {!chooserOpen && !(kind === "claude_desktop" && disclosure && !connection) && <button className={button} disabled={locked} onClick={() => void open("claude_desktop")}>Connect Claude Desktop</button>}
-    <button className={button} disabled={locked} onClick={() => {setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button>
+    {!chooserOpen && !kind && <button className={button} disabled={locked} onClick={() => void open("claude_desktop")}>Connect Claude Desktop</button>}
+    {!kind && <button className={button} disabled={locked} onClick={() => {setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button>}
     {status?.clients.filter(c => !c.revoked).map(c => <div key={c.client_id}>
       <p>{c.name} · {c.created_at_display}</p>
       {c.last_call && <p>Last request {c.last_call_display}</p>}
@@ -132,6 +129,6 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     </div>}
     {message && <p role="status" className="whitespace-pre-wrap">{message}</p>}
     <h3>Recent activity</h3>
-    {status?.recent.map((entry, i) => <p key={i}>{entry.time_display} · {entry.client} · {entry.tool} · {entry.allowed ? "Allowed" : "Refused"}{entry.refusal_code ? ` · ${entry.refusal_code}` : ""} · {entry.result_count}</p>)}
+    {status?.recent.map((entry, i) => <p key={i}>{entry.time_display} · {entry.client} · {entry.tool} · {entry.allowed ? `Allowed${entry.refusal_code ? ` · ${entry.refusal_code}` : ""} · ${entry.result_count}` : "Refused"}</p>)}
   </aside>;
 }

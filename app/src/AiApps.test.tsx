@@ -174,3 +174,42 @@ it.each(["Connect Claude Desktop", "Connect another app"])("Cancel closes %s bef
   expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   expect(invoke.mock.calls.some(([command]) => command === "app_connect_claude" || command === "app_connect_other")).toBe(false);
 });
+
+it.each(["Connect Claude Desktop", "Connect another app"])("A5.3 hides dialog-opening buttons throughout %s and restores them after Cancel and Done", async name => {
+  show(); await screen.findByText("Claude Desktop · OS connected");
+  const expectOpeners = (visible: boolean) => {
+    for (const label of ["Connect Claude Desktop", "Connect another app"]) {
+      if (visible) expect(screen.getByRole("button", {name: label})).toBeInTheDocument();
+      else expect(screen.queryByRole("button", {name: label})).not.toBeInTheDocument();
+    }
+  };
+  await userEvent.click(screen.getByRole("button", {name}));
+  expectOpeners(false);
+  await userEvent.click(screen.getByRole("button", {name: "Cancel"}));
+  expectOpeners(true);
+  await userEvent.click(screen.getByRole("button", {name}));
+  if (name === "Connect another app") {
+    await userEvent.type(screen.getByLabelText("App name"), "New app");
+    await userEvent.click(screen.getByRole("button", {name: "Continue"}));
+  }
+  expectOpeners(false);
+  await userEvent.click(await screen.findByRole("button", {name: "Grant access"}));
+  await screen.findByRole("button", {name: "Done"});
+  expectOpeners(false);
+  await userEvent.click(screen.getByRole("button", {name: "Done"}));
+  expectOpeners(true);
+});
+
+it("A5.4 displays refused activity without code or count and preserves allowed activity", async () => {
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "app_status" ? {
+    enabled: true, off: false, clients: [], recent: [
+      {time: "utc", time_display: "OS refused", client: "Unknown app", tool: "search", allowed: false, refusal_code: "access_denied", result_count: 0},
+      {time: "utc", time_display: "OS allowed", client: "Research app", tool: "get_document", allowed: true, refusal_code: "tool_error", result_count: 2},
+    ],
+  } : original(command, args));
+  show();
+  expect((await screen.findByText("OS refused · Unknown app · search · Refused")).textContent).toBe("OS refused · Unknown app · search · Refused");
+  expect(screen.queryByText(/access_denied/)).not.toBeInTheDocument();
+  expect(screen.getByText("OS allowed · Research app · get_document · Allowed · tool_error · 2")).toBeInTheDocument();
+});

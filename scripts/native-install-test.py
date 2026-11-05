@@ -9,6 +9,7 @@ from pathlib import Path
 import platform
 import shutil
 import sqlite3
+import struct
 import subprocess
 import sys
 import tempfile
@@ -54,6 +55,24 @@ def print_scenario_failure(log_path):
     print('\n'.join(lines[-200:]), flush=True)
 
 
+def check_pe_subsystems(installed):
+    for name, expected in [('vectoraiz.exe', 2), ('vectoraiz-cli.exe', 3),
+                           ('vectoraiz-mcp.exe', 3), ('vz-parser-worker.exe', 3)]:
+        path = installed / name
+        assert path.is_file(), f'Installed executable missing: {path}'
+        with path.open('rb') as exe:
+            assert exe.read(2) == b'MZ', f'Invalid DOS header: {path}'
+            exe.seek(0x3C)
+            pe_offset, = struct.unpack('<I', exe.read(4))
+            exe.seek(pe_offset)
+            assert exe.read(4) == b'PE\0\0', f'Invalid PE signature: {path}'
+            # PE signature (4), COFF header (20), then the optional header.
+            exe.seek(pe_offset + 24 + 68)
+            subsystem, = struct.unpack('<H', exe.read(2))
+        assert subsystem == expected, f'{name}: PE subsystem {subsystem}, expected {expected}'
+        step(f'{name}: PE subsystem {subsystem} (expected {expected})')
+
+
 step('Starting fresh hosted-runner install stand-in')
 artifacts = Path('artifacts').resolve()
 data = Path.home() / 'vectorAIz'
@@ -90,6 +109,8 @@ else:
 assert binary.is_file(), f'Installed executable missing: {binary}'
 step(f'Installed executable: {binary}')
 try:
+    if windows:
+        check_pe_subsystems(installed)
     # No checkout/assets in this working directory: exercise installed paths.
     with tempfile.TemporaryDirectory(prefix='vz-first-run-', ignore_cleanup_errors=True) as cwd:
         # A per-machine app cannot write WebView2's default profile next to its

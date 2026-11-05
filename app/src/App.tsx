@@ -537,7 +537,7 @@ export default function App() {
       {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
     </aside>}
     <AiApps chooserOpen={!!models?.ready && (askState === "no_answer" || !!(cloud && !cloud.default))} onDisclosure={setClaudeDisclosure} installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
-    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? c.last_call ? M3_COPY.connected(c.name) : `${c.name} is set up. Ask it to search your vectorAIz library.` : M3_COPY.stale(c.name)}</p>)}
+    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? c.last_call ? M3_COPY.connected(c.name) : `Finish setting up vectorAIz in ${c.name}, then ask it to search your vectorAIz library.` : M3_COPY.stale(c.name)}</p>)}
     {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
       <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
