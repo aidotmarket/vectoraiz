@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(not(test), windows_subsystem = "windows")]
 
 #[cfg(all(feature = "ui-test", not(debug_assertions)))]
 compile_error!("ui-test is restricted to debug builds");

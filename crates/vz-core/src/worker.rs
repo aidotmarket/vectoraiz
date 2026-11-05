@@ -176,7 +176,16 @@ pub fn command(worker: &Path) -> Command {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        Command::new(worker)
+        let cmd = Command::new(worker);
+        #[cfg(windows)]
+        let cmd = {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            let mut cmd = cmd;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+            cmd
+        };
+        cmd
     }
 }
 /// Called before reading the request, before a parser can allocate memory.

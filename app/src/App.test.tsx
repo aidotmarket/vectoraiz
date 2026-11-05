@@ -1154,7 +1154,7 @@ it("shows channel and failed-save notices, activity and Retry", async () => {
   render(<App />);
   expect(await screen.findByText(/can't open its local channel/)).toBeInTheDocument();
   expect(screen.getByText("Research app can't read your library until vectorAIz restarts.")).toBeInTheDocument();
-  expect(screen.getByText(/Research app · search · Refused · access_denied · 0/)).toBeInTheDocument();
+  expect(screen.getByText(/Research app · search · Refused$/)).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button", {name: "Retry"}));
   expect(appInvoke).toHaveBeenCalledWith("app_access_retry", undefined);
   expect(screen.getByText("AI apps connect through a local channel on this computer. vectorAIz opens no network port for them.")).toBeInTheDocument();
@@ -1305,7 +1305,7 @@ it("A3.3.4 uses set up until an allowed request and keeps Test waiting for a fre
   const claude={...connectedApp,app:"claude_desktop",name:"Claude Desktop",last_call:null};
   appInvoke.mockImplementation(async command => command === "app_status" ? appStatus([claude]) : pending.promise);
   render(<App />);
-  expect(await screen.findByText("Claude Desktop is set up. Ask it to search your vectorAIz library.")).toBeInTheDocument();
+  expect(await screen.findByText("Finish setting up vectorAIz in Claude Desktop, then ask it to search your vectorAIz library.")).toBeInTheDocument();
   expect(screen.queryByText(/^Connected to/)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Test the connection"}));
   expect(screen.getByText("Waiting for Claude Desktop. In a new chat in Claude Desktop, ask it to search your vectorAIz library.")).toBeInTheDocument();
@@ -1363,4 +1363,50 @@ it.each(["/data/ai-apps/vectoraiz-claude.mcpb", "C:\\Users\\Test User\\ai-apps\\
   expect(screen.getByText("vectorAIz has moved. In Claude Desktop, uninstall vectorAIz under Settings → Desktop app → Extensions, then install this file.")).toBeInTheDocument();
   await userEvent.click(screen.getByRole("button",{name:"Show the file"}));
   expect(appInvoke).toHaveBeenCalledWith("app_show_extension",undefined);
+});
+
+it.each(["claude_desktop", "other"])("A5.3 hides chooser Connect throughout the %s dialog and restores it after Cancel and Done", async kind => {
+  cloudInvoke.mockResolvedValue({default:null,api_key:{enabled:false},consent_current:false});
+  appInvoke.mockImplementation(async command => {
+    if (command === "app_disclosure") return {version:"current", strings:["Connect", "Disclosure", "Removal", "Grant access"]};
+    if (command === "app_connect_claude") return {client_id:connectedApp.client_id,bundle:"bundle.mcpb",opened:"reveal"};
+    if (command === "app_connect_other") return {client_id:connectedApp.client_id,bridge:"bridge",json:"JSON snippet",toml:"TOML snippet",command:"command"};
+    return appStatus([]);
+  });
+  render(<App />);
+  const chooser = await screen.findByRole("complementary", {name:"How should vectorAIz write answers?"});
+  const opener = kind === "claude_desktop" ? "Connect Claude Desktop" : "Connect another app";
+  const expectOpeners = (visible: boolean) => {
+    for (const name of ["Connect Claude Desktop", "Connect another app"]) {
+      if (visible) expect(screen.getByRole("button", {name})).toBeInTheDocument();
+      else expect(screen.queryByRole("button", {name})).not.toBeInTheDocument();
+    }
+    if (visible) expect(within(chooser).getByRole("button", {name:"Connect Claude Desktop"})).toBeInTheDocument();
+  };
+  await userEvent.click(screen.getByRole("button", {name:opener}));
+  await screen.findByRole("dialog");
+  expectOpeners(false);
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  expectOpeners(true);
+  await userEvent.click(screen.getByRole("button", {name:opener}));
+  if (kind === "other") {
+    await userEvent.type(screen.getByLabelText("App name"), "Research app");
+    await userEvent.click(screen.getByRole("button", {name:"Continue"}));
+  }
+  await userEvent.click(await screen.findByRole("button", {name:"Grant access"}));
+  await screen.findByRole("button", {name:"Done"});
+  expectOpeners(false);
+  await userEvent.click(screen.getByRole("button", {name:"Done"}));
+  expectOpeners(true);
+});
+
+it.each(["Claude Desktop", "Research app"])("A5.2 replaces setup guidance for %s on the first call", async name => {
+  let called = false;
+  appInvoke.mockImplementation(async () => appStatus([{...connectedApp, name, last_call:called ? "2026-11-05T12:00:00Z" : null}]));
+  render(<App />);
+  const guidance = `Finish setting up vectorAIz in ${name}, then ask it to search your vectorAIz library.`;
+  expect(await screen.findByText(guidance)).toBeInTheDocument();
+  await act(async () => { called = true; appEvents.callback?.(); });
+  expect(await screen.findByText(`Connected to ${name}. Ask in ${name}, and it searches your library here.`)).toBeInTheDocument();
+  expect(screen.queryByText(guidance)).not.toBeInTheDocument();
 });
