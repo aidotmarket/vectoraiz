@@ -87,18 +87,31 @@ fn platform(time: &DateTime<Local>, locale: Option<&str>) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn platform(time: &DateTime<Local>, locale: Option<&str>) -> Option<String> {
-    use core_foundation_sys::{base::*, date_formatter::*, locale::*, string::*};
+mod cf_owned {
+    use core_foundation_sys::base::{CFRelease, CFTypeRef};
+
     // Own every Create/Copy result, including early-return paths.
-    struct Owned(CFTypeRef);
+    pub(super) struct Owned(pub CFTypeRef);
     impl Drop for Owned {
         fn drop(&mut self) {
             unsafe { CFRelease(self.0) }
         }
     }
-    fn own(pointer: CFTypeRef) -> Option<Owned> {
-        (!pointer.is_null()).then_some(Owned(pointer))
+    pub(super) fn own(pointer: CFTypeRef) -> Option<Owned> {
+        (!pointer.is_null()).then(|| Owned(pointer))
     }
+
+    #[test]
+    fn null_returns_none_without_releasing() {
+        // CFRelease(NULL) is invalid: a null result must never create an owner.
+        assert!(own(std::ptr::null()).is_none());
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn platform(time: &DateTime<Local>, locale: Option<&str>) -> Option<String> {
+    use cf_owned::own;
+    use core_foundation_sys::{date_formatter::*, locale::*, string::*};
     unsafe {
         let locale = if let Some(name) = locale {
             let name = std::ffi::CString::new(name).ok()?;

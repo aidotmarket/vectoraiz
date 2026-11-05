@@ -33,13 +33,17 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   const attempts = useRef(new Map<string, Attempt>());
   const sequence = useRef(0);
   const [testing, setTesting] = useState<Set<string>>(new Set());
-  function setMessage(text: string) { owner.current = undefined; setMessageState(text); }
-  function dropTests(ids?: string[]) {
-    for (const id of ids ?? [...attempts.current.keys()]) attempts.current.delete(id);
-    setTesting(current => new Set([...current].filter(id => attempts.current.has(id))));
-    if (owner.current && (!ids || ids.includes(owner.current.client))) setMessage("");
+  function setMessage(text: string) {
+    const previous = owner.current;
+    if (previous) {
+      attempts.current.delete(previous.client);
+      setTesting(current => { const next = new Set(current); next.delete(previous.client); return next; });
+    }
+    owner.current = undefined;
+    setMessageState(text);
   }
   async function test(c: AppClient) {
+    setMessage("");
     const attempt = ++sequence.current;
     const started: Attempt = {client: c.client_id, attempt, clicked: Date.now(), phase: "waiting"};
     attempts.current.set(c.client_id, started);
@@ -89,7 +93,6 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     if (!disclosure) return;
     await action(async () => {
       if (confirmId) { await invoke("app_confirm", {clientId: confirmId, disclosureVersion: disclosure.version}); setKind(undefined); return; }
-      if (kind === "claude_desktop") dropTests(status?.clients.filter(c => c.app === "claude_desktop").map(c => c.client_id));
       const result = await invoke<Connection>(kind === "claude_desktop" ? "app_connect_claude" : "app_connect_other", {name, disclosureVersion: disclosure.version});
       setConnection(result); setDisclosure(undefined);
     });
@@ -101,14 +104,14 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   useEffect(() => { onDisclosure(kind === "claude_desktop" && !!disclosure && !connection); }, [kind, disclosure, connection, onDisclosure]);
   return <aside className="mt-6 grid gap-3" aria-label={M3_COPY.title}>
     <h2>{M3_COPY.title}</h2>
-    <label>AI apps <input type="checkbox" aria-label="AI apps On/Off" checked={!!status?.enabled && !status.off} disabled={locked} onChange={e => { if (!e.target.checked) dropTests(); void action(async () => {const result = await invoke<{message?: string}>("app_path_set", {enabled: e.target.checked}); setMessage(result.message ?? "");});}} /> {status?.enabled && !status.off ? "On" : "Off"}</label>
+    <label>AI apps <input type="checkbox" aria-label="AI apps On/Off" checked={!!status?.enabled && !status.off} disabled={locked} onChange={e => { void action(async () => {const result = await invoke<{message?: string}>("app_path_set", {enabled: e.target.checked}); setMessage(result.message ?? "");});}} /> {status?.enabled && !status.off ? "On" : "Off"}</label>
     {!chooserOpen && !(kind === "claude_desktop" && disclosure && !connection) && <button className={button} disabled={locked} onClick={() => void open("claude_desktop")}>Connect Claude Desktop</button>}
     <button className={button} disabled={locked} onClick={() => {setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button>
     {status?.clients.filter(c => !c.revoked).map(c => <div key={c.client_id}>
       <p>{c.name} · {c.created_at_display}</p>
       {c.last_call && <p>Last request {c.last_call_display}</p>}
       {!c.consent_current && <><p>{M3_COPY.stale(c.name)}</p><button className={button} disabled={locked} onClick={() => void open(c.app as "claude_desktop" | "other", c.name, c.client_id)}>Review and confirm</button></>}
-      <button className={button} disabled={locked} onClick={() => {dropTests([c.client_id]); void action(async () => {const result = await invoke<{message: string; file_error?: string}>("app_disconnect", {clientId: c.client_id}); setKind(undefined); setConnection(undefined); setDisclosure(undefined); setConfirmId(undefined); setMessage([result.message, result.file_error].filter(Boolean).join("\n"));});}}>Remove {c.name}</button>
+      <button className={button} disabled={locked} onClick={() => {void action(async () => {const result = await invoke<{message: string; file_error?: string}>("app_disconnect", {clientId: c.client_id}); setKind(undefined); setConnection(undefined); setDisclosure(undefined); setConfirmId(undefined); setMessage([result.message, result.file_error].filter(Boolean).join("\n"));});}}>Remove {c.name}</button>
       <button className={button} disabled={locked || testing.has(c.client_id)} onClick={() => void test(c)}>Test the connection</button>
     </div>)}
     {status?.channel_error && <p role="alert">{status.channel_error}</p>}

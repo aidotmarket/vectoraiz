@@ -74,6 +74,40 @@ it("only a call after this click clears this attempt's timeout, and no other mes
   await act(async () => events.activity?.());
   expect(line()).toBe("Removal message");
 });
+it("an mcp-activity refresh with a fresh last_call arriving while the Test is still waiting keeps the waiting line, then the connected:true reply shows Connection works.", async () => {
+  show(); await screen.findByText("Claude Desktop · OS connected");
+  await userEvent.click(tests()[0]);
+  const waiting = line();
+  clients[0].last_call = new Date(Date.now()+1000).toISOString();
+  await act(async () => events.activity?.());
+  expect(line()).toBe(waiting);
+  expect(line()).toMatch(/^Waiting for Claude Desktop/);
+  expect(tests()[0]).toBeDisabled();
+  await finish(0,true);
+  expect(line()).toBe("Connection works.");
+});
+it.each(["remove", "off"])("%s releases the waiting client's Test button immediately and drops its late result", async action => {
+  show(); await screen.findByText("Claude Desktop · OS connected");
+  await userEvent.click(tests()[0]);
+  expect(tests()[0]).toBeDisabled();
+  // Remove another row so the waiting client's button remains visible.
+  if(action === "remove") await userEvent.click(screen.getByRole("button",{name:"Remove Research app"}));
+  else await userEvent.click(screen.getByRole("checkbox"));
+  expect(tests()[0]).toBeEnabled();
+  const message = line();
+  expect(message).toBe(action === "remove" ? "Removal message" : "Off message");
+  await finish(0,true);
+  expect(line()).toBe(message);
+  expect(screen.queryByText(/Waiting for|No request|Connection works/)).not.toBeInTheDocument();
+});
+it("a replacement Test releases the previous client's button and ignores its late result", async () => {
+  show(); await screen.findByText("Claude Desktop · OS connected");
+  await userEvent.click(tests()[0]); await userEvent.click(tests()[1]);
+  expect(tests()[0]).toBeEnabled(); expect(tests()[1]).toBeDisabled();
+  await finish(0,true);
+  expect(line()).toMatch(/^Waiting for Research/);
+  await finish(1,true); expect(line()).toBe("Connection works.");
+});
 it("a new attempt on the same client uses its own click time", async () => {
   show(); await screen.findByText("Claude Desktop · OS connected");
   await userEvent.click(tests()[0]); await finish(0,false);
