@@ -661,7 +661,7 @@ async fn app_connect_claude<R: tauri::Runtime>(
     apps: tauri::State<'_, mcp_apps::Apps>,
     disclosure_version: String,
 ) -> Result<serde_json::Value, String> {
-    let result = apps
+    let mut result = apps
         .connect(
             &model_dir(&app)?,
             "claude_desktop",
@@ -670,11 +670,21 @@ async fn app_connect_claude<R: tauri::Runtime>(
         )
         .await?;
     use tauri_plugin_opener::OpenerExt;
-    mcp_apps::open_extension(&result, |path| {
-        app.opener()
-            .open_path(path, None::<&str>)
-            .map_err(|e| e.to_string())
-    });
+    let opened = mcp_apps::open_extension(
+        &result,
+        cfg!(windows),
+        |path| {
+            app.opener()
+                .open_path(path, None::<&str>)
+                .map_err(|e| e.to_string())
+        },
+        |path| {
+            app.opener()
+                .reveal_item_in_dir(path)
+                .map_err(|e| e.to_string())
+        },
+    );
+    result["opened"] = serde_json::json!(opened);
     Ok(result)
 }
 #[tauri::command]

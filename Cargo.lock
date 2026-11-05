@@ -10921,6 +10921,7 @@ version = "0.0.18"
 dependencies = [
  "anyhow",
  "chrono",
+ "core-foundation-sys",
  "getrandom 0.3.4",
  "reqwest 0.13.5",
  "serde",

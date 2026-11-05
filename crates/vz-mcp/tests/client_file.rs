@@ -72,9 +72,18 @@ fn flags_and_invalid_files_preserve_discovery_and_deny_calls() {
     assert!(none.request("server/discover").get("result").is_some());
     assert_eq!(
         none.request("tools/call")["result"]["content"][0]["text"],
-        vz_mcp::NO_ACCESS
+        vz_mcp::NOT_RUNNING
     );
+    assert!(none.request("tools/list").get("result").is_some());
     none.stop();
+    let mut invalid = Bridge::start(&["--client", "malformed"], root.path());
+    assert!(invalid.request("server/discover").get("result").is_some());
+    assert!(invalid.request("tools/list").get("result").is_some());
+    assert_eq!(
+        invalid.request("tools/call")["result"]["content"][0]["text"],
+        vz_mcp::NOT_RUNNING
+    );
+    invalid.stop();
     let path = root.path().join("client");
     let mut bridge = Bridge::start(&["--client-file", path.to_str().unwrap()], root.path());
     for contents in [
@@ -93,7 +102,7 @@ fn flags_and_invalid_files_preserve_discovery_and_deny_calls() {
         assert!(bridge.request("tools/list").get("result").is_some());
         assert_eq!(
             bridge.request("tools/call")["result"]["content"][0]["text"],
-            vz_mcp::NO_ACCESS
+            vz_mcp::NOT_RUNNING
         );
     }
     let id = "a".repeat(32);
@@ -154,5 +163,62 @@ fn running_bridge_rereads_replacement_and_relays_revocation_without_logging_ids(
     );
     let stderr = bridge.stop();
     assert!(!stderr.contains(&a) && !stderr.contains(&b));
+    server.join().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn invalid_ids_from_file_or_flag_are_forwarded_empty() {
+    use std::os::unix::net::UnixListener;
+    let root = tempfile::Builder::new()
+        .prefix("vz")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let socket = root
+        .path()
+        .join("Library/Application Support/vectorAIz/mcp.sock");
+    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+    let listener = UnixListener::bind(socket).unwrap();
+    let server = std::thread::spawn(move || {
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(10)))
+                .unwrap();
+            let mut length = [0; 4];
+            stream.read_exact(&mut length).unwrap();
+            let mut bytes = vec![0; u32::from_le_bytes(length) as usize];
+            stream.read_exact(&mut bytes).unwrap();
+            let request: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(request["client"], "");
+            assert_eq!(request["tool"], "search");
+            let bytes =
+                serde_json::to_vec(&json!({"ok":false,"message":vz_mcp::NO_ACCESS})).unwrap();
+            stream
+                .write_all(&(bytes.len() as u32).to_le_bytes())
+                .unwrap();
+            stream.write_all(&bytes).unwrap();
+        }
+    });
+    let path = root.path().join("client");
+    for contents in [None, Some(""), Some("malformed")] {
+        if let Some(text) = contents {
+            std::fs::write(&path, text).unwrap();
+        }
+        let mut bridge = Bridge::start(&["--client-file", path.to_str().unwrap()], root.path());
+        assert_eq!(
+            bridge.request("tools/call")["result"]["content"][0]["text"],
+            vz_mcp::NO_ACCESS
+        );
+        bridge.stop();
+    }
+    for args in [vec!["--client", "malformed"], vec![]] {
+        let mut bridge = Bridge::start(&args, root.path());
+        assert_eq!(
+            bridge.request("tools/call")["result"]["content"][0]["text"],
+            vz_mcp::NO_ACCESS
+        );
+        bridge.stop();
+    }
     server.join().unwrap();
 }

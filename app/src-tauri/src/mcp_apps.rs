@@ -1,3 +1,4 @@
+use crate::local_time::format_local;
 use crate::settings;
 use serde_json::{json, Value};
 use std::{
@@ -119,6 +120,20 @@ impl Apps {
         })?;
         value["channel_error"] = json!(self.channel.error.lock().unwrap().clone());
         value["recent"] = json!(self.recent(dir));
+        for client in value["clients"].as_array_mut().unwrap() {
+            client["created_at_display"] = json!(format_local(
+                client["created_at"].as_str().unwrap_or_default(),
+                None
+            ));
+            client["last_call_display"] =
+                json!(client["last_call"].as_str().map(|t| format_local(t, None)));
+        }
+        for entry in value["recent"].as_array_mut().unwrap() {
+            entry["time_display"] = json!(format_local(
+                entry["time"].as_str().unwrap_or_default(),
+                None
+            ));
+        }
         Ok(value)
     }
     pub async fn connect(
@@ -305,11 +320,20 @@ impl Apps {
             if std::fs::metadata(&path).is_ok_and(|m| m.len() >= 1024 * 1024) {
                 let _ = std::fs::rename(&path, root.join("mcp-calls.log.old"));
             }
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).append(true);
+            #[cfg(unix)]
             {
+                use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+                options.mode(0o600);
+                for name in ["mcp-calls.log", "mcp-calls.log.old"] {
+                    let _ = std::fs::set_permissions(
+                        root.join(name),
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
+            }
+            if let Ok(mut f) = options.open(path) {
                 let v = json!({"call_id":call_id,"time":now(),"client":name,"client_id":prefix,"tool":tool,"allowed":error.is_none(),"refusal_code":error.map(|e|e["code"].clone()),"result_count":0});
                 let _ = writeln!(f, "{v}");
             }
@@ -404,7 +428,7 @@ impl Apps {
                 notified.await;
             }
         };
-        if tokio::time::timeout(std::time::Duration::from_secs(60), wait)
+        if tokio::time::timeout(std::time::Duration::from_secs(120), wait)
             .await
             .is_ok_and(|r| r.is_ok())
         {
@@ -436,9 +460,24 @@ pub fn client_path(dir: &Path) -> PathBuf {
         .join("claude-desktop.client")
 }
 /// Opening is best effort: the response always retains the drag/install fallback.
-pub fn open_extension(value: &Value, open: impl FnOnce(&str) -> Result<(), String>) {
+pub fn open_extension(
+    value: &Value,
+    windows: bool,
+    open: impl FnOnce(&str) -> Result<(), String>,
+    reveal: impl FnOnce(&str) -> Result<(), String>,
+) -> &'static str {
+    let reveal_file = windows || value["moved"] == true;
     if let Some(path) = value["bundle"].as_str() {
-        let _ = open(path);
+        let _ = if reveal_file {
+            reveal(path)
+        } else {
+            open(path)
+        };
+    }
+    if reveal_file {
+        "reveal"
+    } else {
+        "install"
     }
 }
 pub fn bundle_path(dir: &Path) -> PathBuf {
@@ -568,18 +607,33 @@ mod extension_tests {
         assert_eq!(write_extension(&dir, &moved, &b).unwrap()["moved"], true);
     }
     #[test]
-    fn failed_opener_keeps_bundle_fallback() {
-        let root = tempfile::tempdir().unwrap();
-        let bundle = root.path().join("ai-apps").join("vectoraiz-claude.mcpb");
-        let value = json!({"bundle":bundle});
-        let mut called = false;
-        open_extension(&value, |path| {
-            called = true;
-            assert_eq!(path, bundle.to_str().unwrap());
-            Err("no default handler".into())
-        });
-        assert!(called);
-        assert_eq!(value["bundle"], json!(bundle));
+    fn open_or_reveal_choice_and_failure_keep_fallback() {
+        for windows in [false, true] {
+            for moved in [false, true] {
+                let value = json!({"bundle":"bundle.mcpb", "moved":moved});
+                let expected_reveal = windows || moved;
+                let calls = std::cell::Cell::new(0);
+                let opened = open_extension(
+                    &value,
+                    windows,
+                    |path| {
+                        assert!(!expected_reveal);
+                        calls.set(calls.get() + 1);
+                        assert_eq!(path, "bundle.mcpb");
+                        Err("no handler".into())
+                    },
+                    |path| {
+                        assert!(expected_reveal);
+                        calls.set(calls.get() + 1);
+                        assert_eq!(path, "bundle.mcpb");
+                        Err("no handler".into())
+                    },
+                );
+                assert_eq!(calls.get(), 1);
+                assert_eq!(opened, if expected_reveal { "reveal" } else { "install" });
+                assert_eq!(value["bundle"], "bundle.mcpb");
+            }
+        }
     }
     // icacls prints the requested filename, then one principal:(flags)(rights)
     // per line, followed by a blank line and its processing summary.

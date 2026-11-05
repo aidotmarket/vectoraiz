@@ -94,14 +94,14 @@ class Client:
             jsonschema.Draft202012Validator.check_schema(tool['outputSchema'])
         self.tools = {tool['name']: tool for tool in listed}
 
-    def tools_run(self, allowed):
-        hits = self.tool('search', {'query':'thirty days'}, allowed)
+    def tools_run(self, allowed, denied='vectorAIz has not given this app access.'):
+        hits = self.tool('search', {'query':'thirty days'}, allowed, denied)
         hit = hits['hits'][0] if allowed else {'doc_id':'unknown', 'chunk_id':'unknown'}
-        self.tool('list_collections', None, allowed)
-        self.tool('get_document', {'doc_id':hit['doc_id']}, allowed)
-        self.tool('get_chunk', {'chunk_id':hit['chunk_id']}, allowed)
+        self.tool('list_collections', None, allowed, denied)
+        self.tool('get_document', {'doc_id':hit['doc_id']}, allowed, denied)
+        self.tool('get_chunk', {'chunk_id':hit['chunk_id']}, allowed, denied)
 
-    def tool(self, name, arguments, allowed):
+    def tool(self, name, arguments, allowed, denied='vectorAIz has not given this app access.'):
         params = {'name':name}
         if arguments is not None: params['arguments'] = arguments
         response = self.call('tools/call', params)['result']
@@ -112,7 +112,7 @@ class Client:
             assert json.loads(response['content'][0]['text']) == obj
             return obj
         assert response['isError'] is True
-        assert response['content'][0]['text'] == 'vectorAIz has not given this app access.'
+        assert response['content'][0]['text'] == denied
 
     def close(self):
         self.child.stdin.close()
@@ -128,7 +128,8 @@ def main():
         with Path(f'mcp-protocol-{era}.jsonl').open('w', encoding='utf-8') as evidence:
             client = Client(args.bridge.resolve(), 'malformed', era, evidence)
             try:
-                client.startup(); client.tools_run(False)
+                # A4.7 forwards invalid IDs as empty; with no app listening, expect NOT_RUNNING.
+                client.startup(); client.tools_run(False, denied='Open vectorAIz to search your library.')
             finally:
                 client.close()
         print(f'{era}: whole-message schema validation PASS', flush=True)

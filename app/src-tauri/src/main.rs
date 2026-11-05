@@ -12,6 +12,7 @@ mod bundled_library;
 #[cfg_attr(test, allow(dead_code))]
 mod cloud;
 mod desktop_pipeline;
+mod local_time;
 #[cfg_attr(test, allow(dead_code))]
 mod mcp_apps;
 #[cfg_attr(test, allow(dead_code))]
