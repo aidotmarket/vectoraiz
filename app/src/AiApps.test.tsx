@@ -213,3 +213,28 @@ it("A5.4 displays refused activity without code or count and preserves allowed a
   expect(screen.queryByText(/access_denied/)).not.toBeInTheDocument();
   expect(screen.getByText("OS allowed · Research app · get_document · Allowed · tool_error · 2")).toBeInTheDocument();
 });
+
+it("A6.1 gives App name the existing text-box classes", async () => {
+  show(); await screen.findByText("Claude Desktop · OS connected");
+  await userEvent.click(screen.getByRole("button", {name:"Connect another app"}));
+  expect(screen.getByLabelText("App name")).toHaveClass("bg-white text-slate-950 p-2 w-full");
+});
+
+it.each(["Connect Claude Desktop", "Connect another app"])("A6.3 hides Review and confirm throughout %s and restores it after Cancel and Done", async name => {
+  clients[0].consent_current = false;
+  show(); await screen.findByRole("button", {name:"Review and confirm"});
+  await userEvent.click(screen.getByRole("button", {name}));
+  expect(screen.queryByRole("button", {name:"Review and confirm"})).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", {name:"Cancel"}));
+  expect(screen.getByRole("button", {name:"Review and confirm"})).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name}));
+  if (name === "Connect another app") {
+    await userEvent.type(screen.getByLabelText("App name"), "New app");
+    await userEvent.click(screen.getByRole("button", {name:"Continue"}));
+  }
+  await userEvent.click(await screen.findByRole("button", {name:"Grant access"}));
+  await screen.findByRole("button", {name:"Done"});
+  expect(screen.queryByRole("button", {name:"Review and confirm"})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Done"}));
+  expect(screen.getByRole("button", {name:"Review and confirm"})).toBeInTheDocument();
+});

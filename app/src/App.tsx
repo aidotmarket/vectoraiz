@@ -524,7 +524,7 @@ export default function App() {
         {cloud?.api_key.provider && cloud.api_key.provider !== provider && <p>{M2_COPY.changeNote(providerName(cloud.api_key.provider))}</p>}
         <button className={buttonStyle} disabled={!disclosure || keyBusy} onClick={() => void confirmKey()}>{disclosure?.strings[4]}</button>
       </> : <>
-        <label>{M2_COPY.key}<input type="password" autoComplete="off" value={key} disabled={keyBusy} onChange={event => setKey(event.target.value)} /></label>
+        <label>{M2_COPY.key}<input className="bg-white text-slate-950 p-2 w-full" type="password" autoComplete="off" value={key} disabled={keyBusy} onChange={event => setKey(event.target.value)} /></label>
         {cloud?.api_key.key_present && <p>{M2_COPY.replaceNote}</p>}
         <button className={buttonStyle} disabled={keyBusy || !key.trim()} onClick={() => void saveKey()}>{keyBusy ? M2_COPY.checking : M2_COPY.save}</button>
       </>}
@@ -542,7 +542,7 @@ export default function App() {
       <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
       {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
-      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && <button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>}
+      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && !appClients.some(c => !c.revoked && c.app === "claude_desktop") && <button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>}
       <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
       <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
     </aside>}

@@ -107,14 +107,14 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     {status?.clients.filter(c => !c.revoked).map(c => <div key={c.client_id}>
       <p>{c.name} · {c.created_at_display}</p>
       {c.last_call && <p>Last request {c.last_call_display}</p>}
-      {!c.consent_current && <><p>{M3_COPY.stale(c.name)}</p><button className={button} disabled={locked} onClick={() => void open(c.app as "claude_desktop" | "other", c.name, c.client_id)}>Review and confirm</button></>}
+      {!c.consent_current && <><p>{M3_COPY.stale(c.name)}</p>{!kind && <button className={button} disabled={locked} onClick={() => void open(c.app as "claude_desktop" | "other", c.name, c.client_id)}>Review and confirm</button>}</>}
       <button className={button} disabled={locked} onClick={() => {void action(async () => {const result = await invoke<{message: string; file_error?: string}>("app_disconnect", {clientId: c.client_id}); setKind(undefined); setConnection(undefined); setDisclosure(undefined); setConfirmId(undefined); setMessage([result.message, result.file_error].filter(Boolean).join("\n"));});}}>Remove {c.name}</button>
       <button className={button} disabled={locked || testing.has(c.client_id)} onClick={() => void test(c)}>Test the connection</button>
     </div>)}
     {status?.channel_error && <p role="alert">{status.channel_error}</p>}
     {status?.save_failed && <><p role="alert">{status.save_failed}</p><button className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_access_retry");})}>Retry</button></>}
     {kind && <div role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>
-      {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button>}</>}
+      {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input className="bg-white text-slate-950 p-2 w-full" value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button>}</>}
       {!connection && disclosure && <>
         {disclosure.strings.slice(0, 3).map((line, i) => i === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
         <p>Your whole library</p>{disclosure.extension && <p>{disclosure.extension}</p>}<button className={button} disabled={locked} onClick={() => void connect()}>{disclosure.strings[3]}</button>
