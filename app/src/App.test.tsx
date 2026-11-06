@@ -1410,3 +1410,50 @@ it.each(["Claude Desktop", "Research app"])("A5.2 replaces setup guidance for %s
   expect(await screen.findByText(`Connected to ${name}. Ask in ${name}, and it searches your library here.`)).toBeInTheDocument();
   expect(screen.queryByText(guidance)).not.toBeInTheDocument();
 });
+
+it("A6.1 gives the cloud API key the existing text-box classes", async () => {
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your Anthropic API key","Disclosure","Billing","Removal","Use Anthropic"]} : {default:"local",api_key:{enabled:false}});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Use Anthropic"}));
+  expect(await screen.findByLabelText("API key")).toHaveClass("bg-white text-slate-950 p-2 w-full");
+});
+
+it.each([true, false])("A6.2 hides chooser Connect for a Claude client (current=%s), preserves its id on confirmation and restores Connect after Remove", async current => {
+  const claude = {...connectedApp,app:"claude_desktop",name:"Claude Desktop",consent_current:current};
+  let clients = [claude];
+  cloudInvoke.mockResolvedValue({default:null,api_key:{enabled:false},consent_current:false});
+  appInvoke.mockImplementation(async (command, args) => {
+    if (command === "app_status") return appStatus(clients);
+    if (command === "app_disclosure") return {version:"new",strings:["Connect", "Disclosure", "Removal", "Grant access"]};
+    if (command === "app_confirm") {clients = clients.map(c => c.client_id === args.clientId ? {...c,consent_current:true} : c); return {};}
+    if (command === "app_disconnect") {clients = clients.filter(c => c.client_id !== args.clientId); return {message:"Removed"};}
+  });
+  render(<App />);
+  const chooser = await screen.findByRole("complementary", {name:"How should vectorAIz write answers?"});
+  await screen.findByRole("button", {name:"Remove Claude Desktop"});
+  expect(within(chooser).queryByRole("button", {name:"Connect Claude Desktop"})).not.toBeInTheDocument();
+  if (!current) {
+    await userEvent.click(screen.getByRole("button", {name:"Review and confirm"}));
+    expect(screen.queryByRole("button", {name:"Review and confirm"})).not.toBeInTheDocument();
+    await userEvent.click(await screen.findByRole("button", {name:"Grant access"}));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(appInvoke).toHaveBeenCalledWith("app_confirm", {clientId:claude.client_id,disclosureVersion:"new"});
+    expect(clients).toEqual([{...claude,consent_current:true}]);
+    expect(appInvoke.mock.calls.some(([command]) => command === "app_connect_claude")).toBe(false);
+    expect(screen.queryByRole("button", {name:"Review and confirm"})).not.toBeInTheDocument();
+    expect(within(chooser).queryByRole("button", {name:"Connect Claude Desktop"})).not.toBeInTheDocument();
+  }
+  await userEvent.click(screen.getByRole("button", {name:"Remove Claude Desktop"}));
+  expect(await within(chooser).findByRole("button", {name:"Connect Claude Desktop"})).toBeInTheDocument();
+});
+
+it.each(["revoked Claude", "other app"])("A6.2 shows chooser Connect with only a %s client", async kind => {
+  const client = kind === "revoked Claude" ? {...connectedApp,app:"claude_desktop",name:"Claude Desktop",revoked:true} : connectedApp;
+  cloudInvoke.mockResolvedValue({default:null,api_key:{enabled:false},consent_current:false});
+  appInvoke.mockResolvedValue(appStatus([client]));
+  render(<App />);
+  const chooser = await screen.findByRole("complementary", {name:"How should vectorAIz write answers?"});
+  await waitFor(() => expect(appInvoke).toHaveBeenCalledWith("app_status", undefined));
+  expect(within(chooser).getByRole("button", {name:"Connect Claude Desktop"})).toBeInTheDocument();
+});
