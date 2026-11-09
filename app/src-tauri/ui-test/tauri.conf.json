@@ -1,4 +1,5 @@
 {
+  "app": { "withGlobalTauri": true },
   "bundle": {
     "active": true,
     "resources": { "../../spike/fixtures/models.json": "models.json" },

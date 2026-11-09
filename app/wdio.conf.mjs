@@ -7,7 +7,7 @@ const temporaryDataRoot = process.env.VZ_UI_TEST_DATA_ROOT
   ? undefined
   : mkdtempSync(resolve(tmpdir(), 'vectoraiz-ui-'));
 process.env.VZ_UI_TEST_DATA_ROOT ??= temporaryDataRoot;
-const artifacts = resolve('ui-test-results');
+const artifacts = resolve(process.env.VZ_UI_TEST_RESULTS_DIR ?? 'ui-test-results');
 mkdirSync(artifacts, { recursive: true });
 
 export const config = {
