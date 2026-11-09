@@ -37,22 +37,32 @@ describe('native first launch (offline)', () => {
     const fonts = await browser.execute(async () => {
       const loaded = await document.fonts.load('14px Inter', 'vectorAIz');
       await document.fonts.ready;
-      // Inspect the actual rendered element and compare glyph metrics against a
-      // forced fallback, alongside loaded FontFace objects (not just a CSS name).
+      // Use the heading's real family, size and weight. Remove only Inter to
+      // measure the same fallback stack the app would use if Inter failed.
+      const rendered = getComputedStyle(document.querySelector('.view:not([hidden]) h1'));
+      const families = rendered.fontFamily.split(',').map(family => family.trim());
+      const isInter = family => family.replace(/["']/g, '') === 'Inter';
+      const fallbackFamily = families.filter(family => !isInter(family)).join(', ');
       const canvas = document.createElement('canvas');
       const context = canvas.getContext('2d');
-      context.font = '14px Inter';
+      const measure = family => {
+        context.font = `${rendered.fontWeight} ${rendered.fontSize} ${family}`;
+        return context.measureText('vectorAIz iii WWW 123').width;
+      };
+      const renderedWidth = measure(rendered.fontFamily);
+      context.font = `${rendered.fontWeight} ${rendered.fontSize} Inter`;
       const interWidth = context.measureText('vectorAIz iii WWW 123').width;
-      context.font = '14px monospace';
       return {
         loaded:loaded.map(face => ({family:face.family,status:face.status})),
         checked:document.fonts.check('14px Inter', 'vectorAIz'),
-        renderedFamily:getComputedStyle(document.querySelector('.view:not([hidden]) h1')).fontFamily,
-        interWidth, fallbackWidth:context.measureText('vectorAIz iii WWW 123').width,
+        renderedFamily:families[0].replace(/["']/g, ''), fallbackFamily,
+        renderedWidth, interWidth, fallbackWidth:measure(fallbackFamily),
       };
     });
     assert.ok(fonts.checked && fonts.loaded.some(face => /Inter/.test(face.family) && face.status === 'loaded'));
-    assert.match(fonts.renderedFamily, /Inter/);
-    assert.notEqual(fonts.interWidth, fonts.fallbackWidth, 'Rendered glyphs must not use the forced fallback');
+    assert.equal(fonts.renderedFamily, 'Inter');
+    assert.ok(fonts.fallbackFamily, 'The app must retain its real fallback family stack');
+    assert.equal(fonts.renderedWidth, fonts.interWidth, 'Rendered glyphs must resolve to Inter');
+    assert.notEqual(fonts.renderedWidth, fonts.fallbackWidth, 'Rendered glyphs must not use the app fallback');
   });
 });

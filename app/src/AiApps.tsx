@@ -114,13 +114,14 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   function closeDialog() {
     const connected = !!connection;
     const clientId = connection?.client_id;
+    const connectedTarget = kind === "claude_desktop" && !chooserOpen ? "#connect-claude" : `#test-${clientId}`;
     setKind(undefined); setDisclosure(undefined); setConnection(undefined);
     if (externalSetup.current) {
       externalSetup.current = false;
       onSetupClose?.(connected);
-      if (connected && clientId) focusTarget.current = `#test-${clientId}`;
+      if (connected && clientId) focusTarget.current = connectedTarget;
     } else {
-      focusTarget.current = clientId ? `#test-${clientId}` : opener.current?.id ? `#${opener.current.id}` : "#connect-claude";
+      focusTarget.current = clientId ? connectedTarget : opener.current?.id ? `#${opener.current.id}` : "#connect-claude";
     }
   }
   const dialog = kind && <div className="stack" role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>

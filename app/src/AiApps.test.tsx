@@ -19,6 +19,19 @@ let pending: ReturnType<typeof deferred>[];
 const show = () => render(<AiApps ready setupRequest={0} installing={false} chooserOpen={false} onClients={() => {}} onDisclosure={() => {}} />);
 const tests = () => screen.getAllByRole("button",{name:"Test the connection"});
 const line = () => screen.queryByRole("status")?.textContent;
+it.each([false, true])("A7 Claude Done focuses eligible Connect, otherwise Test (chooser open: %s)", async chooserOpen => {
+  invoke.mockImplementation(async (command) => {
+    if (command === "app_status") return {enabled:true,off:false,clients, recent:[]};
+    if (command === "app_disclosure") return {version:"current",strings:["Connect", "Disclosure", "Removal", "Grant access"]};
+    if (command === "app_connect_claude") return {client_id:a.client_id,bundle:"bundle.mcpb",opened:"reveal"};
+  });
+  const {rerender} = render(<AiApps ready setupRequest={0} installing={false} chooserOpen={chooserOpen} onClients={() => {}} onDisclosure={() => {}} />);
+  if (chooserOpen) rerender(<AiApps ready setupRequest={1} installing={false} chooserOpen={chooserOpen} onClients={() => {}} onDisclosure={() => {}} />);
+  else await userEvent.click(await screen.findByRole("button", {name:"Connect Claude Desktop"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Grant access"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Done"}));
+  expect(chooserOpen ? within(screen.getByRole("article", {name:"Claude Desktop"})).getByRole("button", {name:"Test the connection"}) : screen.getByRole("button", {name:"Connect Claude Desktop"})).toHaveFocus();
+});
 async function finish(index: number, connected: boolean) { await act(async () => pending[index].resolve({connected})); }
 beforeEach(() => {
   clients = [{...a},{...b}]; pending = [deferred(), deferred(), deferred()]; let call = 0;

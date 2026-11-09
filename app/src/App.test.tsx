@@ -1675,7 +1675,7 @@ it.each(["local", "setup cancel", "setup error", "consent_required"])("A7 cloud 
 });
 
 it.each([[true,false], [false,true], [true,true], [false,false]])("A7 empty-library privacy (API enabled=%s, Claude connected=%s)", async (api, claude) => {
-  cloudInvoke.mockResolvedValue({...apiReady,default:api ? "api_key" : null,api_key:{...apiReady.api_key,enabled:api}});
+  cloudInvoke.mockResolvedValue({...apiReady,default:api ? "api_key" : null,api_key:{...apiReady.api_key,enabled:api,key_present:api}});
   appInvoke.mockResolvedValue(appStatus(claude ? [{...connectedApp,app:"claude_desktop",name:"Claude Desktop"}] : []));
   render(<App />);
   await screen.findByRole("complementary", {name:"How should vectorAIz write answers?"}).catch(() => {});
@@ -1740,7 +1740,11 @@ it("A7 attributes a cloud error finishing during indexing to Ask, then an index 
   const asking = deferred();
   const indexing = deferred();
   cloudInvoke.mockResolvedValue(apiReady);
-  invoke.mockImplementation(async command => command === "pipeline_ask" ? asking.promise : command === "pipeline_index" ? indexing.promise : {available:false});
+  let progress!: {onmessage: (value: unknown) => void};
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "pipeline_index") {progress = args.progress; return indexing.promise;}
+    return command === "pipeline_ask" ? asking.promise : {available:false};
+  });
   render(<App />);
   await userEvent.click(await screen.findByRole("button", {name:"Ask"}));
   await userEvent.click(screen.getByRole("link", {name:"Library"}));
@@ -1750,8 +1754,62 @@ it("A7 attributes a cloud error finishing during indexing to Ask, then an index 
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("link", {name:"Ask"}));
   expect(screen.getByRole("alert")).toHaveTextContent("Cloud unavailable");
+  await act(async () => progress.onmessage({completed:1,failed:0,skipped:0,total:2,path:"fixture.txt"}));
+  expect(screen.getByRole("alert")).toHaveTextContent("Cloud unavailable");
+  expect(screen.queryByText(/1\/2 · 1 indexed/)).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("link", {name:"Library"}));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("1/2 · 1 indexed");
+  await userEvent.click(screen.getByRole("link", {name:"Ask"}));
   await act(async () => indexing.resolve(Promise.reject("Index unavailable")));
+  expect(screen.getByRole("alert")).toHaveTextContent("Cloud unavailable");
   expect(screen.queryByText(/Index unavailable/)).not.toBeInTheDocument();
   await userEvent.click(screen.getByRole("link", {name:"Library"}));
-  expect(within(screen.getByRole("region", {name:"Folders"})).getByRole("alert")).toHaveTextContent("Re-index did not finish: Index unavailable");
+  expect(within(screen.getByRole("region", {name:"Folders"})).getByRole("alert")).toHaveTextContent("Re-index did not finish: 1 indexed, 0 skipped, 0 failed, 2 total; Index unavailable");
+});
+
+it.each(["chooser", "cloud recovery", "automatic consent recovery"])("A7 reopens active API setup from Ask via %s", async origin => {
+  const fresh = {...apiReady,default:null,api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false};
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure"
+    ? {version:"current",strings:["Title", "Transfer", "Billing", "Removal", "I understand"]}
+    : origin === "chooser" ? fresh : apiReady);
+  invoke.mockImplementation(async command => command === "pipeline_ask"
+    ? {kind:"cloud_error",reason:origin === "automatic consent recovery" ? "consent_required" : "quota",message:"Cloud unavailable"}
+    : {available:false});
+  render(<App />);
+  if (origin !== "chooser") await userEvent.click(await screen.findByRole("button", {name:"Ask"}));
+  const trigger = () => screen.getByRole("button", {name:origin === "chooser" ? "Set up" : "Use your Anthropic or OpenAI API key"});
+  if (origin !== "automatic consent recovery") await userEvent.click(await screen.findByRole("button", {name:origin === "chooser" ? "Set up" : "Use your Anthropic or OpenAI API key"}));
+  expect(await screen.findByLabelText("Provider")).toHaveFocus();
+  await userEvent.click(screen.getByRole("link", {name:"Ask"}));
+  await userEvent.click(trigger());
+  expect(screen.getByRole("link", {name:"Settings"})).toHaveAttribute("aria-current", "page");
+  const answers = screen.getByRole("region", {name:"Answers"});
+  expect(within(answers).getByRole("dialog")).toBeVisible();
+  expect(screen.getByLabelText("Provider")).toHaveFocus();
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  expect(trigger()).toHaveFocus();
+});
+
+it.each(["stored disabled key", "credential cleanup", "non-revoked app", "revoked app", "fresh"])("A7 first-run privacy respects %s", async state => {
+  cloudInvoke.mockResolvedValue({...apiReady,default:null,api_key:{...apiReady.api_key,enabled:false,key_present:state === "stored disabled key"},cleanup_pending:state === "credential cleanup"});
+  appInvoke.mockResolvedValue(appStatus(state.includes("app") ? [{...connectedApp,revoked:state === "revoked app"}] : []));
+  render(<App />);
+  await screen.findByRole("complementary", {name:"How should vectorAIz write answers?"});
+  await waitFor(() => expect(appInvoke).toHaveBeenCalledWith("app_status", undefined));
+  expect(!!screen.queryByText(/Everything stays on this computer/)).toBe(state === "fresh" || state === "revoked app");
+});
+
+it("A7 no_answer keeps the Ask model navigation and only acquisition offers in Settings", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},offer:[answerTier]});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Ask"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Add answer model"}));
+  expect(screen.getByRole("link", {name:"Settings"})).toHaveAttribute("aria-current", "page");
+  expect(screen.queryByRole("button", {name:"Add answer model"})).not.toBeInTheDocument();
+  const offers = screen.getAllByRole("button", {name:/^Add answer model · /});
+  expect(offers).toHaveLength(1);
+  expect(offers[0]).toHaveFocus();
+  expect(screen.getByRole("region", {name:"Models"})).toContainElement(offers[0]);
 });

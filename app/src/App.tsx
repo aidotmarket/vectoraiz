@@ -96,7 +96,6 @@ export default function App() {
   const focusTarget = useRef<string | undefined>(undefined);
   const setupOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-api"});
   const claudeOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-claude"});
-  const lastOperation = useRef<"index" | "search" | "ask">("search");
   function navigate(next: View, target?: string) { focusTarget.current = target; setView(next); }
   // Keep the request until an asynchronously rendered target is available.
   useLayoutEffect(() => {
@@ -145,6 +144,8 @@ export default function App() {
   const [folder, setFolder] = useState("");
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
   const [progress, setProgress] = useState("");
+  const [indexError, setIndexError] = useState("");
+  const [indexProgress, setIndexProgress] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
   const [appClients, setAppClients] = useState<AppClient[]>();
   const [claudeDisclosure, setClaudeDisclosure] = useState(false);
@@ -245,32 +246,28 @@ export default function App() {
     }
   }
   async function indexFolder() {
-    lastOperation.current = "index";
-    setIndexing(true); setRunning(true); setError(""); setProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
+    setIndexing(true); setRunning(true); setIndexError(""); setIndexProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
     let active = true;
     let receivedProgress = false;
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { lastOperation.current = "index"; receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
+    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) {
-      lastOperation.current = "index";
       const detail = String(cause);
-      setError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
+      setIndexError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
         `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
-      setProgress("");
+      setIndexProgress("");
     }
     finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
-    lastOperation.current = "search";
     setRunning(true); setError(""); setProgress("Searching…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); }
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
-    catch (cause) { lastOperation.current = "search"; setError(String(cause)); setProgress(""); }
+    catch (cause) { setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
-    lastOperation.current = "ask";
     if ([...query].length > 2000) { setError(M2_COPY.limit); return; }
     const cloudAsk = cloud?.default === "api_key";
     const generation = ++answerGeneration.current;
@@ -292,9 +289,9 @@ export default function App() {
       if (generation !== answerGeneration.current) return;
       setAskState(result.kind);
       if (result.kind === "answer") { setAnswer(result.text ?? ""); setCitations(result.citations ?? []); setAnsweredBy(result.answered_by ?? "local"); }
-      else { setAnswer(""); setCitations([]); if (result.message) {lastOperation.current = "ask"; setError(result.message);} }
+      else { setAnswer(""); setCitations([]); if (result.message) setError(result.message); }
       if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false, true);
-    } catch (cause) { if (generation === answerGeneration.current) {lastOperation.current = "ask"; setAnswer(""); setCitations([]); setError(String(cause));} }
+    } catch (cause) { if (generation === answerGeneration.current) {setAnswer(""); setCitations([]); setError(String(cause));} }
     finally { active = false; if (generation === answerGeneration.current) {answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); if (!cloudAsk) setRunning(false); setProgress("");} }
   }
   async function cancelAnswer() {
@@ -305,11 +302,11 @@ export default function App() {
   async function refreshCloud() { const next = await invoke<CloudStatus>("cloud_status"); if (next) setCloud(next); return next; }
   useEffect(() => { void refreshCloud().catch(cause => setCloudMessage(String(cause))); }, []);
   async function openSetup(p: Provider = "anthropic", replace = false, fromRecovery = false) {
-    if (!setupActive.current) {
+    if (!setupActive.current || view === "Ask") {
       const active = document.activeElement as HTMLElement | null;
       setupOrigin.current = {view, id: view === "Ask" ? ((fromRecovery || askState === "cloud_error") ? "cloud-recovery" : "chooser-api") : active?.id || "api-setup"};
-      navigate("Settings", "#provider");
     }
+    navigate("Settings", "#provider");
     const generation = ++setupGeneration.current;
     setDisclosure(undefined); setSetup(true); setupActive.current = true; setProvider(p); setKey(""); setCloudMessage("");
     setConfirmed(replace || (cloud?.consent_provider === p && !!cloud.consent_version_current));
@@ -471,7 +468,7 @@ export default function App() {
   const chooser = chooserVisible ? (<aside className="chooser stack" aria-label={M2_COPY.chooser}>
       <h2>{M2_COPY.chooser}</h2><div className="choices"><div className="choice stack"><h3>{M2_COPY.local}</h3>
       {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
-      {(models.answer?.state === "ready" ? <button id="chooser-local" className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={addAnswerModel}>{M1_COPY.add}</button>)}
+      {(models.answer?.state === "ready" ? <button id="chooser-local" className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : (view === "Ask" || askState !== "no_answer") && <button className={buttonStyle} disabled={transferBusy || installing} onClick={addAnswerModel}>{M1_COPY.add}</button>)}
       </div><div className="choice stack"><h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
       <button id="chooser-api" className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
       </div><div className="choice stack"><h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && !(appClients ?? []).some(c => !c.revoked && c.app === "claude_desktop") && <button className={buttonStyle} id="chooser-claude" onClick={startClaude}>Connect Claude Desktop</button>}
@@ -511,10 +508,8 @@ export default function App() {
             {(cloud?.default || !(appClients ?? []).some(c => !c.revoked)) && <button className="button primary" disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}
             {cloud?.default && <span className="chip">{cloud.default === "local" ? M2_COPY.answered.local : M2_COPY.answered[cloud.api_key.provider ?? "anthropic"]}</span>}
           </div>
-          {lastOperation.current !== "index" && <>
-            {error && <p role="alert">{error}</p>}
-            <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
-          </>}
+          {error && <p role="alert">{error}</p>}
+          <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
           {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
           {askState === "cloud_error" && <div className="actions">{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button id="cloud-recovery" className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
           {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) void indexFolder();}}>Re-index</button></div>}
@@ -527,7 +522,7 @@ export default function App() {
         </article>}
         {hits.length > 0 && <section className="card stack"><h2>Matching passages</h2><ol className="stack">{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol></section>}
         {models && !models.ready && <div className="card stack"><p>{M1_COPY.searchNeeded}</p><div className="actions"><button className="button primary" disabled={transferBusy || installing} onClick={downloadSearch}>{M1_COPY.downloadSearch(models.files[0]?.size ?? 0)}</button><button className={buttonStyle} disabled={transferBusy || installing} onClick={importModels}>Import from a folder</button></div></div>}
-        {models?.ready && !models.last_indexed_folder && cloud && appClients && !cloud.api_key.enabled && !(appClients ?? []).some(c => !c.revoked) && <p>{M1_COPY.firstRun}</p>}
+        {models?.ready && !models.last_indexed_folder && cloud && appClients && !cloud.api_key.enabled && !cloud.api_key.key_present && !cloud.cleanup_pending && !appClients.some(c => !c.revoked) && <p>{M1_COPY.firstRun}</p>}
         {chooser}
       </section>}
       {view === "Library" && <section className="view stack" aria-label="Library"><h1>Library</h1>
@@ -536,8 +531,8 @@ export default function App() {
           {models?.last_indexed_folder && <p>{models.last_indexed_folder}</p>}
           <label>Folder <input id="library-folder" placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
           <div className="actions"><button className="button primary" disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>{indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}</div>
-          <div id="index-feedback" tabIndex={-1} role="status" aria-live="polite">{lastOperation.current === "index" && progress && <p>{progress}</p>}</div>
-          {lastOperation.current === "index" && error && <p role="alert">{error}</p>}
+          <div id="index-feedback" tabIndex={-1} role="status" aria-live="polite">{indexProgress && <p>{indexProgress}</p>}</div>
+          {indexError && <p role="alert">{indexError}</p>}
         </section>
       </section>}
       <section className="view" hidden={view !== "AI apps"} aria-label="AI apps">
