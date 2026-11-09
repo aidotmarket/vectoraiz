@@ -1,1 +1,76 @@
+@import "@fontsource/inter/400.css";
+@import "@fontsource/inter/600.css";
 @import "tailwindcss";
+
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  font-size: 14px;
+  color: #0f172a;
+  background: #f6f7f9;
+  font-synthesis: none;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+h1 { font-size: 26px; font-weight: 600; line-height: 1.3; }
+h2, h3 { font-size: 16px; font-weight: 600; }
+p, li, label { line-height: 1.6; }
+small, .muted { color: #475569; }
+button, input, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: default; opacity: .5; }
+:focus-visible, [tabindex="-1"]:focus { outline: 2px solid #2563eb; outline-offset: 3px; }
+.app-shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 100vh; }
+.sidebar { padding: 28px 16px 20px; border-right: 1px solid #e5e7eb; background: white; display: flex; flex-direction: column; gap: 32px; }
+.wordmark { padding: 0 12px; font-size: 23px; font-weight: 600; letter-spacing: -.8px; }
+.wordmark span { color: #2563eb; }
+.sidebar nav { display: grid; gap: 8px; }
+.sidebar nav a { display: flex; align-items: center; gap: 12px; min-height: 44px; padding: 10px 12px; border-radius: 10px; text-align: left; color: #475569; }
+.sidebar nav a[aria-current] { color: #2563eb; background: #eff6ff; font-weight: 600; }
+.sidebar svg { width: 20px; height: 20px; }
+.sidebar footer { margin-top: auto; padding: 0 12px; color: #475569; font-size: 12px; }
+.content { min-width: 0; padding: 32px; }
+.view { max-width: 1080px; margin: auto; }
+.view > h1, .view > header { margin-bottom: 12px; }
+.stack { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
+.card, .choice, .source-card { background: white; border: 1px solid #e5e7eb; border-radius: 14px; padding: 22px; min-width: 0; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.button { min-height: 40px; padding: 9px 16px; border-radius: 10px; border: 1px solid #c4cbd6; background: white; color: #0f172a; font-weight: 600; width: fit-content; max-width: 100%; }
+.button:hover:enabled { background: #f6f7f9; }
+.button.primary { background: #2563eb; border-color: #2563eb; color: white; }
+.button.primary:hover:enabled { background: #1d4ed8; }
+label:not(.toggle) { display: flex; flex-direction: column; gap: 6px; }
+input:not([type="checkbox"]), select { background: white; border: 1px solid #c4cbd6; border-radius: 10px; min-height: 42px; width: 100%; padding: 8px 12px; color: #0f172a; }
+.toggle { display: flex; align-items: center; gap: 8px; }
+input[type="checkbox"] { accent-color: #2563eb; }
+.choices { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.choice { padding: 16px; }
+.choice p { color: #475569; }
+.choice .button { margin-top: auto; }
+.chip { display: inline-block; border-radius: 20px; background: #eff6ff; color: #2563eb; padding: 5px 10px; font-size: 12px; width: fit-content; }
+.success { background: #ecfdf5; color: #166534; }
+.warning { background: #fff7ed; color: #7c2d12; }
+.notice { padding: 16px; border-radius: 10px; }
+[role="alert"] { color: #b91c1c; }
+.update-banner { margin: 0 auto 24px; max-width: 1080px; background: #eff6ff; }
+.library-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.source-cards { display: flex; flex-wrap: wrap; gap: 12px; }
+.source-card { padding: 12px 16px; color: #475569; }
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; text-align: left; font-size: 12px; color: #475569; }
+th { font-weight: 600; color: #0f172a; }
+td, th { padding: 12px 10px; border-bottom: 1px solid #e5e7eb; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+p { overflow-wrap: anywhere; }
+summary { cursor: pointer; font-weight: 600; }
+details[open] > :not(summary) { margin-top: 16px; }
+.modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(480px, 90vw); box-shadow: 0 16px 64px #0f172a33; z-index: 10; }
+@media (max-width: 719px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
+  .sidebar { border-right: 0; border-bottom: 1px solid #e5e7eb; gap: 16px; padding: 16px; }
+  .sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .sidebar nav a { justify-content: center; flex-wrap: wrap; gap: 6px; padding: 8px; }
+  .sidebar footer { margin-top: 0; }
+  .content { padding: 20px 16px; }
+  .choices { grid-template-columns: minmax(0, 1fr); }
+}

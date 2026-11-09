@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { AnswerText } from "./AnswerText";
 import { AiApps, M3_COPY, type AppClient } from "./AiApps";
 import { Channel, invoke } from "@tauri-apps/api/core";
@@ -84,7 +84,42 @@ interface UpdateCheck { available: boolean; version?: string }
 interface UpdateProgress { stage: "downloading" | "installing"; downloaded?: number; total?: number }
 interface InstallFailure { detail: string; currentVersionUnchanged?: boolean; checkAgain?: boolean }
 
+type View = "Ask" | "Library" | "AI apps" | "Settings";
+
+function NavIcon({view}: {view: View}) {
+  const paths = {Ask: "M4 5h16v11H9l-5 4V5Z", Library: "M4 4h6v16H4zM14 4h6v16h-6z", "AI apps": "M8 3h8v5h5v8h-5v5H8v-5H3V8h5z", Settings: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M5 19l2-2M17 7l2-2"};
+  return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6"><path d={paths[view]} /></svg>;
+}
+
 export default function App() {
+  const [view, setView] = useState<View>("Ask");
+  const focusTarget = useRef<string | undefined>(undefined);
+  const setupOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-api"});
+  const claudeOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-claude"});
+  const lastOperation = useRef<"index" | "search" | "ask">("search");
+  function navigate(next: View, target?: string) { focusTarget.current = target; setView(next); }
+  // Keep the request until an asynchronously rendered target is available.
+  useLayoutEffect(() => {
+    if (!focusTarget.current) return;
+    const element = document.querySelector<HTMLElement>(focusTarget.current);
+    if (element && !element.closest("[hidden]") && !element.matches(":disabled")) {
+      element.focus(); element.scrollIntoView?.({block: "nearest"}); focusTarget.current = undefined;
+    }
+  });
+  function addAnswerModel() {
+    setShowSmaller(true); setAskState("no_answer");
+    navigate("Settings", "[data-answer-tier] button:not(:disabled)");
+  }
+  function startClaude() {
+    claudeOrigin.current = {view, id: "chooser-claude"};
+    navigate("AI apps"); setAppSetup(n => n + 1);
+  }
+  function finishClaude(connected: boolean) {
+    if (!connected) navigate(claudeOrigin.current.view, `#${claudeOrigin.current.id}`);
+  }
+  function importModels() { setShowImport(true); navigate("Settings", "#model-folder"); }
+  function downloadSearch() { navigate("Settings", "#search-model-cancel, #model-feedback"); void acquireModels("download"); }
+
   const [result, setResult] = useState<SelfTestResult>();
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
@@ -111,7 +146,7 @@ export default function App() {
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
   const [progress, setProgress] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
-  const [appClients, setAppClients] = useState<AppClient[]>([]);
+  const [appClients, setAppClients] = useState<AppClient[]>();
   const [claudeDisclosure, setClaudeDisclosure] = useState(false);
   const [appSetup, setAppSetup] = useState(0);
   const [answer, setAnswer] = useState("");
@@ -136,7 +171,7 @@ export default function App() {
   const modelsRequest = useRef(0);
   const [selfTestError, setSelfTestError] = useState("");
   const windows = /Windows/i.test(navigator.userAgent);
-  const buttonStyle = "rounded bg-teal-300 px-5 py-3 font-medium text-slate-950 disabled:opacity-50";
+  const buttonStyle = "button";
   const startupChecked = useRef(false);
   const updateBusy = useRef(false);
   const updateDismissed = useRef(false);
@@ -210,14 +245,16 @@ export default function App() {
     }
   }
   async function indexFolder() {
+    lastOperation.current = "index";
     setIndexing(true); setRunning(true); setError(""); setProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
     let active = true;
     let receivedProgress = false;
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
+    channel.onmessage = p => { if (active) { lastOperation.current = "index"; receivedProgress = true; counts = p; setProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
     catch (cause) {
+      lastOperation.current = "index";
       const detail = String(cause);
       setError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
         `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
@@ -226,12 +263,14 @@ export default function App() {
     finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
+    lastOperation.current = "search";
     setRunning(true); setError(""); setProgress("Searching…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); }
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
-    catch (cause) { setError(String(cause)); setProgress(""); }
+    catch (cause) { lastOperation.current = "search"; setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
+    lastOperation.current = "ask";
     if ([...query].length > 2000) { setError(M2_COPY.limit); return; }
     const cloudAsk = cloud?.default === "api_key";
     const generation = ++answerGeneration.current;
@@ -253,9 +292,9 @@ export default function App() {
       if (generation !== answerGeneration.current) return;
       setAskState(result.kind);
       if (result.kind === "answer") { setAnswer(result.text ?? ""); setCitations(result.citations ?? []); setAnsweredBy(result.answered_by ?? "local"); }
-      else { setAnswer(""); setCitations([]); if (result.message) setError(result.message); }
-      if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false);
-    } catch (cause) { if (generation === answerGeneration.current) {setAnswer(""); setCitations([]); setError(String(cause));} }
+      else { setAnswer(""); setCitations([]); if (result.message) {lastOperation.current = "ask"; setError(result.message);} }
+      if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false, true);
+    } catch (cause) { if (generation === answerGeneration.current) {lastOperation.current = "ask"; setAnswer(""); setCitations([]); setError(String(cause));} }
     finally { active = false; if (generation === answerGeneration.current) {answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); if (!cloudAsk) setRunning(false); setProgress("");} }
   }
   async function cancelAnswer() {
@@ -265,7 +304,12 @@ export default function App() {
   }
   async function refreshCloud() { const next = await invoke<CloudStatus>("cloud_status"); if (next) setCloud(next); return next; }
   useEffect(() => { void refreshCloud().catch(cause => setCloudMessage(String(cause))); }, []);
-  async function openSetup(p: Provider = "anthropic", replace = false) {
+  async function openSetup(p: Provider = "anthropic", replace = false, fromRecovery = false) {
+    if (!setupActive.current) {
+      const active = document.activeElement as HTMLElement | null;
+      setupOrigin.current = {view, id: view === "Ask" ? ((fromRecovery || askState === "cloud_error") ? "cloud-recovery" : "chooser-api") : active?.id || "api-setup"};
+      navigate("Settings", "#provider");
+    }
     const generation = ++setupGeneration.current;
     setDisclosure(undefined); setSetup(true); setupActive.current = true; setProvider(p); setKey(""); setCloudMessage("");
     setConfirmed(replace || (cloud?.consent_provider === p && !!cloud.consent_version_current));
@@ -282,7 +326,7 @@ export default function App() {
       const result = await invoke<CloudStatus & {kind?: string; disclosure?: Disclosure}>("api_key_confirm", {provider, disclosureVersion: disclosure.version});
       if (generation !== setupGeneration.current) return;
       if (result.kind === "cloud_error") { setDisclosure(result.disclosure); setConfirmed(false); return; }
-      setCloud(result); setConfirmed(true);
+      setCloud(result); setConfirmed(true); focusTarget.current = "#api-key";
     } catch (cause) { setCloudMessage(String(cause)); }
   }
   async function saveKey() {
@@ -294,7 +338,7 @@ export default function App() {
         if (setupActive.current) {setCloudMessage(result.message ?? result.reason ?? ""); if (result.reason === "consent_required") setConfirmed(false);}
       } else {
         if (answerActive.current && cloud?.default === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress(""); }
-        setCloud(result); setCloudMessage([M2_COPY.stored, result.answers_switched ? M2_COPY.answersNow(providerName(provider)) : ""].filter(Boolean).join(" ")); setSetup(false); setupActive.current = false;}
+        setCloud(result); setCloudMessage([M2_COPY.stored, result.answers_switched ? M2_COPY.answersNow(providerName(provider)) : ""].filter(Boolean).join(" ")); setSetup(false); setupActive.current = false; focusTarget.current = "#provider-summary";}
       await refreshCloud();
     } catch (cause) { if (setupActive.current) setCloudMessage(String(cause)); }
     finally {setKey(""); setKeyBusy(false);}
@@ -303,7 +347,7 @@ export default function App() {
     ++setupGeneration.current; setupActive.current = false; setSetup(false); setKey("");
     try { if (keyBusy) await invoke("models_cancel", {kind: "cloud_setup"}); }
     catch (cause) { if (String(cause) !== "already finished") setCloudMessage(String(cause)); }
-    finally { await refreshCloud(); }
+    finally { await refreshCloud(); navigate(setupOrigin.current.view, `#${setupOrigin.current.id}`); }
   }
   async function cloudAction(command: "api_key_stop" | "api_key_cleanup_retry") {
     if (command === "api_key_stop" && answerActive.current && activeAnswerPath.current === "api_key") { ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); }
@@ -312,7 +356,7 @@ export default function App() {
     catch (cause) {setCloudMessage(String(cause)); await refreshCloud();}
     finally { setStopping(false); }
   }
-  async function choosePath(path: "local" | "api_key") { try {setCloud(await invoke<CloudStatus>("answer_path_set", {path})); setAskState("");} catch (cause) { if (path === "api_key" && String(cause) === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider); else setCloudMessage(String(cause));} }
+  async function choosePath(path: "local" | "api_key") { const initiator = document.activeElement as HTMLElement | null; try {setCloud(await invoke<CloudStatus>("answer_path_set", {path})); setAskState(""); focusTarget.current = view === "Ask" ? "#question" : initiator?.id ? `#${initiator.id}, #provider-summary` : "#provider-summary";} catch (cause) { if (path === "api_key" && String(cause) === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider); else {setCloudMessage(String(cause)); navigate("Settings", "#provider-summary");}} }
   async function runSelfTest() {
     setRunning(true); setSelfTestRunning(true);
     setResult(undefined);
@@ -423,18 +467,30 @@ export default function App() {
     try { await invoke("models_cancel", { kind }); }
     catch (cause) { await refreshAfterModelError(cause); }
   }
-  return <main className="min-h-screen bg-slate-950 p-10 text-slate-100">
-    <h1 className="text-3xl font-semibold">vectorAIz</h1>
-    <p className="mt-2 text-slate-300">Version {version} · Native pipeline spike</p>
-    <button className="mt-8 rounded bg-teal-300 px-5 py-3 font-medium text-slate-950 disabled:opacity-50" disabled={running || installing || modelBusy} onClick={runSelfTest}>
-      {selfTestRunning ? "Running…" : "Run self-test"}
-    </button>
-    <aside className="mt-6" aria-label="Updates" aria-live="polite">
-      <button className={buttonStyle} disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
-      {availableVersion && <div className="mt-3 rounded border border-teal-300 p-4">
+  const chooserVisible = !!models?.ready && (askState === "no_answer" || !!(cloud && !cloud.default));
+  const chooser = chooserVisible ? (<aside className="chooser stack" aria-label={M2_COPY.chooser}>
+      <h2>{M2_COPY.chooser}</h2><div className="choices"><div className="choice stack"><h3>{M2_COPY.local}</h3>
+      {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
+      {(models.answer?.state === "ready" ? <button id="chooser-local" className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={addAnswerModel}>{M1_COPY.add}</button>)}
+      </div><div className="choice stack"><h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
+      <button id="chooser-api" className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
+      </div><div className="choice stack"><h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && !(appClients ?? []).some(c => !c.revoked && c.app === "claude_desktop") && <button className={buttonStyle} id="chooser-claude" onClick={startClaude}>Connect Claude Desktop</button>}
+      </div></div>
+    </aside>) : null;
+  return <div className="app-shell">
+    <aside className="sidebar">
+      <div className="wordmark" aria-label="vectorAIz">vector<span>AI</span>z</div>
+      <nav aria-label="Main navigation">{(["Ask", "Library", "AI apps", "Settings"] as View[]).map(item =>
+        <a key={item} href={`#${item.toLowerCase().replace(" ", "-")}`} aria-current={view === item ? "page" : undefined} onClick={event => {event.preventDefault(); navigate(item);}}><NavIcon view={item} />{item}</a>
+      )}</nav>
+      <footer>Version {version}</footer>
+    </aside>
+    <main className="content">
+      <aside aria-label="Updates" aria-live="polite">
+      {availableVersion && <div className="update-banner card">
         <p>vectorAIz {availableVersion} is available</p>
-        <div className="mt-3 flex gap-6">
-          <button className={buttonStyle} disabled={running || modelBusy || checking || installing || installFailure?.checkAgain} onClick={installUpdate}>Install and restart</button>
+        <div className="actions">
+          <button className="button primary" disabled={running || modelBusy || checking || installing || installFailure?.checkAgain} onClick={installUpdate}>Install and restart</button>
           <button className={buttonStyle} disabled={installing} onClick={dismissUpdate}>Later</button>
         </div>
         {windows && <p className="mt-3">Windows will ask for administrator approval. If no prompt appears, click the shield in the taskbar.</p>}
@@ -445,35 +501,112 @@ export default function App() {
         </div>}
         {updateProgress && <p>{updateProgress}</p>}
       </div>}
-      {updateMessage && <p>{updateMessage}</p>}
-    </aside>
-    {(!models?.ready || importResults.length > 0) && <aside className="mt-6 grid gap-3" aria-label="Models">
+      </aside>
+      {view === "Ask" && <section className="view stack" aria-label="Ask your library">
+        <header><h1>Ask your library</h1>{models?.last_indexed_folder && <p className="muted library-summary" title={models.last_indexed_folder}>{models.last_indexed_folder}</p>}</header>
+        <div className="card stack">
+          <label>Question or search <input id="question" className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
+          <div className="actions">
+            <button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button>
+            {(cloud?.default || !(appClients ?? []).some(c => !c.revoked)) && <button className="button primary" disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}
+            {cloud?.default && <span className="chip">{cloud.default === "local" ? M2_COPY.answered.local : M2_COPY.answered[cloud.api_key.provider ?? "anthropic"]}</span>}
+          </div>
+          {lastOperation.current !== "index" && <>
+            {error && <p role="alert">{error}</p>}
+            <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
+          </>}
+          {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
+          {askState === "cloud_error" && <div className="actions">{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button id="cloud-recovery" className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
+          {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) void indexFolder();}}>Re-index</button></div>}
+          {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
+        </div>
+        {(answer || askState === "answer" || answerStreaming) && <article className="card stack">
+          {askState === "answer" && <p className="chip success">{M2_COPY.answered[answeredBy]}</p>}
+          <div aria-live="polite"><AnswerText text={answer} streaming={answerStreaming} /></div>
+          {citations.length > 0 && <><h2>Sources</h2><ol className="source-cards">{citations.map(citation => <li className="source-card" key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol></>}
+        </article>}
+        {hits.length > 0 && <section className="card stack"><h2>Matching passages</h2><ol className="stack">{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol></section>}
+        {models && !models.ready && <div className="card stack"><p>{M1_COPY.searchNeeded}</p><div className="actions"><button className="button primary" disabled={transferBusy || installing} onClick={downloadSearch}>{M1_COPY.downloadSearch(models.files[0]?.size ?? 0)}</button><button className={buttonStyle} disabled={transferBusy || installing} onClick={importModels}>Import from a folder</button></div></div>}
+        {models?.ready && !models.last_indexed_folder && cloud && appClients && !cloud.api_key.enabled && !(appClients ?? []).some(c => !c.revoked) && <p>{M1_COPY.firstRun}</p>}
+        {chooser}
+      </section>}
+      {view === "Library" && <section className="view stack" aria-label="Library"><h1>Library</h1>
+        {models?.needs_reindex && <div className="notice warning"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Re-index</button></div>}
+        <section className="card stack" aria-label="Folders"><h2>Folders</h2>
+          {models?.last_indexed_folder && <p>{models.last_indexed_folder}</p>}
+          <label>Folder <input id="library-folder" placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
+          <div className="actions"><button className="button primary" disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>{indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}</div>
+          <div id="index-feedback" tabIndex={-1} role="status" aria-live="polite">{lastOperation.current === "index" && progress && <p>{progress}</p>}</div>
+          {lastOperation.current === "index" && error && <p role="alert">{error}</p>}
+        </section>
+      </section>}
+      <section className="view" hidden={view !== "AI apps"} aria-label="AI apps">
+        <h1>AI apps</h1>
+        <AiApps chooserOpen={chooserVisible} onDisclosure={setClaudeDisclosure} installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} onSetupClose={finishClaude} />
+      </section>
+      {view === "Settings" && <section className="view stack" aria-label="Settings"><h1>Settings</h1>
+        <section id="answers" className="card stack" aria-label="Answers"><h2>Answers</h2>
+          {chooser}
+    {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select id="answer-path" aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
+    {models?.ready && <aside className="stack" aria-label={M2_COPY.settings}>
+      <h2>{M2_COPY.settings}</h2>
+      {cloud?.api_key.provider ? <>
+        <p id="provider-summary" tabIndex={-1}>{providerName(cloud.api_key.provider)}{cloud.api_key.key_last4 ? ` · ${M2_COPY.last4(cloud.api_key.key_last4)}` : ""}</p>
+        {cloud.consent_provider && cloud.consent_provider !== cloud.api_key.provider ? <>
+          <button id="api-setup" className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.consent_provider)}>{M2_COPY.finish(providerName(cloud.consent_provider))}</button>
+          <button id="api-cancel-change" className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.api_key.provider!)}>{M2_COPY.cancelChange}</button>
+        </> : <>
+          <button id="api-setup" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!, !!cloud.consent_current)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : cloud.api_key.enabled ? M2_COPY.addKey(providerName(cloud.api_key.provider)) : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
+          {cloud.api_key.enabled && <button className={buttonStyle} disabled={stopping} onClick={() => void cloudAction("api_key_stop")}>{M2_COPY.stop(providerName(cloud.api_key.provider))}</button>}
+        </>}
+        <button id="api-change" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button>
+      </> : <><p id="provider-summary" tabIndex={-1}>{M2_COPY.setup}</p>{!(askState === "no_answer" || (cloud && !cloud.default)) && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} id="api-setup" onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
+    {setup && <div className="stack" role="dialog" aria-label={M2_COPY.setup}>
+      <label>{M2_COPY.provider}<select id="provider" aria-label={M2_COPY.provider} value={provider} disabled={keyBusy} onChange={event => void openSetup(event.target.value as Provider)}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
+      {!confirmed ? <>
+        {disclosure?.strings.slice(0, 4).map((line, index) => index === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
+        {cloud?.api_key.provider && cloud.api_key.provider !== provider && <p>{M2_COPY.changeNote(providerName(cloud.api_key.provider))}</p>}
+        <button className={buttonStyle} disabled={!disclosure || keyBusy} onClick={() => void confirmKey()}>{disclosure?.strings[4]}</button>
+      </> : <>
+        <label>{M2_COPY.key}<input id="api-key" className="bg-white text-slate-950 p-2 w-full" type="password" autoComplete="off" value={key} disabled={keyBusy} onChange={event => setKey(event.target.value)} /></label>
+        {cloud?.api_key.key_present && <p>{M2_COPY.replaceNote}</p>}
+        <button className={buttonStyle} disabled={keyBusy || !key.trim()} onClick={() => void saveKey()}>{keyBusy ? M2_COPY.checking : M2_COPY.save}</button>
+      </>}
+      <button className={buttonStyle} onClick={() => void closeSetup()}>{M2_COPY.cancel}</button>
+    </div>}
+      {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
+      {stopping && <p role="status">{M2_COPY.stopping}</p>}
+      {cloudMessage && <p role="status">{cloudMessage}</p>}
+      {cloud?.cleanup_pending && cloud.message && cloud.message !== cloudMessage && <p role="status">{cloud.message}</p>}
+      {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
+    </aside>}
+
+        </section>
+        <section id="models" className="card stack" aria-label="Models"><h2>Models</h2>
+          {models?.ready && models.search && <p>{M1_COPY.searchModel(models.search.pin.size)} · {models.search.pin.name} · {models.search.pin.license} · Verified</p>}
+    {(!models?.ready || importResults.length > 0) && <aside className="stack">
       {!models && !modelError ? <p>Checking models…</p> : <>
-      <h2 className="text-xl font-semibold">Models</h2>
+
       <ul>{(models?.search ? [models.search.pin] : models?.files.slice(0, 1))?.map(file => <li key={file.file} className="mb-3">
         <p>{M1_COPY.searchModel(file.size)} · {file.name} · {file.license} · {downloadStates[file.file] ?? ((file.verified || (file.sha256 === models?.search?.pin.sha256 && models?.search?.verified)) ? "Verified" : "Needed")}</p>
-        <span className="text-teal-300">{file.source}</span>
+        <span className="muted">{file.source}</span>
       </li>)}</ul>
       <button className={buttonStyle} disabled={transferBusy || installing || !models} onClick={() => void acquireModels("download")}>{M1_COPY.downloadSearch(models?.files[0]?.size ?? 0)}</button>
-      <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setShowImport(true)}>Import from a folder</button>
-      {showImport && <>
-        <label>Model folder <input className="bg-white text-slate-950 p-2 w-full" placeholder="Absolute path to the model folder" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
+      {!models?.ready && <button className={buttonStyle} disabled={transferBusy || installing} onClick={importModels}>Import from a folder</button>}
+      {showImport && !models?.ready && <>
+        <label>Model folder <input id="model-folder" className="bg-white text-slate-950 p-2 w-full" placeholder="Absolute path to the model folder" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
         <button className={buttonStyle} disabled={transferBusy || installing || !importFolder.trim()} onClick={() => void acquireModels("import")}>Import models</button>
       </>}
-      {modelBusy && <button className={buttonStyle} onClick={() => void cancelModels()}>Cancel</button>}
-      <div aria-live="polite">
+      {modelBusy && !models?.ready && <button id="search-model-cancel" className={buttonStyle} onClick={() => void cancelModels()}>Cancel</button>}
+      <div id="model-feedback" tabIndex={-1} aria-live="polite">
         {modelProgress && <p>{modelProgress}</p>}
         {importResults.map(result => <p key={result.file}>{result.file}: {result.result}</p>)}
       </div>
       {(modelError || (importResults.length > 0 && !models?.ready)) && <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void acquireModels(retry)}>Retry</button>}
       </>}
     </aside>}
-    {modelError && <p>{modelError}</p>}
-    {modelMessage && <p>{modelMessage}</p>}
-    {models && !models.ready && <p className="mt-4">{M1_COPY.searchNeeded}</p>}
-    {models?.ready && !models.last_indexed_folder && <p className="mt-4">{M1_COPY.firstRun}</p>}
-    {models?.ready && <aside className="mt-6 grid gap-3" aria-label={M1_COPY.settings}>
-      <h2 className="text-xl">{M1_COPY.settings}</h2>
+    {models?.ready && <aside className="stack" aria-label={M1_COPY.settings}>
+      <h2>{M1_COPY.settings}</h2>
       {models.answer?.pin && <>
         <p>{models.answer.pin.name}</p>
         <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setAnswerOffers(undefined);setShowSmaller(value => !value);}}>{M1_COPY.smaller}</button>
@@ -484,9 +617,9 @@ export default function App() {
       {models.answer?.state === "ready" && models.answer.pin && !answerOffers?.some(t => t.pin.sha256 === models.answer?.pin?.sha256) && <div><p>{models.answer.pin.name}</p><button className={buttonStyle} disabled>{M1_COPY.inUse}</button></div>}
       {answerOffers && answerOffers.length > 0 && <>
         <h3>{M1_COPY.getAnswers}</h3><p>{M1_COPY.onComputer}</p>
-        {answerOffers.map(tier => <div key={tier.tier_index} data-answer-tier={tier.tier_index}>
+        {answerOffers.map(tier => <div className="choice stack" key={tier.tier_index} data-answer-tier={tier.tier_index}>
           <p>{tier.pin.name}</p><p>{M1_COPY.answerOffer(tier)}</p><p>{M1_COPY.diskNeeded(tier.pin.size)}</p><p>{M1_COPY.privacy}</p>
-          <button className={buttonStyle} disabled={transferBusy || installing || (models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256)} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{(models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256) ? M1_COPY.inUse : models.files.some(f => f.sha256 === tier.pin.sha256 && f.verified && (f.installed_bytes ?? 0) >= tier.pin.size) ? M1_COPY.switch(tier.pin.name) : `${M1_COPY.add} · ${size(tier.pin.size)}`}</button>
+          <button className="button primary" disabled={transferBusy || installing || (models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256)} onClick={() => void manageAnswer(models.answer?.pin ? "answer_switch" : "answer_add", {tierIndex: tier.tier_index})}>{(models.answer?.state === "ready" && tier.pin.sha256 === models.answer.pin?.sha256) ? M1_COPY.inUse : models.files.some(f => f.sha256 === tier.pin.sha256 && f.verified && (f.installed_bytes ?? 0) >= tier.pin.size) ? M1_COPY.switch(tier.pin.name) : `${M1_COPY.add} · ${size(tier.pin.size)}`}</button>
         </div>)}
       </>}
       {models.answer?.pin?.name === "qwen3.6-35b-a3b" && (models.ram_bytes ?? 0) >= 32 * 2**30 && (models.ram_bytes ?? 0) < 64 * 2**30 && <p>{M1_COPY.warning(models.ram_bytes ?? 0)}</p>}
@@ -499,86 +632,38 @@ export default function App() {
         <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setDeleteFile(file)}>{M1_COPY.delete}</button>
       </div>)}
       {showImport && importResults.length === 0 && <>
-        <label>Model folder <input className="bg-white text-slate-950 p-2 w-full" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
+        <label>Model folder <input id="model-folder" className="bg-white text-slate-950 p-2 w-full" value={importFolder} onChange={event => setImportFolder(event.target.value)} /></label>
         <button className={buttonStyle} disabled={transferBusy || installing || !importFolder.trim()} onClick={() => void acquireModels("import")}>Import models</button>
       </>}
-      {!showImport && <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => setShowImport(true)}>Import from a folder</button>}
+      {!showImport && <button className={buttonStyle} disabled={transferBusy || installing} onClick={importModels}>Import from a folder</button>}
     </aside>}
-    {models?.ready && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.settings}>
-      <h2>{M2_COPY.settings}</h2>
-      {cloud?.api_key.provider ? <>
-        <p>{providerName(cloud.api_key.provider)}{cloud.api_key.key_last4 ? ` · ${M2_COPY.last4(cloud.api_key.key_last4)}` : ""}</p>
-        {cloud.consent_provider && cloud.consent_provider !== cloud.api_key.provider ? <>
-          <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.consent_provider)}>{M2_COPY.finish(providerName(cloud.consent_provider))}</button>
-          <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.api_key.provider!)}>{M2_COPY.cancelChange}</button>
-        </> : <>
-          <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!, !!cloud.consent_current)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : cloud.api_key.enabled ? M2_COPY.addKey(providerName(cloud.api_key.provider)) : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
-          {cloud.api_key.enabled && <button className={buttonStyle} disabled={stopping} onClick={() => void cloudAction("api_key_stop")}>{M2_COPY.stop(providerName(cloud.api_key.provider))}</button>}
-        </>}
-        <button className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button>
-      </> : <><p>{M2_COPY.setup}</p>{!(askState === "no_answer" || (cloud && !cloud.default)) && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
-    {setup && <div role="dialog" aria-label={M2_COPY.setup}>
-      <label>{M2_COPY.provider}<select aria-label={M2_COPY.provider} value={provider} disabled={keyBusy} onChange={event => void openSetup(event.target.value as Provider)}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
-      {!confirmed ? <>
-        {disclosure?.strings.slice(0, 4).map((line, index) => index === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
-        {cloud?.api_key.provider && cloud.api_key.provider !== provider && <p>{M2_COPY.changeNote(providerName(cloud.api_key.provider))}</p>}
-        <button className={buttonStyle} disabled={!disclosure || keyBusy} onClick={() => void confirmKey()}>{disclosure?.strings[4]}</button>
-      </> : <>
-        <label>{M2_COPY.key}<input className="bg-white text-slate-950 p-2 w-full" type="password" autoComplete="off" value={key} disabled={keyBusy} onChange={event => setKey(event.target.value)} /></label>
-        {cloud?.api_key.key_present && <p>{M2_COPY.replaceNote}</p>}
-        <button className={buttonStyle} disabled={keyBusy || !key.trim()} onClick={() => void saveKey()}>{keyBusy ? M2_COPY.checking : M2_COPY.save}</button>
-      </>}
-      <button className={buttonStyle} onClick={() => void closeSetup()}>{M2_COPY.cancel}</button>
-    </div>}
-      {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
-      {stopping && <p role="status">{M2_COPY.stopping}</p>}
-      {cloudMessage && <p role="status">{cloudMessage}</p>}
-      {cloud?.cleanup_pending && cloud.message && cloud.message !== cloudMessage && <p role="status">{cloud.message}</p>}
-      {cloud?.cleanup_pending && <button className={buttonStyle} onClick={() => void cloudAction("api_key_cleanup_retry")}>{M2_COPY.retry}</button>}
-    </aside>}
-    <AiApps chooserOpen={!!models?.ready && (askState === "no_answer" || !!(cloud && !cloud.default))} onDisclosure={setClaudeDisclosure} installing={installing} ready={!!models?.ready} setupRequest={appSetup} onClients={setAppClients} />
-    {appClients.filter(c => !c.revoked).map(c => <p key={c.client_id}>{c.consent_current ? c.last_call ? M3_COPY.connected(c.name) : `Finish setting up vectorAIz in ${c.name}, then ask it to search your vectorAIz library.` : M3_COPY.stale(c.name)}</p>)}
-    {models?.ready && (askState === "no_answer" || (cloud && !cloud.default)) && <aside className="mt-6 grid gap-3" aria-label={M2_COPY.chooser}>
-      <h2>{M2_COPY.chooser}</h2><h3>{M2_COPY.local}</h3>
-      {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
-      {askState !== "no_answer" && (models.answer?.state === "ready" ? <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setShowSmaller(true);setAskState("no_answer");}}>{M1_COPY.add}</button>)}
-      <h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && !appClients.some(c => !c.revoked && c.app === "claude_desktop") && <button className={buttonStyle} onClick={() => setAppSetup(n => n + 1)}>Connect Claude Desktop</button>}
-      <h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
-      <button className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
-    </aside>}
-    {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
-    <aside className="mt-6" aria-label={M2_COPY.network}><h2>{M2_COPY.network}</h2><p>{M2_COPY.downloads}</p><p>{M2_COPY.updates}</p>
+
+          {modelError && <p>{modelError}</p>}{modelMessage && <p>{modelMessage}</p>}
+        </section>
+        <section className="card stack" aria-label="Updates"><h2>Updates</h2><p>Version {version}</p>
+          <button className="button primary" disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
+          {updateMessage && <p>{updateMessage}</p>}
+        </section>
+        <details className="card stack"><summary>Network activity and diagnostics</summary>
+    <aside className="stack" aria-label={M2_COPY.network}><h2>{M2_COPY.network}</h2><p>{M2_COPY.downloads}</p><p>{M2_COPY.updates}</p>
       {cloud?.api_key.provider && <p>{M2_COPY.destinations[cloud.api_key.provider]} · {cloud.api_key.enabled && cloud.consent_current ? M2_COPY.on : M2_COPY.off}</p>}
       <p>{M2_COPY.proxy}</p>
       <p>{M3_COPY.network}</p>
     </aside>
-    {deleteFile && <div role="dialog" aria-label={M1_COPY.deleteTitle}>
+
+          <button className={buttonStyle} disabled={running || installing || modelBusy} onClick={runSelfTest}>{selfTestRunning ? "Running…" : "Run self-test"}</button>
+          {selfTestError && <p>{selfTestError}</p>}
+          <div role="status" aria-live="polite">{result && <pre>{JSON.stringify(result, null, 2)}</pre>}</div>
+        </details>
+      </section>}
+    {deleteFile && <div className="modal card stack" role="dialog" aria-label={M1_COPY.deleteTitle}>
       <p>{M1_COPY.deleteTitle}</p><p>{M1_COPY.freed((deleteFile.installed_bytes ?? 0) + (deleteFile.partial_bytes ?? 0))}</p>
       {!!deleteFile.partial_bytes && <p>{M1_COPY.partial}</p>}
       {deleteWaiting && <p>{indexing ? M1_COPY.waitingIndex : M1_COPY.waitingSearch}</p>}
       <button className={buttonStyle} disabled={deleteWaiting} onClick={() => {setDeleteWaiting(true); void manageAnswer("delete_unused_model", {sha256: deleteFile.sha256});}}>{M1_COPY.delete}</button>
       <button className={buttonStyle} onClick={() => { if (deleteWaiting) void cancelModels(); else setDeleteFile(undefined); }}>{M1_COPY.cancel}</button>
     </div>}
-    {selfTestError && <p>{selfTestError}</p>}
-    <div role="status" className="mt-6" aria-live="polite">
-      {progress && <p>{progress}</p>}
-      {result && <pre>{JSON.stringify(result, null, 2)}</pre>}
-    </div>
-    <section className="mt-8 grid gap-3">
-      {models?.needs_reindex && <p role="alert">Your library needs re-indexing for the new search model.</p>}
-      {error && <p role="alert">{error}</p>}
-      <label>Folder <input placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
-      <button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>{models?.needs_reindex ? "Re-index" : "Index folder"}</button>
-      {indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}
-      <label>Question or search <input className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
-      <div className="flex gap-6"><button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button>{(cloud?.default || !appClients.some(c => !c.revoked)) && <button className={buttonStyle} disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}</div>
-      {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
-      {askState === "cloud_error" && <div>{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
-      <ol>{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol>
-      {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
-      {askState === "answer" && <p>{M2_COPY.answered[answeredBy]}</p>}
-      <div aria-live="polite"><AnswerText text={answer} streaming={answerStreaming} /></div>
-      <ol>{citations.map(citation => <li key={citation.number}>[{citation.number}] {citation.file_name || `Document ${citation.doc_id.slice(0, 8)}`} · Page {citation.page}</li>)}</ol>
-    </section>
-  </main>;
+
+    </main>
+  </div>;
 }

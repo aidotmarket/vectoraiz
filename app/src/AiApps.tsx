@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -7,7 +7,7 @@ interface Status { enabled: boolean; off: boolean; clients: AppClient[]; channel
 interface Disclosure { version: string; strings: string[]; extension?: string }
 interface Connection { client_id: string; bridge: string; json: string; toml: string; command: string; bundle?: string; moved?: boolean; opened?: "install" | "reveal" }
 export const M3_COPY = {
-  title: "AI apps", third: "In your AI app.",
+  title: "AI apps", third: "Claude Desktop",
   description: "Connect Claude Desktop. You ask in Claude, and Claude searches your library here. Claude can read whole documents in your library, and Anthropic handles what it reads.",
   generic: "Connect another app",
   genericText: "For apps that can run a local MCP server. vectorAIz gives you a command and an id to add to the app's settings.",
@@ -19,7 +19,17 @@ export const M3_COPY = {
   stale: (name: string) => `${name} needs you to confirm the updated terms.`,
 };
 
-export function AiApps({ready, setupRequest, onClients, installing, chooserOpen, onDisclosure}: {chooserOpen: boolean; onDisclosure: (open: boolean) => void; installing: boolean; ready: boolean; setupRequest: number; onClients: (clients: AppClient[]) => void}) {
+export function AiApps({ready, setupRequest, onClients, installing, chooserOpen, onDisclosure, onSetupClose}: {onSetupClose?: (connected: boolean) => void; chooserOpen: boolean; onDisclosure: (open: boolean) => void; installing: boolean; ready: boolean; setupRequest: number; onClients: (clients: AppClient[]) => void}) {
+  const focusTarget = useRef<string | undefined>(undefined);
+  const externalSetup = useRef(false);
+  const opener = useRef<HTMLElement | null>(null);
+  useLayoutEffect(() => {
+    if (!focusTarget.current) return;
+    const element = document.querySelector<HTMLElement>(focusTarget.current);
+    if (element && !element.closest("[hidden]") && !element.matches(":disabled")) {
+      element.focus(); element.scrollIntoView?.({block: "nearest"}); focusTarget.current = undefined;
+    }
+  });
   const [status, setStatus] = useState<Status>();
   const [kind, setKind] = useState<"claude_desktop" | "other">();
   const [name, setName] = useState("");
@@ -64,7 +74,7 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   }
 
   const locked = busy || installing;
-  const button = "rounded bg-teal-300 px-5 py-3 font-medium text-slate-950 disabled:opacity-50";
+  const button = "button";
   const refresh = useCallback(async () => {
     const next = await invoke<Status>("app_status");
     if (next && Array.isArray(next.clients)) {
@@ -78,10 +88,12 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   }, [onClients]);
   useEffect(() => { void refresh().catch(e => setMessage(String(e))); }, [refresh, ready]);
   const open = useCallback(async (app: "claude_desktop" | "other", appName = "Claude Desktop", id?: string) => {
+    if (!document.activeElement?.closest("[role=dialog]")) opener.current = document.activeElement as HTMLElement;
+    focusTarget.current = "#app-confirm";
     setKind(app); setConfirmId(id); setConnection(undefined); setDisclosure(undefined); setMessage("");
     setName(appName); setDisclosure(await invoke<Disclosure>("app_disclosure", {app, name: appName}));
   }, []);
-  useEffect(() => { if (setupRequest) void open("claude_desktop").catch(e => setMessage(String(e))); }, [setupRequest, open]);
+  useEffect(() => { if (setupRequest) { externalSetup.current = true; void open("claude_desktop").catch(e => setMessage(String(e))); } }, [setupRequest, open]);
   async function action(work: () => Promise<void>) {
     setBusy(true); setMessage("");
     try { await work(); await refresh(); } catch (e) {setMessage(String(e)); await refresh().catch(() => {});} finally {setBusy(false);}
@@ -89,9 +101,9 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
   async function connect() {
     if (!disclosure) return;
     await action(async () => {
-      if (confirmId) { await invoke("app_confirm", {clientId: confirmId, disclosureVersion: disclosure.version}); setKind(undefined); return; }
+      if (confirmId) { await invoke("app_confirm", {clientId: confirmId, disclosureVersion: disclosure.version}); setKind(undefined); focusTarget.current = `#test-${confirmId}`; return; }
       const result = await invoke<Connection>(kind === "claude_desktop" ? "app_connect_claude" : "app_connect_other", {name, disclosureVersion: disclosure.version});
-      setConnection(result); setDisclosure(undefined);
+      setConnection(result); setDisclosure(undefined); focusTarget.current = kind === "claude_desktop" ? "#show-extension" : "#app-done";
     });
   }
   useEffect(() => {
@@ -99,36 +111,63 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
     return () => { void subscription.then(unlisten => unlisten()); };
   }, [refresh]);
   useEffect(() => { onDisclosure(!!kind); }, [kind, onDisclosure]);
-  return <aside className="mt-6 grid gap-3" aria-label={M3_COPY.title}>
-    <h2>{M3_COPY.title}</h2>
-    <label>AI apps <input type="checkbox" aria-label="AI apps On/Off" checked={!!status?.enabled && !status.off} disabled={locked} onChange={e => { void action(async () => {const result = await invoke<{message?: string}>("app_path_set", {enabled: e.target.checked}); setMessage(result.message ?? "");});}} /> {status?.enabled && !status.off ? "On" : "Off"}</label>
-    {!chooserOpen && !kind && <button className={button} disabled={locked} onClick={() => void open("claude_desktop")}>Connect Claude Desktop</button>}
-    {!kind && <button className={button} disabled={locked} onClick={() => {setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button>}
-    {status?.clients.filter(c => !c.revoked).map(c => <div key={c.client_id}>
-      <p>{c.name} · {c.created_at_display}</p>
+  function closeDialog() {
+    const connected = !!connection;
+    const clientId = connection?.client_id;
+    setKind(undefined); setDisclosure(undefined); setConnection(undefined);
+    if (externalSetup.current) {
+      externalSetup.current = false;
+      onSetupClose?.(connected);
+      if (connected && clientId) focusTarget.current = `#test-${clientId}`;
+    } else {
+      focusTarget.current = clientId ? `#test-${clientId}` : opener.current?.id ? `#${opener.current.id}` : "#connect-claude";
+    }
+  }
+  const dialog = kind && <div className="stack" role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>
+    {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input className="bg-white text-slate-950 p-2 w-full" value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <div className="actions"><button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button></div>}</>}
+    {!connection && disclosure && <>
+      {disclosure.strings.slice(0, 3).map((line, i) => i === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
+      <p>Your whole library</p>{disclosure.extension && <p>{disclosure.extension}</p>}
+      <div className="actions"><button id="app-confirm" className="button primary" disabled={locked} onClick={() => void connect()}>{disclosure.strings[3]}</button></div>
+    </>}
+    {connection && kind === "claude_desktop" && <>
+      {connection.moved && <p>vectorAIz has moved. In Claude Desktop, uninstall vectorAIz under Settings → Desktop app → Extensions, then install this file.</p>}
+      <p>{connection.opened === "reveal" ? M3_COPY.reveal : M3_COPY.install}</p>{connection.opened !== "reveal" && <p>{M3_COPY.fallback}</p>}<p>{connection.bundle}</p>
+      <div className="actions"><button id="show-extension" className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_show_extension");})}>Show the file</button></div>
+    </>}
+    {connection && kind === "other" && <><p>Bridge path: {connection.bridge}</p><p>Client id: {connection.client_id}</p><h3>JSON</h3><pre>{connection.json}</pre><h3>Codex TOML</h3><pre>{connection.toml}</pre><h3>Command</h3><pre>{connection.command}</pre></>}
+    <div className="actions"><button id="app-done" className={button} disabled={locked} onClick={closeDialog}>{connection ? "Done" : "Cancel"}</button></div>
+  </div>;
+  const visibleClients = status?.clients.filter(c => !c.revoked) ?? [];
+  const dialogClient = connection?.client_id ?? confirmId;
+  return <aside className="stack" aria-label={M3_COPY.title}>
+    <div className="actions">
+      <label className="toggle">AI apps <input type="checkbox" aria-label="AI apps On/Off" checked={!!status?.enabled && !status.off} disabled={locked} onChange={e => { void action(async () => {const result = await invoke<{message?: string}>("app_path_set", {enabled: e.target.checked}); setMessage(result.message ?? "");});}} /> {status?.enabled && !status.off ? "On" : "Off"}</label>
+      {!chooserOpen && !kind && <button id="connect-claude" className="button primary" disabled={locked} onClick={() => void open("claude_desktop")}>Connect Claude Desktop</button>}
+    </div>
+    {visibleClients.map(c => <article className="card stack" aria-label={c.name} key={c.client_id}>
+      <h2>{c.name}</h2><p>Connected {c.created_at_display}</p>
       {c.last_call && <p>Last request {c.last_call_display}</p>}
-      {!c.consent_current && <><p>{M3_COPY.stale(c.name)}</p>{!kind && <button className={button} disabled={locked} onClick={() => void open(c.app as "claude_desktop" | "other", c.name, c.client_id)}>Review and confirm</button>}</>}
-      <button className={button} disabled={locked} onClick={() => {void action(async () => {const result = await invoke<{message: string; file_error?: string}>("app_disconnect", {clientId: c.client_id}); setKind(undefined); setConnection(undefined); setDisclosure(undefined); setConfirmId(undefined); setMessage([result.message, result.file_error].filter(Boolean).join("\n"));});}}>Remove {c.name}</button>
-      <button className={button} disabled={locked || testing.has(c.client_id)} onClick={() => void test(c)}>Test the connection</button>
-    </div>)}
+      <p>{c.consent_current ? c.last_call ? M3_COPY.connected(c.name) : `Finish setting up vectorAIz in ${c.name}, then ask it to search your vectorAIz library.` : M3_COPY.stale(c.name)}</p>
+      <div className="actions">
+        {!c.consent_current && !kind && <button id={`review-${c.client_id}`} className={button} disabled={locked} onClick={() => void open(c.app as "claude_desktop" | "other", c.name, c.client_id)}>Review and confirm</button>}
+        <button id={`test-${c.client_id}`} className={button} disabled={locked || testing.has(c.client_id)} onClick={() => void test(c)}>Test the connection</button>
+        <button className={button} disabled={locked} onClick={() => {void action(async () => {const result = await invoke<{message: string; file_error?: string}>("app_disconnect", {clientId: c.client_id}); setKind(undefined); setConnection(undefined); setDisclosure(undefined); setConfirmId(undefined); setMessage([result.message, result.file_error].filter(Boolean).join("\n"));});}}>Remove {c.name}</button>
+      </div>
+      {kind === "claude_desktop" && dialogClient === c.client_id && dialog}
+      {kind === "other" && confirmId === c.client_id && dialog}
+    </article>)}
+    {kind === "claude_desktop" && !visibleClients.some(c => c.client_id === dialogClient) && <article className="card stack" aria-label="Claude Desktop">{dialog}</article>}
     {status?.channel_error && <p role="alert">{status.channel_error}</p>}
-    {status?.save_failed && <><p role="alert">{status.save_failed}</p><button className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_access_retry");})}>Retry</button></>}
-    {kind && <div role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>
-      {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input className="bg-white text-slate-950 p-2 w-full" value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button>}</>}
-      {!connection && disclosure && <>
-        {disclosure.strings.slice(0, 3).map((line, i) => i === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
-        <p>Your whole library</p>{disclosure.extension && <p>{disclosure.extension}</p>}<button className={button} disabled={locked} onClick={() => void connect()}>{disclosure.strings[3]}</button>
-      </>}
-      {connection && kind === "claude_desktop" && <>
-        {connection.moved && <p>vectorAIz has moved. In Claude Desktop, uninstall vectorAIz under Settings → Desktop app → Extensions, then install this file.</p>}
-        <p>{connection.opened === "reveal" ? M3_COPY.reveal : M3_COPY.install}</p>{connection.opened !== "reveal" && <p>{M3_COPY.fallback}</p>}<p>{connection.bundle}</p>
-        <button className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_show_extension");})}>Show the file</button>
-      </>}
-      {connection && kind === "other" && <><p>Bridge path: {connection.bridge}</p><p>Client id: {connection.client_id}</p><h3>JSON</h3><pre>{connection.json}</pre><h3>Codex TOML</h3><pre>{connection.toml}</pre><h3>Command</h3><pre>{connection.command}</pre></>}
-      <button className={button} disabled={locked} onClick={() => {setKind(undefined); setDisclosure(undefined); setConnection(undefined);}}>{connection ? "Done" : "Cancel"}</button>
-    </div>}
+    {status?.save_failed && <div className="stack"><p role="alert">{status.save_failed}</p><div className="actions"><button className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_access_retry");})}>Retry</button></div></div>}
     {message && <p role="status" className="whitespace-pre-wrap">{message}</p>}
-    <h3>Recent activity</h3>
-    {status?.recent.map((entry, i) => <p key={i}>{entry.time_display} · {entry.client} · {entry.tool} · {entry.allowed ? `Allowed${entry.refusal_code ? ` · ${entry.refusal_code}` : ""} · ${entry.result_count}` : "Refused"}</p>)}
+    <section className="card stack" aria-label={M3_COPY.generic}>
+      {!kind && <div className="actions"><button id="connect-other" className={button} disabled={locked} onClick={() => {opener.current = document.activeElement as HTMLElement; setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button></div>}
+      {kind === "other" && !confirmId && dialog}
+    </section>
+    <section className="card stack"><h2>Recent activity</h2>
+      <div className="table-scroll"><table><thead><tr>{["Time", "App", "Request", "Result", "Results"].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
+      <tbody>{status?.recent.map((entry, i) => <tr key={i}><td>{entry.time_display}</td><td>{entry.client}</td><td>{entry.tool}</td><td>{entry.allowed ? `Allowed${entry.refusal_code ? ` · ${entry.refusal_code}` : ""}` : "Refused"}</td><td>{entry.allowed ? entry.result_count : ""}</td></tr>)}</tbody></table></div>
+    </section>
   </aside>;
 }
