@@ -1,20 +1,29 @@
 const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { checkpoint });
 (async () => {
   await report('started');
-  const button = label => [...document.querySelectorAll('button')].find(b => b.textContent === label);
-  const downloadButton = () => [...document.querySelectorAll('button')].find(b => b.textContent.startsWith('Download search model ('));
+  const activeView = () => document.querySelector('main > .view:not([hidden])');
+  const button = label => [...(activeView()?.querySelectorAll('button') ?? [])].find(b => b.textContent === label);
+  const downloadButton = () => [...(activeView()?.querySelectorAll('button') ?? [])].find(b => b.textContent.startsWith('Download search model ('));
   const wait = async (predicate, budget = 240000) => {
     const deadline = Date.now() + budget;
     let logged = Date.now();
     while (!predicate()) {
       if (Date.now() - logged > 10000) {
-        await report('waiting ' + predicate.toString() + ' DOM: ' + document.querySelector('main')?.textContent.slice(-2400));
+        await report('waiting ' + predicate.toString() + ' DOM: ' + activeView()?.textContent.slice(-2400));
         logged = Date.now();
       }
       if (document.querySelector('[role="alert"]')) throw new Error(document.querySelector('[role="alert"]').textContent);
       if (Date.now() > deadline) throw new Error('Pipeline UI timed out');
       await new Promise(resolve => setTimeout(resolve, 100));
     }
+  };
+  const navigate = async name => {
+    const selector = `nav a[href="#${name.toLowerCase().replace(' ', '-')}"]`;
+    await wait(() => document.querySelector(selector));
+    document.querySelector(selector).click();
+    await wait(() => document.querySelector(selector)?.getAttribute('aria-current') === 'page'
+      && activeView()?.getAttribute('aria-label') === (name === 'Ask' ? 'Ask your library' : name));
+    await report('view: ' + name);
   };
   const ipc = (command, args) => window.__TAURI_INTERNALS__.invoke(command, args);
   const statusWait = async (predicate, budget = 8000) => {
@@ -162,8 +171,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     await ipc('self_test');
     return;
   }
-  await wait(() => button('Index folder'));
   if (window.__VZ_SMOKE__.acquisition) {
+    await navigate('Settings');
     await report('acquisition: empty model directory, awaiting model status');
     await wait(() => downloadButton() && !downloadButton().disabled);
     // Acquisition owns a 900s total budget and at most three UI attempts, in
@@ -173,8 +182,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await report('acquisition attempt ' + attempt);
       (attempt === 1 ? downloadButton() : button('Retry')).click();
       await new Promise(resolve => setTimeout(resolve, 0));
-      await wait(() => !document.querySelector('[aria-label="Models"]') || (button('Retry') && !button('Retry').disabled), Math.max(1, acquisitionDeadline - Date.now()));
-      if (!document.querySelector('[aria-label="Models"]')) break;
+      await wait(() => !downloadButton() || (button('Retry') && !button('Retry').disabled), Math.max(1, acquisitionDeadline - Date.now()));
+      if (!downloadButton()) break;
       await report('acquisition attempt failed: ' + document.querySelector('[aria-label="Models"]').textContent);
       if (attempt === 3 || Date.now() >= acquisitionDeadline) throw new Error('Model acquisition retries exhausted');
     }
@@ -188,6 +197,8 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   }
   const pipelineDeadline = Date.now() + 300000;
   const pipelineWait = predicate => wait(predicate, Math.max(1, pipelineDeadline - Date.now()));
+  await navigate('Library');
+  await pipelineWait(() => button('Index folder'));
   const folder = [...document.querySelectorAll('label')].find(label => label.textContent.startsWith('Folder')).querySelector('input');
   if (!window.__VZ_SMOKE__.fixture) throw new Error('Absolute fixture path is required');
   Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(folder, window.__VZ_SMOKE__.fixture);
@@ -195,11 +206,13 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await pipelineWait(() => !button('Index folder').disabled);
   await report('indexing ' + folder.value);
   button('Index folder').click();
-  await pipelineWait(() => document.querySelector('[role="status"]').textContent.includes('20/20') && !button('Search').disabled);
+  await pipelineWait(() => document.querySelector('#index-feedback').textContent.includes('20/20') && !button('Index folder').disabled);
   await report('indexed');
+  await navigate('Ask');
+  await pipelineWait(() => button('Search') && !button('Search').disabled);
   button('Search').click();
-  await pipelineWait(() => document.querySelector('section li')?.textContent.includes('thirty days') && !button('Ask').disabled);
-  const previousSearch = [...document.querySelectorAll('section ol:first-of-type li')].map(li => li.textContent);
+  await pipelineWait(() => activeView().querySelector('section ol li')?.textContent.includes('thirty days') && !button('Ask').disabled);
+  const previousSearch = [...activeView().querySelectorAll('section ol li')].map(li => li.textContent);
   const repeatedHits = await window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
   if (!repeatedHits[0]?.chunk.text.includes('thirty days')) throw new Error('Repeated Search lost its result');
   await report('searched again');
@@ -266,7 +279,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   await ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress});
   if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Offline Search failed');
   button('Ask').click();
-  await pipelineWait(() => document.querySelector('section ol:last-of-type li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
+  await pipelineWait(() => activeView().querySelector('article ol li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');
   const secondAnswer = await window.__TAURI_INTERNALS__.invoke('pipeline_ask', { question: query, tokens: progress });
   if (secondAnswer.kind !== 'answer' || !secondAnswer.text.toLowerCase().includes('thirty days') || !secondAnswer.citations.length) throw new Error('Repeated Ask lost its answer or citations');
@@ -289,5 +302,9 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await new Promise(resolve => setTimeout(resolve,100));
     }
   }
+  await navigate('Settings');
+  const diagnostics = document.querySelector('main details');
+  diagnostics.querySelector('summary').click();
+  await pipelineWait(() => diagnostics.open && button('Run self-test') && !button('Run self-test').disabled);
   button('Run self-test').click();
 })().catch(error => report('ERROR: ' + String(error)));

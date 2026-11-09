@@ -5,12 +5,13 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
-    "build": "tsc --noEmit && vite build",
+    "build": "tsc --noEmit && vite build && node ../scripts/native-ui-resources.mjs",
     "test": "vitest run",
     "tauri": "tauri",
     "licenses": "node ../scripts/native-ui-notices.cjs"
   },
   "dependencies": {
+    "@fontsource/inter": "5.3.0",
     "@tauri-apps/api": "^2.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"

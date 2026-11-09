@@ -405,7 +405,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
                 let config = serde_json::json!({"fixture": fixture, "acquisition": std::env::var_os("VZ_ACQUISITION_SMOKE").is_some(), "a9":std::env::var_os("VZ_A9_CONTROL_DIR").is_some(), "migration": std::env::var("VZ_MIGRATION_SMOKE").ok(), "importFolder": std::env::var("VZ_SMOKE_IMPORT_FOLDER").ok()});
                 webview.eval(format!("window.__VZ_SMOKE__ = {config};\n{}", include_str!("../../../scripts/pipeline-smoke.js"))).expect("pipeline smoke clicks");
             } else { webview.eval(
-                "const timer = setInterval(() => { const button = document.querySelector('button'); if (button) { clearInterval(timer); button.click(); } }, 50);"
+                include_str!("../../../scripts/self-test-smoke.js")
             ).expect("start smoke-test button click"); }
         }
     });
