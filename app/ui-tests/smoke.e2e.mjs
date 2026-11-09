@@ -4,6 +4,10 @@ describe('native first launch (offline)', () => {
   it('renders the one-window shell and reaches first-run Models without frontend errors', async () => {
     await browser.waitUntil(async () => (await browser.getWindowHandles()).length === 1,
       { timeoutMsg: 'Expected the main native window' });
+    // Explicitly select this one-window app. The service's automatic focus
+    // discovery requires the separate wdio IPC plugin, which we do not use.
+    const [mainWindow] = await browser.getWindowHandles();
+    await browser.switchToWindow(mainWindow);
     const heading = await $('main > .view[aria-label="Ask your library"] h1');
     await heading.waitForDisplayed();
     assert.equal(await heading.getText(), 'Ask your library');
