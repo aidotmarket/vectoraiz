@@ -46,6 +46,7 @@ jobs:
         if: always()
         with:
           name: update-evidence-${{ matrix.os }}
+          retention-days: 3
           path: |
             update-*.json
             update-*.log
