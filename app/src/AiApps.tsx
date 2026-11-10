@@ -124,20 +124,20 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
       focusTarget.current = clientId ? connectedTarget : opener.current?.id ? `#${opener.current.id}` : "#connect-claude";
     }
   }
-  const dialog = kind && <div className="stack" role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>
-    {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input className="bg-white text-slate-950 p-2 w-full" value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <div className="actions"><button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button></div>}</>}
+  const dialog = kind && <div className="actions app-dialog" role="dialog" aria-label={kind === "other" ? M3_COPY.generic : "Connect Claude Desktop"}>
+    {kind === "other" && !connection && <><h2>{M3_COPY.generic}</h2><p>{M3_COPY.genericText}</p><label>App name <input className="bg-white text-slate-950 p-2 w-full" value={name} maxLength={100} disabled={!!disclosure} onChange={e => setName(e.target.value)} /></label>{!disclosure && <button className={button} disabled={locked || !name.trim()} onClick={() => void open("other", name)}>Continue</button>}</>}
     {!connection && disclosure && <>
       {disclosure.strings.slice(0, 3).map((line, i) => i === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
       <p>Your whole library</p>{disclosure.extension && <p>{disclosure.extension}</p>}
-      <div className="actions"><button id="app-confirm" className="button primary" disabled={locked} onClick={() => void connect()}>{disclosure.strings[3]}</button></div>
+      <button id="app-confirm" className="button primary" disabled={locked} onClick={() => void connect()}>{disclosure.strings[3]}</button>
     </>}
     {connection && kind === "claude_desktop" && <>
       {connection.moved && <p>vectorAIz has moved. In Claude Desktop, uninstall vectorAIz under Settings → Desktop app → Extensions, then install this file.</p>}
       <p>{connection.opened === "reveal" ? M3_COPY.reveal : M3_COPY.install}</p>{connection.opened !== "reveal" && <p>{M3_COPY.fallback}</p>}<p>{connection.bundle}</p>
-      <div className="actions"><button id="show-extension" className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_show_extension");})}>Show the file</button></div>
+      <button id="show-extension" className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_show_extension");})}>Show the file</button>
     </>}
     {connection && kind === "other" && <><p>Bridge path: {connection.bridge}</p><p>Client id: {connection.client_id}</p><h3>JSON</h3><pre>{connection.json}</pre><h3>Codex TOML</h3><pre>{connection.toml}</pre><h3>Command</h3><pre>{connection.command}</pre></>}
-    <div className="actions"><button id="app-done" className={button} disabled={locked} onClick={closeDialog}>{connection ? "Done" : "Cancel"}</button></div>
+    <button id="app-done" className={button} disabled={locked} onClick={closeDialog}>{connection ? "Done" : "Cancel"}</button>
   </div>;
   const visibleClients = status?.clients.filter(c => !c.revoked) ?? [];
   const dialogClient = connection?.client_id ?? confirmId;
@@ -159,13 +159,13 @@ export function AiApps({ready, setupRequest, onClients, installing, chooserOpen,
       {kind === "other" && confirmId === c.client_id && dialog}
     </article>)}
     {kind === "claude_desktop" && !visibleClients.some(c => c.client_id === dialogClient) && <article className="card stack" aria-label="Claude Desktop">{dialog}</article>}
+    {message && <p role="status" className="whitespace-pre-wrap">{message}</p>}
     {status?.channel_error && <p role="alert">{status.channel_error}</p>}
     {status?.save_failed && <div className="stack"><p role="alert">{status.save_failed}</p><div className="actions"><button className={button} disabled={locked} onClick={() => void action(async () => {await invoke("app_access_retry");})}>Retry</button></div></div>}
-    {message && <p role="status" className="whitespace-pre-wrap">{message}</p>}
-    <section className="card stack" aria-label={M3_COPY.generic}>
+    {(!kind || (kind === "other" && !confirmId)) && <section className="card stack" aria-label={M3_COPY.generic}>
       {!kind && <div className="actions"><button id="connect-other" className={button} disabled={locked} onClick={() => {opener.current = document.activeElement as HTMLElement; setKind("other"); setName(""); setDisclosure(undefined); setConnection(undefined); setConfirmId(undefined);}}>{M3_COPY.generic}</button></div>}
       {kind === "other" && !confirmId && dialog}
-    </section>
+    </section>}
     <section className="card stack"><h2>Recent activity</h2>
       <div className="table-scroll"><table><thead><tr>{["Time", "App", "Request", "Result", "Results"].map(label => <th key={label} scope="col">{label}</th>)}</tr></thead>
       <tbody>{status?.recent.map((entry, i) => <tr key={i}><td>{entry.time_display}</td><td>{entry.client}</td><td>{entry.tool}</td><td>{entry.allowed ? `Allowed${entry.refusal_code ? ` · ${entry.refusal_code}` : ""}` : "Refused"}</td><td>{entry.allowed ? entry.result_count : ""}</td></tr>)}</tbody></table></div>

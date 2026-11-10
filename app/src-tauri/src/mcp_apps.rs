@@ -459,6 +459,53 @@ pub fn client_path(dir: &Path) -> PathBuf {
         .join("ai-apps")
         .join("claude-desktop.client")
 }
+// Shell selection takes one absolute item PIDL with cidl=0. It never invokes
+// ShellExecute (and therefore cannot dispatch a .mcpb handler as a fallback).
+#[cfg(windows)]
+pub fn reveal_extension(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED},
+        UI::Shell::{ILCreateFromPathW, ILFree, SHOpenFolderAndSelectItems},
+    };
+    let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let path = windows_reveal_path(&path.to_string_lossy());
+    let wide: Vec<u16> = std::ffi::OsStr::new(&path)
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    std::thread::spawn(move || unsafe {
+        let initialized = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32);
+        if initialized < 0 {
+            return Err(std::io::Error::from_raw_os_error(initialized).to_string());
+        }
+        let item = ILCreateFromPathW(wide.as_ptr());
+        let result = if item.is_null() {
+            Err(std::io::Error::last_os_error().to_string())
+        } else {
+            let result = SHOpenFolderAndSelectItems(item, 0, std::ptr::null(), 0);
+            ILFree(item);
+            if result < 0 {
+                Err(std::io::Error::from_raw_os_error(result).to_string())
+            } else {
+                Ok(())
+            }
+        };
+        CoUninitialize();
+        result
+    })
+    .join()
+    .unwrap_or_else(|e| std::panic::resume_unwind(e))
+}
+#[cfg(any(windows, test))]
+fn windows_reveal_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    }
+}
+
 /// Opening is best effort: the response always retains the drag/install fallback.
 pub fn open_extension(
     value: &Value,
@@ -605,6 +652,25 @@ mod extension_tests {
         let moved = root.path().join("moved-bridge");
         std::fs::write(&moved, b"bridge fixture").unwrap();
         assert_eq!(write_extension(&dir, &moved, &b).unwrap()["moved"], true);
+    }
+    #[test]
+    fn a8_windows_reveal_uses_normal_shell_paths() {
+        for (input, expected) in [
+            (
+                r"\\?\C:\Users\Max\vectorAIz\ai-apps\vectoraiz-claude.mcpb",
+                r"C:\Users\Max\vectorAIz\ai-apps\vectoraiz-claude.mcpb",
+            ),
+            (
+                r"\\?\UNC\server\share\vectoraiz-claude.mcpb",
+                r"\\server\share\vectoraiz-claude.mcpb",
+            ),
+            (
+                r"C:\a folder\vectoraiz-claude.mcpb",
+                r"C:\a folder\vectoraiz-claude.mcpb",
+            ),
+        ] {
+            assert_eq!(windows_reveal_path(input), expected);
+        }
     }
     #[test]
     fn open_or_reveal_choice_and_failure_keep_fallback() {

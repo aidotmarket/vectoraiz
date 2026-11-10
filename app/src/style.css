@@ -20,8 +20,8 @@ button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .5; }
 :focus-visible, [tabindex="-1"]:focus { outline: 2px solid #2563eb; outline-offset: 3px; }
-.app-shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); min-height: 100vh; }
-.sidebar { padding: 28px 16px 20px; border-right: 1px solid #e5e7eb; background: white; display: flex; flex-direction: column; gap: 32px; }
+.app-shell { display: grid; grid-template-columns: 200px minmax(0, 1fr); height: 100dvh; overflow: hidden; }
+.sidebar { min-height: 0; padding: 28px 16px 20px; border-right: 1px solid #e5e7eb; background: white; display: flex; flex-direction: column; gap: 32px; }
 .wordmark { padding: 0 12px; font-size: 23px; font-weight: 600; letter-spacing: -.8px; }
 .wordmark span { color: #2563eb; }
 .sidebar nav { display: grid; gap: 8px; }
@@ -29,7 +29,7 @@ button:disabled { cursor: default; opacity: .5; }
 .sidebar nav a[aria-current] { color: #2563eb; background: #eff6ff; font-weight: 600; }
 .sidebar svg { width: 20px; height: 20px; }
 .sidebar footer { margin-top: auto; padding: 0 12px; color: #475569; font-size: 12px; }
-.content { min-width: 0; padding: 32px; }
+.content { min-width: 0; min-height: 0; overflow-y: auto; padding: 32px; }
 .view { max-width: 1080px; margin: auto; }
 .view > h1, .view > header { margin-bottom: 12px; }
 .stack { display: flex; flex-direction: column; align-items: stretch; gap: 16px; }
@@ -66,11 +66,14 @@ summary { cursor: pointer; font-weight: 600; }
 details[open] > :not(summary) { margin-top: 16px; }
 .modal { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(480px, 90vw); box-shadow: 0 16px 64px #0f172a33; z-index: 10; }
 @media (max-width: 719px) {
-  .app-shell { grid-template-columns: minmax(0, 1fr); }
-  .sidebar { border-right: 0; border-bottom: 1px solid #e5e7eb; gap: 16px; padding: 16px; }
+  .app-shell { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+  .sidebar { position: sticky; top: 0; z-index: 1; border-right: 0; border-bottom: 1px solid #e5e7eb; gap: 16px; padding: 16px; }
   .sidebar nav { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .sidebar nav a { justify-content: center; flex-wrap: wrap; gap: 6px; padding: 8px; }
   .sidebar footer { margin-top: 0; }
   .content { padding: 20px 16px; }
   .choices { grid-template-columns: minmax(0, 1fr); }
 }
+
+.app-dialog, .setup-fields { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+.app-dialog > :not(button), .setup-fields > :not(button) { flex-basis: 100%; }

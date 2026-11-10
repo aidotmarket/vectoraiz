@@ -885,3 +885,42 @@ async fn call_log_private_on_create_rotation_and_existing_files() {
     assert_eq!(mode(&old), 0o600);
     assert!(!root.join("ai-apps/mcp-calls.log").exists());
 }
+
+#[tokio::test]
+async fn a8_removal_location_changes_disclosure_version_and_requires_reconfirmation() {
+    use vz_core::cloud_gate::{app_disclosure_version, APP_DISCLOSURE};
+    let mut previous = 0xcbf29ce484222325u64;
+    for line in APP_DISCLOSURE {
+        for byte in line
+            .replace("at any time in AI apps.", "at any time in Settings.")
+            .bytes()
+        {
+            previous ^= u64::from(byte);
+            previous = previous.wrapping_mul(0x100000001b3);
+        }
+        previous = previous.wrapping_mul(0x100000001b3);
+    }
+    let previous = format!("{previous:016x}");
+    assert_ne!(previous, app_disclosure_version());
+    let f = Fixture::new().await;
+    settings::update(&f.dir, |s| {
+        s.settings.0["paths"]["app"]["clients"][0]["consent"]["disclosure_version"] =
+            json!(previous);
+        Ok::<(), String>(())
+    })
+    .unwrap();
+    assert_eq!(
+        f.apps.status(&f.dir).unwrap()["clients"][0]["consent_current"],
+        false
+    );
+    let disclosure = crate::mcp_apps::disclosure("claude_desktop", "Claude Desktop");
+    assert_eq!(disclosure["strings"][2], "You can remove the connection at any time in AI apps. What vectorAIz already sent to Claude Desktop can't be taken back.");
+    f.apps
+        .confirm(&f.dir, &f.id, &app_disclosure_version())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.apps.status(&f.dir).unwrap()["clients"][0]["consent_current"],
+        true
+    );
+}

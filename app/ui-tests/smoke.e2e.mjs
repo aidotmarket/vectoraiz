@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { assertLayout, assertDialogActions } from './layout-checks.mjs';
 
 describe('native first launch (offline)', () => {
   it('renders the one-window shell and reaches first-run Models without frontend errors', async () => {
@@ -31,6 +32,25 @@ describe('native first launch (offline)', () => {
     assert.ok(evidence, 'Startup error observer must be installed before frontend scripts');
     assert.deepEqual(evidence.errors, [], 'No uncaught errors, rejected promises or console errors');
     assert.deepEqual(evidence.network, [], 'No external frontend network requests');
+  });
+
+  it('A8 keeps navigation in the viewport while long views scroll and action groups wrap only as needed', async () => {
+    await assertLayout(browser, view => $(`nav a[href="#${view}"]`).click());
+  });
+
+  it('A8 generic Continue/Cancel and confirmation/Cancel share a row and wrap at narrow widths', async () => {
+    for (const width of [1280, 360]) {
+      await browser.setWindowSize(width, 800);
+      await $('nav a[href="#ai-apps"]').click();
+      await $('#connect-other').click();
+      await assertDialogActions(browser);
+      await $('[role="dialog"] input').setValue('Layout test');
+      await $('[role="dialog"] button').click();
+      await $('#app-confirm').waitForDisplayed();
+      await assertDialogActions(browser);
+      await $('#app-done').click();
+    }
+    await browser.setWindowSize(1280, 800);
   });
 
   it('loads bundled Inter in the packaged WebView', async () => {

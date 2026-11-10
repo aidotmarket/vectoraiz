@@ -23,6 +23,10 @@ impl Settings {
         if !value["paths"]["app"].is_object() {
             value["paths"]["app"] = json!({"enabled":false,"clients":[]});
         }
+        let api = &mut value["paths"]["api_key"];
+        if api["key_present"] != true || api["consent"]["provider"] != api["provider"] {
+            api["consent"] = Value::Null;
+        }
         Self(value)
     }
     pub fn default_path(&self) -> Option<&str> {
@@ -122,6 +126,7 @@ pub struct Operation {
 #[derive(Clone)]
 pub struct SettingsState {
     pub settings: Settings,
+    pub setup_consent: Option<vz_core::cloud_gate::Consent>,
     pub cloud_epoch: u64,
     pub cloud_stopped: bool,
     pub stop_failed: bool,
@@ -168,6 +173,7 @@ pub fn with_state<T>(dir: &Path, f: impl FnOnce(&mut SettingsState) -> T) -> Res
             dir.to_owned(),
             SettingsState {
                 settings,
+                setup_consent: None,
                 cloud_epoch: 0,
                 cloud_stopped: false,
                 stop_failed: false,

@@ -265,3 +265,62 @@ it("A7 places status and actions in each client card, and retains live feedback 
   expect(screen.getByRole("region", {name:"Connect another app"})).toBeVisible();
   expect(screen.getAllByRole("columnheader").map(cell => cell.textContent)).toEqual(["Time","App","Request","Result","Results"]);
 });
+
+it("A8 hides the whole generic card during Claude disclosure/install and restores it after Cancel/Done", async () => {
+  show();
+  await userEvent.click(await screen.findByRole("button", {name:"Connect Claude Desktop"}));
+  expect(screen.queryByRole("region", {name:"Connect another app"})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  expect(screen.getByRole("region", {name:"Connect another app"})).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Connect Claude Desktop"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Grant access"}));
+  expect(screen.queryByRole("region", {name:"Connect another app"})).not.toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Done"}));
+  expect(screen.getByRole("region", {name:"Connect another app"})).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Connect another app"}));
+  expect(screen.getByLabelText("App name")).toBeInTheDocument();
+});
+it.each(["Cancel", "Grant access"])("A8 hides the generic card during stale generic review until %s", async action => {
+  clients = [{...b,consent_current:false}];
+  show();
+  await userEvent.click(await screen.findByRole("button", {name:"Review and confirm"}));
+  expect(screen.queryByRole("region", {name:"Connect another app"})).not.toBeInTheDocument();
+  expect(screen.getByRole("article", {name:"Research app"})).toContainElement(screen.getByRole("dialog"));
+  await userEvent.click(await screen.findByRole("button", {name:action}));
+  expect(screen.getByRole("region", {name:"Connect another app"})).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Connect another app"}));
+  await userEvent.type(screen.getByLabelText("App name"), "Another app");
+  expect(screen.getByRole("button", {name:"Continue"})).toBeEnabled();
+});
+it("A8 announces removal immediately below surviving clients, before errors and the generic card, including the final removal", async () => {
+  const base = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "app_status" ? {enabled:true,off:false,clients:[...clients],recent:[],channel_error:"Channel failure",save_failed:"Save failure"} : base(command,args));
+  show();
+  await userEvent.click(await screen.findByRole("button", {name:"Remove Claude Desktop"}));
+  let feedback = screen.getByRole("status");
+  expect(feedback).toHaveTextContent("Removal message");
+  expect(feedback.previousElementSibling).toBe(screen.getByRole("article", {name:"Research app"}));
+  expect(feedback.nextElementSibling).toBe(screen.getByText("Channel failure"));
+  await userEvent.click(screen.getByRole("button", {name:"Remove Research app"}));
+  feedback = screen.getByRole("status");
+  expect(feedback).toHaveTextContent("Removal message");
+  expect(feedback.previousElementSibling).toContainElement(screen.getByRole("checkbox"));
+  expect(feedback.previousElementSibling).not.toContainElement(feedback);
+  expect(feedback.compareDocumentPosition(screen.getByRole("region", {name:"Connect another app"})) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("A8 generic action pairs share one row and disclosure names AI apps for removal", async () => {
+  const base = invoke.getMockImplementation()!;
+  const removal = "You can remove the connection at any time in AI apps. What vectorAIz already sent to Research app can't be taken back.";
+  invoke.mockImplementation(async (command,args) => command === "app_disclosure" ? {version:"current",strings:["Connect Research app","Transfer",removal,"Connect Research app"]} : base(command,args));
+  show();
+  await userEvent.click(await screen.findByRole("button", {name:"Connect another app"}));
+  const cancel = screen.getByRole("button", {name:"Cancel"});
+  expect(cancel.parentElement).toHaveClass("actions");
+  expect(cancel.parentElement).toContainElement(screen.getByRole("button", {name:"Continue"}));
+  await userEvent.type(screen.getByLabelText("App name"),"Research app");
+  await userEvent.click(screen.getByRole("button", {name:"Continue"}));
+  expect(await screen.findByText(removal)).toBeInTheDocument();
+  expect(screen.getByRole("button", {name:"Connect Research app"}).parentElement).toContainElement(screen.getByRole("button", {name:"Cancel"}));
+  expect(within(screen.getByRole("article", {name:"Research app"})).getByRole("button", {name:"Remove Research app"})).toBeInTheDocument();
+});
