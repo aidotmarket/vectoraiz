@@ -770,7 +770,7 @@ fn third_party_notices<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<St
         .resource_dir()
         .map_err(|e| e.to_string())?
         .join("THIRD_PARTY_NOTICES");
-    std::fs::read_to_string(path).map_err(|e| e.to_string())
+    crate::notices::read(&path)
 }
 
 #[tauri::command]

@@ -4,6 +4,7 @@ import { AiApps, M3_COPY, type AppClient } from "./AiApps";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
+import { repositoryLicenceName } from "./licence";
 
 interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
 interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
@@ -672,7 +673,7 @@ export default function App() {
         <section className="card stack" aria-label="About"><h2>About</h2>
           <p>vectorAIz <span>by ai.market</span></p>
           <p>Version {version}</p>
-          <p>Elastic License 2.0 (ELv2)</p>
+          <p>{repositoryLicenceName}</p>
           <a href="https://ai.market/vectoraiz" onClick={event => {event.preventDefault(); void openAbout("open_product_page");}}>https://ai.market/vectoraiz</a>
           <button className={buttonStyle} disabled={installing} onClick={() => void openAbout("third_party_notices")}>Third-party notices</button>
           {thirdPartyNotices !== undefined && <pre tabIndex={0} aria-label="Third-party notices">{thirdPartyNotices}</pre>}

@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 
 import App, { readableFolder } from "./App";
 import { version } from "../package.json";
+import { licenceName } from "./licence";
 
 const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents, appEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), appEvents: { callback: undefined as undefined | (() => void) }, modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (event: string, callback: () => void) => { const target = event === "mcp-activity" ? appEvents : modelEvents; target.callback = callback; return () => { if (target.callback === callback) target.callback = undefined; }; }}));
@@ -2116,9 +2117,13 @@ it.each(["indexed library", "API key", "connected app"])("B2 omits the first-run
   expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
 });
 
+it.each(["\n", "\r\n"])("B3 extracts the licence name with %j line endings", lineEnding => {
+  expect(licenceName(` \tElastic License 2.0 (ELv2) \t${lineEnding}Licence body`)).toBe("Elastic License 2.0 (ELv2)");
+});
+
 it("B3 shows the repository licence, current version, owner and bundled notices in About", async () => {
   const {readFileSync} = await import("node:fs");
-  const licence = readFileSync("../LICENSE", "utf8").split("\n")[0];
+  const licence = readFileSync("../LICENSE", "utf8").split("\n")[0].trim();
   invoke.mockImplementation(async command => command === "third_party_notices" ? "Bundled dependency notices" : {available:false});
   render(<App />);
   const about = within(at("Settings").getByRole("region", {name:"About"}));

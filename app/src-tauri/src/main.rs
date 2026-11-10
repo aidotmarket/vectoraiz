@@ -23,6 +23,7 @@ mod mcp_tests;
 mod mcp_tools;
 #[cfg_attr(test, allow(dead_code))]
 mod models;
+mod notices;
 #[cfg_attr(test, allow(dead_code))]
 mod settings;
 
