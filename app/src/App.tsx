@@ -332,7 +332,7 @@ export default function App() {
       if (generation !== setupGeneration.current) return;
       if (result.kind === "cloud_error") { setDisclosure(result.disclosure); setConfirmed(false); return; }
       setCloud(result); setConfirmed(true); focusTarget.current = "#api-key";
-    } catch (cause) { setCloudMessage(String(cause)); }
+    } catch (cause) { if (generation === setupGeneration.current && setupActive.current) setCloudMessage(String(cause)); }
   }
   async function saveKey() {
     if (keyBusy) return;

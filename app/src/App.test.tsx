@@ -945,6 +945,33 @@ it("requires disclosure, masks the key and clears it after checking", async () =
  await act(async()=>pending.resolve({kind:"cloud_error",message:"That key was not accepted."}));await waitFor(()=>expect(field).toHaveValue(""));
  expect(await screen.findByText("That key was not accepted.")).toBeInTheDocument();
 });
+it.each([true, false])("guards a pending confirm failure when setup is closed: %s", async closed => {
+  const fresh = {...apiReady,default:null,api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false};
+  const pending = deferred();
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "cloud_status") return fresh;
+    if (command === "api_key_disclosure") return {version:"current",strings:["Use Anthropic", "Question and passages go to Anthropic.", "Billing", "Removal", "I understand"]};
+    if (command === "api_key_confirm") return pending.promise;
+  });
+  render(<App />);
+  at("Settings");
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.click(await screen.findByRole("button", {name:"I understand"}));
+  expect(cloudInvoke).toHaveBeenCalledWith("api_key_confirm", {provider:"anthropic",disclosureVersion:"current"});
+  if (closed) {
+    await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  }
+  await act(async () => pending.reject(closed ? "cancelled" : "Consent failed"));
+  const answers = screen.getByRole("region", {name:"Answers"});
+  if (closed) {
+    expect(within(answers).queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText("cancelled")).not.toBeInTheDocument();
+  } else {
+    expect(within(answers).getByRole("status")).toHaveTextContent("Consent failed");
+  }
+});
+
 it("keeps Search and Index enabled during cloud Ask and ignores cancelled callbacks", async () => {
  cloudInvoke.mockResolvedValue(apiReady);const pending=deferred();let tokens:{onmessage:(t:string)=>void}|undefined;
  invoke.mockImplementation(async(command,args)=>{
