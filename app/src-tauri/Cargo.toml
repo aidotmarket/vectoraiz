@@ -36,7 +36,7 @@ reqwest = { version = "=0.13.5", default-features = false, features = ["rustls",
 tauri-plugin-single-instance = "=2.4.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Globalization"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Globalization", "Win32_UI_Shell", "Win32_UI_Shell_Common", "Win32_System_Com"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }

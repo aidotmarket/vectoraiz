@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import App from "./App";
+import App, { readableFolder } from "./App";
 import { version } from "../package.json";
 
 const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents, appEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), appEvents: { callback: undefined as undefined | (() => void) }, modelEvents: { callback: undefined as undefined | (() => void) } }));
@@ -48,8 +48,9 @@ async function renderAvailable() {
 }
 function deferred() {
   let resolve!: (value: unknown) => void;
-  const promise = new Promise(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (cause: unknown) => void;
+  const promise = new Promise((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 it("invokes the self-test only on click and displays its platform result", async () => {
@@ -753,14 +754,15 @@ it("shows checking and verified download stages and a completion message", async
 const answerPin = {name:"Small local model", file:"answer.gguf", sha256:"small",size:2_000_000_000,license:"Apache-2.0",source:"fixture",verified:true,installed_bytes:2_000_000_000};
 const answerTier = {tier_index:0,min_ram_gb:0,pin:answerPin,memory:{bytes:4_000_000_000,measured:false,source:null}};
 it("renders both answer paths for no_answer without a failure", async () => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:null, api_key:{...apiReady.api_key,enabled:false,key_present:false}});
   modelsInvoke.mockResolvedValue({...readyModels, answer:{state:"none"},offer:[answerTier]});
   invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
   render(<App />);
   await waitFor(() => expect(at("Ask").getByRole("button", {name:"Ask"})).toBeEnabled());
   await userEvent.click(at("Ask").getByRole("button", {name:"Ask"}));
   expect(await at("Settings").findByText("Get written answers on this computer.")).toBeInTheDocument();
-  expect(screen.getByText(/uses about 4.0 GB of memory \(estimate\)/)).toHaveTextContent("Works offline. Search keeps working without it.");
-  expect(screen.getByText("Disk space needed: 2.2 GB")).toBeInTheDocument();
+  expect(screen.getAllByText(/uses about 4.0 GB of memory \(estimate\)/).every(element => element.textContent?.includes("Works offline. Search keeps working without it."))).toBe(true);
+  expect(screen.getAllByText("Disk space needed: 2.2 GB").length).toBeGreaterThan(0);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByText("With your API key.")).toBeInTheDocument();
   expect(screen.getByRole("heading", {name:"Claude Desktop", level:3})).toBeInTheDocument();
@@ -785,6 +787,7 @@ it("refreshes background checking from models_changed without polling", async ()
 });
 
 it("sends only the transfer cancel while adding answers and keeps Search enabled", async () => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:null, api_key:{...apiReady.api_key,enabled:false,key_present:false}});
   const pending = deferred();
   modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},offer:[answerTier]});
   invoke.mockImplementation(command => command === "pipeline_ask" ? Promise.resolve({kind:"no_answer"}) : command === "answer_add" ? pending.promise : Promise.resolve({available:false}));
@@ -841,6 +844,7 @@ it("shows Checking during a cold Ask when verification could not be recorded", a
 
 
 it("offers every eligible tier largest first and adds Qwen3-4B directly on a search-only 64 GiB PC", async () => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:null, api_key:{...apiReady.api_key,enabled:false,key_present:false}});
   const small = {...answerTier, pin:{...answerPin,name:"Qwen3-4B"}};
   const medium = {...answerTier,tier_index:1,min_ram_gb:16,pin:{...answerPin,name:"Ministral 3 8B",size:5_000_000_000},memory:{bytes:12_000_000_000,measured:false,source:null}};
   const large = {...answerTier,tier_index:2,min_ram_gb:64,pin:{...answerPin,name:"Qwen3.6",size:20_000_000_000},memory:{bytes:39_000_000_000,measured:true,source:"measured"}};
@@ -941,6 +945,33 @@ it("requires disclosure, masks the key and clears it after checking", async () =
  await act(async()=>pending.resolve({kind:"cloud_error",message:"That key was not accepted."}));await waitFor(()=>expect(field).toHaveValue(""));
  expect(await screen.findByText("That key was not accepted.")).toBeInTheDocument();
 });
+it.each([true, false])("guards a pending confirm failure when setup is closed: %s", async closed => {
+  const fresh = {...apiReady,default:null,api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false};
+  const pending = deferred();
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "cloud_status") return fresh;
+    if (command === "api_key_disclosure") return {version:"current",strings:["Use Anthropic", "Question and passages go to Anthropic.", "Billing", "Removal", "I understand"]};
+    if (command === "api_key_confirm") return pending.promise;
+  });
+  render(<App />);
+  at("Settings");
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.click(await screen.findByRole("button", {name:"I understand"}));
+  expect(cloudInvoke).toHaveBeenCalledWith("api_key_confirm", {provider:"anthropic",disclosureVersion:"current"});
+  if (closed) {
+    await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  }
+  await act(async () => pending.reject(closed ? "cancelled" : "Consent failed"));
+  const answers = screen.getByRole("region", {name:"Answers"});
+  if (closed) {
+    expect(within(answers).queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText("cancelled")).not.toBeInTheDocument();
+  } else {
+    expect(within(answers).getByRole("status")).toHaveTextContent("Consent failed");
+  }
+});
+
 it("keeps Search and Index enabled during cloud Ask and ignores cancelled callbacks", async () => {
  cloudInvoke.mockResolvedValue(apiReady);const pending=deferred();let tokens:{onmessage:(t:string)=>void}|undefined;
  invoke.mockImplementation(async(command,args)=>{
@@ -1019,15 +1050,15 @@ it("drops a superseded paused status after resume and keeps polling the download
 });
 
 
-it.each([true, false])("resumes confirmed setup at the key field (mid-change=%s)", async midChange => {
-  const status = {...apiReady, consent_provider:"openai", consent_version_current:true, consent_current:false,
-    api_key:{enabled:midChange,provider:midChange ? "anthropic" : "openai",key_present:midChange,key_last4:null}};
+it.each(["wrong provider", "keyless", "saved current"])("A8 reuses only matching saved consent: %s", async state => {
+  const status = {...apiReady, consent_provider:"openai", consent_version_current:true, consent_current:state === "saved current",
+    api_key:{enabled:true,provider:state === "wrong provider" ? "anthropic" : "openai",key_present:state !== "keyless",key_last4:null}};
   cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your OpenAI API key"]} : status);
   render(<App />);
-  await userEvent.click(await at("Settings").findByRole("button",{name:midChange ? "Finish changing to OpenAI" : "Review and confirm"}));
-  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
-  expect(screen.queryByText("Use your OpenAI API key")).not.toBeInTheDocument();
-  expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
+  await userEvent.click(await at("Settings").findByRole("button",{name:state === "saved current" ? "Replace key" : "Review and confirm"}));
+  if (state === "saved current") expect(await screen.findByLabelText("API key")).toBeInTheDocument();
+  else { expect(await screen.findByText("Use your OpenAI API key")).toBeInTheDocument(); expect(screen.queryByLabelText("API key")).not.toBeInTheDocument(); }
+  expect(screen.queryByRole("button", {name:/Finish changing|Cancel change/})).not.toBeInTheDocument();
 });
 
 it("uses the saved OpenAI provider from the chooser", async () => {
@@ -1053,7 +1084,7 @@ it("offers answer models after turning off the smallest model from the smaller-m
   const initial = {...readyModels,answer:{state:"ready",pin:answerPin},offer:[answerTier,medium,large]};
   modelsInvoke.mockResolvedValue(initial);
   invoke.mockImplementation(async command => {
-    if (command === "answer_turn_off") modelsInvoke.mockResolvedValue({...initial,answer:{state:"none"}});
+    if (command === "answer_turn_off") { modelsInvoke.mockResolvedValue({...initial,answer:{state:"none"}}); cloudInvoke.mockResolvedValue({...apiReady, default:null}); }
     return command === "pipeline_ask" ? {kind:"no_answer"} : {available:false};
   });
   render(<App />);
@@ -1067,6 +1098,7 @@ it("offers answer models after turning off the smallest model from the smaller-m
 });
 
 it("keeps the offered tier rows in place through download, checking and completion", async () => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:null, api_key:{...apiReady.api_key,enabled:false,key_present:false}});
   const medium = {...answerTier,tier_index:1,pin:{...answerPin,name:"Medium model",sha256:"medium",size:5_000_000_000}};
   const large = {...answerTier,tier_index:2,pin:{...answerPin,name:"Large model",sha256:"large",size:20_000_000_000}};
   const initial = {...readyModels,answer:{state:"none"},offer:[answerTier,medium,large]};
@@ -1107,7 +1139,7 @@ it("renders safe answer Markdown and leaves citations unchanged", async () => {
 });
 
 
-it("resumes setup after consent when no key has ever been saved", async () => {
+it("A8 requires disclosure for an upgraded keyless confirmation", async () => {
   const status = {...apiReady,default:null,consent_provider:"anthropic",consent_version_current:true,consent_current:false,
     api_key:{enabled:false,provider:null,key_present:false,key_last4:null}};
   cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your Anthropic API key"]} : status);
@@ -1115,8 +1147,8 @@ it("resumes setup after consent when no key has ever been saved", async () => {
   const chooser = await screen.findByRole("complementary",{name:"How should vectorAIz write answers?"});
   expect(screen.getAllByRole("button",{name:"Set up"})).toHaveLength(1);
   await userEvent.click(within(chooser).getByRole("button",{name:"Set up"}));
-  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
-  expect(screen.queryByText("Use your Anthropic API key")).not.toBeInTheDocument();
+  expect(await screen.findByText("Use your Anthropic API key")).toBeInTheDocument();
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
   expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_confirm")).toBe(false);
 });
 
@@ -1193,7 +1225,7 @@ it("shows the connected-app line and in-app chooser when no in-app answer path i
   render(<App />);
   expect(await screen.findByText("Connected to Research app. Ask in Research app, and it searches your library here.")).toBeInTheDocument();
   expect(at("Ask").getByRole("button", {name: "Search"})).toBeEnabled();
-  expect(screen.queryByRole("button", {name: "Ask"})).not.toBeInTheDocument();
+  expect(screen.getByRole("button", {name: "Ask"})).toBeEnabled();
   expect(screen.getByRole("heading", {name:"Claude Desktop", level:3})).toBeInTheDocument();
   const chooser = screen.getByRole("complementary", {name: "How should vectorAIz write answers?"});
   expect(within(chooser).getAllByRole("heading", {level: 3}).map(h => h.textContent)).toEqual(["On this computer.", "With your API key.", "Claude Desktop"]);
@@ -1209,10 +1241,10 @@ it("gives generic clients the no-call connection message", async () => {
 });
 
 
-it.each([false, true])("labels stopped and externally missing keys separately (enabled=%s)", async enabled => {
-  cloudInvoke.mockResolvedValue({...apiReady, api_key:{...apiReady.api_key, enabled, key_present:false, key_last4:null}});
+it.each([false, true])("A8 keyless profiles use Review and confirm (enabled=%s)", async enabled => {
+  cloudInvoke.mockResolvedValue({...apiReady, consent_current:false, api_key:{...apiReady.api_key, enabled, key_present:false, key_last4:null}});
   render(<App />);
-  expect(await at("Settings").findByRole("button",{name:enabled ? "Add your Anthropic API key" : "Set up Anthropic again"})).toBeEnabled();
+  expect(await at("Settings").findByRole("button",{name:"Review and confirm"})).toBeEnabled();
 });
 
 it.each([true, false])("announces a saved-key answer switch only when committed (switched=%s)", async switched => {
@@ -1321,7 +1353,7 @@ it("A3.3.4 uses set up until an allowed request and keeps Test waiting for a fre
   appInvoke.mockImplementation(async command => command === "app_status" ? appStatus([claude]) : pending.promise);
   render(<App />);
   expect(await screen.findByText("Finish setting up vectorAIz in Claude Desktop, then ask it to search your vectorAIz library.")).toBeInTheDocument();
-  expect(screen.queryByText(/^Connected to/)).not.toBeInTheDocument();
+  expect(within(screen.getByRole("region", {name:"Ask your library"})).queryByText(/^Connected to/)).not.toBeInTheDocument();
   await userEvent.click(at("AI apps").getByRole("button",{name:"Test the connection"}));
   expect(screen.getByText("Waiting for Claude Desktop. In a new chat in Claude Desktop, ask it to search your vectorAIz library.")).toBeInTheDocument();
   await act(async () => pending.resolve({connected:false}));
@@ -1800,16 +1832,246 @@ it.each(["stored disabled key", "credential cleanup", "non-revoked app", "revoke
   expect(!!screen.queryByText(/Everything stays on this computer/)).toBe(state === "fresh" || state === "revoked app");
 });
 
-it("A7 no_answer keeps the Ask model navigation and only acquisition offers in Settings", async () => {
+it("A8 no_answer keeps the local chooser and model acquisition offers in Settings", async () => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:null, api_key:{...apiReady.api_key,enabled:false,key_present:false}});
   modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},offer:[answerTier]});
   invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
   render(<App />);
   await userEvent.click(await screen.findByRole("button", {name:"Ask"}));
   await userEvent.click(await screen.findByRole("button", {name:"Add answer model"}));
   expect(screen.getByRole("link", {name:"Settings"})).toHaveAttribute("aria-current", "page");
-  expect(screen.queryByRole("button", {name:"Add answer model"})).not.toBeInTheDocument();
+  expect(screen.getByRole("button", {name:"Add answer model"})).toBeInTheDocument();
   const offers = screen.getAllByRole("button", {name:/^Add answer model · /});
   expect(offers).toHaveLength(1);
   expect(offers[0]).toHaveFocus();
   expect(screen.getByRole("region", {name:"Models"})).toContainElement(offers[0]);
+});
+
+
+it.each([
+  [String.raw`\\?\C:\folder`, String.raw`C:\folder`, "folder"],
+  [String.raw`C:\Users\Max\Documents`, String.raw`C:\Users\Max\Documents`, "Documents"],
+  [String.raw`\\?\UNC\server\share`, String.raw`\\server\share`, "share"],
+  [String.raw`\\?\UNC\server\share\folder`, String.raw`\\server\share\folder`, "folder"],
+  ["/Users/max/Documents/", "/Users/max/Documents/", "Documents"],
+])("A8 folder summary normalizes %s in both views", async (folder, path, name) => {
+  expect(readableFolder(folder)).toEqual({path, name});
+  modelsInvoke.mockResolvedValue({...readyModels,last_indexed_folder:folder});
+  render(<App />);
+  expect(await screen.findByTitle(path)).toHaveTextContent(name);
+  expect(screen.getByTitle(path).textContent).toBe(name);
+  expect(at("Library").getByText(path)).toBeInTheDocument();
+  expect(screen.getByLabelText("Folder")).toHaveValue(path);
+  expect(screen.queryByText(/\\\\\?\\/)).not.toBeInTheDocument();
+  invoke.mockImplementation(async command => command === "pipeline_index" ? {completed:2,skipped:1,failed:0,total:3} : {available:false});
+  await userEvent.click(screen.getByRole("button", {name:"Index folder"}));
+  await waitFor(() => expect(screen.getByRole("button", {name:"Index folder"})).toBeEnabled());
+  at("Ask");
+  expect(screen.getByTitle(path).textContent).toBe(`${name} · 3`);
+});
+it("A8 omits an unknown library summary and does not invent a count", async () => {
+  const {container} = render(<App />);
+  await waitFor(() => expect(modelsInvoke).toHaveBeenCalled());
+  expect(container.querySelector(".library-summary")).toBeNull();
+});
+it.each([null, "local", "api_key"] as const)("A8 chooser reflects selected source %s in Ask and Answers", async source => {
+  cloudInvoke.mockResolvedValue({...apiReady, default:source});
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin}});
+  render(<App />);
+  await waitFor(() => expect(cloudInvoke).toHaveBeenCalled());
+  for (const view of ["Ask", "Settings"] as const) {
+    at(view);
+    expect(!!screen.queryByRole("complementary", {name:"How should vectorAIz write answers?"})).toBe(source === null);
+    if (view === "Settings" && source === "local") expect(screen.getByText("Answered on this computer")).toBeInTheDocument();
+    if (view === "Settings" && source === "api_key") expect(screen.getByRole("complementary", {name:"Answers with your API key"})).toHaveTextContent("Anthropic");
+  }
+});
+it.each([null, "local", "api_key"] as const)("A8 Search and Ask survive every client state with source %s", async source => {
+  for (const client of [null, {...connectedApp,app:"claude_desktop"}, connectedApp, {...connectedApp,revoked:true}]) {
+    cloudInvoke.mockResolvedValue({...apiReady,default:source});
+    appInvoke.mockResolvedValue(appStatus(client ? [client] : []));
+    invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:source ? "answer" : "no_answer",text:"answer"} : {available:false});
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", {name:"Ask"})).toBeEnabled());
+    await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+    expect(screen.getByRole("button", {name:"Search"})).toBeEnabled();
+    expect(screen.getByRole("button", {name:"Ask"})).toBeEnabled();
+    expect(!!screen.queryByRole("complementary", {name:"How should vectorAIz write answers?"})).toBe(!source);
+    expect(within(screen.getByRole("region", {name:"Ask your library"})).queryByText(/^Connected to/)).not.toBeInTheDocument();
+    cleanup();
+  }
+});
+it("A8 a stale no_answer cannot override a newly selected source", async () => {
+  cloudInvoke.mockImplementation(async command => command === "answer_path_set" ? {...apiReady, default:"local"} : {...apiReady,default:null});
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin}});
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? {kind:"no_answer"} : {available:false});
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Ask"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Use on this computer"}));
+  for (const view of ["Ask", "Settings"] as const) {
+    at(view);
+    expect(screen.queryByRole("complementary", {name:"How should vectorAIz write answers?"})).not.toBeInTheDocument();
+  }
+});
+it.each(["cancel", "failure"])("A8 local chooser survives offers and acquisition %s in one session", async outcome => {
+  cloudInvoke.mockResolvedValue({...apiReady,default:null});
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"none"},offer:[answerTier]});
+  const acquisition = deferred();
+  invoke.mockImplementation(command => command === "pipeline_ask" ? Promise.resolve({kind:"no_answer"}) : command === "answer_add" ? acquisition.promise : Promise.resolve({available:false}));
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Add answer model"}));
+  expect(screen.getByRole("button", {name:"Add answer model"})).toBeInTheDocument();
+  expect(screen.getAllByText(/uses about 4.0 GB/).length).toBeGreaterThan(0);
+  await userEvent.click(await screen.findByRole("button", {name:/^Add answer model · /}));
+  if (outcome === "cancel") await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  await act(async () => { if (outcome === "failure") acquisition.reject("Download failed"); else acquisition.resolve(undefined); });
+  if (outcome === "failure") expect(screen.getByText("Download failed")).toBeInTheDocument();
+  at("Ask");
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  await userEvent.click(screen.getByRole("button", {name:"Add answer model"}));
+  expect(screen.getByRole("button", {name:"Add answer model"})).toBeInTheDocument();
+  expect(screen.getAllByText(/uses about 4.0 GB/).length).toBeGreaterThan(0);
+});
+
+it("A8 uses only a known document count from existing indexing progress", async () => {
+  let folder: string | undefined;
+  modelsInvoke.mockImplementation(async () => ({...readyModels,last_indexed_folder:folder}));
+  invoke.mockImplementation(async (command, args) => {
+    if (command === "pipeline_index") {
+      folder = "/Users/max/Documents";
+      args.progress.onmessage({completed:2,failed:0,skipped:1,total:3,path:"last.txt"});
+      return {completed:2,failed:0,skipped:1,total:3};
+    }
+    return {available:false};
+  });
+  render(<App />);
+  await userEvent.type(at("Library").getByLabelText("Folder"), "/Users/max/Documents");
+  await userEvent.click(screen.getByRole("button", {name:"Index folder"}));
+  await waitFor(() => expect(screen.getByRole("button", {name:"Index folder"})).toBeEnabled());
+  at("Ask");
+  expect(await screen.findByTitle("/Users/max/Documents")).toHaveTextContent("Documents · 3");
+});
+
+it.each(["anthropic", "openai"] as const)("A8 %s setup confirms before entry, discards Cancel/failed save, reuses saved approval, and reviews after Stop", async provider => {
+  const name = provider === "anthropic" ? "Anthropic" : "OpenAI";
+  let state = {...apiReady, default:null as string | null, consent_current:false, consent_provider:undefined as string | undefined, api_key:{enabled:false,provider:null as string | null,key_present:false,key_last4:null as string | null}};
+  let fail = true;
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "api_key_disclosure") return {version:"current",strings:[`Use your ${name} API key`, "Transfer", "Billing", "Removal", `Use ${name}`]};
+    if (command === "api_key_set") {
+      if (fail) return {kind:"cloud_error",reason:"key_rejected",message:"That key was not accepted."};
+      state = {...state,default:"api_key",consent_current:true,consent_provider:provider,api_key:{enabled:true,provider,key_present:true,key_last4:"1234"}};
+    }
+    if (command === "api_key_stop") state = {...state,default:null,consent_current:false,consent_provider:undefined,api_key:{...state.api_key,enabled:false,key_present:false,key_last4:null}};
+    return state;
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.selectOptions(screen.getByLabelText("Provider"),provider);
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", {name:`Use ${name}`}));
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  expect(modelsInvoke).toHaveBeenCalledWith("models_cancel", {kind:"cloud_setup"});
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.selectOptions(screen.getByLabelText("Provider"),provider);
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", {name:`Use ${name}`}));
+  await userEvent.type(screen.getByLabelText("API key"),"sk-test-1234");
+  await userEvent.click(screen.getByRole("button", {name:"Check and save key"}));
+  expect(await screen.findByText("That key was not accepted.")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Set up"}));
+  await userEvent.selectOptions(screen.getByLabelText("Provider"),provider);
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", {name:`Use ${name}`}));
+  await userEvent.type(screen.getByLabelText("API key"),"sk-test-1234");
+  fail = false;
+  await userEvent.click(screen.getByRole("button", {name:"Check and save key"}));
+  expect(await screen.findByText(/Your key is stored/)).toBeInTheDocument();
+  cleanup(); render(<App />);
+  await userEvent.click(await at("Settings").findByRole("button", {name:"Replace key"}));
+  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  await userEvent.click(at("Settings").getByRole("button", {name:`Stop using ${name}`}));
+  cleanup(); render(<App />);
+  await userEvent.click(await at("Settings").findByRole("button", {name:"Review and confirm"}));
+  expect(await screen.findByRole("button", {name:`Use ${name}`})).toBeInTheDocument();
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+}, 15_000);
+
+it("A8 confirming a different provider leaves the streamed saved-provider answer running", async () => {
+  const pending = deferred();
+  let tokens: {onmessage:(t:string)=>void} | undefined;
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Use your OpenAI API key","Transfer","Billing","Removal","Use OpenAI"]} : apiReady);
+  invoke.mockImplementation(async (command,args) => {
+    if (command === "pipeline_ask") {tokens = args.tokens; tokens!.onmessage("First"); return pending.promise;}
+    return {available:false};
+  });
+  render(<App />);
+  await waitFor(() => expect(cloudInvoke).toHaveBeenCalledWith("cloud_status",undefined));
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  expect(await screen.findByText("First")).toBeInTheDocument();
+  await userEvent.click(at("Settings").getByRole("button", {name:"Change provider"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Use OpenAI"}));
+  expect(await screen.findByLabelText("API key")).toBeInTheDocument();
+  await act(async () => {tokens!.onmessage(" second");});
+  expect(at("Ask").getByText("First second")).toBeInTheDocument();
+  expect(screen.getByRole("button", {name:"Cancel answer"})).toBeInTheDocument();
+  expect(modelsInvoke.mock.calls.some(([command,args]) => command === "models_cancel" && args?.kind === "cloud")).toBe(false);
+  await act(async () => pending.resolve({kind:"answer",text:"Final",answered_by:"anthropic"}));
+  expect(screen.getByText("Final")).toBeInTheDocument();
+});
+it.each(["anthropic", "openai"] as const)("A8 stale %s consent Cancel keeps Ask reopening review; confirming restores the saved key without entry", async provider => {
+  const name = provider === "anthropic" ? "Anthropic" : "OpenAI";
+  let current = false;
+  const state = () => ({...apiReady,consent_current:current,api_key:{...apiReady.api_key,provider}});
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "api_key_disclosure") return {version:"current",strings:[`Use your ${name} API key`,"Transfer","Billing","Removal",`Use ${name}`]};
+    if (command === "api_key_confirm") current = true;
+    return state();
+  });
+  invoke.mockImplementation(async command => command === "pipeline_ask" ? current ? {kind:"answer",text:"Saved key works",answered_by:provider} : {kind:"cloud_error",reason:"consent_required"} : {available:false});
+  render(<App />);
+  await waitFor(() => expect(cloudInvoke).toHaveBeenCalled());
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  await userEvent.click(await screen.findByRole("button", {name:"Cancel"}));
+  expect(current).toBe(false);
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+  await userEvent.click(await screen.findByRole("button", {name:`Use ${name}`}));
+  expect(current).toBe(true);
+  await userEvent.click(screen.getByRole("button", {name:"Cancel"}));
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  expect(await screen.findByText("Saved key works")).toBeInTheDocument();
+  expect(cloudInvoke.mock.calls.some(([command]) => command === "api_key_set")).toBe(false);
+});
+
+it("A8 Answers and Models keep their related controls in shared action rows", async () => {
+  cloudInvoke.mockImplementation(async command => command === "api_key_disclosure" ? {version:"current",strings:["Title","Transfer","Billing","Removal","Use OpenAI"]} : apiReady);
+  modelsInvoke.mockResolvedValue({...readyModels,answer:{state:"ready",pin:answerPin}});
+  render(<App />);
+  const replace = await at("Settings").findByRole("button", {name:"Replace key"});
+  const row = replace.parentElement!;
+  expect(row).toHaveClass("actions");
+  expect(row).toContainElement(screen.getByRole("button", {name:"Change provider"}));
+  expect(row).toContainElement(screen.getByRole("button", {name:"Stop using Anthropic"}));
+  expect(screen.getByRole("button", {name:"Use a smaller model"}).parentElement).toBe(screen.getByRole("button", {name:"Turn off"}).parentElement);
+  await userEvent.click(screen.getByRole("button", {name:"Change provider"}));
+  const confirm = await screen.findByRole("button", {name:"Use OpenAI"});
+  expect(confirm.parentElement).toHaveClass("actions");
+  expect(confirm.parentElement).toContainElement(screen.getByRole("button", {name:"Cancel"}));
+  await userEvent.click(confirm);
+  expect(screen.getByRole("button", {name:"Check and save key"}).parentElement).toBe(screen.getByRole("button", {name:"Cancel"}).parentElement);
+});
+
+it("A8 a backend consent refusal while selecting an apparently current saved key opens disclosure", async () => {
+  cloudInvoke.mockImplementation(async command => {
+    if (command === "answer_path_set") throw "consent_required";
+    if (command === "api_key_disclosure") return {version:"new",strings:["Use your Anthropic API key","Transfer","Billing","Removal","Use Anthropic"]};
+    return {...apiReady,default:null};
+  });
+  render(<App />);
+  await userEvent.click(await screen.findByRole("button", {name:"Use your API key"}));
+  expect(await screen.findByRole("button", {name:"Use Anthropic"})).toBeInTheDocument();
+  expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
 });

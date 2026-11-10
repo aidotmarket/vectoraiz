@@ -678,11 +678,7 @@ async fn app_connect_claude<R: tauri::Runtime>(
                 .open_path(path, None::<&str>)
                 .map_err(|e| e.to_string())
         },
-        |path| {
-            app.opener()
-                .reveal_item_in_dir(path)
-                .map_err(|e| e.to_string())
-        },
+        |path| reveal_extension(&app, std::path::Path::new(path)),
     );
     result["opened"] = serde_json::json!(opened);
     Ok(result)
@@ -738,12 +734,26 @@ async fn app_test_connection<R: tauri::Runtime>(
 ) -> Result<serde_json::Value, String> {
     apps.test_connection(&model_dir(&app)?, &client_id).await
 }
+fn reveal_extension<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let _ = app;
+        mcp_apps::reveal_extension(path)
+    }
+    #[cfg(not(windows))]
+    {
+        use tauri_plugin_opener::OpenerExt;
+        app.opener()
+            .reveal_item_in_dir(path)
+            .map_err(|e| e.to_string())
+    }
+}
 #[tauri::command]
 fn app_show_extension<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
-    use tauri_plugin_opener::OpenerExt;
-    app.opener()
-        .reveal_item_in_dir(mcp_apps::bundle_path(&model_dir(&app)?))
-        .map_err(|e| e.to_string())
+    reveal_extension(&app, &mcp_apps::bundle_path(&model_dir(&app)?))
 }
 
 #[tauri::command]

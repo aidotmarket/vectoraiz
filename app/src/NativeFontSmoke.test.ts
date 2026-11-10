@@ -28,7 +28,7 @@ async function runFontSmoke(interRenders: boolean, family = "Inter, system-ui, s
     },
     getComputedStyle: () => style,
   };
-  const source = readFileSync("ui-tests/smoke.e2e.mjs", "utf8").replace(/^import assert[^\n]+\n/, "");
+  const source = readFileSync("ui-tests/smoke.e2e.mjs", "utf8").replace(/^import [^\n]+\n/gm, "");
   vm.runInNewContext(source, sandbox);
   await tests.get("loads bundled Inter in the packaged WebView")!();
   return measured;

@@ -78,6 +78,9 @@ fn mark(state: &SettingsState, id: &str) -> Result<(), String> {
 }
 pub fn cancel(dir: &Path, kind: &str) -> Result<(), String> {
     let (senders, finished) = settings::with_state(dir, |s| {
+        if kind == "cloud_setup" {
+            s.setup_consent = None;
+        }
         let mut senders = vec![];
         let mut finished = false;
         for o in s.ops.values_mut().filter(|o| o.kind == kind) {
@@ -104,6 +107,7 @@ pub fn revoke(dir: &Path, stop: bool) -> Result<(), String> {
         s.cloud_epoch += 1;
         if stop {
             s.cloud_stopped = true;
+            s.setup_consent = None;
         }
         s.ops
             .values_mut()
@@ -124,6 +128,27 @@ pub fn revoke(dir: &Path, stop: bool) -> Result<(), String> {
 }
 pub fn snapshot(dir: &Path) -> (cloud_gate::ConsentState, u64) {
     settings::with_state(dir, |s| (s.consent_state(), s.cloud_epoch)).unwrap_or_default()
+}
+// Setup consent authorizes key checking only; answers always use saved consent.
+fn key_state(s: &SettingsState, p: Provider) -> cloud_gate::ConsentState {
+    let mut state = s.consent_state();
+    if let Some(consent) = s.setup_consent.as_ref().filter(|c| c.provider == p) {
+        state.consent = Some(consent.clone());
+    }
+    state
+}
+fn send_snapshot(dir: &Path, kind: Op, p: Provider) -> (cloud_gate::ConsentState, u64) {
+    settings::with_state(dir, |s| {
+        (
+            if kind == Op::KeyCheck {
+                key_state(s, p)
+            } else {
+                s.consent_state()
+            },
+            s.cloud_epoch,
+        )
+    })
+    .unwrap_or_default()
 }
 pub fn status(dir: &Path) -> Result<Value, String> {
     settings::with_state(dir, |s| {
@@ -196,6 +221,7 @@ impl Cloud {
                     if s.settings.api()["provider"] == json!(p) {
                         s.settings.api_mut()["key_present"] = json!(false);
                         s.settings.api_mut()["key_last4"] = Value::Null;
+                        s.settings.api_mut()["consent"] = Value::Null;
                     }
                     Ok::<(), String>(())
                 })?;
@@ -214,15 +240,30 @@ impl Cloud {
                 json!({"kind":"cloud_error","reason":"consent_required","disclosure":cloud_gate::disclosure(p)}),
             );
         }
-        if settings::with_state(dir, |s| s.settings.api()["provider"] != json!(p))? {
-            revoke(dir, false)?;
-        }
+        let op = register(dir, "cloud_setup")?;
         let _lock = self.cloud_lock.lock().await;
-        settings::update(dir, |s| {
-            s.settings.api_mut()["consent"] =
-                json!({"provider":p,"disclosure_version":version,"confirmed_at":now()});
-            Ok::<(), String>(())
+        let consent = cloud_gate::Consent {
+            provider: p,
+            disclosure_version: version,
+            confirmed_at: now(),
+        };
+        let saved = settings::with_state(dir, |s| {
+            s.settings.api()["provider"] == json!(p) && s.settings.api()["key_present"] == true
         })?;
+        if saved {
+            settings::update(dir, |s| {
+                mark(s, &op.id)?;
+                s.settings.api_mut()["consent"] = json!(consent);
+                s.setup_consent = Some(consent.clone());
+                Ok::<(), String>(())
+            })?;
+        } else {
+            settings::with_state(dir, |s| {
+                mark(s, &op.id)?;
+                s.setup_consent = Some(consent);
+                Ok::<(), String>(())
+            })??;
+        }
         status(dir)
     }
     pub async fn set(&self, dir: &Path, p: Provider, key: Secret) -> Result<Value, LifecycleError> {
@@ -239,7 +280,7 @@ impl Cloud {
             if s.stop_failed {
                 return Err("Restart vectorAIz to set up a key again.".to_owned());
             }
-            cloud_gate::check(&s.consent_state(), p, Op::KeyCheck)
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
                 .map_err(|e| SendError::from(e).reason().to_owned())?;
             let epoch = s.cloud_epoch;
             s.ops.get_mut(&op.id).unwrap().epoch = epoch;
@@ -258,7 +299,7 @@ impl Cloud {
         }
         settings::update(dir, |s| {
             mark(s, &op.id)?;
-            cloud_gate::check(&s.consent_state(), p, Op::KeyCheck)
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
                 .map_err(|_| "revoked".to_owned())?;
             s.settings.api_mut()["pending"] = json!(p);
             Ok::<(), String>(())
@@ -282,17 +323,20 @@ impl Cloud {
         let mut answers_switched = false;
         let commit = settings::update(dir, |s| {
             mark(s, &op.id)?;
-            cloud_gate::check(&s.consent_state(), p, Op::KeyCheck)
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
                 .map_err(|_| "revoked".to_owned())?;
             #[cfg(test)]
             (self.hook)("commit");
             let old = serde_json::from_value::<Provider>(s.settings.api()["provider"].clone()).ok();
+            let consent = key_state(s, p).consent;
             let api = s.settings.api_mut();
             api["pending"] = Value::Null;
             api["provider"] = json!(p);
             api["key_present"] = json!(true);
             api["key_last4"] = json!(last4);
             api["enabled"] = json!(true);
+            api["consent"] = json!(consent);
+            s.setup_consent = None;
             answers_switched = s.settings.default_path() != Some("api_key");
             s.settings.0["paths"]["default"] = json!("api_key");
             if let Some(old) = old.filter(|old| *old != p) {
@@ -359,6 +403,8 @@ impl Cloud {
             api["enabled"] = json!(false);
             api["key_present"] = json!(false);
             api["key_last4"] = Value::Null;
+            api["consent"] = Value::Null;
+            s.setup_consent = None;
             s.settings.0["paths"]["default"] = if s.settings.selected().is_some() {
                 json!("local")
             } else {
@@ -442,6 +488,7 @@ impl Cloud {
                 settings::update(&op.dir, |s| {
                     s.settings.api_mut()["key_present"] = json!(false);
                     s.settings.api_mut()["key_last4"] = Value::Null;
+                    s.settings.api_mut()["consent"] = Value::Null;
                     Ok::<(), String>(())
                 })?;
                 Err("no_key".into())
@@ -589,7 +636,7 @@ impl Cloud {
             .transport
             .client
             .send(
-                || snapshot(&op.dir),
+                || send_snapshot(&op.dir, kind, p),
                 p,
                 kind,
                 key,
@@ -600,7 +647,7 @@ impl Cloud {
             .await;
         #[cfg(not(test))]
         cloud_gate::send(
-            || snapshot(&op.dir),
+            || send_snapshot(&op.dir, kind, p),
             p,
             kind,
             key,

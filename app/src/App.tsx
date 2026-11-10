@@ -14,6 +14,11 @@ interface ModelFile { name: string; file: string; size: number; sha256: string; 
 interface AnswerTier { tier_index: number; min_ram_gb: number; pin: ModelFile; memory?: {bytes: number; measured: boolean; source: string | null} }
 interface ModelsStatus { last_indexed_folder?: string; needs_reindex?: boolean; ready: boolean; files: ModelFile[]; search?: {pin: ModelFile; verified: boolean}; answer?: {state: "none" | "checking" | "ready" | "missing" | "failed"; pin?: ModelFile}; target?: {pin: ModelFile; state: string; progress?: ModelProgress}; offer?: AnswerTier[]; ram_bytes?: number }
 
+export function readableFolder(folder: string) {
+  const path = folder.startsWith("\\\\?\\UNC\\") ? "\\\\" + folder.slice(8) : folder.startsWith("\\\\?\\") ? folder.slice(4) : folder;
+  return {path, name: path.replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path};
+}
+
 const gb = (bytes: number) => `${(bytes / 1_000_000_000).toFixed(1)} GB`;
 const size = (bytes: number) => bytes < 1_000_000_000 ? `${Math.ceil(bytes / 1_000_000)} MB` : gb(bytes);
 // All M1 customer copy lives here for review.
@@ -66,7 +71,7 @@ export const M2_COPY = {
   stop: (p: string) => `Stop using ${p}`, again: (p: string) => `Set up ${p} again`, addKey: (p: string) => `Add your ${p} API key`,
   answersNow: (p: string) => `Answers now use ${p}.`,
   changeNote: (p: string) => `Your ${p} key will be removed once the new key works.`,
-  finish: (p: string) => `Finish changing to ${p}`, cancelChange: "Cancel change (re-confirm previous provider)", review: "Review and confirm",
+  review: "Review and confirm",
   last4: (s: string) => `Saved key ending in ${s}`, stored: "Your key is stored in this computer's password store.",
   network: "Network activity", downloads: "Model downloads: huggingface.co, only while downloading",
   updates: "Update checks: github.com/aidotmarket/vectoraiz-test-builds",
@@ -92,6 +97,7 @@ function NavIcon({view}: {view: View}) {
 }
 
 export default function App() {
+  const [indexedCount, setIndexedCount] = useState<{folder: string; count: number}>();
   const [view, setView] = useState<View>("Ask");
   const focusTarget = useRef<string | undefined>(undefined);
   const setupOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-api"});
@@ -249,10 +255,15 @@ export default function App() {
     setIndexing(true); setRunning(true); setIndexError(""); setIndexProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
     let active = true;
     let receivedProgress = false;
+    setIndexedCount(undefined);
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
     channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
-    try { await invoke("pipeline_index", { folder, progress: channel }); await refreshModels(); }
+    try {
+      const result = await invoke<Progress>("pipeline_index", { folder, progress: channel });
+      const next = await refreshModels();
+      setIndexedCount(result?.failed === 0 && Number.isInteger(result.completed) && Number.isInteger(result.skipped) && result.completed + result.skipped === result.total && next?.last_indexed_folder ? {folder: next.last_indexed_folder, count: result.completed + result.skipped} : undefined);
+    }
     catch (cause) {
       const detail = String(cause);
       setIndexError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
@@ -290,7 +301,7 @@ export default function App() {
       setAskState(result.kind);
       if (result.kind === "answer") { setAnswer(result.text ?? ""); setCitations(result.citations ?? []); setAnsweredBy(result.answered_by ?? "local"); }
       else { setAnswer(""); setCitations([]); if (result.message) setError(result.message); }
-      if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false, true);
+      if (result.reason === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, true, true);
     } catch (cause) { if (generation === answerGeneration.current) {setAnswer(""); setCitations([]); setError(String(cause));} }
     finally { active = false; if (generation === answerGeneration.current) {answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); if (!cloudAsk) setRunning(false); setProgress("");} }
   }
@@ -301,7 +312,7 @@ export default function App() {
   }
   async function refreshCloud() { const next = await invoke<CloudStatus>("cloud_status"); if (next) setCloud(next); return next; }
   useEffect(() => { void refreshCloud().catch(cause => setCloudMessage(String(cause))); }, []);
-  async function openSetup(p: Provider = "anthropic", replace = false, fromRecovery = false) {
+  async function openSetup(p: Provider = "anthropic", fromRecovery = false, requireDisclosure = false) {
     if (!setupActive.current || view === "Ask") {
       const active = document.activeElement as HTMLElement | null;
       setupOrigin.current = {view, id: view === "Ask" ? ((fromRecovery || askState === "cloud_error") ? "cloud-recovery" : "chooser-api") : active?.id || "api-setup"};
@@ -309,22 +320,19 @@ export default function App() {
     navigate("Settings", "#provider");
     const generation = ++setupGeneration.current;
     setDisclosure(undefined); setSetup(true); setupActive.current = true; setProvider(p); setKey(""); setCloudMessage("");
-    setConfirmed(replace || (cloud?.consent_provider === p && !!cloud.consent_version_current));
+    setConfirmed(!requireDisclosure && !!cloud?.api_key.key_present && cloud.api_key.provider === p && !!cloud.consent_current);
     try { const text = await invoke<Disclosure>("api_key_disclosure", {provider: p}); if (generation === setupGeneration.current) setDisclosure(text); }
     catch (cause) { setCloudMessage(String(cause)); }
   }
   async function confirmKey() {
     if (!disclosure) return;
     const generation = setupGeneration.current;
-    if (answerActive.current && cloud?.default === "api_key" && cloud.api_key.provider !== provider) {
-      ++answerGeneration.current; answerActive.current = false; setAnswerStreaming(false); setAnswerRunning(false); setAnswer(""); setCitations([]); setAskState("cancelled"); setProgress("");
-    }
     try {
       const result = await invoke<CloudStatus & {kind?: string; disclosure?: Disclosure}>("api_key_confirm", {provider, disclosureVersion: disclosure.version});
       if (generation !== setupGeneration.current) return;
       if (result.kind === "cloud_error") { setDisclosure(result.disclosure); setConfirmed(false); return; }
       setCloud(result); setConfirmed(true); focusTarget.current = "#api-key";
-    } catch (cause) { setCloudMessage(String(cause)); }
+    } catch (cause) { if (generation === setupGeneration.current && setupActive.current) setCloudMessage(String(cause)); }
   }
   async function saveKey() {
     if (keyBusy) return;
@@ -342,7 +350,7 @@ export default function App() {
   }
   async function closeSetup() {
     ++setupGeneration.current; setupActive.current = false; setSetup(false); setKey("");
-    try { if (keyBusy) await invoke("models_cancel", {kind: "cloud_setup"}); }
+    try { await invoke("models_cancel", {kind: "cloud_setup"}); }
     catch (cause) { if (String(cause) !== "already finished") setCloudMessage(String(cause)); }
     finally { await refreshCloud(); navigate(setupOrigin.current.view, `#${setupOrigin.current.id}`); }
   }
@@ -353,7 +361,7 @@ export default function App() {
     catch (cause) {setCloudMessage(String(cause)); await refreshCloud();}
     finally { setStopping(false); }
   }
-  async function choosePath(path: "local" | "api_key") { const initiator = document.activeElement as HTMLElement | null; try {setCloud(await invoke<CloudStatus>("answer_path_set", {path})); setAskState(""); focusTarget.current = view === "Ask" ? "#question" : initiator?.id ? `#${initiator.id}, #provider-summary` : "#provider-summary";} catch (cause) { if (path === "api_key" && String(cause) === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider); else {setCloudMessage(String(cause)); navigate("Settings", "#provider-summary");}} }
+  async function choosePath(path: "local" | "api_key") { const initiator = document.activeElement as HTMLElement | null; try {setCloud(await invoke<CloudStatus>("answer_path_set", {path})); setAskState(""); focusTarget.current = view === "Ask" ? "#question" : initiator?.id ? `#${initiator.id}, #provider-summary` : "#provider-summary";} catch (cause) { if (path === "api_key" && String(cause) === "consent_required" && cloud?.api_key.provider) await openSetup(cloud.api_key.provider, false, true); else {setCloudMessage(String(cause)); navigate("Settings", "#provider-summary");}} }
   async function runSelfTest() {
     setRunning(true); setSelfTestRunning(true);
     setResult(undefined);
@@ -372,7 +380,7 @@ export default function App() {
     if (request === modelsRequest.current) {
       setModels(status);
       if (!status) return status;
-      setFolder(current => current || status.last_indexed_folder || "");
+      setFolder(current => current || (status.last_indexed_folder ? readableFolder(status.last_indexed_folder).path : ""));
       setAskState(current => current === "checking" && ["ready", "failed"].includes(status.answer?.state ?? "") ? "" : current);
     }
     return status;
@@ -464,11 +472,11 @@ export default function App() {
     try { await invoke("models_cancel", { kind }); }
     catch (cause) { await refreshAfterModelError(cause); }
   }
-  const chooserVisible = !!models?.ready && (askState === "no_answer" || !!(cloud && !cloud.default));
+  const chooserVisible = !!models?.ready && !!(cloud && !cloud.default);
   const chooser = chooserVisible ? (<aside className="chooser stack" aria-label={M2_COPY.chooser}>
       <h2>{M2_COPY.chooser}</h2><div className="choices"><div className="choice stack"><h3>{M2_COPY.local}</h3>
-      {askState !== "no_answer" && offered && <p>{M1_COPY.answerOffer(offered)}</p>}
-      {(models.answer?.state === "ready" ? <button id="chooser-local" className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : (view === "Ask" || askState !== "no_answer") && <button className={buttonStyle} disabled={transferBusy || installing} onClick={addAnswerModel}>{M1_COPY.add}</button>)}
+      {offered && <p>{M1_COPY.answerOffer(offered)}</p>}
+      {(models.answer?.state === "ready" ? <button id="chooser-local" className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button> : <button className={buttonStyle} disabled={transferBusy || installing} onClick={addAnswerModel}>{M1_COPY.add}</button>)}
       </div><div className="choice stack"><h3>{M2_COPY.api}</h3><p>{M2_COPY.apiDescription}</p><p>{M2_COPY.chatgpt}</p><p>{M2_COPY.search}</p>
       <button id="chooser-api" className={buttonStyle} disabled={keyBusy || installing} onClick={() => cloud?.api_key.enabled && cloud.consent_current ? void choosePath("api_key") : void openSetup(cloud?.api_key.provider ?? "anthropic")}>{cloud?.api_key.enabled ? M2_COPY.useApi : M2_COPY.setUp}</button>
       </div><div className="choice stack"><h3>{M3_COPY.third}</h3><p>{M3_COPY.description}</p>{!claudeDisclosure && !(appClients ?? []).some(c => !c.revoked && c.app === "claude_desktop") && <button className={buttonStyle} id="chooser-claude" onClick={startClaude}>Connect Claude Desktop</button>}
@@ -500,12 +508,12 @@ export default function App() {
       </div>}
       </aside>
       {view === "Ask" && <section className="view stack" aria-label="Ask your library">
-        <header><h1>Ask your library</h1>{models?.last_indexed_folder && <p className="muted library-summary" title={models.last_indexed_folder}>{models.last_indexed_folder}</p>}</header>
+        <header><h1>Ask your library</h1>{models?.last_indexed_folder && <p className="muted library-summary" title={readableFolder(models.last_indexed_folder).path}>{readableFolder(models.last_indexed_folder).name}{indexedCount?.folder === models.last_indexed_folder ? ` · ${indexedCount.count}` : ""}</p>}</header>
         <div className="card stack">
           <label>Question or search <input id="question" className="bg-white text-slate-950 p-2 w-full" value={query} onChange={event => setQuery(event.target.value)} /></label>
           <div className="actions">
             <button className={buttonStyle} disabled={pipelineDisabled || models?.needs_reindex} onClick={search}>Search</button>
-            {(cloud?.default || !(appClients ?? []).some(c => !c.revoked)) && <button className="button primary" disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>}
+            <button className="button primary" disabled={pipelineDisabled || answerRunning || models?.needs_reindex} onClick={ask}>Ask</button>
             {cloud?.default && <span className="chip">{cloud.default === "local" ? M2_COPY.answered.local : M2_COPY.answered[cloud.api_key.provider ?? "anthropic"]}</span>}
           </div>
           {error && <p role="alert">{error}</p>}
@@ -528,7 +536,7 @@ export default function App() {
       {view === "Library" && <section className="view stack" aria-label="Library"><h1>Library</h1>
         {models?.needs_reindex && <div className="notice warning"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Re-index</button></div>}
         <section className="card stack" aria-label="Folders"><h2>Folders</h2>
-          {models?.last_indexed_folder && <p>{models.last_indexed_folder}</p>}
+          {models?.last_indexed_folder && <p>{readableFolder(models.last_indexed_folder).path}</p>}
           <label>Folder <input id="library-folder" placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
           <div className="actions"><button className="button primary" disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>{indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}</div>
           <div id="index-feedback" tabIndex={-1} role="status" aria-live="polite">{indexProgress && <p>{indexProgress}</p>}</div>
@@ -542,23 +550,20 @@ export default function App() {
       {view === "Settings" && <section className="view stack" aria-label="Settings"><h1>Settings</h1>
         <section id="answers" className="card stack" aria-label="Answers"><h2>Answers</h2>
           {chooser}
+          {cloud?.default === "local" && <p>{M2_COPY.answered.local}</p>}
     {cloud?.api_key.enabled && models?.answer?.state === "ready" && <label>{M2_COPY.choose}<select id="answer-path" aria-label={M2_COPY.choose} value={cloud.default ?? ""} disabled={answerRunning} onChange={event => void choosePath(event.target.value as "local" | "api_key")}><option value="" disabled>{M2_COPY.choose}</option><option value="local">{M2_COPY.local}</option><option value="api_key">{M2_COPY.api}</option></select></label>}
     {models?.ready && <aside className="stack" aria-label={M2_COPY.settings}>
       <h2>{M2_COPY.settings}</h2>
       {cloud?.api_key.provider ? <>
         <p id="provider-summary" tabIndex={-1}>{providerName(cloud.api_key.provider)}{cloud.api_key.key_last4 ? ` · ${M2_COPY.last4(cloud.api_key.key_last4)}` : ""}</p>
-        {cloud.consent_provider && cloud.consent_provider !== cloud.api_key.provider ? <>
-          <button id="api-setup" className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.consent_provider)}>{M2_COPY.finish(providerName(cloud.consent_provider))}</button>
-          <button id="api-cancel-change" className={buttonStyle} disabled={keyBusy || installing} onClick={() => void openSetup(cloud.api_key.provider!)}>{M2_COPY.cancelChange}</button>
-        </> : <>
-          <button id="api-setup" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!, !!cloud.consent_current)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : cloud.api_key.enabled ? M2_COPY.addKey(providerName(cloud.api_key.provider)) : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
+        <div className="actions">
+          <button id="api-setup" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider!)}>{!cloud.consent_current ? M2_COPY.review : cloud.api_key.key_present ? M2_COPY.replace : cloud.api_key.enabled ? M2_COPY.addKey(providerName(cloud.api_key.provider)) : M2_COPY.again(providerName(cloud.api_key.provider))}</button>
           {cloud.api_key.enabled && <button className={buttonStyle} disabled={stopping} onClick={() => void cloudAction("api_key_stop")}>{M2_COPY.stop(providerName(cloud.api_key.provider))}</button>}
-        </>}
-        <button id="api-change" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button>
-      </> : <><p id="provider-summary" tabIndex={-1}>{M2_COPY.setup}</p>{!(askState === "no_answer" || (cloud && !cloud.default)) && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} id="api-setup" onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
+        <button id="api-change" className={buttonStyle} disabled={keyBusy || stopping || installing || cloud.stop_failed} onClick={() => void openSetup(cloud.api_key.provider === "anthropic" ? "openai" : "anthropic")}>{M2_COPY.change}</button></div>
+      </> : <><p id="provider-summary" tabIndex={-1}>{M2_COPY.setup}</p>{!chooserVisible && <button className={buttonStyle} disabled={keyBusy || installing || cloud?.stop_failed} id="api-setup" onClick={() => void openSetup()}>{M2_COPY.setUp}</button>}</>}
     {setup && <div className="stack" role="dialog" aria-label={M2_COPY.setup}>
       <label>{M2_COPY.provider}<select id="provider" aria-label={M2_COPY.provider} value={provider} disabled={keyBusy} onChange={event => void openSetup(event.target.value as Provider)}><option value="anthropic">Anthropic</option><option value="openai">OpenAI</option></select></label>
-      {!confirmed ? <>
+      <div className="actions setup-fields">{!confirmed ? <>
         {disclosure?.strings.slice(0, 4).map((line, index) => index === 0 ? <h2 key={line}>{line}</h2> : <p key={line}>{line}</p>)}
         {cloud?.api_key.provider && cloud.api_key.provider !== provider && <p>{M2_COPY.changeNote(providerName(cloud.api_key.provider))}</p>}
         <button className={buttonStyle} disabled={!disclosure || keyBusy} onClick={() => void confirmKey()}>{disclosure?.strings[4]}</button>
@@ -567,7 +572,7 @@ export default function App() {
         {cloud?.api_key.key_present && <p>{M2_COPY.replaceNote}</p>}
         <button className={buttonStyle} disabled={keyBusy || !key.trim()} onClick={() => void saveKey()}>{keyBusy ? M2_COPY.checking : M2_COPY.save}</button>
       </>}
-      <button className={buttonStyle} onClick={() => void closeSetup()}>{M2_COPY.cancel}</button>
+      <button className={buttonStyle} onClick={() => void closeSetup()}>{M2_COPY.cancel}</button></div>
     </div>}
       {cloud?.stop_failed && <p>{M2_COPY.restart}</p>}
       {stopping && <p role="status">{M2_COPY.stopping}</p>}
@@ -579,7 +584,7 @@ export default function App() {
         </section>
         <section id="models" className="card stack" aria-label="Models"><h2>Models</h2>
           {models?.ready && models.search && <p>{M1_COPY.searchModel(models.search.pin.size)} · {models.search.pin.name} · {models.search.pin.license} · Verified</p>}
-    {(!models?.ready || importResults.length > 0) && <aside className="stack">
+    {(!models?.ready || importResults.length > 0) && <aside className="actions setup-fields">
       {!models && !modelError ? <p>Checking models…</p> : <>
 
       <ul>{(models?.search ? [models.search.pin] : models?.files.slice(0, 1))?.map(file => <li key={file.file} className="mb-3">
@@ -604,8 +609,8 @@ export default function App() {
       <h2>{M1_COPY.settings}</h2>
       {models.answer?.pin && <>
         <p>{models.answer.pin.name}</p>
-        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setAnswerOffers(undefined);setShowSmaller(value => !value);}}>{M1_COPY.smaller}</button>
-        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer("answer_turn_off")}>{M1_COPY.turnOff}</button>
+        <div className="actions"><button className={buttonStyle} disabled={transferBusy || installing} onClick={() => {setAnswerOffers(undefined);setShowSmaller(value => !value);}}>{M1_COPY.smaller}</button>
+        <button className={buttonStyle} disabled={transferBusy || installing} onClick={() => void manageAnswer("answer_turn_off")}>{M1_COPY.turnOff}</button></div>
       </>}
       {models.answer?.state === "checking" && <p>{M1_COPY.checking}</p>}
       {(["missing", "failed"].includes(models.answer?.state ?? "") || askState === "failed") && <p>{M1_COPY.failed}</p>}
@@ -655,8 +660,8 @@ export default function App() {
       <p>{M1_COPY.deleteTitle}</p><p>{M1_COPY.freed((deleteFile.installed_bytes ?? 0) + (deleteFile.partial_bytes ?? 0))}</p>
       {!!deleteFile.partial_bytes && <p>{M1_COPY.partial}</p>}
       {deleteWaiting && <p>{indexing ? M1_COPY.waitingIndex : M1_COPY.waitingSearch}</p>}
-      <button className={buttonStyle} disabled={deleteWaiting} onClick={() => {setDeleteWaiting(true); void manageAnswer("delete_unused_model", {sha256: deleteFile.sha256});}}>{M1_COPY.delete}</button>
-      <button className={buttonStyle} onClick={() => { if (deleteWaiting) void cancelModels(); else setDeleteFile(undefined); }}>{M1_COPY.cancel}</button>
+      <div className="actions"><button className={buttonStyle} disabled={deleteWaiting} onClick={() => {setDeleteWaiting(true); void manageAnswer("delete_unused_model", {sha256: deleteFile.sha256});}}>{M1_COPY.delete}</button>
+      <button className={buttonStyle} onClick={() => { if (deleteWaiting) void cancelModels(); else setDeleteFile(undefined); }}>{M1_COPY.cancel}</button></div>
     </div>}
 
     </main>
