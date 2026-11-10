@@ -48,6 +48,8 @@ mod tests {
             url: "https://example.com".parse().unwrap(),
         };
         for command in [
+            "open_product_page",
+            "third_party_notices",
             "self_test",
             "pipeline_index",
             "pipeline_search",

@@ -39,6 +39,8 @@
     "allow-app-disconnect",
     "allow-app-path-set",
     "allow-app-access-retry",
-    "allow-app-show-extension"
+    "allow-app-show-extension",
+    "allow-open-product-page",
+    "allow-third-party-notices"
   ]
 }
