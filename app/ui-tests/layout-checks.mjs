@@ -23,6 +23,7 @@ export async function assertLayout(browser, selectView) {
           filler.remove(); content.scrollTop = 0;
           return result;
         });
+        assert.equal(geometry.width, width);
         assert.ok(geometry.scroll > 0, JSON.stringify(geometry));
         assert.equal(geometry.pageScroll, 0);
         assert.deepEqual(geometry.before, geometry.after);

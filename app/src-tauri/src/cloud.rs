@@ -130,18 +130,18 @@ pub fn snapshot(dir: &Path) -> (cloud_gate::ConsentState, u64) {
     settings::with_state(dir, |s| (s.consent_state(), s.cloud_epoch)).unwrap_or_default()
 }
 // Setup consent authorizes key checking only; answers always use saved consent.
-fn key_state(s: &SettingsState) -> cloud_gate::ConsentState {
+fn key_state(s: &SettingsState, p: Provider) -> cloud_gate::ConsentState {
     let mut state = s.consent_state();
-    if let Some(consent) = &s.setup_consent {
+    if let Some(consent) = s.setup_consent.as_ref().filter(|c| c.provider == p) {
         state.consent = Some(consent.clone());
     }
     state
 }
-fn send_snapshot(dir: &Path, kind: Op) -> (cloud_gate::ConsentState, u64) {
+fn send_snapshot(dir: &Path, kind: Op, p: Provider) -> (cloud_gate::ConsentState, u64) {
     settings::with_state(dir, |s| {
         (
             if kind == Op::KeyCheck {
-                key_state(s)
+                key_state(s, p)
             } else {
                 s.consent_state()
             },
@@ -240,6 +240,7 @@ impl Cloud {
                 json!({"kind":"cloud_error","reason":"consent_required","disclosure":cloud_gate::disclosure(p)}),
             );
         }
+        let op = register(dir, "cloud_setup")?;
         let _lock = self.cloud_lock.lock().await;
         let consent = cloud_gate::Consent {
             provider: p,
@@ -251,12 +252,17 @@ impl Cloud {
         })?;
         if saved {
             settings::update(dir, |s| {
+                mark(s, &op.id)?;
                 s.settings.api_mut()["consent"] = json!(consent);
                 s.setup_consent = Some(consent.clone());
                 Ok::<(), String>(())
             })?;
         } else {
-            settings::with_state(dir, |s| s.setup_consent = Some(consent))?;
+            settings::with_state(dir, |s| {
+                mark(s, &op.id)?;
+                s.setup_consent = Some(consent);
+                Ok::<(), String>(())
+            })??;
         }
         status(dir)
     }
@@ -274,7 +280,7 @@ impl Cloud {
             if s.stop_failed {
                 return Err("Restart vectorAIz to set up a key again.".to_owned());
             }
-            cloud_gate::check(&key_state(s), p, Op::KeyCheck)
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
                 .map_err(|e| SendError::from(e).reason().to_owned())?;
             let epoch = s.cloud_epoch;
             s.ops.get_mut(&op.id).unwrap().epoch = epoch;
@@ -293,7 +299,8 @@ impl Cloud {
         }
         settings::update(dir, |s| {
             mark(s, &op.id)?;
-            cloud_gate::check(&key_state(s), p, Op::KeyCheck).map_err(|_| "revoked".to_owned())?;
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
+                .map_err(|_| "revoked".to_owned())?;
             s.settings.api_mut()["pending"] = json!(p);
             Ok::<(), String>(())
         })?;
@@ -316,11 +323,12 @@ impl Cloud {
         let mut answers_switched = false;
         let commit = settings::update(dir, |s| {
             mark(s, &op.id)?;
-            cloud_gate::check(&key_state(s), p, Op::KeyCheck).map_err(|_| "revoked".to_owned())?;
+            cloud_gate::check(&key_state(s, p), p, Op::KeyCheck)
+                .map_err(|_| "revoked".to_owned())?;
             #[cfg(test)]
             (self.hook)("commit");
             let old = serde_json::from_value::<Provider>(s.settings.api()["provider"].clone()).ok();
-            let consent = key_state(s).consent;
+            let consent = key_state(s, p).consent;
             let api = s.settings.api_mut();
             api["pending"] = Value::Null;
             api["provider"] = json!(p);
@@ -628,7 +636,7 @@ impl Cloud {
             .transport
             .client
             .send(
-                || send_snapshot(&op.dir, kind),
+                || send_snapshot(&op.dir, kind, p),
                 p,
                 kind,
                 key,
@@ -639,7 +647,7 @@ impl Cloud {
             .await;
         #[cfg(not(test))]
         cloud_gate::send(
-            || send_snapshot(&op.dir, kind),
+            || send_snapshot(&op.dir, kind, p),
             p,
             kind,
             key,

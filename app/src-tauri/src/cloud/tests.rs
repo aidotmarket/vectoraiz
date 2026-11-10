@@ -360,10 +360,7 @@ async fn consent_version_changes_and_defaults_are_memory_only_on_exit() {
         .unwrap();
     assert_eq!(snapshot(dir.path()).1, epoch);
     consent(&c, dir.path(), Provider::OpenAi).await;
-    assert_eq!(
-        set(&c, dir.path(), p).await.unwrap_err().to_string(),
-        "consent_required"
-    );
+    set(&c, dir.path(), p).await.unwrap();
     consent(&c, dir.path(), p).await;
     set(&c, dir.path(), p).await.unwrap();
     c.stop(dir.path()).await.unwrap();
@@ -1111,5 +1108,84 @@ fn a8_upgrade_discards_keyless_and_mismatched_consent() {
             assert!(settings::read(dir.path()).unwrap().api()["consent"].is_null());
             assert_eq!(status_at(dir.path())["consent_current"], false);
         }
+    }
+}
+
+#[tokio::test]
+async fn a8_cancel_wins_over_queued_confirmation() {
+    for p in [Provider::Anthropic, Provider::OpenAi] {
+        let (dir, c, store) = setup(|_| {});
+        let holder = c.cloud_lock.lock().await;
+        let mut confirmation = Box::pin(c.confirm(dir.path(), p, cloud_gate::disclosure_version()));
+        // Poll through registration to the held lock without scheduler timing.
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(confirmation.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        cancel(dir.path(), "cloud_setup").unwrap();
+        drop(holder);
+        assert_eq!(confirmation.await.unwrap_err(), "cancelled");
+        assert!(settings::with_state(dir.path(), |s| s.setup_consent.is_none()).unwrap());
+        assert_eq!(
+            set(&c, dir.path(), p).await.unwrap_err().to_string(),
+            "consent_required"
+        );
+        assert!(c.transport.requests().is_empty());
+        assert!(store.keys.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a8_saved_consent_survives_other_provider_confirmation() {
+    for (saved, other) in [
+        (Provider::Anthropic, Provider::OpenAi),
+        (Provider::OpenAi, Provider::Anthropic),
+    ] {
+        let (dir, c, _) = setup(|_| {});
+        // Neither saved nor transient consent matches the requested provider.
+        consent(&c, dir.path(), other).await;
+        assert_eq!(
+            set(&c, dir.path(), saved).await.unwrap_err().to_string(),
+            "consent_required"
+        );
+        assert!(c.transport.requests().is_empty());
+        consent(&c, dir.path(), saved).await;
+        set(&c, dir.path(), saved).await.unwrap();
+        let saved_consent = disk(dir.path())["paths"]["api_key"]["consent"].clone();
+        consent(&c, dir.path(), other).await;
+        let count = c.transport.requests().len();
+        set(&c, dir.path(), saved).await.unwrap();
+        assert_eq!(c.transport.requests().len(), count + 1);
+        assert_eq!(
+            disk(dir.path())["paths"]["api_key"]["consent"],
+            saved_consent
+        );
+    }
+}
+
+#[tokio::test]
+async fn a8_key_check_requires_reconfirmation_of_stale_saved_consent() {
+    for p in [Provider::Anthropic, Provider::OpenAi] {
+        let (dir, c, _) = setup(|_| {});
+        consent(&c, dir.path(), p).await;
+        set(&c, dir.path(), p).await.unwrap();
+        settings::update(dir.path(), |s| {
+            s.settings.api_mut()["consent"]["disclosure_version"] = json!("old");
+            Ok::<(), String>(())
+        })
+        .unwrap();
+        settings::restart(dir.path());
+        let old = disk(dir.path());
+        let count = c.transport.requests().len();
+        assert_eq!(
+            set(&c, dir.path(), p).await.unwrap_err().to_string(),
+            "consent_required"
+        );
+        assert_eq!(c.transport.requests().len(), count);
+        assert_eq!(disk(dir.path()), old);
+        consent(&c, dir.path(), p).await;
+        set(&c, dir.path(), p).await.unwrap();
+        assert_eq!(c.transport.requests().len(), count + 1);
     }
 }
