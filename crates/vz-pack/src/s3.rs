@@ -185,7 +185,13 @@ pub(crate) fn upload(
             "reviewed payload changed before S3 write"
         );
         let existing = s3.request(Method::GET, "manifest.json", &[])?;
-        if existing.status() != reqwest::StatusCode::NOT_FOUND {
+        // Without ListBucket, AWS also returns 403 for a missing key. Treat
+        // that as unknown existence; conditional PUTs and readback still fence
+        // every object, including the manifest completion boundary.
+        if !matches!(
+            existing.status(),
+            reqwest::StatusCode::NOT_FOUND | reqwest::StatusCode::FORBIDDEN
+        ) {
             ensure!(
                 existing.status().is_success(),
                 "S3 manifest check failed: HTTP {}",
@@ -203,7 +209,11 @@ pub(crate) fn upload(
                 s3.readback(&file.path, &bytes)?;
             }
             guard.check_accepted(current)?;
-            return Ok(());
+            return guard.resolve_verified_transfers(
+                current,
+                &format!("{endpoint}/{bucket}/{prefix}"),
+                &files,
+            );
         }
         for file in &files {
             guard.check_accepted(current)?;
@@ -223,15 +233,14 @@ pub(crate) fn upload(
                 "reviewed payload changed before S3 write"
             );
             // Resume only byte-identical immutable objects after a partial upload.
-            // Manifest races after preflight retain the uncertain outcome.
+            // A manifest 412 also requires byte-identical readback, since a
+            // forbidden preflight cannot establish whether it already exists.
             if file.path == "manifest.json" {
                 intent = Some(guard.intent(current, &format!("{endpoint}/{bucket}/{prefix}"))?);
                 promotion_attempted = true;
             }
             let response = s3.request(Method::PUT, &file.path, &bytes)?;
-            if !(response.status() == reqwest::StatusCode::PRECONDITION_FAILED
-                && file.path != "manifest.json")
-            {
+            if response.status() != reqwest::StatusCode::PRECONDITION_FAILED {
                 ensure!(
                     response.status().is_success(),
                     "S3 conditional write failed: HTTP {}",
@@ -244,7 +253,8 @@ pub(crate) fn upload(
         // No remote deletion on an unknown PUT/promotion result. The durable intent
         // retains the exact destination; reconciliation must inspect those bytes.
         guard.check_accepted(current)?;
-        guard.completed(&intent.context("missing S3 intent")?, &files)
+        guard.completed(&intent.context("missing S3 intent")?, &files)?;
+        guard.resolve_verified_transfers(current, &format!("{endpoint}/{bucket}/{prefix}"), &files)
     })();
     result.map_err(|error| {
         if promotion_attempted {
