@@ -318,6 +318,18 @@ def confinement(evidence):
             "resource_bound_status":"fail: sampled RSS can overshoot or miss allocation bursts", "network_destinations":routes, "ipv6_lan_route_available":routes[6]["gateway"] is not None, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
 
 
+def pending_victim(records, incoming_source=None, source_cap=8):
+    pending=[(key,row) for key,row in records.items() if row["identity"] is None and not row.get("closing",False)]
+    if not pending: return None
+    counts={}
+    for _,row in pending:counts[row["source"]]=counts.get(row["source"],0)+1
+    largest=max(counts.values())
+    # At an incoming-source cap, break a largest-source tie in its favour.
+    # This keeps that source at its cap while still selecting a largest source.
+    source=incoming_source if counts.get(incoming_source,0)==largest and largest>=source_cap else max(counts,key=counts.get)
+    return min(((key,row) for key,row in pending if row["source"]==source),key=lambda item:item[1]["arrival"])
+
+
 def transport(evidence, evict_incomplete=True):
     """Bounded TLS admission prototype; atomic auth/eviction, synthetic sessions."""
     try:
@@ -338,7 +350,7 @@ def transport(evidence, evict_incomplete=True):
     session_deadlines = {identity:time.monotonic()+120 for identity in sessions}
     def live(identity):
         return sessions.get(identity,False) and session_deadlines.get(identity,0)>time.monotonic()
-    metrics = {"arrivals": 0, "evictions": 0, "auth_progress": 0, "capacity_closures": 0, "peak_connections": 0, "peak_threads": 0, "auth_evicted": 0, "per_person_closures": 0}
+    metrics = {"arrivals": 0, "evictions": 0, "auth_progress": 0, "capacity_closures": 0, "peak_connections": 0, "peak_threads": 0, "auth_evicted": 0, "per_person_closures": 0, "revocation_expiry_closures":0, "peak_pending_per_source":0}
     trace, workers, errors = [], set(), []
     def close(conn):
         try: conn.shutdown(socket.SHUT_RDWR)
@@ -351,6 +363,7 @@ def transport(evidence, evict_incomplete=True):
             record = connections.get(key)
             if record is None: return False
             if not live(identity):
+                record["closing"] = record["identity"] is not None
                 record["identity"] = None
                 return False
             peers = sum(r["identity"] == identity for k,r in connections.items() if k != key)
@@ -360,6 +373,15 @@ def transport(evidence, evict_incomplete=True):
             record["identity"] = identity
             metrics["auth_progress"] += 1
             return True
+    def closing(key):
+        with lock:return key not in connections or connections[key].get("closing",False)
+    def retire_expired():
+        # Called only under the classification/victim lock. Draining workers
+        # retain their permits; closed sessions never retain auth protection.
+        for key,record in list(connections.items()):
+            if record["identity"] and not live(record["identity"]):
+                connections.pop(key);close(record["socket"])
+                metrics["revocation_expiry_closures"]+=1
     def serve(key):
         conn = key
         try:
@@ -381,6 +403,8 @@ def transport(evidence, evict_incomplete=True):
                             auth = classify(key, headers.get("authorization", ""))
                             status = "200" if auth or headers.get(":path", "").startswith("/auth/") else "401"
                             protocol.send_headers(event.stream_id, [(":status", status), ("content-length", "0")], end_stream=True)
+                            if closing(key):
+                                conn.sendall(protocol.data_to_send());return
                     conn.sendall(protocol.data_to_send())
             else:
                 while not stop.is_set():
@@ -395,6 +419,7 @@ def transport(evidence, evict_incomplete=True):
                     auth = classify(key, identity)
                     status = "200" if auth or headers[0].startswith("GET /auth/") else "401"
                     conn.sendall(f"HTTP/1.1 {status} C1\r\nContent-Length: 0\r\n\r\n".encode())
+                    if closing(key):return
         except Exception as error:
             with lock: errors.append(type(error).__name__)
         finally:
@@ -410,15 +435,13 @@ def transport(evidence, evict_incomplete=True):
             try: raw, address = listener.accept()
             except socket.timeout: continue
             except OSError: break
+            with lock:retire_expired()
             if not worker_slots.acquire(blocking=False):
                 with lock:
-                    candidates=[(k,r) for k,r in connections.items() if r["identity"] is None]
-                    counts={}
-                    for _,r in candidates: counts[r["source"]]=counts.get(r["source"],0)+1
-                    if candidates and evict_incomplete:
-                        source=max(counts,key=counts.get)
-                        key,victim=min(((k,r) for k,r in candidates if r["source"]==source),key=lambda pair:pair[1]["arrival"])
-                        connections.pop(key);close(victim["socket"]);metrics["evictions"]+=1
+                    victim=pending_victim(connections,address[0])
+                    if victim is not None and evict_incomplete:
+                        key,record=victim
+                        connections.pop(key);close(record["socket"]);metrics["evictions"]+=1
                 # Retiring workers still consume the bound until fully drained.
                 if not worker_slots.acquire(timeout=.1):
                     close(raw)
@@ -426,18 +449,15 @@ def transport(evidence, evict_incomplete=True):
                     continue
             with lock:
                 metrics["arrivals"] += 1
-                # Expiry/revocation is evaluated before assigning protection.
-                for record in list(connections.values()):
-                    if record["identity"] and not live(record["identity"]):
-                        record["identity"] = None
-                pending = [(k,r) for k,r in connections.items() if r["identity"] is None]
+                retire_expired()
+                pending = [(k,r) for k,r in connections.items() if r["identity"] is None and not r.get("closing",False)]
                 by_source = {}
                 for _,r in pending: by_source[r["source"]] = by_source.get(r["source"],0)+1
                 full = len(connections) >= 64 or by_source.get(address[0],0) >= 8
                 if full:
                     if evict_incomplete and pending:
-                        most = max(by_source, key=by_source.get)
-                        key, victim = min(((k,r) for k,r in pending if r["source"] == most), key=lambda x:x[1]["arrival"])
+                        key, victim = pending_victim(connections,address[0])
+                        most=victim["source"]
                         assert victim["identity"] is None
                         connections.pop(key)
                         close(victim["socket"])
@@ -445,7 +465,13 @@ def transport(evidence, evict_incomplete=True):
                         trace.append({"event":"evict", "at":time.monotonic(), "source":most, "pending":by_source[most]})
                     else:
                         close(raw); worker_slots.release(); metrics["capacity_closures"] += 1; continue
-                connections[raw] = {"socket":raw,"source":address[0],"identity":None,"arrival":time.monotonic()}
+                # Reject rather than exceed a source cap if a different, more
+                # crowded source had to be selected first.
+                source_pending=sum(r["source"]==address[0] and r["identity"] is None and not r.get("closing",False) for r in connections.values())
+                if source_pending>=8:
+                    close(raw);worker_slots.release();metrics["capacity_closures"]+=1;continue
+                connections[raw] = {"socket":raw,"source":address[0],"identity":None,"arrival":time.monotonic(),"closing":False}
+                metrics["peak_pending_per_source"]=max(metrics["peak_pending_per_source"],source_pending+1)
                 worker=threading.Thread(target=serve,args=(raw,));workers.add(worker)
                 metrics["peak_connections"] = max(metrics["peak_connections"],len(connections))
                 metrics["peak_threads"] = max(metrics["peak_threads"],len(workers))
@@ -556,9 +582,10 @@ def transport(evidence, evict_incomplete=True):
             sessions["person0"]=False
             revoked=request(clients[0],"person0")
             sessions["person0"]=True
-            assert request(clients[0],"person0")=="200"
+            fresh=client(protocol);clients.append(fresh)
+            assert request(fresh,"person0")=="200"
             session_deadlines["person0"]=time.monotonic()-1
-            expired=request(clients[0],"person0")
+            expired=request(fresh,"person0")
             session_deadlines["person0"]=time.monotonic()+120
             abuse[protocol]={"nine_same_person":statuses,"revoked_response":revoked,"expired_response":expired}
             for c in clients:close(c[0])
@@ -580,7 +607,7 @@ def transport(evidence, evict_incomplete=True):
         for kind in ("established","new_authenticated","new_sign_in"):
             trials=[r for r in data["trials"] if r["kind"]==kind]
             summary[protocol][kind]={"success":sum(map(success,trials)),"attempts":len(trials),"max_ms":max((r["latency_ms"] for r in trials),default=None)}
-    passed=len(rows)==50 and all(map(success,rows)) and all(success(finite[p]) for p in ("http/1.1","h2")) and all(v["success"]==v["attempts"]==75 for p in summary.values() for v in p.values()) and metrics["peak_connections"]<=64 and metrics["peak_threads"]<=64
+    passed=len(rows)==50 and all(map(success,rows)) and all(success(finite[p]) for p in ("http/1.1","h2")) and all(v["success"]==v["attempts"]==75 for p in summary.values() for v in p.values()) and metrics["peak_connections"]<=64 and metrics["peak_threads"]<=64 and metrics["peak_pending_per_source"]<=8
     return {"status":"pass" if passed else "fail","normal_correct":sum(map(success,rows)),"normal_max_ms":max((r["latency_ms"] for r in rows),default=None),"finite":finite,"sustained":summary,"metrics":metrics,"session_abuse":abuse,
             "experimental_caps":{"connections":64,"preauth_per_source":8,"connections_per_person":8,"deadline_s":2,"header_bytes":16384},
             "policy":"atomic live-auth classification; at source/global cap evict oldest pending from most-pending source; no authenticated victim; preauth callbacks receive no protection",
@@ -682,6 +709,14 @@ def self_test():
         pass
     else:
         raise AssertionError("unresolved refusal bound silently accepted")
+    records={}
+    for source in ("older","arriving"):
+        for index in range(8):records[(source,index)]={"source":source,"identity":None,"arrival":len(records)}
+    assert pending_victim(records,"arriving")[1]["source"]=="arriving"
+    records["auth"]={"source":"arriving","identity":"person0","arrival":-1}
+    assert pending_victim(records,"arriving")[0]!="auth"
+    records["closing"]={"source":"arriving","identity":None,"arrival":-2,"closing":True}
+    assert pending_victim(records,"arriving")[0]!="closing"
     print("office-feasibility self-test passed (no probes executed)")
 
 
