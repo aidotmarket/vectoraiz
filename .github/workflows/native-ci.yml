@@ -169,16 +169,18 @@ jobs:
           name: native-installers-${{ matrix.os }}
           path: target/stage1/*
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 3
       - uses: actions/upload-artifact@v4
         with:
           name: THIRD_PARTY_NOTICES-${{ matrix.os }}
+          retention-days: 3
           path: THIRD_PARTY_NOTICES
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: pipeline-evidence-${{ matrix.os }}
+          retention-days: 3
           path: |
             minio-test.log
             windows-test-dependents.log
@@ -228,6 +230,7 @@ jobs:
         if: always()
         with:
           name: installed-app-evidence-${{ matrix.os }}
+          retention-days: 3
           path: |
             installed-ui.log
             installed-self-test.json
@@ -297,4 +300,4 @@ jobs:
           name: ui-test-macos-failure
           path: app/ui-test-results/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
