@@ -9,7 +9,7 @@ publish.workspace = true
 vz-core.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 anyhow = "1"
 parquet = { version = "56.2", default-features = false, features = ["arrow", "snap"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
@@ -21,7 +21,11 @@ chrono = "0.4"
 url = "2"
 russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "=2.1.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Registry"] }
+
+[target.'cfg(target_os="macos")'.dependencies]
+core-foundation-sys = "=0.8.7"

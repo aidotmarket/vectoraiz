@@ -185,6 +185,12 @@ fn same_filesystem(a: &Path, b: &Path) -> Result<bool> {
 
 /// Export to existing source/staging directories. Interrupted partials are left alone.
 pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
+    crate::listing_policy::system().require_listing()?;
+    folder_unreviewed(pack, id, source, staging)
+}
+
+// Private legacy copier. No production caller can reach it without the gate.
+fn folder_unreviewed(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
     folder_inner(
         pack,
         id,
@@ -197,8 +203,8 @@ pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Va
 }
 
 /// Fault injection seam for export acceptance tests. Normal callers use `folder`.
-#[doc(hidden)]
-pub fn folder_with_checks(
+#[cfg(test)]
+fn folder_with_checks(
     pack: &Path,
     id: &str,
     source: &Path,
@@ -218,8 +224,8 @@ pub fn folder_with_checks(
 }
 
 /// Fault injection after copy and before staged verification. Normal callers use `folder`.
-#[doc(hidden)]
-pub fn folder_with_staged_check(
+#[cfg(test)]
+fn folder_with_staged_check(
     pack: &Path,
     id: &str,
     source: &Path,
@@ -506,6 +512,11 @@ impl russh::client::Handler for PinnedHost {
 
 /// Key-only SFTP export. No shell commands or password/agent authentication.
 pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
+    crate::listing_policy::system().require_listing()?;
+    sftp_unreviewed(pack, id, options).await
+}
+
+async fn sftp_unreviewed(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
     let start = Instant::now();
     let files = inventory(pack, id)?;
     let (authority, path) = options
@@ -677,3 +688,10 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "export_tests/folder_export.rs"]
+mod folder_regressions;
+#[cfg(test)]
+#[path = "export_tests/sftp_export.rs"]
+mod sftp_regressions;

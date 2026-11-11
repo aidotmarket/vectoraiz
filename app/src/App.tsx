@@ -212,6 +212,20 @@ export default function App() {
       }
     }
   }, [view, models, cloud, appClients]);
+  const [listingReason, setListingReason] = useState("Listing availability could not be checked. Try reopening Settings.");
+  useEffect(() => {
+    if (view !== "Settings") return;
+    let active = true;
+    const refresh = () => {
+      void invoke<{reason: string}>("listing_status").then(status => {
+        if (active) setListingReason(typeof status?.reason === "string" ? status.reason : "Listing is unavailable.");
+      }).catch(() => { if (active) setListingReason("Listing availability could not be checked. Try reopening Settings."); });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [view]);
   const [thirdPartyNotices, setThirdPartyNotices] = useState<string>();
   const [aboutError, setAboutError] = useState("");
   async function openAbout(command: "open_product_page" | "third_party_notices") {
@@ -669,6 +683,10 @@ export default function App() {
         <section className="card stack" aria-label="Updates"><h2>Updates</h2><p>Version {version}</p>
           <button className="button primary" disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
           {updateMessage && <p>{updateMessage}</p>}
+        </section>
+        <section className="card stack" aria-label="Listing availability"><h2>Listing availability</h2>
+          <p>{listingReason}</p>
+          <p>Local indexing, search and answers remain available.</p>
         </section>
         <section className="card stack" aria-label="About"><h2>About</h2>
           <p>vectorAIz <span>by ai.market</span></p>

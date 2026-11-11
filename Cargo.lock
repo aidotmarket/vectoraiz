@@ -10938,6 +10938,7 @@ dependencies = [
  "uuid",
  "vz-core",
  "vz-mcp",
+ "vz-pack",
  "windows-sys 0.61.2",
  "zip 2.6.1",
 ]
@@ -11051,6 +11052,7 @@ version = "0.0.23"
 dependencies = [
  "anyhow",
  "chrono",
+ "core-foundation-sys",
  "hmac 0.12.1",
  "parquet",
  "reqwest 0.12.28",
@@ -11060,6 +11062,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
  "vz-core",

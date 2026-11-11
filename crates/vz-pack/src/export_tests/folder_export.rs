@@ -1,7 +1,7 @@
 mod common;
+use super::{folder_unreviewed as folder, folder_with_checks, folder_with_staged_check};
 use common::Fixture;
 use std::fs;
-use vz_pack::export::{folder, folder_with_checks, folder_with_staged_check};
 
 #[test]
 fn complete_pack_and_nested_files() {

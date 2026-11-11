@@ -20,6 +20,7 @@ where
         + Send
         + 'static,
 {
+    vz_pack::listing_policy::system().refresh();
     use crate::mcp_channel::gate;
     let failure = |code: &str, message: &str| json!({"ok":false,"code":code,"message":message});
     let checked = gate(dir, &request);
@@ -99,6 +100,7 @@ pub fn execute(
     tool: &str,
     args: &Value,
 ) -> anyhow::Result<Value> {
+    vz_pack::listing_policy::system().refresh();
     let engines = cache.get_or_load(false, || Engines::load_embedding(assets, pins, cpu))?;
     let state = open_index(root, engines)?;
     let docs = state.documents()?;

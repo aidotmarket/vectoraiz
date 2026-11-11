@@ -1,6 +1,7 @@
 //! Minimal portable vector packs and explicitly requested S3-compatible upload.
 pub mod export;
 pub mod handoff;
+pub mod listing_policy;
 pub mod review;
 use anyhow::{bail, Context, Result};
 use parquet::arrow::ArrowWriter;
@@ -19,6 +20,7 @@ fn embedding_recipe_sha256(recipe: &Recipe) -> Result<String> {
 }
 
 pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Result<Value> {
+    listing_policy::system().require_listing()?;
     let (state, recipe) = State::open_index(root, &engines.recipe)?;
     if output.exists() {
         bail!("pack output already exists; choose an empty destination");
@@ -105,7 +107,7 @@ pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Resu
                 );
             }
         }
-        let mut manifest = json!({"format_version":1,"pack_id":format!("pack-{}",&sha256(serde_json::to_string(&hashes)?.as_bytes())[..24]),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
+        let mut manifest = json!({"format_version":1,"pack_id":uuid::Uuid::new_v4().to_string(),"created_at":chrono::Utc::now().to_rfc3339(),"counts":{"documents":docs.len(),"chunks":chunks.len()},"embedding_recipe":recipe,"files":hashes,"hash_scope":"all payload files; manifest.json excludes itself","originals":true});
         manifest.sort_all_objects();
         std::fs::write(
             stage.join("manifest.json"),
@@ -142,6 +144,7 @@ pub fn verify(pack: &Path) -> Result<Value> {
 /// Environment credentials are used solely inside this explicit operation.
 /// reqwest uses native trust roots and system proxy discovery (environment overrides supported).
 pub fn upload(pack: &Path, endpoint: &str, bucket: &str, region: &str, prefix: &str) -> Result<()> {
+    listing_policy::system().require_listing()?;
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
     let manifest = verify(pack)?;

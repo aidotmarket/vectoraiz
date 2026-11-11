@@ -2153,3 +2153,27 @@ it.each(["open_product_page", "third_party_notices"])("B3 reports %s failures in
   await userEvent.click(command === "open_product_page" ? about.getByRole("link") : about.getByRole("button", {name:"Third-party notices"}));
   expect(await about.findByRole("alert")).toHaveTextContent("Could not open");
 });
+
+it("announces managed listing denial while keeping local library controls usable", async () => {
+  invoke.mockImplementation(async (command: string) => command === "listing_status"
+    ? {available: false, listing_authority_preview_v1: false, code: "POLICY_DENIED", reason: "Listing is disabled by your organisation. Contact IT."}
+    : {available: false});
+  render(<App />);
+  at("Settings");
+  const listing = screen.getByRole("region", {name: "Listing availability"});
+  expect(await within(listing).findByText("Listing is disabled by your organisation. Contact IT.")).toBeInTheDocument();
+  expect(within(listing).getByText("Local indexing, search and answers remain available.")).toBeInTheDocument();
+  expect(within(listing).queryByRole("button")).not.toBeInTheDocument();
+  expect(at("Library").getByRole("button", {name: "Index folder"})).toBeInTheDocument();
+});
+
+it("fails closed when listing availability cannot be read", async () => {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === "listing_status") throw new Error("unreadable");
+    return {available: false};
+  });
+  render(<App />);
+  at("Settings");
+  expect(await screen.findByText("Listing availability could not be checked. Try reopening Settings.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", {name: "Prepare listing"})).not.toBeInTheDocument();
+});

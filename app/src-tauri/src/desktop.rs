@@ -417,6 +417,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         pipeline_search,
         pipeline_ask,
         cloud_status,
+        listing_status,
         app_status,
         app_disclosure,
         app_connect_claude,
@@ -477,6 +478,7 @@ pub(crate) fn run() {
     #[cfg(windows)]
     allow_single_instance_foreground(&context.config().identifier);
     configure(tauri::Builder::default().setup(|app| {
+        vz_pack::listing_policy::system().refresh();
         #[cfg(feature = "smoke-test")]
         if std::env::args().any(|arg| arg == "--update-test") {
             use tauri_plugin_updater::UpdaterExt;
@@ -1715,4 +1717,9 @@ async fn pipeline_ask_cloud<R: tauri::Runtime>(
             },
         )
         .await
+}
+
+#[tauri::command]
+fn listing_status() -> vz_pack::listing_policy::ListingStatus {
+    vz_pack::listing_policy::system().status()
 }

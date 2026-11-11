@@ -95,6 +95,14 @@ enum Operation {
 }
 fn main() -> Result<()> {
     let args = Args::parse();
+    let policy = vz_pack::listing_policy::system();
+    policy.refresh();
+    if matches!(
+        args.command,
+        Operation::Pack { .. } | Operation::Upload { .. } | Operation::Export { .. }
+    ) {
+        policy.require_listing()?;
+    }
     if let Operation::Export {
         pack,
         pack_id,

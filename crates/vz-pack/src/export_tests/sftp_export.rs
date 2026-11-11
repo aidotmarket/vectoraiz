@@ -1,11 +1,13 @@
 mod common;
+use super::{
+    exit_code, normalize_remote, sftp_unreviewed as sftp, PublicationOutcomeUnknown, SftpOptions,
+};
 use common::Fixture;
 use std::{
     fs,
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
 };
-use vz_pack::export::{exit_code, normalize_remote, sftp, PublicationOutcomeUnknown, SftpOptions};
 
 struct Server {
     child: Child,
