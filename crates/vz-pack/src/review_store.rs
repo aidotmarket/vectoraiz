@@ -21,6 +21,7 @@ mod windows;
 
 const MAX_FILES: usize = 50_000;
 const MAX_BYTES: u64 = 2_000_000_000;
+const MAX_RECORD_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -272,8 +273,9 @@ impl ReviewStore {
 }
 
 pub struct NativePackReview<'a> {
-    pub(crate) pack: PackReview<'a>,
+    // Drop the inner index fences before releasing the outer pack mutex.
     index: NativeIndexFence,
+    pack: PackReview<'a>,
 }
 
 impl NativePackReview<'_> {
@@ -465,6 +467,12 @@ impl PackReview<'_> {
         let receipt = self.generation_path(current).join("accepted.json");
         if !receipt.try_exists()? {
             write_json(&receipt, &current.review_hash)?;
+        }
+        if let Err(error) = self.lease.check(self.policy) {
+            // Keep the append-only acceptance evidence, but never let a policy
+            // cancellation during its durable write revive it on restart.
+            self.invalidate(current, "policy changed during acceptance")?;
+            return Err(error.into());
         }
         self.accepted_review(generation)
     }
@@ -838,8 +846,13 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     // Unique partial prevents readers from accepting a torn final record.
     let partial = path.with_extension(format!("{}.partial", Uuid::new_v4()));
     let result = (|| {
+        let bytes = serde_json::to_vec(value)?;
+        ensure!(
+            bytes.len() as u64 <= MAX_RECORD_BYTES,
+            "review record size limit"
+        );
         let mut file = private_file(&partial)?;
-        file.write_all(&serde_json::to_vec(value)?)?;
+        file.write_all(&bytes)?;
         file.sync_all()?;
         // Caller holds the pack mutex. Never overwrite committed evidence.
         ensure!(!path.try_exists()?, "review record already exists");
@@ -858,14 +871,18 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn read_input_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    const LIMIT: u64 = 64 * 1024 * 1024;
     ensure!(
-        check_regular(path)?.len() <= LIMIT,
+        check_regular(path)?.len() <= MAX_RECORD_BYTES,
         "review record size limit"
     );
     let mut bytes = Vec::new();
-    File::open(path)?.take(LIMIT + 1).read_to_end(&mut bytes)?;
-    ensure!(bytes.len() as u64 <= LIMIT, "review record size limit");
+    File::open(path)?
+        .take(MAX_RECORD_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= MAX_RECORD_BYTES,
+        "review record size limit"
+    );
     Ok(serde_json::from_slice(&bytes)?)
 }
 
@@ -1074,6 +1091,48 @@ mod tests {
             .unwrap();
         drop(writer);
         stale(store.lock_native_current(&policy, &current, &index));
+    }
+
+    #[test]
+    fn policy_stop_during_acceptance_write_durably_invalidates_receipt() {
+        struct StopOnRead(Mutex<Option<usize>>);
+        impl PolicySource for StopOnRead {
+            fn read(&self) -> ManagedPolicy {
+                let mut remaining = self.0.lock().unwrap();
+                match remaining.as_mut() {
+                    Some(0) => ManagedPolicy::Denied,
+                    Some(n) => {
+                        *n -= 1;
+                        ManagedPolicy::Allowed
+                    }
+                    None => ManagedPolicy::Allowed,
+                }
+            }
+        }
+        let fixture = Fixture::new();
+        let source = Arc::new(StopOnRead(Mutex::new(None)));
+        let policy = ListingPolicy::new(source.clone());
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let pack = store.lock(&policy, id).unwrap();
+        let current = fixture.freeze(&pack);
+        // Two validation reads succeed; the read after writing accepted.json
+        // observes Off. The test exercises the persisted evidence boundary.
+        *source.0.lock().unwrap() = Some(2);
+        stale(pack.accept(&current));
+        assert!(pack
+            .generation_path(&current)
+            .join("accepted.json")
+            .exists());
+        assert!(pack
+            .generation_path(&current)
+            .join("invalidated.json")
+            .exists());
+        drop(pack);
+        *source.0.lock().unwrap() = None;
+        let restarted_policy = ListingPolicy::new(source);
+        let pack = store.lock(&restarted_policy, id).unwrap();
+        stale(pack.check_accepted(&current));
     }
 
     #[test]
