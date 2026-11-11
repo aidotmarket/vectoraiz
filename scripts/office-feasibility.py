@@ -793,7 +793,7 @@ def main():
     else:
         manifest["results"]["native_abort"] = {"status": "blocked", "reason": "explicit pinned local models and --rust required; no native abort evidence"}
     manifest["results"]["native_full_run_exclusion"] = {"status": "fail", "reason": "current Operations::cancel advances generation while inference held; immediate-signal/deferred-invalidation lease protocol is test-local, not integrated into product call sites"}
-    for name in ("delivery-gate", "lease-boundaries", "real-mutation-seams"):
+    for name in ("delivery-gate", "lease-boundaries", "real-mutation-seams", "stale-cancel"):
         path=evidence/(name+".json")
         if path.exists(): manifest["results"][name]=json.loads(path.read_text())
     native_lease = evidence / "native-cache-lease.json"

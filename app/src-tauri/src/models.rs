@@ -185,12 +185,6 @@ impl<E: CachedEngine> OperationState<E> {
         changed();
         result
     }
-    // C1 protocol seam only: stop delivery promptly, defer generation mutation
-    // until an independent full-run lease has drained. Product cancel unchanged.
-    #[cfg(all(test, feature = "office-feasibility"))]
-    pub fn office_signal_cancel(&self) {
-        self.cancel.lock().unwrap().send_replace(true);
-    }
     // Harness-only: capture the cancelled generation while signalling, then
     // invalidate it after the fair generation lease drains. Never signal again.
     #[cfg(all(test, feature = "office-feasibility"))]
