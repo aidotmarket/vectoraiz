@@ -11053,6 +11053,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "core-foundation-sys",
+ "fs2",
  "hmac 0.12.1",
  "parquet",
  "reqwest 0.12.28",

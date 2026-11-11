@@ -1,6 +1,6 @@
 //! Local seller-attested review contracts. These are opaque native commitments,
-//! not server-verified source facts or proof of an honest client. No persistence,
-//! sanitization, review acceptance, or transfer behaviour is implemented here.
+//! not server-verified source facts or proof of an honest client. Persistence is
+//! in `review_store`; these contracts alone grant no transfer capability.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

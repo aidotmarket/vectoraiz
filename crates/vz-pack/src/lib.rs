@@ -3,6 +3,7 @@ pub mod export;
 pub mod handoff;
 pub mod listing_policy;
 pub mod review;
+pub mod review_store;
 use anyhow::{bail, Context, Result};
 use parquet::arrow::ArrowWriter;
 use serde_json::{json, Value};

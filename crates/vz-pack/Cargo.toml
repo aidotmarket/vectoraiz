@@ -14,6 +14,7 @@ anyhow = "1"
 parquet = { version = "56.2", default-features = false, features = ["arrow", "snap"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 walkdir = "2"
+fs2 = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "blocking", "system-proxy"] }
 hmac = "0.12"
 sha2 = "0.10"
