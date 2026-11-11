@@ -290,6 +290,9 @@ def transport(evidence, evict_incomplete=True):
     connections = {}
     worker_slots = threading.BoundedSemaphore(64)
     sessions = {f"person{i}": True for i in range(25)}
+    session_deadlines = {identity:time.monotonic()+120 for identity in sessions}
+    def live(identity):
+        return sessions.get(identity,False) and session_deadlines.get(identity,0)>time.monotonic()
     metrics = {"arrivals": 0, "evictions": 0, "auth_progress": 0, "capacity_closures": 0, "peak_connections": 0, "peak_threads": 0, "auth_evicted": 0, "per_person_closures": 0}
     trace, workers, errors = [], set(), []
     def close(conn):
@@ -302,7 +305,7 @@ def transport(evidence, evict_incomplete=True):
         with lock:
             record = connections.get(key)
             if record is None: return False
-            if not sessions.get(identity, False):
+            if not live(identity):
                 record["identity"] = None
                 return False
             peers = sum(r["identity"] == identity for k,r in connections.items() if k != key)
@@ -380,7 +383,7 @@ def transport(evidence, evict_incomplete=True):
                 metrics["arrivals"] += 1
                 # Expiry/revocation is evaluated before assigning protection.
                 for record in list(connections.values()):
-                    if record["identity"] and not sessions.get(record["identity"], False):
+                    if record["identity"] and not live(record["identity"]):
                         record["identity"] = None
                 pending = [(k,r) for k,r in connections.items() if r["identity"] is None]
                 by_source = {}
@@ -490,9 +493,9 @@ def transport(evidence, evict_incomplete=True):
                     for kind in ("established","new_authenticated","new_sign_in"):
                         def attempt(i):
                             result=query(protocol,f"person{i}" if kind!="new_sign_in" else None,"/auth/callback" if kind=="new_sign_in" else "/",established[i] if kind=="established" else None)
-                            return dict(result,person=i,kind=kind,round=round_id)
+                            return dict(result,person=i,kind=kind,round=round_id,at_ms=(time.monotonic()-start)*1000)
                         trials.extend(pool.map(attempt,range(25)))
-                time.sleep(.1)
+                time.sleep(.8)
             # Keep the attack sustained for a declared minimum interval.
             flood_stop.wait(max(0,3-(time.monotonic()-start)))
             flood_stop.set()
@@ -508,7 +511,11 @@ def transport(evidence, evict_incomplete=True):
             sessions["person0"]=False
             revoked=request(clients[0],"person0")
             sessions["person0"]=True
-            abuse[protocol]={"nine_same_person":statuses,"revoked_or_expired_response":revoked}
+            assert request(clients[0],"person0")=="200"
+            session_deadlines["person0"]=time.monotonic()-1
+            expired=request(clients[0],"person0")
+            session_deadlines["person0"]=time.monotonic()+120
+            abuse[protocol]={"nine_same_person":statuses,"revoked_response":revoked,"expired_response":expired}
             for c in clients:close(c[0])
     finally:
         flood_stop.set()
