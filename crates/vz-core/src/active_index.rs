@@ -325,6 +325,21 @@ async fn finish_reindex(
 mod tests {
     use super::*;
 
+    #[test]
+    fn selection_fence_serializes_publication_against_native_review_readers() {
+        let data = tempfile::tempdir().unwrap();
+        let first = selection_fence(data.path(), false).unwrap();
+        let second = selection_fence(data.path(), false).unwrap();
+        assert!(selection_fence(data.path(), true).is_err());
+        drop(first);
+        assert!(selection_fence(data.path(), true).is_err());
+        drop(second);
+        let writer = selection_fence(data.path(), true).unwrap();
+        assert!(selection_fence(data.path(), false).is_err());
+        drop(writer);
+        selection_fence(data.path(), false).unwrap();
+    }
+
     fn recipe() -> Recipe {
         let pins =
             serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();

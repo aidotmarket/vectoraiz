@@ -21,8 +21,14 @@ fn embedding_recipe_sha256(recipe: &Recipe) -> Result<String> {
     Ok(sha256(&serde_json::to_vec(&value)?))
 }
 
-pub fn write(root: &Path, engines: &Engines, output: &Path, query: &str) -> Result<Value> {
-    listing_policy::system().require_listing()?;
+pub fn write(
+    root: &Path,
+    engines: &Engines,
+    output: &Path,
+    query: &str,
+    current: Option<&listing_commands::ListingReference>,
+) -> Result<Value> {
+    listing_commands::transfer_preflight(current)?;
     let (state, recipe) = State::open_index(root, &engines.recipe)?;
     if output.exists() {
         bail!("pack output already exists; choose an empty destination");
@@ -145,8 +151,15 @@ pub fn verify(pack: &Path) -> Result<Value> {
 }
 /// Environment credentials are used solely inside this explicit operation.
 /// reqwest uses native trust roots and system proxy discovery (environment overrides supported).
-pub fn upload(pack: &Path, endpoint: &str, bucket: &str, region: &str, prefix: &str) -> Result<()> {
-    listing_policy::system().require_listing()?;
+pub fn upload(
+    pack: &Path,
+    endpoint: &str,
+    bucket: &str,
+    region: &str,
+    prefix: &str,
+    current: Option<&listing_commands::ListingReference>,
+) -> Result<()> {
+    listing_commands::transfer_preflight(current)?;
     use hmac::{Hmac, Mac};
     use sha2::{Digest, Sha256};
     let manifest = verify(pack)?;

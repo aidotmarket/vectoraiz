@@ -5,8 +5,33 @@ use crate::{
     review::ListingReview,
     review_store::{CurrentReview, ReviewStore},
 };
-use serde::Serialize;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Required binding for packaging and every destination. An arbitrary pack
+/// directory or pack UUID is never a substitute for this exact generation.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingReference {
+    pub store: PathBuf,
+    pub library: PathBuf,
+    pub current: CurrentReview,
+}
+
+/// Transitional preflight on all four production transfer entries. This
+/// validates native/staged/source commitments but deliberately still refuses
+/// delivery: the sanitizer and transfer adapters are not yet complete. Do not
+/// remove the final gate without keeping the live guards through promotion.
+pub(crate) fn transfer_preflight(reference: Option<&ListingReference>) -> anyhow::Result<()> {
+    let policy = crate::listing_policy::system();
+    policy.require_preview()?;
+    let reference = reference.ok_or(ListingError::ReviewRequired)?;
+    let store = ReviewStore::open(&reference.store)?;
+    let pack = store.lock_native_current(policy, &reference.current, &reference.library)?;
+    pack.check_accepted(&reference.current)?;
+    policy.require_listing()?;
+    Ok(())
+}
 
 /// Additive structured IPC error; stale generations remain distinguishable
 /// from managed denial and the default-off feature flag.
@@ -45,7 +70,7 @@ pub fn review(
     let run = || -> anyhow::Result<ListingReview> {
         policy.require_preview()?;
         let store = ReviewStore::open(store)?;
-        let pack = store.lock_native(policy, current.pack_id, library)?;
+        let pack = store.lock_native_current(policy, current, library)?;
         if accept {
             pack.accept(current)
         } else {

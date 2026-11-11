@@ -17,6 +17,9 @@ struct Args {
     models: PathBuf,
     #[arg(long)]
     cpu: bool,
+    /// Private store/library/current-generation reference for listing transfers.
+    #[arg(long, global = true)]
+    review_reference: Option<PathBuf>,
     #[command(subcommand)]
     command: Operation,
 }
@@ -124,12 +127,25 @@ fn main() -> Result<()> {
         println!("{}", serde_json::to_string(&review)?);
         return Ok(());
     }
-    if matches!(
+    let current = if matches!(
         args.command,
         Operation::Pack { .. } | Operation::Upload { .. } | Operation::Export { .. }
     ) {
-        policy.require_listing()?;
-    }
+        policy.require_preview()?;
+        let path = args
+            .review_reference
+            .as_ref()
+            .ok_or(vz_pack::listing_policy::ListingError::ReviewRequired)?;
+        anyhow::ensure!(
+            std::fs::metadata(path)?.len() <= 16384,
+            "listing reference size limit"
+        );
+        Some(serde_json::from_slice::<
+            vz_pack::listing_commands::ListingReference,
+        >(&std::fs::read(path)?)?)
+    } else {
+        None
+    };
     if let Operation::Export {
         pack,
         pack_id,
@@ -147,6 +163,7 @@ fn main() -> Result<()> {
                 pack_id,
                 source,
                 staging.as_deref().expect("clap requires staging"),
+                current.as_ref(),
             )?
         } else {
             tokio_runtime()?
@@ -159,6 +176,7 @@ fn main() -> Result<()> {
                         identity: identity.clone(),
                         known_hosts: known_hosts.clone(),
                     },
+                    current.as_ref(),
                 ))
                 .unwrap_or_else(|error| {
                     eprintln!("Error: {error:#}");
@@ -180,7 +198,7 @@ fn main() -> Result<()> {
         prefix,
     } = &args.command
     {
-        return vz_pack::upload(pack, endpoint, bucket, region, prefix);
+        return vz_pack::upload(pack, endpoint, bucket, region, prefix, current.as_ref());
     }
     if let Operation::BakeoffChat { items, prompt } = &args.command {
         let chat = ChatOnly::load(&args.assets, &args.models, args.cpu)?;
@@ -265,7 +283,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&answer)?);
             }
             Operation::Pack { output, query } => {
-                let manifest = vz_pack::write(&args.state, &engines, &output, &query)?;
+                let manifest = vz_pack::write(&args.state, &engines, &output, &query, current.as_ref())?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
             Operation::SelfTest

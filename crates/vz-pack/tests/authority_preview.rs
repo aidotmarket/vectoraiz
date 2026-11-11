@@ -66,9 +66,28 @@ fn entry_refresh_catches_unnotified_policy_and_invalid_never_means_unmanaged() {
 fn listing_entries_refuse_before_local_io_credentials_or_network() {
     let absent = std::env::temp_dir().join(format!("vz-c1-absent-{}", std::process::id()));
     assert!(!absent.exists());
+    let current = vz_pack::review_store::CurrentReview {
+        pack_id: uuid::Uuid::new_v4(),
+        generation: uuid::Uuid::new_v4(),
+        review_hash: "a".repeat(64).try_into().unwrap(),
+    };
+    let reference = vz_pack::listing_commands::ListingReference {
+        store: absent.join("reviews"),
+        library: absent.join("library"),
+        current: current.clone(),
+    };
     for error in [
-        vz_pack::upload(&absent, "http://127.0.0.1:1", "bucket", "region", "prefix").unwrap_err(),
-        vz_pack::export::folder(&absent, "pack", &absent, &absent).unwrap_err(),
+        vz_pack::upload(
+            &absent,
+            "http://127.0.0.1:1",
+            "bucket",
+            "region",
+            "prefix",
+            None,
+        )
+        .unwrap_err(),
+        vz_pack::export::folder(&absent, "pack", &absent, &absent, None).unwrap_err(),
+        vz_pack::export::folder(&absent, "pack", &absent, &absent, Some(&reference)).unwrap_err(),
         tokio::runtime::Runtime::new()
             .unwrap()
             .block_on(vz_pack::export::sftp(
@@ -80,10 +99,30 @@ fn listing_entries_refuse_before_local_io_credentials_or_network() {
                     identity: Some(absent.clone()),
                     known_hosts: Some(absent.clone()),
                 },
+                None,
             ))
             .unwrap_err(),
     ] {
         assert!(error.downcast_ref::<ListingError>().is_some(), "{error:#}");
+    }
+    for accept in [false, true] {
+        let failure = vz_pack::listing_commands::review(
+            vz_pack::listing_policy::system(),
+            &reference.store,
+            &reference.library,
+            &current,
+            accept,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            failure.code,
+            ListingError::PreviewDisabled
+                | ListingError::PolicyDenied
+                | ListingError::PolicyUnreadable
+        ));
+        let wire = serde_json::to_value(failure).unwrap();
+        assert!(wire["code"].is_string());
+        assert!(wire["reason"].is_string());
     }
     assert!(!absent.exists());
 }

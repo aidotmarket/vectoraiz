@@ -184,8 +184,14 @@ fn same_filesystem(a: &Path, b: &Path) -> Result<bool> {
 }
 
 /// Export to existing source/staging directories. Interrupted partials are left alone.
-pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
-    crate::listing_policy::system().require_listing()?;
+pub fn folder(
+    pack: &Path,
+    id: &str,
+    source: &Path,
+    staging: &Path,
+    current: Option<&crate::listing_commands::ListingReference>,
+) -> Result<Value> {
+    crate::listing_commands::transfer_preflight(current)?;
     folder_unreviewed(pack, id, source, staging)
 }
 
@@ -511,8 +517,13 @@ impl russh::client::Handler for PinnedHost {
 }
 
 /// Key-only SFTP export. No shell commands or password/agent authentication.
-pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
-    crate::listing_policy::system().require_listing()?;
+pub async fn sftp(
+    pack: &Path,
+    id: &str,
+    options: &SftpOptions,
+    current: Option<&crate::listing_commands::ListingReference>,
+) -> Result<Value> {
+    crate::listing_commands::transfer_preflight(current)?;
     sftp_unreviewed(pack, id, options).await
 }
 

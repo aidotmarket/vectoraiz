@@ -234,6 +234,28 @@ impl ReviewStore {
         let index = NativeIndexFence::acquire(library)?;
         Ok(NativePackReview { pack, index })
     }
+
+    /// Existing-generation entries validate and durably invalidate before
+    /// attempting the live fence. A damaged pointer must not revive an old
+    /// acceptance merely because it is restored before the next command.
+    pub fn lock_native_current<'a>(
+        &'a self,
+        policy: &'a ListingPolicy,
+        current: &CurrentReview,
+        library: &Path,
+    ) -> Result<NativePackReview<'a>> {
+        let pack = self.lock(policy, current.pack_id)?;
+        let generation = pack.validate(current, false)?;
+        let selection = NativeSelection::capture(library);
+        if selection.as_ref().ok() != generation.binding.selection.as_ref() {
+            pack.invalidate(current, "native index selection changed or binding absent")?;
+            return Err(ListingError::StaleGeneration.into());
+        }
+        let index = NativeIndexFence::acquire(library)?;
+        let native = NativePackReview { pack, index };
+        native.inspect(current)?;
+        Ok(native)
+    }
 }
 
 pub struct NativePackReview<'a> {
@@ -254,13 +276,17 @@ impl NativePackReview<'_> {
     fn check_native(&self, current: &CurrentReview, accepted: bool) -> Result<ListingReview> {
         let generation = self.pack.validate(current, accepted)?;
         if generation.binding.selection.as_ref() != Some(&self.index.selection) {
-            let path = self.pack.generation_path(current).join("invalidated.json");
-            if !path.try_exists()? {
-                write_json(&path, &"native index selection changed or binding absent")?;
-            }
+            self.pack
+                .invalidate(current, "native index selection changed or binding absent")?;
             return Err(ListingError::StaleGeneration.into());
         }
-        if accepted {
+        if accepted
+            || self
+                .pack
+                .generation_path(current)
+                .join("accepted.json")
+                .try_exists()?
+        {
             self.pack.accepted_review(generation)
         } else {
             Ok(generation.review)
@@ -295,6 +321,13 @@ impl Drop for PackReview<'_> {
 }
 
 impl PackReview<'_> {
+    fn invalidate(&self, current: &CurrentReview, reason: &str) -> Result<()> {
+        let path = self.generation_path(current).join("invalidated.json");
+        if !path.try_exists()? {
+            write_json(&path, &reason)?;
+        }
+        Ok(())
+    }
     /// Persist a rebuilt payload supplied by the future sanitizer. No source
     /// mappings or terms are copied from private state into this payload.
     /// This method does not certify metadata safety or enable delivery.
@@ -578,9 +611,9 @@ impl PackReview<'_> {
         {
             // Durable invalidation: reverting changed source/staged bytes must
             // never revive previously accepted work after restart.
-            write_json(
-                &path.join("invalidated.json"),
-                &"source/index/recipe/staged bytes changed or unreadable",
+            self.invalidate(
+                current,
+                "source/index/recipe/staged bytes changed or unreadable",
             )?;
             return Err(ListingError::StaleGeneration.into());
         }
@@ -805,6 +838,8 @@ fn read_input_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 fn sync_directory(path: &Path) -> Result<()> {
     #[cfg(unix)]
     File::open(path)?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = path;
     Ok(())
 }
 
@@ -944,6 +979,35 @@ mod tests {
         let native = store.lock_native(&policy, id, &index).unwrap();
         stale(native.check_accepted(&current));
         stale(native.accept(&current));
+    }
+
+    #[test]
+    fn command_entry_invalidates_changed_selection_even_before_live_fence() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        fs::write(index.join("writer.lock"), b"").unwrap();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let current;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            current = fixture.freeze_bound(
+                &native.pack,
+                native.capture(&fixture.0.join("source")).unwrap(),
+            );
+            native.accept(&current).unwrap();
+            assert_eq!(
+                native.inspect(&current).unwrap().accepted_review_hash,
+                Some(current.review_hash.clone())
+            );
+        }
+        // Resolve to another existing explicit index with byte-identical data.
+        // The old index itself has not changed: only the caller's selection did.
+        let other = fixture.0.join("other-index");
+        private_directory(&other).unwrap();
+        stale(store.lock_native_current(&policy, &current, &other));
+        stale(store.lock_native_current(&policy, &current, &index));
     }
 
     #[test]
