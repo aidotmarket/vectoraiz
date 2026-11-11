@@ -373,6 +373,26 @@ impl NativePackReview<'_> {
             .record_completed_transfer(intent, digest(&(intent, evidence))?)?;
         Ok(())
     }
+
+    /// Only call after verifying every remote byte for this exact destination.
+    /// Keep the original job binding when recovering a lost completion receipt.
+    pub(crate) fn resolve_verified_transfers(
+        &self,
+        current: &CurrentReview,
+        destination: &str,
+        evidence: &impl Serialize,
+    ) -> Result<()> {
+        self.check_accepted(current)?;
+        let commitment = digest(&destination)?;
+        for intent in self.pack.uncertain_transfers(current)? {
+            if intent.destination.as_deref() == Some(destination)
+                && intent.destination_commitment == commitment
+            {
+                self.completed(&intent, evidence)?;
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn index_path(&self) -> &Path {
         &self.index.selection.index
     }
@@ -1250,6 +1270,46 @@ mod tests {
                 .downcast_ref::<ListingError>(),
             Some(ListingError::ReviewRequired)
         ));
+    }
+
+    #[test]
+    fn verified_retry_resolves_only_matching_pending_destination_after_restart() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        fs::write(index.join("writer.lock"), b"").unwrap();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let destination = "http://localhost/bucket/vz/pack";
+        let current;
+        let pending;
+        let unrelated;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            current = fixture.freeze_bound(
+                &native.pack,
+                native.capture(&fixture.0.join("source")).unwrap(),
+            );
+            native.accept(&current).unwrap();
+            pending = native.intent(&current, destination).unwrap();
+            unrelated = native
+                .intent(&current, "http://localhost/other/vz/pack")
+                .unwrap();
+            assert_eq!(native.pack.uncertain_transfers(&current).unwrap().len(), 2);
+        }
+        let native = store.lock_native(&policy, id, &index).unwrap();
+        native
+            .resolve_verified_transfers(&current, destination, &"verified inventory")
+            .unwrap();
+        let remaining = native.pack.uncertain_transfers(&current).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].job_id, unrelated.job_id);
+        assert!(native.pack.completed_transfer(&pending).is_ok());
+        // Another retry is idempotent and leaves the other destination pending.
+        native
+            .resolve_verified_transfers(&current, destination, &"verified inventory")
+            .unwrap();
+        assert_eq!(native.pack.uncertain_transfers(&current).unwrap().len(), 1);
     }
 
     #[test]

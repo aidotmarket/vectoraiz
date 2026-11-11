@@ -13,14 +13,17 @@ function listingFixture() {
   inventory[0] = {location: "README.md", kind: "text", value: "Confidential Project Orion", warning: true};
   inventory[1] = {location: `documents.parquet/id/${"b".repeat(64)}/column/2`, kind: "title", value: "Document B", warning: false};
   inventory[2] = {location: `chunks.parquet/id/${"c".repeat(64)}/column/4`, kind: "heading_path", value: '["Heading B"]', warning: false};
+  for (const [index, value] of ["embedding", "doc_id", "chunk_id", "text", "title", "language", "server_protected"].entries()) {
+    inventory[index + 3] = {location: `${index % 2 ? "documents" : "chunks"}.parquet/column/${index}/name`, kind: "column", value, warning: false};
+  }
   return {metadata_inventory: [...inventory, {location: "manifest.json/date_ranges", kind: "value", value: null, warning: false}], warnings: ["README.md: text"], exclusions: [], accepted_review_hash: null as string | null};
 }
-function mockListing() {
+function mockListing(protectedColumns = ["embedding", "doc_id", "chunk_id", "text"]) {
   let review = listingFixture();
   invoke.mockImplementation(async (command: string, args: unknown) => {
     const params = args as {changes?: {edits: Record<string, string>}};
     if (command === "listing_status") return {listing_authority_preview_v1: true, code: "REVIEW_REQUIRED", reason: "Review required"};
-    if (command === "listing_sources") return {pack_id: listingCurrent.pack_id, sources: [
+    if (command === "listing_sources") return {pack_id: listingCurrent.pack_id, protected_columns: protectedColumns, sources: [
       {source: "private.md", artifact: "originals-0001.zip!document-0001.md", format: "md", supported: true},
       {source: "unsupported.pdf", artifact: "originals-0001.zip!document-0002.pdf", format: "pdf", supported: false},
     ]};
@@ -102,6 +105,20 @@ it("sends document and chunk edits with their stable inventory identities", asyn
   }
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: []}}));
+});
+
+it("uses the backend protected set to hide structural column edits and keeps descriptive columns editable", async () => {
+  mockListing(["embedding", "doc_id", "chunk_id", "text", "server_protected"]);
+  const region = within(await openListing());
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await region.findByRole("button", {name: "Accept this exact generation"});
+  for (const entry of listingFixture().metadata_inventory.filter(entry => entry.location.endsWith("/name"))) {
+    expect(region.getByText(entry.value!)).toBeInTheDocument();
+    const edit = region.queryByRole("button", {name: `Edit ${entry.location}`});
+    if (["title", "language"].includes(entry.value!)) expect(edit).toBeEnabled();
+    else expect(edit).not.toBeInTheDocument();
+  }
 });
 
 it("hides purchaser review when the exposure flag is off or managed policy denies", async () => {

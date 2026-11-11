@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Start a pinned MinIO with throwaway credentials; verify every uploaded byte."""
 import hashlib
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import urllib.request
 import boto3
 from botocore.config import Config
@@ -46,12 +49,25 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         for name in [*manifest['files'], 'manifest.json']:
             body = s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read()
             assert body == (pack / name).read_bytes(), name
+        ref = json.loads(reference.read_text())
+        generation = Path(ref['store']) / manifest['pack_id'] / ref['current']['generation']
+        before_retry = {path.name for path in generation.glob('*.json')}
         retry = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
-        assert retry.returncode != 0 and 'conditional write failed' in retry.stderr, retry.stderr
+        assert retry.returncode == 0, retry.stderr
+        assert {path.name for path in generation.glob('*.json')} == before_retry, 'repeat created a new intent/receipt'
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
         keys = {obj['Key'] for obj in s3.list_objects_v2(Bucket='phase0-pack').get('Contents', [])}
         assert keys == {prefix + '/' + name for name in [*manifest['files'], 'manifest.json']}, keys
+        # A different completed manifest refuses before writes or a new intent.
+        s3.create_bucket(Bucket='manifest-conflict-pack')
+        s3.put_object(Bucket='manifest-conflict-pack', Key=prefix + '/manifest.json', Body=b'conflicting manifest')
+        before_conflict = {path.name for path in generation.glob('*.json')}
+        conflict = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'manifest-conflict-pack'], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert conflict.returncode == 1 and 'readback mismatch' in conflict.stderr, conflict.stderr
+        assert {path.name for path in generation.glob('*.json')} == before_conflict, 'conflict created an intent/receipt'
+        assert s3.get_object(Bucket='manifest-conflict-pack', Key=prefix + '/manifest.json')['Body'].read() == b'conflicting manifest'
+        assert {obj['Key'] for obj in s3.list_objects_v2(Bucket='manifest-conflict-pack').get('Contents', [])} == {prefix + '/manifest.json'}
         # A partial final namespace resumes only matching bytes, without staging.
         s3.create_bucket(Bucket='partial-pack')
         first = next(iter(manifest['files']))
@@ -73,13 +89,101 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         assert failed.returncode == 3 and 'injected lost transfer receipt' in failed.stderr, failed.stderr
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='uncertain-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
-        ref = json.loads(reference.read_text())
-        generation = Path(ref['store']) / manifest['pack_id'] / ref['current']['generation']
         intents = [json.loads(path.read_text()) for path in generation.glob('transfer-*.json')]
         pending = [intent for intent in intents if '/uncertain-pack/' in (intent.get('destination') or '')]
         assert len(pending) == 1, pending
         assert not (generation / f"completed-{pending[0]['job_id']}.json").exists()
-        print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
+        recovered = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'uncertain-pack'], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert recovered.returncode == 0, recovered.stderr
+        assert (generation / f"completed-{pending[0]['job_id']}.json").is_file(), 'original intent remains uncertain'
+        assert len([p for p in generation.glob('transfer-*.json') if '/uncertain-pack/' in (json.loads(p.read_text()).get('destination') or '')]) == 1
+
+        # Model AWS's no-ListBucket missing-key 403 by injecting only the
+        # preflight response, forwarding all remaining signed requests
+        # (and their original Host) to the real MinIO conditional-write path.
+        class ForbiddenPreflight(BaseHTTPRequestHandler):
+            deny_next = False
+            writes = []
+
+            def log_message(self, *args):
+                pass
+
+            def forward(self):
+                if self.command == 'GET' and self.path.endswith('/manifest.json') and ForbiddenPreflight.deny_next:
+                    ForbiddenPreflight.deny_next = False
+                    self.send_response(403)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+                body = self.rfile.read(int(self.headers.get('Content-Length', '0')))
+                if self.command == 'PUT':
+                    assert self.headers.get('If-None-Match') == '*', 'unconditional write'
+                connection = http.client.HTTPConnection('127.0.0.1', port, timeout=120)
+                try:
+                    connection.request(self.command, self.path, body=body, headers=dict(self.headers))
+                    response = connection.getresponse()
+                    data = response.read()
+                    if self.command == 'PUT':
+                        ForbiddenPreflight.writes.append((self.path, response.status))
+                    self.send_response(response.status)
+                    self.send_header('Content-Length', str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                finally:
+                    connection.close()
+
+            do_GET = do_PUT = forward
+
+        proxy = ThreadingHTTPServer(('127.0.0.1', 0), ForbiddenPreflight)
+        worker = threading.Thread(target=proxy.serve_forever, daemon=True)
+        worker.start()
+        try:
+            proxy_endpoint = f'http://127.0.0.1:{proxy.server_port}'
+            def forbidden_upload(bucket, expected):
+                ForbiddenPreflight.deny_next = True
+                ForbiddenPreflight.writes = []
+                result = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', proxy_endpoint, '--bucket', bucket], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+                assert result.returncode == expected, result.stderr
+                assert not ForbiddenPreflight.deny_next, 'preflight not exercised'
+                return result
+
+            s3.create_bucket(Bucket='forbidden-preflight-pack')
+            forbidden_upload('forbidden-preflight-pack', 0)
+            assert all(status == 200 for _, status in ForbiddenPreflight.writes)
+            forbidden_upload('forbidden-preflight-pack', 0)
+            assert all(status == 412 for _, status in ForbiddenPreflight.writes)
+            assert any(path.endswith('/manifest.json') for path, _ in ForbiddenPreflight.writes)
+            for name in [*manifest['files'], 'manifest.json']:
+                assert s3.get_object(Bucket='forbidden-preflight-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
+            # Existing payload bytes match, but the manifest must never be replaced.
+            s3.put_object(Bucket='forbidden-preflight-pack', Key=prefix + '/manifest.json', Body=b'conflicting manifest')
+            conflict = forbidden_upload('forbidden-preflight-pack', 3)
+            assert 'readback mismatch' in conflict.stderr, conflict.stderr
+            assert s3.get_object(Bucket='forbidden-preflight-pack', Key=prefix + '/manifest.json')['Body'].read() == b'conflicting manifest'
+            assert all(status == 412 for _, status in ForbiddenPreflight.writes)
+            proxy_pending = []
+            for path in generation.glob('transfer-*.json'):
+                intent = json.loads(path.read_text())
+                receipt = generation / f"completed-{intent['job_id']}.json"
+                if '/forbidden-preflight-pack/' in (intent.get('destination') or '') and not receipt.exists():
+                    proxy_pending.append(intent)
+            assert len(proxy_pending) == 1, proxy_pending
+            pending_receipt = generation / f"completed-{proxy_pending[0]['job_id']}.json"
+            # A payload mismatch also prevents a successful completed retry.
+            s3.put_object(Bucket='forbidden-preflight-pack', Key=prefix + '/manifest.json', Body=(pack / 'manifest.json').read_bytes())
+            s3.put_object(Bucket='forbidden-preflight-pack', Key=prefix + '/' + first, Body=b'conflicting bytes')
+            conflict = forbidden_upload('forbidden-preflight-pack', 1)
+            assert 'readback mismatch' in conflict.stderr, conflict.stderr
+            assert not any(path.endswith('/manifest.json') for path, _ in ForbiddenPreflight.writes)
+            assert not pending_receipt.exists(), 'mismatching bytes resolved an uncertain transfer'
+            s3.put_object(Bucket='forbidden-preflight-pack', Key=prefix + '/' + first, Body=(pack / first).read_bytes())
+            forbidden_upload('forbidden-preflight-pack', 0)
+            assert pending_receipt.is_file(), '403 retry did not resolve the original intent'
+        finally:
+            proxy.shutdown()
+            proxy.server_close()
+            worker.join(timeout=5)
+        print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'completed_rerun_no_intent': 'OK', 'manifest_conflict_no_intent': 'OK', 'lost_receipt_recovered': 'OK', 'mocked_403_fresh_retry_conflict': 'OK', 'files': len(manifest['files']) + 1}))
     finally:
         if os.name == 'nt': child.terminate()
         else: os.killpg(child.pid, signal.SIGTERM)

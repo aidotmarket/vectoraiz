@@ -402,22 +402,23 @@ fn row_location(name: &str, batch: &RecordBatch, row: usize, offset: usize) -> R
 
 // These fields are consumed by the format, query example, citation resolution
 // or native row identity. Descriptive columns may still be renamed.
+pub const PROTECTED_COLUMNS: &[&str] = &[
+    "embedding",
+    "doc_id",
+    "chunk_id",
+    "text",
+    "page",
+    "pages",
+    "file_name",
+    "sha256",
+    "type",
+    "bytes",
+    "token_count",
+    "heading_path",
+];
+
 fn structural_column(name: &str) -> bool {
-    matches!(
-        name,
-        "embedding"
-            | "doc_id"
-            | "chunk_id"
-            | "text"
-            | "page"
-            | "pages"
-            | "file_name"
-            | "sha256"
-            | "type"
-            | "bytes"
-            | "token_count"
-            | "heading_path"
-    )
+    PROTECTED_COLUMNS.contains(&name)
 }
 
 fn rewrite_parquet(
