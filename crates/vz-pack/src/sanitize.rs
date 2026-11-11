@@ -39,6 +39,71 @@ pub struct Changes {
     pub identity_terms: Vec<String>,
 }
 
+impl Changes {
+    pub(crate) fn validate(&self) -> Result<()> {
+        ensure!(
+            self.identity_terms.len() <= 128 && self.identity_terms.iter().all(|s| s.len() <= 256),
+            "private identity input limit"
+        );
+        ensure!(
+            self.edits.len() <= 50_000 && self.exclusions.len() <= 50_000,
+            "private edit count limit"
+        );
+        let mut bytes = 0usize;
+        for (key, value) in &self.edits {
+            ensure!(
+                key.len() <= 4096 && value.len() <= 1024 * 1024,
+                "edit size limit"
+            );
+            bytes = bytes
+                .checked_add(key.len() + value.len())
+                .context("edit size overflow")?;
+        }
+        for key in &self.exclusions {
+            ensure!(key.len() <= 4096, "exclusion size limit");
+            bytes = bytes
+                .checked_add(key.len())
+                .context("exclusion size overflow")?;
+        }
+        ensure!(bytes <= 8 * 1024 * 1024, "total edit size limit");
+        Ok(())
+    }
+}
+
+/// Handler preview only: this memory result grants no generation, acceptance
+/// or transfer authority. Native certification remains private to the builder.
+pub struct ArtifactPreview {
+    pub bytes: Vec<u8>,
+    pub inventory: Vec<Entry>,
+}
+pub fn rebuild_artifact(name: &str, input: &[u8], changes: &Changes) -> Result<ArtifactPreview> {
+    changes.validate()?;
+    let bytes = rewrite(
+        name,
+        input,
+        changes,
+        &mut BTreeMap::new(),
+        &mut Budget::default(),
+    )?;
+    let mut inventory = Vec::new();
+    inspect(
+        name,
+        &bytes,
+        changes,
+        &mut inventory,
+        &mut Budget::default(),
+    )?;
+    for (location, edit) in &changes.edits {
+        ensure!(
+            inventory
+                .iter()
+                .any(|entry| &entry.location == location && entry.value.as_ref() == Some(edit)),
+            "edit did not reach delivered readback"
+        );
+    }
+    Ok(ArtifactPreview { bytes, inventory })
+}
+
 #[derive(Default)]
 pub(crate) struct Budget {
     bytes: usize,
@@ -94,7 +159,7 @@ fn entry(
             .identity_terms
             .iter()
             .filter(|t| !t.trim().is_empty())
-            .any(|t| lower.contains(&t.to_lowercase()));
+            .any(|t| lower.contains(&t.trim().to_lowercase()));
     out.push(Entry {
         location: location.into(),
         kind: kind.into(),
@@ -112,7 +177,7 @@ pub fn check_identifier(value: &str, terms: &[String]) -> Result<()> {
         !terms
             .iter()
             .filter(|t| !t.trim().is_empty())
-            .any(|t| lower.contains(&t.to_lowercase())),
+            .any(|t| lower.contains(&t.trim().to_lowercase())),
         "identity match in public/storage identifier"
     );
     Ok(())
@@ -302,7 +367,7 @@ fn supported(data_type: &DataType) -> bool {
             | DataType::UInt64
             | DataType::Float32
             | DataType::Float64
-    ) || matches!(data_type, DataType::FixedSizeList(field, _) if field.data_type() == &DataType::Float32)
+    ) || matches!(data_type, DataType::FixedSizeList(field, _) if field.data_type() == &DataType::Float32 && field.name() == "item" && field.metadata().is_empty())
 }
 
 fn rewrite_parquet(
@@ -352,6 +417,12 @@ fn rewrite_parquet(
                         changes.edits.get(&key).map(String::as_str).or(value)
                     })
                     .collect::<Vec<_>>();
+                if batch.schema().field(column).name() == "heading_path" {
+                    for text in values.iter().flatten() {
+                        serde_json::from_str::<Vec<String>>(text)
+                            .context("heading path must be a JSON string array")?;
+                    }
+                }
                 columns.push(Arc::new(StringArray::from(values)));
             } else {
                 columns.push(array.clone());
@@ -397,6 +468,7 @@ fn inspect_at(
     depth: usize,
 ) -> Result<()> {
     ensure!(depth <= MAX_DEPTH, "container depth limit");
+    check_identifier(name, &changes.identity_terms)?;
     budget.charge(input.len())?;
     entry(
         out,
@@ -592,6 +664,29 @@ fn inspect_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn unhandled_nested_parquet_properties_block() {
+        let child = Arc::new(Field::new("item", DataType::Float32, true).with_metadata(
+            std::collections::HashMap::from([("private-author".into(), "fixture-identity".into())]),
+        ));
+        let values = Arc::new(arrow_array::Float32Array::from(vec![1., 0.]));
+        let array =
+            arrow_array::FixedSizeListArray::try_new(child.clone(), 2, values, None).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "embedding",
+            DataType::FixedSizeList(child, 2),
+            false,
+        )]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(array)]).unwrap();
+        let mut writer = ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+        writer.write(&batch).unwrap();
+        assert!(rebuild_artifact(
+            "nested.parquet",
+            &writer.into_inner().unwrap(),
+            &Changes::default()
+        )
+        .is_err());
+    }
     #[test]
     fn nested_parquet_columns_values_and_properties_are_rebuilt() {
         let schema = Arc::new(Schema::new_with_metadata(

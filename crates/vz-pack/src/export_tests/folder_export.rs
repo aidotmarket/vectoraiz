@@ -144,3 +144,29 @@ fn corrupted_staged_file_is_not_published() {
     assert!(!f.source.join("vz/fixture").exists());
     assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 0);
 }
+
+#[test]
+fn late_staged_swap_refuses_promotion_and_preserves_other_jobs() {
+    let f = Fixture::new();
+    let other = f.staging.join("other-job.partial");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join("keep"), b"unrelated seller data").unwrap();
+    let result = folder_with_checks(&f.pack, "fixture", &f.source, &f.staging, true, || {
+        let stage = fs::read_dir(&f.staging)?
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.path() != other)
+            .unwrap();
+        fs::write(
+            stage.path().join("documents.parquet"),
+            b"late swapped payload",
+        )?;
+        Ok(())
+    });
+    assert!(result.is_err());
+    assert!(!f.source.join("vz/fixture").exists());
+    assert_eq!(
+        fs::read(other.join("keep")).unwrap(),
+        b"unrelated seller data"
+    );
+    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 1);
+}

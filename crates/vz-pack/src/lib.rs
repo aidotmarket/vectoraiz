@@ -31,7 +31,12 @@ pub fn write(
     _query: &str,
     current: Option<&listing_commands::ListingReference>,
 ) -> Result<Value> {
+    let library = current.map(|reference| &reference.library);
     listing_commands::with_reviewed(current, |guard, current, payload, terms| {
+        anyhow::ensure!(
+            root.canonicalize()? == library.context("review library required")?.canonicalize()?,
+            "requested library differs from reviewed library"
+        );
         let reference = current;
         let review = guard.check_accepted(reference)?;
         anyhow::ensure!(
@@ -39,7 +44,6 @@ pub fn write(
                 == String::from(review.embedding_recipe_sha256),
             "embedding recipe mismatch; re-index required"
         );
-        let _ = root;
         sanitize::check_identifier(&current.pack_id.to_string(), terms)?;
         review_transfer::package(guard, current, payload, output)
     })

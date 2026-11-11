@@ -80,6 +80,33 @@ class Sftp(paramiko.SFTPServerInterface):
         except OSError as error:
             return paramiko.SFTPServer.convert_errno(error.errno)
 
+    def list_folder(self, path):
+        try:
+            if (root / "extra-stage-file").exists() and ".partial-" in path:
+                (self.local(path) / "unreviewed.txt").write_text("unreviewed fixture metadata")
+            result = []
+            for entry in self.local(path).iterdir():
+                attrs = paramiko.SFTPAttributes.from_stat(entry.lstat())
+                attrs.filename = entry.name
+                result.append(attrs)
+            return result
+        except OSError as error:
+            return paramiko.SFTPServer.convert_errno(error.errno)
+
+    def remove(self, path):
+        try:
+            self.local(path).unlink()
+            return paramiko.SFTP_OK
+        except OSError as error:
+            return paramiko.SFTPServer.convert_errno(error.errno)
+
+    def rmdir(self, path):
+        try:
+            self.local(path).rmdir()
+            return paramiko.SFTP_OK
+        except OSError as error:
+            return paramiko.SFTPServer.convert_errno(error.errno)
+
     def open(self, path, flags, attr):
         try:
             descriptor = os.open(self.local(path), flags, 0o600)

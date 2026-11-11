@@ -18,10 +18,9 @@ pub struct ListingReference {
     pub current: CurrentReview,
 }
 
-/// Transitional preflight on all four production transfer entries. This
-/// validates native/staged/source commitments but deliberately still refuses
-/// delivery: the sanitizer and transfer adapters are not yet complete. Do not
-/// remove the final gate without keeping the live guards through promotion.
+/// All synchronous transfer entries retain these guards through destination
+/// writes/readback, promotion and durable completion. Only frozen, accepted,
+/// sanitizer-certified generations expose a payload to an adapter.
 pub(crate) fn with_reviewed<T>(
     reference: Option<&ListingReference>,
     run: impl FnOnce(

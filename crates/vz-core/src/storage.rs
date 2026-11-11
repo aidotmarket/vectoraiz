@@ -33,6 +33,7 @@ impl State {
     /// Review builders already hold the selected index writer fence. Read the
     /// committed visibility set without recovery, lock upgrade or SQLite writes.
     pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
+        use std::io::Read;
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
             "readonly_shm=1"
@@ -52,8 +53,10 @@ impl State {
         let mut statement = db.prepare("SELECT generation FROM documents ORDER BY doc_id")?;
         let generations = statement
             .query_map([], |r| r.get::<_, String>(0))?
+            .take(50_001)
             .collect::<rusqlite::Result<Vec<_>>>()?;
         anyhow::ensure!(generations.len() <= 50_000, "review document limit");
+        let mut total = 0usize;
         generations
             .into_iter()
             .map(|generation| {
@@ -72,7 +75,18 @@ impl State {
                     std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
                     "review document size limit"
                 );
-                Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+                let mut bytes = Vec::new();
+                std::fs::File::open(path)?
+                    .take(64 * 1024 * 1024 + 1)
+                    .read_to_end(&mut bytes)?;
+                total = total
+                    .checked_add(bytes.len())
+                    .context("review document size overflow")?;
+                anyhow::ensure!(
+                    total <= 64 * 1024 * 1024,
+                    "total review document size limit"
+                );
+                Ok(serde_json::from_slice(&bytes)?)
             })
             .collect()
     }

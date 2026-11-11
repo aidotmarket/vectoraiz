@@ -10,15 +10,34 @@ use reqwest::{
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, io::Read, path::Path};
 
+#[derive(Clone)]
 struct S3<'a> {
     client: Client,
     endpoint: &'a str,
     bucket: &'a str,
     region: &'a str,
-    prefix: &'a str,
+    prefix: String,
     access: String,
     secret: String,
     session: Option<String>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+
+struct UploadBody {
+    bytes: std::io::Cursor<Vec<u8>>,
+    cancel: tokio_util::sync::CancellationToken,
+}
+impl Read for UploadBody {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.cancel.is_cancelled() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "listing transfer cancelled",
+            ));
+        }
+        let size = buffer.len().min(65536);
+        self.bytes.read(&mut buffer[..size])
+    }
 }
 impl S3<'_> {
     fn request(&self, method: Method, name: &str, body: &[u8]) -> Result<Response> {
@@ -83,7 +102,17 @@ impl S3<'_> {
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect::<String>();
-        let mut request = self.client.request(method, url).body(body.to_vec()).header("authorization", format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}", self.access));
+        let is_put = method == Method::PUT;
+        let mut request = self.client.request(method, url).header("authorization", format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={signature}", self.access));
+        if is_put {
+            request = request.body(reqwest::blocking::Body::sized(
+                UploadBody {
+                    bytes: std::io::Cursor::new(body.to_vec()),
+                    cancel: self.cancel.clone(),
+                },
+                body.len() as u64,
+            ));
+        }
         for (key, value) in headers {
             request = request.header(key, value);
         }
@@ -127,43 +156,89 @@ pub(crate) fn upload(
         endpoint,
         bucket,
         region,
-        prefix,
+        prefix: prefix.into(),
         access: std::env::var("AWS_ACCESS_KEY_ID").context("AWS_ACCESS_KEY_ID required")?,
         secret: std::env::var("AWS_SECRET_ACCESS_KEY").context("AWS_SECRET_ACCESS_KEY required")?,
         session: std::env::var("AWS_SESSION_TOKEN").ok(),
+        cancel: guard.cancellation_token(),
     };
     let mut files = crate::export::inventory(payload, &current.pack_id.to_string())?;
     files.sort_by_key(|f| f.path == "manifest.json");
     let intent = guard.intent(current, &format!("{endpoint}/{bucket}/{prefix}"))?;
-    for file in &files {
-        guard.check_accepted(current)?;
-        if file.path == "manifest.json" {
-            for payload_file in files.iter().filter(|f| f.path != "manifest.json") {
-                guard.check_accepted(current)?;
-                s3.readback(
-                    &payload_file.path,
-                    &std::fs::read(payload.join(&payload_file.path))?,
-                )?;
-            }
+    let stage = S3 {
+        prefix: format!("_vz-staging/{}", intent.job_id),
+        ..s3.clone()
+    };
+    let mut staged = Vec::new();
+    let mut promotion_attempted = false;
+    let result = (|| {
+        // A job-owned namespace never receives a manifest/completion marker.
+        for file in files.iter().filter(|file| file.path != "manifest.json") {
             guard.check_accepted(current)?;
+            let bytes = std::fs::read(payload.join(&file.path))?;
+            ensure!(
+                bytes.len() as u64 == file.size && vz_core::pipeline::sha256(&bytes) == file.sha256,
+                "reviewed payload changed before S3 staging"
+            );
+            let response = stage.request(Method::PUT, &file.path, &bytes)?;
+            ensure!(
+                response.status().is_success(),
+                "S3 staging write failed: HTTP {}",
+                response.status()
+            );
+            staged.push(file.path.clone());
+            guard.check_accepted(current)?;
+            stage.readback(&file.path, &bytes)?;
         }
-        let bytes = std::fs::read(payload.join(&file.path))?;
-        ensure!(
-            bytes.len() as u64 == file.size && vz_core::pipeline::sha256(&bytes) == file.sha256,
-            "reviewed payload changed before S3 write"
-        );
-        // Existing objects are never overwritten, even on uncertain retries.
-        let response = s3.request(Method::PUT, &file.path, &bytes)?;
-        ensure!(
-            response.status().is_success(),
-            "S3 conditional write failed: HTTP {}",
-            response.status()
-        );
+        for file in &files {
+            guard.check_accepted(current)?;
+            if file.path == "manifest.json" {
+                for payload_file in files.iter().filter(|f| f.path != "manifest.json") {
+                    guard.check_accepted(current)?;
+                    s3.readback(
+                        &payload_file.path,
+                        &std::fs::read(payload.join(&payload_file.path))?,
+                    )?;
+                }
+                guard.check_accepted(current)?;
+            }
+            let bytes = std::fs::read(payload.join(&file.path))?;
+            ensure!(
+                bytes.len() as u64 == file.size && vz_core::pipeline::sha256(&bytes) == file.sha256,
+                "reviewed payload changed before S3 write"
+            );
+            // Existing objects are never overwritten, even on uncertain retries.
+            if file.path == "manifest.json" {
+                promotion_attempted = true;
+            }
+            let response = s3.request(Method::PUT, &file.path, &bytes)?;
+            ensure!(
+                response.status().is_success(),
+                "S3 conditional write failed: HTTP {}",
+                response.status()
+            );
+            guard.check_accepted(current)?;
+            s3.readback(&file.path, &bytes)?;
+        }
+        // No remote deletion on an unknown PUT/promotion result. The durable intent
+        // retains the exact destination; reconciliation must inspect those bytes.
         guard.check_accepted(current)?;
-        s3.readback(&file.path, &bytes)?;
+        guard.completed(&intent, &files)
+    })();
+    // Remove only acknowledged writes in our random, incomplete namespace.
+    // A stage containing a completion marker, or an unreadable stage, is left
+    // for reconciliation. Never DELETE final pack objects, including on cancel.
+    if matches!(stage.request(Method::HEAD, "manifest.json", &[]), Ok(response) if response.status() == reqwest::StatusCode::NOT_FOUND)
+    {
+        for name in staged {
+            let _ = stage.request(Method::DELETE, &name, &[]);
+        }
     }
-    // No remote deletion on an unknown PUT/promotion result. The durable intent
-    // retains the exact destination; reconciliation must inspect those bytes.
-    guard.check_accepted(current)?;
-    guard.completed(&intent, &files)
+    result.map_err(|error| {
+        if promotion_attempted {
+            crate::review_transfer::uncertain(&format!("{endpoint}/{bucket}/{prefix}"), error)
+        } else {
+            error
+        }
+    })
 }

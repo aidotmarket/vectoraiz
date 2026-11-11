@@ -1,14 +1,15 @@
 //! Machine policy shared by every native listing entry point.
 //!
-//! This first C1 slice deliberately grants no packaging capability: the staged
-//! review/sanitizer is not complete. Policy permission alone is never a review.
+//! Policy permission alone never grants packaging capability. Transfers also
+//! require preview exposure and an accepted sanitizer-certified generation.
 use serde::Serialize;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
 /// Exposure flag. No environment variable or user preference can enable this
-/// incomplete journey. Search, index and answers do not consult it.
-pub const LISTING_AUTHORITY_PREVIEW_V1: bool = cfg!(feature = "listing-preview-harness");
+/// journey. Search, index and answers do not consult it.
+pub const LISTING_AUTHORITY_PREVIEW_V1: bool =
+    cfg!(all(feature = "listing-preview-harness", debug_assertions));
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +40,7 @@ impl std::fmt::Display for ListingError {
             Self::PolicyDenied => "Listing is disabled by your organisation. Contact IT.",
             Self::PolicyUnreadable => "The managed listing policy cannot be read or is invalid. Listing is disabled. Contact IT.",
             Self::PreviewDisabled => "Listing preview is not available in this build.",
-            Self::ReviewRequired => "A current purchaser review is required. Listing is unavailable until review support is complete.",
+            Self::ReviewRequired => "A current, explicitly accepted purchaser review is required before transfer.",
             Self::StaleGeneration => "Listing policy, source or reviewed generation changed. Start a new purchaser review.",
         })
     }
@@ -127,7 +128,7 @@ impl ListingPolicy {
         self.refresh_locked(&mut self.state.lock().unwrap());
     }
 
-    /// Take this snapshot before a future per-pack mutex, then recheck the lease
+    /// Take this snapshot before the per-pack mutex, then recheck the lease
     /// before each write/promotion. It cannot bypass the review entry gate.
     pub fn policy_lease(&self) -> Result<PolicyLease, ListingError> {
         let mut state = self.state.lock().unwrap();

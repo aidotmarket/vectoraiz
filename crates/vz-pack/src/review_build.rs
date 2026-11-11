@@ -102,6 +102,7 @@ fn build(
     changes: &Changes,
 ) -> Result<CurrentReview> {
     pack.begin_rebuild()?;
+    changes.validate()?;
     let binding = pack.capture(source)?;
     let index = pack.index_path();
     let recipe: vz_core::engine::Recipe =
@@ -598,10 +599,160 @@ mod tests {
         *f.policy_source.0.lock().unwrap() = ManagedPolicy::Allowed;
         f.policy.refresh();
         assert!(guard.check_accepted(&current).is_err());
+    }
+
+    #[test]
+    fn reviewed_transfer_source_swaps_refuse_before_writes_and_before_promotion() {
+        use crate::review_transfer::{package_with_checks, Point};
+        for cutoff in [Point::BeforeWrite, Point::BeforePromotion] {
+            let f = Fixture::new();
+            let id = Uuid::new_v4();
+            let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+            let guard = store
+                .lock_native(&f.policy, id, &f.root.join("index"))
+                .unwrap();
+            let current = build(
+                &guard,
+                &f.root.join("source"),
+                id,
+                &f.engine,
+                "query",
+                &Fixture::changes(),
+            )
+            .unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            let source = f.root.join("source/client-original.md");
+            let original = std::fs::read(&source).unwrap();
+            let sentinel = f.root.join(".vz-sentinel.partial");
+            std::fs::create_dir(&sentinel).unwrap();
+            std::fs::write(sentinel.join("keep"), b"seller data").unwrap();
+            let output = f.root.join("swapped");
+            assert!(
+                package_with_checks(&guard, &current, &payload, &output, |point| {
+                    if point == cutoff {
+                        std::fs::write(&source, b"changed source")?;
+                    }
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert!(!output.exists());
+            assert_eq!(
+                std::fs::read(sentinel.join("keep")).unwrap(),
+                b"seller data"
+            );
+            assert_eq!(
+                std::fs::read_dir(&f.root)
+                    .unwrap()
+                    .filter_map(|e| e.ok())
+                    .filter(|e| e.file_name().to_string_lossy().starts_with(".vz-"))
+                    .count(),
+                1
+            );
+            std::fs::write(source, original).unwrap();
+            drop(guard);
+            let restarted = store.lock_native_current(&f.policy, &current, &f.root.join("index"));
+            assert!(
+                restarted.is_err(),
+                "restoring source bytes must not revive a cancelled generation"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_policy_cancellation_at_reviewed_promotion_barrier() {
+        use crate::review_transfer::{package_with_checks, Point};
+        let f = Fixture::new();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Fixture::changes(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        let barrier = std::sync::Barrier::new(2);
+        let output = f.root.join("cancelled");
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                barrier.wait();
+                *f.policy_source.0.lock().unwrap() = ManagedPolicy::Denied;
+                f.policy.refresh();
+                barrier.wait();
+            });
+            assert!(
+                package_with_checks(&guard, &current, &payload, &output, |point| {
+                    if point == Point::BeforePromotion {
+                        barrier.wait();
+                        barrier.wait();
+                    }
+                    Ok(())
+                })
+                .is_err()
+            );
+        });
+        assert!(!output.exists());
+        assert!(!std::fs::read_dir(&f.root).unwrap().any(|e| e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".vz-")));
+        *f.policy_source.0.lock().unwrap() = ManagedPolicy::Allowed;
+        f.policy.refresh();
+        assert!(guard.check_accepted(&current).is_err());
+    }
+
+    #[test]
+    fn reviewed_promotion_lost_receipt_retains_destination_evidence_after_restart() {
+        use crate::review_transfer::{package_with_checks, Point, PromotionOutcomeUnknown};
+        let f = Fixture::new();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Fixture::changes(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        let output = f.root.join("possibly-promoted");
+        let error = package_with_checks(&guard, &current, &payload, &output, |point| {
+            anyhow::ensure!(
+                point != Point::AfterPromotion,
+                "lost durable completion receipt"
+            );
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.is::<PromotionOutcomeUnknown>());
+        assert_eq!(crate::export::exit_code(&error), 3);
+        assert!(output.join("manifest.json").is_file());
         drop(guard);
-        let restarted = store.lock_native_current(&f.policy, &current, &f.root.join("index"));
-        // Cancellation invalidates the live lease; source/staged mutations have
-        // independent durable invalidations tested in review_store.
-        drop(restarted);
+        drop(store);
+        let reopened = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let pack = reopened.lock(&f.policy, id).unwrap();
+        let uncertain = pack.uncertain_transfers(&current).unwrap();
+        assert_eq!(uncertain.len(), 1);
+        assert_eq!(
+            uncertain[0].destination.as_deref(),
+            Some(format!("package:{}", output.display()).as_str())
+        );
+        assert!(output.join("manifest.json").is_file());
     }
 }

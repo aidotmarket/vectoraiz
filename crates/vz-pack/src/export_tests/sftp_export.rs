@@ -151,6 +151,10 @@ fn local_sftp_acceptance() {
     for (marker, message) in [
         ("bad-size", "remote size mismatch"),
         ("bad-hash", "remote hash mismatch"),
+        (
+            "extra-stage-file",
+            "extra or duplicate remote inventory entry",
+        ),
     ] {
         fs::write(f.root.join(marker), b"yes").unwrap();
         let error = runtime

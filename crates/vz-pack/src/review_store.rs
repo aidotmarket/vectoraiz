@@ -1,5 +1,5 @@
 //! Private, append-only review generations. This storage is not a sanitizer or
-//! a listing entry point: production transfers remain gated until C1 is complete.
+//! a listing entry point: certification and transfer gates are separate.
 //! No private binding, receipt, or source name belongs in delivered payloads.
 use crate::{
     listing_policy::{ListingError, ListingPolicy, PolicyLease},
@@ -147,7 +147,7 @@ impl ReviewBinding {
     }
 }
 
-/// Required on acceptance and every future reviewed write/upload/export call.
+/// Required on acceptance and every reviewed write/upload/export call.
 /// The commitment covers the immutable review, payload and private binding.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,6 +176,8 @@ pub struct TransferIntent {
     pub job_id: Uuid,
     pub current: CurrentReview,
     pub destination_commitment: Sha256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
 }
 
 /// A caller-selected application-private directory outside all collection and
@@ -194,7 +196,7 @@ impl ReviewStore {
 
     /// Acquire a policy lease BEFORE the cross-process per-pack mutex. Policy
     /// refresh never takes this mutex. Holding this guard serializes rebuilding,
-    /// accepting and future transfer promotion for the same pack UUID.
+    /// accepting and transfer promotion for the same pack UUID.
     pub fn lock<'a>(&'a self, policy: &'a ListingPolicy, pack_id: Uuid) -> Result<PackReview<'a>> {
         let lease = policy.policy_lease()?;
         let path = self.root.join(pack_id.to_string());
@@ -281,6 +283,9 @@ pub struct NativePackReview<'a> {
 }
 
 impl NativePackReview<'_> {
+    pub(crate) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
+        self.pack.lease.cancellation_token()
+    }
     pub(crate) fn begin_rebuild(&self) -> Result<()> {
         self.check_policy()?;
         if let Some((_, current)) = self.pack.head()? {
@@ -330,8 +335,11 @@ impl NativePackReview<'_> {
         destination: &str,
     ) -> Result<TransferIntent> {
         self.check_accepted(current)?;
-        self.pack
-            .record_transfer_intent(current, digest(&destination)?)
+        self.pack.record_transfer_intent_at(
+            current,
+            digest(&destination)?,
+            Some(destination.into()),
+        )
     }
 
     pub(crate) fn completed(
@@ -435,7 +443,7 @@ impl PackReview<'_> {
         }
         Ok(())
     }
-    /// Persist a rebuilt payload supplied by the future sanitizer. No source
+    /// Persist an uncertified storage payload. No source
     /// mappings or terms are copied from private state into this payload.
     /// This method does not certify metadata safety or enable delivery.
     pub fn freeze(
@@ -587,8 +595,8 @@ impl PackReview<'_> {
     }
 
     /// Validate before EACH destination write and final promotion while holding
-    /// this guard. No payload path is returned by this storage API: a future
-    /// reviewed transfer must additionally enforce the preview/sanitizer gate.
+    /// this guard. Only the native certified boundary additionally exposes a
+    /// payload after checking the preview/sanitizer gate.
     pub fn check_accepted(&self, current: &CurrentReview) -> Result<ListingReview> {
         let generation = self.validate(current, true)?;
         self.accepted_review(generation)
@@ -599,11 +607,21 @@ impl PackReview<'_> {
         current: &CurrentReview,
         destination_commitment: Sha256,
     ) -> Result<TransferIntent> {
+        self.record_transfer_intent_at(current, destination_commitment, None)
+    }
+
+    fn record_transfer_intent_at(
+        &self,
+        current: &CurrentReview,
+        destination_commitment: Sha256,
+        destination: Option<String>,
+    ) -> Result<TransferIntent> {
         self.check_accepted(current)?;
         let intent = TransferIntent {
             job_id: Uuid::new_v4(),
             current: current.clone(),
             destination_commitment,
+            destination,
         };
         write_json(
             &self
@@ -627,7 +645,9 @@ impl PackReview<'_> {
         let stored: TransferIntent =
             read_json(&path.join(format!("transfer-{}.json", intent.job_id)))?;
         ensure!(
-            stored.current == intent.current
+            stored.job_id == intent.job_id
+                && stored.destination == intent.destination
+                && stored.current == intent.current
                 && stored.destination_commitment == intent.destination_commitment,
             ListingError::StaleGeneration
         );
@@ -652,7 +672,9 @@ impl PackReview<'_> {
         let stored: TransferIntent =
             read_json(&path.join(format!("transfer-{}.json", intent.job_id)))?;
         ensure!(
-            stored.current == intent.current
+            stored.job_id == intent.job_id
+                && stored.destination == intent.destination
+                && stored.current == intent.current
                 && stored.destination_commitment == intent.destination_commitment,
             ListingError::StaleGeneration
         );

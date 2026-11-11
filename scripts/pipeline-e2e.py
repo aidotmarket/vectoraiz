@@ -79,6 +79,19 @@ try:
                 for path in output.rglob("*"):
                     if path.is_file():
                         assert (remote / "source/vz" / manifest["pack_id"] / path.relative_to(output)).read_bytes() == path.read_bytes()
+                # The real reviewed path must retain completed bytes and a
+                # destination-bound intent when the rename acknowledgement is lost.
+                (remote / "source-lost-ack").mkdir()
+                (remote / "lost-rename-ack").write_text("fixture fault")
+                uncertain = subprocess.run([str(CLI), "--review-reference", str(reference_path), "export", str(output), "--pack-id", manifest["pack_id"], "--sftp", f"fixture@127.0.0.1:{ready['port']}:/source-lost-ack", "--sftp-staging", "/staging", "--identity", str(remote / "client.pem"), "--known-hosts", str(remote / "pins.json")], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
+                print(uncertain.stderr, file=sys.stderr)
+                assert uncertain.returncode == 3, uncertain.stderr
+                assert (remote / "source-lost-ack/vz" / manifest["pack_id"] / "manifest.json").read_bytes() == (output / "manifest.json").read_bytes()
+                generation = Path(reference["store"]) / manifest["pack_id"] / reference["current"]["generation"]
+                intents = [json.loads(path.read_text()) for path in generation.glob("transfer-*.json")]
+                lost = [intent for intent in intents if "/source-lost-ack/vz/" in (intent.get("destination") or "")]
+                assert len(lost) == 1 and "|stage:/staging/" in lost[0]["destination"], lost
+                assert not (generation / f"completed-{lost[0]['job_id']}.json").exists()
             finally:
                 server.terminate(); server.wait(timeout=15)
             return manifest, reference_path

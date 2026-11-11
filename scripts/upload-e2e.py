@@ -39,10 +39,15 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
                 time.sleep(.2)
         s3 = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=env['AWS_ACCESS_KEY_ID'], aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'], region_name='us-east-1', config=Config(s3={'addressing_style': 'path'}))
         s3.create_bucket(Bucket='phase0-pack')
-        subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, check=True)
+        subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack'], env=env, check=True)
         for name in [*manifest['files'], 'manifest.json']:
             body = s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read()
             assert body == (pack / name).read_bytes(), name
+        retry = subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert retry.returncode != 0 and 'conditional write failed' in retry.stderr, retry.stderr
+        for name in [*manifest['files'], 'manifest.json']:
+            assert s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
+        assert not s3.list_objects_v2(Bucket='phase0-pack', Prefix='_vz-staging/').get('Contents'), 'job-owned staging must be cleaned'
         print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
     finally:
         child.terminate()

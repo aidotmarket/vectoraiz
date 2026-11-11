@@ -38,7 +38,9 @@ impl std::error::Error for PublicationOutcomeUnknown {
 
 /// Export CLI exit codes: 1 for ordinary failure, 3 for uncertain publication.
 pub fn exit_code(error: &anyhow::Error) -> i32 {
-    if error.is::<PublicationOutcomeUnknown>() {
+    if error.is::<PublicationOutcomeUnknown>()
+        || error.is::<crate::review_transfer::PromotionOutcomeUnknown>()
+    {
         3
     } else {
         1
@@ -212,7 +214,14 @@ pub fn folder(
                 Ok(())
             },
         )?;
-        guard.completed(&intent, &result)?;
+        guard.completed(&intent, &result).map_err(|error| {
+            crate::review_transfer::uncertain(
+                result["destination"]
+                    .as_str()
+                    .unwrap_or("folder destination"),
+                error,
+            )
+        })?;
         Ok(result)
     })
 }
@@ -323,6 +332,7 @@ fn folder_inner(
     );
     let stage = staging.join(partial_name(id));
     fs::create_dir(&stage)?;
+    let mut promoted = false;
     let result = (|| {
         for file in &files {
             check()?;
@@ -362,12 +372,27 @@ fn folder_inner(
             }
         }
         before_rename()?;
+        ensure!(
+            serde_json::to_value(inventory(&stage, id)?)? == serde_json::to_value(&files)?,
+            "staged inventory changed before promotion"
+        );
         check()?;
         ensure!(!destination.exists(), "export destination already exists");
         publish_folder(&stage, &destination).map_err(|error| {
             let message = folder_rename_error(&error);
             anyhow::Error::new(error).context(message)
         })?;
+        promoted = true;
+        #[cfg(unix)]
+        {
+            File::open(&parent)?.sync_all()?;
+            File::open(&staging)?.sync_all()?;
+        }
+        ensure!(
+            serde_json::to_value(inventory(&destination, id)?)? == serde_json::to_value(&files)?,
+            "destination inventory mismatch after promotion"
+        );
+        check()?;
         Ok(report(
             id,
             "folder",
@@ -379,7 +404,13 @@ fn folder_inner(
     if result.is_err() && stage.exists() {
         let _ = fs::remove_dir_all(&stage);
     }
-    result
+    result.map_err(|error| {
+        if promoted {
+            crate::review_transfer::uncertain(&destination.to_string_lossy(), error)
+        } else {
+            error
+        }
+    })
 }
 
 fn folder_rename_error(error: &std::io::Error) -> &'static str {
@@ -596,19 +627,93 @@ pub async fn sftp(
         },
     )
     .await?;
-    guard.completed(
-        &intent
-            .into_inner()
-            .unwrap()
-            .context("missing SFTP intent")?,
-        &result,
-    )?;
+    guard
+        .completed(
+            &intent
+                .into_inner()
+                .unwrap()
+                .context("missing SFTP intent")?,
+            &result,
+        )
+        .map_err(|error| {
+            crate::review_transfer::uncertain(
+                result["destination"].as_str().unwrap_or("SFTP destination"),
+                error,
+            )
+        })?;
     Ok(result)
 }
 
 #[cfg(test)]
 async fn sftp_unreviewed(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
     sftp_inner(pack, id, options, || Ok(()), |_, _| Ok(())).await
+}
+
+async fn verify_remote(
+    sftp: &russh_sftp::client::SftpSession,
+    root: &str,
+    files: &[PackFile],
+    check: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    let mut directories: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
+    for file in files {
+        let mut directory = String::new();
+        let parts = file.path.split('/').collect::<Vec<_>>();
+        for (i, part) in parts.iter().enumerate() {
+            directories
+                .entry(directory.clone())
+                .or_default()
+                .insert((*part).into(), i + 1 < parts.len());
+            if !directory.is_empty() {
+                directory.push('/');
+            }
+            directory.push_str(part);
+        }
+    }
+    for (directory, expected) in directories {
+        check()?;
+        let mut actual = BTreeMap::new();
+        for entry in sftp.read_dir(format!("{root}/{directory}")).await? {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            ensure!(
+                !name.is_empty()
+                    && !name.contains(['/', '\\'])
+                    && (entry.file_type().is_file() || entry.file_type().is_dir()),
+                "unsafe remote inventory entry"
+            );
+            ensure!(
+                actual.len() < expected.len()
+                    && actual.insert(name, entry.file_type().is_dir()).is_none(),
+                "extra or duplicate remote inventory entry"
+            );
+        }
+        ensure!(actual == expected, "remote directory inventory mismatch");
+    }
+    for file in files {
+        check()?;
+        let mut remote = sftp.open(format!("{root}/{}", file.path)).await?;
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0; 65536];
+        let mut total = 0;
+        loop {
+            let n = remote.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ensure!(total <= file.size, "remote stage grew before promotion");
+            hash.update(&buffer[..n]);
+        }
+        ensure!(
+            total == file.size && format!("{:x}", hash.finalize()) == file.sha256,
+            "remote stage changed before promotion"
+        );
+        remote.shutdown().await?;
+    }
+    Ok(())
 }
 
 async fn sftp_inner(
@@ -743,22 +848,7 @@ async fn sftp_inner(
     }
     // SFTP v3 RENAME must fail if the destination exists; do not use posix-rename
     // extensions, which overwrite an existing destination.
-        for file in &files {
-            check()?;
-            let mut remote = sftp.open(format!("{stage}/{}", file.path)).await?;
-            let mut hash = Sha256::new();
-            let mut buffer = vec![0; 65536];
-            let mut total = 0;
-            loop {
-                let n = remote.read(&mut buffer).await?;
-                if n == 0 { break; }
-                total += n as u64;
-                ensure!(total <= file.size, "remote stage grew before promotion");
-                hash.update(&buffer[..n]);
-            }
-            ensure!(total == file.size && format!("{:x}", hash.finalize()) == file.sha256, "remote stage changed before promotion");
-            remote.shutdown().await?;
-        }
+    verify_remote(&sftp, &stage, &files, &check).await?;
         check()?;
         promotion_attempted = true;
     if let Err(error) = sftp.rename(&stage, &destination).await {
@@ -776,6 +866,7 @@ async fn sftp_inner(
         }
         .into());
     }
+    verify_remote(&sftp, &destination, &files, &check).await.map_err(|error| crate::review_transfer::uncertain(&destination_url, error))?;
     Ok(report(id, "sftp", &files, destination_url, start))
     }.await;
     if result.is_err() && !promotion_attempted {

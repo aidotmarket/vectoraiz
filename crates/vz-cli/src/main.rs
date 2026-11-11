@@ -117,8 +117,9 @@ enum Operation {
         bucket: String,
         #[arg(long, default_value = "us-east-1")]
         region: String,
-        #[arg(long, default_value = "vz/phase0-pack")]
-        prefix: String,
+        /// Defaults to vz/<reviewed pack UUID>.
+        #[arg(long)]
+        prefix: Option<String>,
     },
 }
 fn main() -> Result<()> {
@@ -243,7 +244,17 @@ fn main() -> Result<()> {
         prefix,
     } = &args.command
     {
-        return vz_pack::upload(pack, endpoint, bucket, region, prefix, current.as_ref());
+        let prefix = prefix.clone().unwrap_or_else(|| {
+            format!(
+                "vz/{}",
+                current
+                    .as_ref()
+                    .expect("listing reference checked")
+                    .current
+                    .pack_id
+            )
+        });
+        return vz_pack::upload(pack, endpoint, bucket, region, &prefix, current.as_ref());
     }
     if let Operation::BakeoffChat { items, prompt } = &args.command {
         let chat = ChatOnly::load(&args.assets, &args.models, args.cpu)?;
@@ -273,7 +284,10 @@ fn main() -> Result<()> {
     }
     let engines = if matches!(
         args.command,
-        Operation::BakeoffSearch { .. } | Operation::Index { .. } | Operation::Search { .. }
+        Operation::BakeoffSearch { .. }
+            | Operation::Index { .. }
+            | Operation::Search { .. }
+            | Operation::Pack { .. }
     ) {
         Engines::load_embedding(&args.assets, &args.models, args.cpu)?
     } else {
