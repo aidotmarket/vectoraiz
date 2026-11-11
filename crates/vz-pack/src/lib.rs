@@ -1,6 +1,7 @@
 //! Minimal portable vector packs and explicitly requested S3-compatible upload.
 pub mod export;
 pub mod handoff;
+pub mod listing_commands;
 pub mod listing_policy;
 pub mod review;
 pub mod review_store;

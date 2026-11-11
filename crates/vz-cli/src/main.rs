@@ -62,6 +62,15 @@ enum Operation {
         known_hosts: Option<PathBuf>,
     },
     SelfTest,
+    /// Inspect or explicitly accept an immutable purchaser review generation.
+    Review {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        current: PathBuf,
+        #[arg(long)]
+        accept: bool,
+    },
     Embed {
         text: String,
     },
@@ -97,6 +106,24 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let policy = vz_pack::listing_policy::system();
     policy.refresh();
+    if let Operation::Review {
+        store,
+        current,
+        accept,
+    } = &args.command
+    {
+        // Availability precedes even opening the caller's reference file.
+        policy.require_preview()?;
+        anyhow::ensure!(
+            std::fs::metadata(current)?.len() <= 4096,
+            "review reference size limit"
+        );
+        let current = serde_json::from_slice(&std::fs::read(current)?)?;
+        let review =
+            vz_pack::listing_commands::review(policy, store, &args.state, &current, *accept)?;
+        println!("{}", serde_json::to_string(&review)?);
+        return Ok(());
+    }
     if matches!(
         args.command,
         Operation::Pack { .. } | Operation::Upload { .. } | Operation::Export { .. }
@@ -242,6 +269,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&manifest)?);
             }
             Operation::SelfTest
+            | Operation::Review { .. }
             | Operation::Upload { .. }
             | Operation::BakeoffChat { .. }
             | Operation::Export { .. } => unreachable!(),

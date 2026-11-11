@@ -16,6 +16,9 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(windows)]
+mod windows;
+
 const MAX_FILES: usize = 50_000;
 const MAX_BYTES: u64 = 2_000_000_000;
 
@@ -39,6 +42,72 @@ pub struct ReviewBinding {
     recipe: PathBuf,
     recipe_file: FileHash,
     recipe_sha256: Sha256,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selection: Option<NativeSelection>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NativeSelection {
+    library: PathBuf,
+    index: PathBuf,
+    pointer: Option<FileHash>,
+}
+
+impl NativeSelection {
+    fn capture(library: &Path) -> Result<Self> {
+        ensure!(
+            !vz_core::active_index::needs_pointer_repair(library),
+            ListingError::StaleGeneration
+        );
+        let pointer = library.join("active-index.json");
+        Ok(Self {
+            library: plain_directory(library)?,
+            index: plain_directory(&vz_core::active_index::resolve_state(library))?,
+            pointer: if pointer.try_exists()? {
+                Some(hash_file(&pointer)?)
+            } else {
+                None
+            },
+        })
+    }
+}
+
+/// Read-only live native state fence. Does not open SQLite, run recovery or
+/// load models. Library selection and the selected writer are fenced across
+/// capture/accept/transfer. External source changes are still hash checked.
+pub struct NativeIndexFence {
+    selection: NativeSelection,
+    _selection: vz_core::active_index::SelectionFence,
+    writer: File,
+}
+
+impl NativeIndexFence {
+    fn acquire(library: &Path) -> Result<Self> {
+        plain_directory(library)?;
+        let selection = vz_core::active_index::selection_fence(library, false)?;
+        let snapshot = NativeSelection::capture(library)?;
+        let lock_path = snapshot.index.join("writer.lock");
+        check_regular(&lock_path)?;
+        let writer = OpenOptions::new().read(true).open(lock_path)?;
+        fs2::FileExt::try_lock_shared(&writer)
+            .context("native index is in use; retry after indexing/search")?;
+        ensure!(
+            NativeSelection::capture(library)? == snapshot,
+            ListingError::StaleGeneration
+        );
+        Ok(Self {
+            selection: snapshot,
+            _selection: selection,
+            writer,
+        })
+    }
+}
+
+impl Drop for NativeIndexFence {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.writer);
+    }
 }
 
 impl ReviewBinding {
@@ -50,7 +119,8 @@ impl ReviewBinding {
             index_files: tree(index)?,
             recipe: fs::canonicalize(recipe)?,
             recipe_file: hash_file(recipe)?,
-            recipe_sha256: digest(&read_json::<serde_json::Value>(recipe)?)?,
+            recipe_sha256: digest(&read_input_json::<serde_json::Value>(recipe)?)?,
+            selection: None,
         })
     }
 
@@ -62,10 +132,16 @@ impl ReviewBinding {
     }
 
     fn check(&self) -> Result<()> {
-        ensure!(
-            Self::capture(&self.source, &self.index, &self.recipe)? == *self,
-            ListingError::StaleGeneration
-        );
+        let mut captured = Self::capture(&self.source, &self.index, &self.recipe)?;
+        if let Some(selection) = &self.selection {
+            let current = NativeSelection::capture(&selection.library)?;
+            ensure!(
+                current == *selection && current.index == self.index,
+                ListingError::StaleGeneration
+            );
+            captured.selection = Some(current);
+        }
+        ensure!(captured == *self, ListingError::StaleGeneration);
         Ok(())
     }
 }
@@ -100,8 +176,7 @@ pub struct TransferIntent {
 }
 
 /// A caller-selected application-private directory outside all collection and
-/// index trees. Unix permissions are enforced; Windows ACL qualification is
-/// deliberately blocked until an owner-only ACL implementation is supplied.
+/// index trees. Owner-only Unix modes and protected Windows DACLs are enforced.
 pub struct ReviewStore {
     root: PathBuf,
 }
@@ -126,6 +201,7 @@ impl ReviewStore {
             Ok(file) => file,
             Err(error) if lock_path.try_exists()? => {
                 check_regular(&lock_path)?;
+                check_private(&lock_path)?;
                 OpenOptions::new()
                     .write(true)
                     .open(&lock_path)
@@ -143,6 +219,63 @@ impl ReviewStore {
             lease,
             _lock: lock,
         })
+    }
+
+    /// Native commands acquire policy → pack → library selection → index.
+    /// Re-index never acquires a pack mutex, so policy updates and indexing
+    /// cannot take these locks in reverse order.
+    pub fn lock_native<'a>(
+        &'a self,
+        policy: &'a ListingPolicy,
+        pack_id: Uuid,
+        library: &Path,
+    ) -> Result<NativePackReview<'a>> {
+        let pack = self.lock(policy, pack_id)?;
+        let index = NativeIndexFence::acquire(library)?;
+        Ok(NativePackReview { pack, index })
+    }
+}
+
+pub struct NativePackReview<'a> {
+    pub(crate) pack: PackReview<'a>,
+    index: NativeIndexFence,
+}
+
+impl NativePackReview<'_> {
+    /// Only a sanitizer rebuild may call freeze with this captured binding.
+    pub fn capture(&self, source: &Path) -> Result<ReviewBinding> {
+        let index = &self.index.selection.index;
+        let mut binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
+        binding.selection = Some(self.index.selection.clone());
+        binding.check()?;
+        Ok(binding)
+    }
+
+    fn check_native(&self, current: &CurrentReview, accepted: bool) -> Result<ListingReview> {
+        let generation = self.pack.validate(current, accepted)?;
+        if generation.binding.selection.as_ref() != Some(&self.index.selection) {
+            let path = self.pack.generation_path(current).join("invalidated.json");
+            if !path.try_exists()? {
+                write_json(&path, &"native index selection changed or binding absent")?;
+            }
+            return Err(ListingError::StaleGeneration.into());
+        }
+        if accepted {
+            self.pack.accepted_review(generation)
+        } else {
+            Ok(generation.review)
+        }
+    }
+
+    pub fn inspect(&self, current: &CurrentReview) -> Result<ListingReview> {
+        self.check_native(current, false)
+    }
+    pub fn accept(&self, current: &CurrentReview) -> Result<ListingReview> {
+        self.check_native(current, false)?;
+        self.pack.accept(current)
+    }
+    pub fn check_accepted(&self, current: &CurrentReview) -> Result<ListingReview> {
+        self.check_native(current, true)
     }
 }
 
@@ -494,6 +627,8 @@ fn digest(value: &impl Serialize) -> Result<Sha256> {
 fn check_regular(path: &Path) -> Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path)?;
     ensure!(metadata.is_file(), "review input must be a regular file");
+    #[cfg(windows)]
+    windows::check_node(path, true)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -527,6 +662,8 @@ fn plain_directory(path: &Path) -> Result<PathBuf> {
     // Reject links in all ancestors as well as the leaf.
     for ancestor in path.ancestors() {
         if !ancestor.as_os_str().is_empty() {
+            #[cfg(windows)]
+            windows::check_node(ancestor, false)?;
             ensure!(
                 !fs::symlink_metadata(ancestor)?.file_type().is_symlink(),
                 "linked review directory"
@@ -569,24 +706,35 @@ fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
 
 fn private_directory(path: &Path) -> Result<()> {
     if !path.try_exists()? {
-        let mut builder = fs::DirBuilder::new();
-        #[cfg(unix)]
+        #[cfg(windows)]
+        windows::create_directory(path)?;
+        #[cfg(not(windows))]
         {
-            use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
+            let mut builder = fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            builder.create(path)?;
         }
-        builder.create(path)?;
     }
     plain_directory(path)?;
+    check_private(path)
+}
+
+fn check_private(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         ensure!(
             fs::metadata(path)?.permissions().mode() & 0o077 == 0,
-            "review directory must be owner-only"
+            "review storage must be owner-only"
         );
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    windows::check_private(path)?;
+    #[cfg(not(any(unix, windows)))]
     anyhow::bail!("private review directory ACL enforcement is not implemented on this platform");
     #[allow(unreachable_code)]
     Ok(())
@@ -608,14 +756,19 @@ fn private_parents(root: &Path, name: &Path) -> Result<()> {
 }
 
 fn private_file(path: &Path) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
+    #[cfg(windows)]
+    return windows::create_file(path);
+    #[cfg(not(windows))]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        Ok(options.open(path)?)
     }
-    Ok(options.open(path)?)
 }
 
 fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
@@ -637,6 +790,11 @@ fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    check_private(path)?;
+    read_input_json(path)
+}
+
+fn read_input_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     ensure!(
         check_regular(path)?.len() <= 64 * 1024 * 1024,
         "review record size limit"
@@ -650,7 +808,7 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use crate::{
@@ -694,8 +852,11 @@ mod tests {
             .unwrap()
         }
         fn freeze(&self, pack: &PackReview<'_>) -> CurrentReview {
+            self.freeze_bound(pack, self.binding())
+        }
+        fn freeze_bound(&self, pack: &PackReview<'_>, binding: ReviewBinding) -> CurrentReview {
             pack.freeze(
-                self.binding(),
+                binding,
                 ListingReview {
                     schema_version: ReviewVersion::V1,
                     pack_id: pack.pack_id,
@@ -728,6 +889,61 @@ mod tests {
             result.err().unwrap().downcast_ref::<ListingError>(),
             Some(ListingError::StaleGeneration)
         ));
+    }
+
+    #[test]
+    fn native_review_fences_live_writer_and_selection_without_recovery() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        fs::write(index.join("writer.lock"), b"").unwrap();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let current;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            let binding = native.capture(&fixture.0.join("source")).unwrap();
+            current = fixture.freeze_bound(&native.pack, binding);
+            native.inspect(&current).unwrap();
+            native.accept(&current).unwrap();
+            native.check_accepted(&current).unwrap();
+            let writer = OpenOptions::new()
+                .write(true)
+                .open(index.join("writer.lock"))
+                .unwrap();
+            assert!(fs2::FileExt::try_lock_exclusive(&writer).is_err());
+            assert!(vz_core::active_index::selection_fence(&index, true).is_err());
+            // Neither fence opens SQLite, creates a DB nor recovers the index.
+            assert!(!index.join("state.sqlite").exists());
+            // An external pointer mutation is detected despite the advisory fence.
+            fs::write(index.join("active-index.json"), b"{}").unwrap();
+            stale(native.check_accepted(&current));
+            fs::remove_file(index.join("active-index.json")).unwrap();
+        }
+        let native = store.lock_native(&policy, id, &index).unwrap();
+        stale(native.accept(&current));
+        drop(native);
+        let _exclusive = vz_core::active_index::selection_fence(&index, true).unwrap();
+        assert!(store.lock_native(&policy, id, &index).is_err());
+    }
+
+    #[test]
+    fn native_commands_refuse_generations_without_live_native_binding() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        fs::write(index.join("writer.lock"), b"").unwrap();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let current;
+        {
+            let pack = store.lock(&policy, id).unwrap();
+            current = fixture.freeze(&pack);
+            pack.accept(&current).unwrap();
+        }
+        let native = store.lock_native(&policy, id, &index).unwrap();
+        stale(native.check_accepted(&current));
+        stale(native.accept(&current));
     }
 
     #[test]
@@ -924,6 +1140,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn private_storage_rejects_overlap_links_and_shared_permissions() {
         use std::os::unix::fs::{symlink, PermissionsExt};
         let fixture = Fixture::new();

@@ -165,6 +165,16 @@ impl ListingPolicy {
     pub fn require_listing(&self) -> Result<(), ListingError> {
         Err(self.status().code)
     }
+
+    /// Availability check for the new review commands. Managed denial always
+    /// precedes feature availability. This grants no transfer capability.
+    pub fn require_preview(&self) -> Result<(), ListingError> {
+        let lease = self.policy_lease()?;
+        if !LISTING_AUTHORITY_PREVIEW_V1 {
+            return Err(ListingError::PreviewDisabled);
+        }
+        lease.check(self)
+    }
 }
 
 struct OsPolicy;

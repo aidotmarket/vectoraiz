@@ -418,6 +418,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         pipeline_ask,
         cloud_status,
         listing_status,
+        listing_review,
         app_status,
         app_disclosure,
         app_connect_claude,
@@ -1722,4 +1723,38 @@ async fn pipeline_ask_cloud<R: tauri::Runtime>(
 #[tauri::command]
 fn listing_status() -> vz_pack::listing_policy::ListingStatus {
     vz_pack::listing_policy::system().status()
+}
+
+#[tauri::command]
+async fn listing_review<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: vz_pack::review_store::CurrentReview,
+    accept: bool,
+) -> Result<vz_pack::review::ListingReview, vz_pack::listing_commands::ListingFailure> {
+    use tauri::Manager;
+    use vz_pack::listing_commands::ListingFailure;
+    let policy = vz_pack::listing_policy::system();
+    policy
+        .require_preview()
+        .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?;
+    let library = data_root(&app).map_err(|error| ListingFailure::from(anyhow::anyhow!(error)))?;
+    let parent = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?;
+    // No private bytes are written in the parent; the store itself is created
+    // atomically with owner-only permissions by the shared Rust boundary.
+    std::fs::create_dir_all(&parent)
+        .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?;
+    tauri::async_runtime::spawn_blocking(move || {
+        vz_pack::listing_commands::review(
+            policy,
+            &parent.join("listing-reviews"),
+            &library,
+            &current,
+            accept,
+        )
+    })
+    .await
+    .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?
 }

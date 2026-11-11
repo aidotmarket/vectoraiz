@@ -5,6 +5,21 @@ fn listing_commands_fail_before_loading_models_or_touching_destinations() {
     for args in [
         vec!["pack", "unused-output"],
         vec![
+            "review",
+            "--store",
+            "unused-store",
+            "--current",
+            "unreadable-reference",
+        ],
+        vec![
+            "review",
+            "--store",
+            "unused-store",
+            "--current",
+            "unreadable-reference",
+            "--accept",
+        ],
+        vec![
             "upload",
             "unused-pack",
             "--endpoint",
