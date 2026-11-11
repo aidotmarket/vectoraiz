@@ -22,15 +22,22 @@ pub struct ListingReference {
 /// validates native/staged/source commitments but deliberately still refuses
 /// delivery: the sanitizer and transfer adapters are not yet complete. Do not
 /// remove the final gate without keeping the live guards through promotion.
-pub(crate) fn transfer_preflight(reference: Option<&ListingReference>) -> anyhow::Result<()> {
+pub(crate) fn with_reviewed<T>(
+    reference: Option<&ListingReference>,
+    run: impl FnOnce(
+        &crate::review_store::NativePackReview<'_>,
+        &CurrentReview,
+        &Path,
+        &[String],
+    ) -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
     let policy = crate::listing_policy::system();
     policy.require_preview()?;
     let reference = reference.ok_or(ListingError::ReviewRequired)?;
     let store = ReviewStore::open(&reference.store)?;
     let pack = store.lock_native_current(policy, &reference.current, &reference.library)?;
-    pack.check_accepted(&reference.current)?;
-    policy.require_listing()?;
-    Ok(())
+    let (payload, terms) = pack.reviewed_payload(&reference.current)?;
+    run(&pack, &reference.current, &payload, &terms)
 }
 
 /// Additive structured IPC error; stale generations remain distinguishable
@@ -72,6 +79,7 @@ pub fn review(
         let store = ReviewStore::open(store)?;
         let pack = store.lock_native_current(policy, current, library)?;
         if accept {
+            pack.check_sanitizer(current)?;
             pack.accept(current)
         } else {
             pack.inspect(current)

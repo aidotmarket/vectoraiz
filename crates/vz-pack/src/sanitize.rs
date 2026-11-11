@@ -220,6 +220,12 @@ fn transform(
         _ => {
             let text = std::str::from_utf8(input).context("unreadable text")?;
             ensure!(!text.contains('\0'), "binary text forbidden");
+            ensure!(
+                !input.starts_with(b"%PDF-")
+                    && !input.starts_with(b"PK\x03\x04")
+                    && !input.starts_with(b"PAR1"),
+                "container disguised as text has no proven handler"
+            );
             Ok(changes
                 .edits
                 .get(name)
@@ -503,7 +509,13 @@ fn inspect_at(
             }
         }
     }
-    for kind in ["language", "date range", "document properties", "aliases"] {
+    for kind in [
+        "unmeasured counts",
+        "language",
+        "date range",
+        "document properties",
+        "aliases",
+    ] {
         entry(out, &format!("{name}/@{kind}"), kind, None, changes, budget)?;
     }
     Ok(())

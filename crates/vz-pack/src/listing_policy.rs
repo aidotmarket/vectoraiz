@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Exposure flag. No environment variable or user preference can enable this
 /// incomplete journey. Search, index and answers do not consult it.
-pub const LISTING_AUTHORITY_PREVIEW_V1: bool = false;
+pub const LISTING_AUTHORITY_PREVIEW_V1: bool = cfg!(feature = "listing-preview-harness");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

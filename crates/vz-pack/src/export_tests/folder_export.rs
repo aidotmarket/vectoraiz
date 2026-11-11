@@ -81,7 +81,7 @@ fn failure_before_rename_and_retry() {
     .unwrap_err();
     assert!(error.to_string().contains("simulated interruption"));
     f.assert_source_empty();
-    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 0);
     let result = folder(&f.pack, "fixture", &f.source, &f.staging).unwrap();
     f.assert_pack(&f.source.join("vz/fixture"), &result);
 }
@@ -142,5 +142,5 @@ fn corrupted_staged_file_is_not_published() {
         .contains("staged file verification failed"));
     f.assert_source_empty();
     assert!(!f.source.join("vz/fixture").exists());
-    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 1);
+    assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 0);
 }

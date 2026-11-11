@@ -286,8 +286,26 @@ impl NativePackReview<'_> {
         &self,
         current: &CurrentReview,
     ) -> Result<(PathBuf, Vec<String>)> {
-        self.check_accepted(current)?;
-        let generation = self.pack.validate(current, true)?;
+        self.certified_payload(current, true)
+    }
+
+    pub(crate) fn check_sanitizer(&self, current: &CurrentReview) -> Result<()> {
+        self.certified_payload(current, false)?;
+        Ok(())
+    }
+
+    fn certified_payload(
+        &self,
+        current: &CurrentReview,
+        accepted: bool,
+    ) -> Result<(PathBuf, Vec<String>)> {
+        self.check_native(current, accepted)?;
+        let generation = self.pack.validate(current, accepted)?;
+        ensure!(
+            generation.review.metadata_inventory_schema_version == 1
+                && !generation.review.metadata_inventory.is_empty(),
+            ListingError::ReviewRequired
+        );
         let path = self.pack.generation_path(current);
         let private: serde_json::Value = read_json(&path.join("private.json"))?;
         let certificate = format!("native-sanitizer-v1:{}", String::from(digest(&private)?));

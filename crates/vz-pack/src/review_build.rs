@@ -19,6 +19,7 @@ use vz_core::{
     storage::{chunks_batch, documents_batch, State},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub fn rebuild(
     store: &Path,
     library: &Path,
@@ -86,7 +87,7 @@ fn build(
             ensure!(allowed, "edit location has no proven rebuild handler");
         }
         let source = source.canonicalize()?;
-        for mut doc in indexed {
+        for (position, mut doc) in indexed.into_iter().enumerate() {
             pack.check_policy()?;
             let relative = Path::new(&doc.path)
                 .strip_prefix(&source)
@@ -103,7 +104,7 @@ fn build(
                 ["txt", "md", "markdown"].contains(&doc.kind.as_str()),
                 "original format has no proven rewrite handler; exclude or re-ingest as text"
             );
-            let name = format!("document-{:04}.{}", docs.len() + 1, doc.kind);
+            let name = format!("document-{:04}.{}", position + 1, doc.kind);
             let location = format!("originals-0001.zip!{name}");
             if changes.exclusions.contains(&location) {
                 continue;
@@ -153,8 +154,14 @@ fn build(
             .iter()
             .flat_map(|d| d.chunks.clone())
             .collect::<Vec<_>>();
+        let documents = documents_batch(&docs)?;
+        let mut columns = documents.columns().to_vec();
+        columns[1] = std::sync::Arc::new(arrow_array::StringArray::from_iter_values(
+            docs.iter().map(|doc| &doc.path),
+        ));
+        let documents = arrow_array::RecordBatch::try_new(documents.schema(), columns)?;
         for (name, batch) in [
-            ("documents.parquet", documents_batch(&docs)?),
+            ("documents.parquet", documents),
             ("chunks.parquet", chunks_batch(&chunks)?),
         ] {
             let mut writer = ArrowWriter::try_new(Vec::new(), batch.schema(), None)?;

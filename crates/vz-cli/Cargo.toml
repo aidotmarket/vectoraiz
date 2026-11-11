@@ -19,6 +19,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [features]
+listing-preview-harness = ["vz-pack/listing-preview-harness"]
 vulkan = ["vz-core/vulkan"]
 
 [dependencies.tokio]
