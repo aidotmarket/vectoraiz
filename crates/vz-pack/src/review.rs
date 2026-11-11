@@ -55,6 +55,8 @@ pub struct StagedArtifact {
 #[serde(deny_unknown_fields)]
 pub struct ListingReview {
     pub schema_version: ReviewVersion,
+    /// Canonical lowercase hyphenated UUID, also used by the manifest and
+    /// handoff pack_id string. New C1 packs replace the Phase 0 pack-<24 hex> id.
     pub pack_id: Uuid,
     pub staged_artifacts: Vec<StagedArtifact>,
     pub metadata_inventory_schema_version: u32,
@@ -91,6 +93,30 @@ mod tests {
         let value = record();
         let record: ListingReview = serde_json::from_value(value.clone()).unwrap();
         assert_eq!(serde_json::to_value(record).unwrap(), value);
+    }
+
+    #[test]
+    fn uuid_pack_id_is_identical_in_review_and_both_handoff_contracts() {
+        use crate::handoff::{bucket_selection_digest, BucketHandoff, GatewayHandoff};
+        let review: ListingReview = serde_json::from_value(record()).unwrap();
+        let id = review.pack_id.to_string();
+        let draft = json!({"title":"Pack", "brief":"", "description":"", "category":"", "tags":""});
+        let gateway: GatewayHandoff = serde_json::from_value(json!({
+            "version":1, "pack_id":id, "files":[{"size":42,"sha256":"a".repeat(64)}], "draft":draft
+        }))
+        .unwrap();
+        gateway.validate().unwrap();
+        let key = format!("vz/{id}/manifest.json");
+        let digest = bucket_selection_digest(&id, &[(key.as_str(), "etag", 42)]).unwrap();
+        let bucket: BucketHandoff = serde_json::from_value(json!({
+            "version":1, "pack_id":id, "provider":"aws", "bucket":"neutral-bucket", "region":"eu-west-1",
+            "connection_folder":"vz", "pack_prefix":format!("vz/{id}/"), "file_count":1,
+            "selection_sha256":digest, "draft":draft
+        })).unwrap();
+        bucket.validate().unwrap();
+        assert_eq!(gateway.pack_id, id);
+        assert_eq!(bucket.pack_id, id);
+        assert_eq!(serde_json::to_value(review).unwrap()["pack_id"], id);
     }
 
     #[test]

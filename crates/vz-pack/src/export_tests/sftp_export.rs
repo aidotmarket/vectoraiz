@@ -1,8 +1,7 @@
-mod common;
+use super::regression_common::Fixture;
 use super::{
     exit_code, normalize_remote, sftp_unreviewed as sftp, PublicationOutcomeUnknown, SftpOptions,
 };
-use common::Fixture;
 use std::{
     fs,
     io::{BufRead, BufReader},

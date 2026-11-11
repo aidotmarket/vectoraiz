@@ -181,12 +181,62 @@ pub fn system() -> &'static ListingPolicy {
     static MONITOR: OnceLock<()> = OnceLock::new();
     let policy = POLICY.get_or_init(|| ListingPolicy::new(Arc::new(OsPolicy)));
     MONITOR.get_or_init(|| {
+        #[cfg(windows)]
+        std::thread::spawn(move || watch_registry(policy));
         std::thread::spawn(move || loop {
             std::thread::sleep(std::time::Duration::from_secs(1));
             policy.refresh();
         });
     });
     policy
+}
+
+/// Windows exposes registry notifications. Watch the parent subtree so creating
+/// or deleting the policy key is observed too. Polling remains active if opening
+/// the notification handle or waiting fails. macOS CFPreferences provides no
+/// corresponding public per-key notification; it uses the refresh fallback.
+#[cfg(windows)]
+fn watch_registry(policy: &'static ListingPolicy) {
+    use windows_sys::Win32::{
+        Foundation::ERROR_SUCCESS,
+        System::Registry::{
+            RegCloseKey, RegNotifyChangeKeyValue, RegOpenKeyExW, HKEY_LOCAL_MACHINE, KEY_NOTIFY,
+            KEY_WOW64_64KEY, REG_NOTIFY_CHANGE_LAST_SET, REG_NOTIFY_CHANGE_NAME,
+        },
+    };
+    let path = "SOFTWARE\\Policies"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    // SAFETY: a query/notification-only HKLM handle, owned by this thread and
+    // closed on wait failure. Synchronous notification uses no event handle.
+    unsafe {
+        let mut key = std::ptr::null_mut();
+        if RegOpenKeyExW(
+            HKEY_LOCAL_MACHINE,
+            path.as_ptr(),
+            0,
+            KEY_NOTIFY | KEY_WOW64_64KEY,
+            &mut key,
+        ) != ERROR_SUCCESS
+        {
+            return;
+        }
+        loop {
+            if RegNotifyChangeKeyValue(
+                key,
+                1,
+                REG_NOTIFY_CHANGE_LAST_SET | REG_NOTIFY_CHANGE_NAME,
+                std::ptr::null_mut(),
+                0,
+            ) != ERROR_SUCCESS
+            {
+                break;
+            }
+            policy.refresh();
+        }
+        RegCloseKey(key);
+    }
 }
 
 #[cfg(target_os = "macos")]

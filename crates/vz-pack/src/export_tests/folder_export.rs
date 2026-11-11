@@ -1,6 +1,5 @@
-mod common;
+use super::regression_common::Fixture;
 use super::{folder_unreviewed as folder, folder_with_checks, folder_with_staged_check};
-use common::Fixture;
 use std::fs;
 
 #[test]

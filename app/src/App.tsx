@@ -685,7 +685,7 @@ export default function App() {
           {updateMessage && <p>{updateMessage}</p>}
         </section>
         <section className="card stack" aria-label="Listing availability"><h2>Listing availability</h2>
-          <p>{listingReason}</p>
+          <p aria-live="polite">{listingReason}</p>
           <p>Local indexing, search and answers remain available.</p>
         </section>
         <section className="card stack" aria-label="About"><h2>About</h2>

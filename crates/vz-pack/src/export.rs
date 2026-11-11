@@ -695,3 +695,7 @@ mod folder_regressions;
 #[cfg(test)]
 #[path = "export_tests/sftp_export.rs"]
 mod sftp_regressions;
+
+#[cfg(test)]
+#[path = "export_tests/common/mod.rs"]
+mod regression_common;

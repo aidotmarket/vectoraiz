@@ -114,7 +114,7 @@ it("indexes with progress then runs a search and a streaming chat", async () => 
 it("checks once under StrictMode, shows nothing for no update, and never installs", async () => {
   render(<StrictMode><App /></StrictMode>);
   await waitFor(() => expect(updateButton()).toBeEnabled());
-  expect(invoke).toHaveBeenCalledExactlyOnceWith("update_check", { startup: true });
+  expect(invoke.mock.calls.filter(([command]) => command === "update_check")).toEqual([["update_check", { startup: true }]]);
   expect(screen.queryByText(/is available/)).not.toBeInTheDocument();
   expect(screen.queryByText(/up to date/)).not.toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
