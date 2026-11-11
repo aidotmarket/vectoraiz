@@ -336,6 +336,9 @@ def transport(evidence, evict_incomplete=True):
         import h2.connection
         import h2.config
         import h2.events
+        import h2.settings
+        import h2.frame_buffer
+        import hyperframe.frame
     except ImportError:
         return {"status": "blocked", "reason": "h2==4.3.0 required"}
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -350,7 +353,7 @@ def transport(evidence, evict_incomplete=True):
     session_deadlines = {identity:time.monotonic()+120 for identity in sessions}
     def live(identity):
         return sessions.get(identity,False) and session_deadlines.get(identity,0)>time.monotonic()
-    metrics = {"arrivals": 0, "evictions": 0, "auth_progress": 0, "capacity_closures": 0, "peak_connections": 0, "peak_threads": 0, "auth_evicted": 0, "per_person_closures": 0, "revocation_expiry_closures":0, "peak_pending_per_source":0}
+    metrics = {"arrivals": 0, "evictions": 0, "auth_progress": 0, "capacity_closures": 0, "peak_connections": 0, "peak_threads": 0, "auth_evicted": 0, "per_person_closures": 0, "revocation_expiry_closures":0, "peak_pending_per_source":0, "tcp_accepts":0, "first_authentications":0}
     trace, workers, errors = [], set(), []
     def close(conn):
         try: conn.shutdown(socket.SHUT_RDWR)
@@ -371,6 +374,7 @@ def transport(evidence, evict_incomplete=True):
             if peers >= 8:
                 metrics["per_person_closures"] += 1
                 return False
+            if record["identity"] is None:metrics["first_authentications"]+=1
             record["identity"] = identity
             metrics["auth_progress"] += 1
             return True
@@ -394,12 +398,19 @@ def transport(evidence, evict_incomplete=True):
             conn.do_handshake()
             if conn.selected_alpn_protocol() == "h2":
                 protocol = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False, header_encoding="utf-8"))
+                protocol.local_settings=h2.settings.Settings(client=False,initial_values={h2.settings.SettingCodes.MAX_HEADER_LIST_SIZE:16384,h2.settings.SettingCodes.MAX_CONCURRENT_STREAMS:8})
+                protocol.decoder.max_header_list_size=16384
                 protocol.initiate_connection(); conn.sendall(protocol.data_to_send())
+                header_deadline=time.monotonic()+2
                 while not stop.is_set():
+                    remaining=header_deadline-time.monotonic()
+                    if remaining<=0:raise TimeoutError("absolute h2 header deadline")
+                    conn.settimeout(remaining)
                     data = conn.recv(16384)
                     if not data: break
                     for event in protocol.receive_data(data):
                         if isinstance(event, h2.events.RequestReceived):
+                            header_deadline=time.monotonic()+2
                             headers = dict(event.headers)
                             auth = classify(key, headers.get("authorization", ""))
                             status = "200" if auth or headers.get(":path", "").startswith("/auth/") else "401"
@@ -410,7 +421,11 @@ def transport(evidence, evict_incomplete=True):
             else:
                 while not stop.is_set():
                     data = b""
+                    header_deadline=time.monotonic()+2
                     while b"\r\n\r\n" not in data and len(data) <= 16384:
+                        remaining=header_deadline-time.monotonic()
+                        if remaining<=0:raise TimeoutError("absolute h1 header deadline")
+                        conn.settimeout(remaining)
                         piece = conn.recv(1024)
                         if not piece: return
                         data += piece
@@ -436,7 +451,9 @@ def transport(evidence, evict_incomplete=True):
             try: raw, address = listener.accept()
             except socket.timeout: continue
             except OSError: break
-            with lock:retire_expired()
+            with lock:
+                metrics["tcp_accepts"]+=1
+                retire_expired()
             if not worker_slots.acquire(blocking=False):
                 with lock:
                     victim=pending_victim(connections,address[0])
@@ -549,7 +566,11 @@ def transport(evidence, evict_incomplete=True):
                             c=[socket.create_connection(("127.0.0.1",port),timeout=.5),None,1]
                         else:
                             c=client(protocol)
-                            if mode==1: c[0].sendall(b"GET / HTTP/1.1\r\nHost: ")
+                            if mode==1:
+                                if protocol=="h2":
+                                    frame=hyperframe.frame.HeadersFrame(1);frame.data=b"\x82"
+                                    c[0].sendall(frame.serialize())  # no END_HEADERS: real stalled h2 headers
+                                else:c[0].sendall(b"GET / HTTP/1.1\r\nHost: ")
                             else: request(c,"invalid-session")
                         with lock: arrivals.append({"at":time.monotonic(),"mode":mode})
                         flood_stop.wait(.015)
@@ -610,7 +631,7 @@ def transport(evidence, evict_incomplete=True):
             summary[protocol][kind]={"success":sum(map(success,trials)),"attempts":len(trials),"max_ms":max((r["latency_ms"] for r in trials),default=None)}
     passed=len(rows)==50 and all(map(success,rows)) and all(success(finite[p]) for p in ("http/1.1","h2")) and all(v["success"]==v["attempts"]==75 for p in summary.values() for v in p.values()) and metrics["peak_connections"]<=64 and metrics["peak_threads"]<=64 and metrics["peak_pending_per_source"]<=8
     return {"status":"pass" if passed else "fail","normal_correct":sum(map(success,rows)),"normal_max_ms":max((r["latency_ms"] for r in rows),default=None),"finite":finite,"sustained":summary,"metrics":metrics,"session_abuse":abuse,
-            "experimental_caps":{"connections":64,"preauth_per_source":8,"connections_per_person":8,"deadline_s":2,"header_bytes":16384},
+            "experimental_caps":{"connections":64,"preauth_per_source":8,"connections_per_person":8,"deadline_s":2,"header_bytes":16384,"h2_max_concurrent_streams":8,"h2_continuation_backlog":h2.frame_buffer.CONTINUATION_BACKLOG},
             "policy":"atomic live-auth classification; at source/global cap evict oldest pending from most-pending source; no authenticated victim; preauth callbacks receive no protection",
             "limits":"loopback single shared IP, 25 synthetic identities, test sessions not OIDC; shared NAT/VPN/VDI by hand; peak threads includes draining evictees, caps remain unaccepted"}
 
