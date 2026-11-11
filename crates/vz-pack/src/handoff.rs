@@ -19,6 +19,7 @@ pub const MAX_GATEWAY_FILES: usize = 64;
 /// Reject before decoding, and check expanded length while decompressing, before
 /// allocating/writing each output chunk. This helper does not decompress input.
 /// Lengths are bytes, not Unicode character counts; nothing is truncated.
+/// Actual encoded/expanded measurement and bounded decompression are C2 work.
 pub fn validate_lengths(encoded_bytes: usize, expanded_bytes: usize) -> Result<()> {
     if encoded_bytes > MAX_ENCODED_BYTES {
         bail!("handoff exceeds 48 KB encoded limit");
@@ -114,6 +115,7 @@ fn validate_pack_id(pack_id: &str) -> Result<()> {
     // Supports existing native pack-<hash> ids and future review UUIDs. A pack
     // id is one neutral identifier, never a path, URL, or navigation component.
     if pack_id.is_empty()
+        || pack_id.len() > 128
         || !pack_id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -137,6 +139,9 @@ impl BucketHandoff {
             }
         {
             bail!("bucket handoff requires the provider's region or account id");
+        }
+        if self.file_count == 0 {
+            bail!("bucket handoff requires at least one file");
         }
         self.draft.validate()
     }
@@ -175,8 +180,16 @@ pub struct GatewayHandoff {
 impl GatewayHandoff {
     pub fn validate(&self) -> Result<()> {
         validate_pack_id(&self.pack_id)?;
+        if self.files.is_empty() {
+            bail!("gateway handoff requires at least one size/SHA256 pair");
+        }
         if self.files.len() > MAX_GATEWAY_FILES {
             bail!("gateway handoff exceeds 64 size/SHA256 pairs");
+        }
+        for (index, file) in self.files.iter().enumerate() {
+            if self.files[..index].contains(file) {
+                bail!("gateway handoff requires unique size/SHA256 pairs");
+            }
         }
         self.draft.validate()
     }
@@ -290,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn encoded_and_expanded_boundaries_reject_without_truncating() {
+    fn caller_supplied_lengths_compare_at_48_kib_encoded_and_64_kib_expanded_boundaries() {
         validate_lengths(MAX_ENCODED_BYTES, MAX_EXPANDED_BYTES).unwrap();
         assert!(validate_lengths(MAX_ENCODED_BYTES + 1, 0).is_err());
         assert!(validate_lengths(0, MAX_EXPANDED_BYTES + 1).is_err());
@@ -299,11 +312,51 @@ mod tests {
     #[test]
     fn gateway_pair_limit() {
         let mut value: GatewayHandoff = serde_json::from_value(gateway()).unwrap();
-        value.files = vec![value.files[0].clone(); 64];
+        value.files = (0..64)
+            .map(|size| GatewayFile {
+                size,
+                sha256: value.files[0].sha256.clone(),
+            })
+            .collect();
         value.validate().unwrap();
         value.files.push(value.files[0].clone());
         assert!(value.validate().is_err());
         assert_eq!(value.files.len(), 65);
+    }
+
+    #[test]
+    fn gateway_rejects_empty_and_duplicate_pairs() {
+        let mut value: GatewayHandoff = serde_json::from_value(gateway()).unwrap();
+        value.files.clear();
+        assert!(value.validate().is_err());
+
+        let original: GatewayHandoff = serde_json::from_value(gateway()).unwrap();
+        value.files = vec![original.files[0].clone(); 2];
+        assert!(value.validate().is_err());
+
+        // Either component may repeat when the pair is distinct.
+        value.files[1].size += 1;
+        value.validate().unwrap();
+        value.files[1].size = value.files[0].size;
+        value.files[1].sha256 = "b".repeat(64).try_into().unwrap();
+        value.validate().unwrap();
+        // Duplicates need not be adjacent.
+        value.files.push(value.files[0].clone());
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn bucket_rejects_zero_file_count() {
+        let mut value: BucketHandoff = serde_json::from_value(bucket()).unwrap();
+        value.validate().unwrap();
+        value.file_count = 0;
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn pack_id_length_accepts_128_and_rejects_129() {
+        validate_pack_id(&"a".repeat(128)).unwrap();
+        assert!(validate_pack_id(&"a".repeat(129)).is_err());
     }
 
     #[test]
