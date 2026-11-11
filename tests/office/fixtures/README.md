@@ -1,7 +1,7 @@
 C1 bounded feasibility harness
 ==============================
 
-Authority: runbooks `c8699ee5`, `specs/BQ-VECTORAIZ-WEB-SERVER-GATE2.md`
+Authority: runbooks `origin/main` (pin its SHA in each private evidence manifest), `specs/BQ-VECTORAIZ-WEB-SERVER-GATE2.md`
 (Pins, C0, C1, A1–A11), Gate 1 and requirements. Accepted native base:
 `2af9e945fce07be6935ef3e4445a054d20b0b26c`. This is a spikes-only draft.
 No product listener, office enable switch, tenant configuration or cloud path.
@@ -42,7 +42,22 @@ What is measured
 * The core test builds real SQLite/Lance generations and measures 25 concurrent
   arrivals twice, including the shared-guard queue, real opens and correctness
   against document IDs/source markers. With explicit pinned assets it uses
-  native embedding; otherwise vectors are synthetic. Default storage size is
+  native embedding; otherwise vectors are synthetic. Baseline instrumentation
+  separates inference-guard wait, arrival/scheduling delay, native context
+  creation/encode, State open (nonblocking exclusive lock, SQLite and recovery),
+  document JSON reads, per-document Lance opens/queries and ranking. The C1
+  harness uses one Tokio runtime; an isolated microprobe measures desktop/MCP's
+  per-request runtime construction/destruction separately.
+  `storage::office::Snapshot` is compiled only with `office-feasibility`. It
+  prepares one consolidated Lance/FTS table and chunk lookup per published
+  office generation, retains one table handle, and releases the inference guard
+  before storage queries. It uses the same queries, top-k and correctness oracle;
+  global FTS corpus statistics can change ordering, so exact ranking equivalence
+  is not claimed. Build cost is reported separately: preparation must finish
+  before a generation accepts searches. Readers retain an Arc across promotion;
+  real generation retirement/recipe binding and product call sites remain work.
+  `VZ_OFFICE_SKIP_BASELINE=1` explicitly selects an after-only measurement; keep
+  a separately captured baseline when using it. Default storage size is
   32 documents, separately recorded from generated corpus size; increase
   `--storage-documents` to measure the costly per-document Lance opens. The
   first pass has OS caches warmed by indexing: it is NOT a cold-disk trial.
@@ -54,15 +69,21 @@ What is measured
   full-run lease is test-local, and admission traces name today's read-only MCP
   tools, with desktop/MCP before office reads. The current cancel-generation
   hole is recorded as a contract failure, even though the regression test
-  detecting the hole passes. No fictional mutating MCP path exists.
+  detecting the hole passes. A separate protocol test signals cancellation
+  immediately and defers generation invalidation until the full-run lease
+  drains; native pinned-engine batches must retain their cache and then reload
+  after the run. This does not integrate the desktop mutation call sites. No fictional mutating MCP path exists.
 * Separate storage roots keep old-generation searches possible with a new
   writer locked, including identical vector recipes. A test-local pointer is
   renamed atomically. This does not claim `active_index::reindex` supports
   generation Refresh or that product desktop/MCP paths use the proposed lease.
 * A minimal compiled C hostile worker runs without inherited host credentials.
   macOS Seatbelt ingest/render test processes must start, read their permitted
-  snapshot, then fail BOTH sentinel reads and loopback socket connection with
-  EPERM/EACCES. Startup failure is a failure, never successful confinement.
+  snapshot, then fail BOTH sentinel reads and socket creation with EPERM/EACCES.
+  A denied loopback connect is also recorded but cannot substitute for denied
+  socket creation. The profile permits the literal root directory needed by
+  dyld startup, without recursively granting host files; paths are canonical.
+  An unconfined positive control must read the sentinel and connect. Startup failure is a failure, never successful confinement.
   This is a capability prototype, not actual parser/viewer coverage. Baseline
   probes run the existing network-only worker profile too. Socket creation and
   connection are recorded separately; a denied connection cannot prove that
@@ -79,7 +100,13 @@ What is measured
   caps are NOT final: a separate stalled-handshake/global-cap attack must retain
   authenticated admission too. Its failure is reported even when completed
   pre-auth requests passed. Shared NAT/VPN/VDI and identity/session abuse remain
-  unrun. Only 127.0.0.1 is bound.
+  unrun. The second test-only transport variant retires the oldest connection
+  that has not authenticated when the unchanged global cap is full. Completed
+  test phases drain before the stalled-TLS attack; a barrier releases 25 new
+  h1/h2 clients per protocol against that attack. Retiring unknown connections
+  proves only finite-stall progress: sustained churn can still evict a legitimate
+  handshake before authentication, so this is not an accepted reserve/fairness
+  design. Only 127.0.0.1 is bound.
 
 Unresolved exit evidence
 ------------------------

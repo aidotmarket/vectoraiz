@@ -188,6 +188,7 @@ def pem(evidence):
 
 
 def confinement(evidence):
+    evidence = outside(evidence)
     if platform.system() != "Darwin":
         return {"status": "blocked", "reason": "macOS Seatbelt required; Windows by hand"}
     sentinel = evidence / "host-sentinel.txt"
@@ -198,9 +199,11 @@ def confinement(evidence):
     compiled = command(["xcrun", "clang", "-Wall", "-Wextra", "-Werror", FIXTURES / "hostile-worker.c", "-o", binary], evidence, "confinement-compile")
     require(compiled)
     # Permit runtime assets, exact worker and snapshot; no evidence directory
-    # grant. Positive snapshot/start control prevents startup denial passing.
+    # grant. dyld on this macOS reads the root directory during CacheFinder
+    # startup. A literal root grant is nonrecursive; it does not grant host files.
+    # Positive snapshot/start control prevents startup denial passing.
     paths = {"/System", "/usr/lib"}
-    profile = '(version 1)(allow default)(deny file-read-data (require-not (require-any ' + " ".join(f'(subpath {json.dumps(p)})' for p in sorted(paths)) + f' (literal "/dev/null") (literal {json.dumps(str(binary))}) (literal {json.dumps(str(allowed))}))))(deny network*)'
+    profile = '(version 1)(allow default)(deny file-read-data (require-not (require-any ' + " ".join(f'(subpath {json.dumps(p)})' for p in sorted(paths)) + f' (literal "/") (literal "/dev/null") (literal {json.dumps(str(binary))}) (literal {json.dumps(str(allowed))}))))(deny network*)'
     results = {}
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -208,23 +211,31 @@ def confinement(evidence):
         port = listener.getsockname()[1]
         for role in ("ingest", "render"):
             worker_env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+            positive = command([binary, allowed, sentinel, str(port)], evidence, f"confinement-{role}-positive", env=worker_env)
             baseline = command(["/usr/bin/sandbox-exec", "-p", "(version 1)(allow default)(deny network*)", binary, allowed, sentinel, str(port)], evidence, f"confinement-{role}-baseline", env=worker_env)
             result = command(["/usr/bin/sandbox-exec", "-p", profile, binary, allowed, sentinel, str(port)], evidence, f"confinement-{role}", env=worker_env)
             try:
                 raw = json.loads((evidence / result["raw"]).read_text())
             except (ValueError, OSError):
                 raw = {}
-            passed = (result["exit_code"] == 0 and raw.get("snapshot") == "allowed" and
+            try:
+                positive_raw = json.loads((evidence / positive["raw"]).read_text())
+            except (ValueError, OSError):
+                positive_raw = {}
+            positive_passed = positive["exit_code"] == 0 and all(positive_raw.get(key) == "allowed" for key in ("snapshot", "sentinel", "socket")) and positive_raw.get("socket_created") is True
+            passed = (positive_passed and result["exit_code"] == 0 and raw.get("snapshot") == "allowed" and
                       isinstance(raw.get("sentinel"), dict) and raw["sentinel"].get("denied_errno") in (1, 13) and
                       isinstance(raw.get("socket"), dict) and raw["socket"].get("denied_errno") in (1, 13) and raw.get("socket_created") is False)
-            results[role] = {"status": "pass" if passed else "fail", "command": result, "probes": raw, "existing_profile_baseline": baseline}
+            results[role] = {"status": "pass" if passed else "fail", "command": result, "probes": raw, "existing_profile_baseline": baseline, "unconfined_positive": positive, "positive_control_passed":positive_passed,
+                             "sentinel_denied": isinstance(raw.get("sentinel"), dict) and raw["sentinel"].get("denied_errno") in (1, 13),
+                             "socket_creation_denied": raw.get("socket_created") is False}
     (evidence / "office-worker.sb").write_text(profile + "\n")
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail",
             "roles": results, "limits": "test worker/profile only; not actual parser/render format coverage",
             "existing_parser_memory_bytes": 1536 * 1024 * 1024, "existing_parser_frame_bytes": 32 * 1024 * 1024, "resource_limits_applied_to_probe": False, "probe_deadline_s": 120}
 
 
-def transport(evidence):
+def transport(evidence, evict_incomplete=False):
     """Real TLS h1/h2, synthetic test token. This is not OIDC/session proof."""
     try:
         import h2.connection
@@ -243,6 +254,8 @@ def transport(evidence):
     token = uuid.uuid4().hex
     errors = []
     sockets = set()
+    pending = {}  # insertion order: oldest not-yet-authenticated connection first
+    evictions = []
     lock = threading.Lock()
 
     def serve(raw):
@@ -250,10 +263,12 @@ def transport(evidence):
         conn = raw
         try:
             raw.settimeout(5)
-            conn = context.wrap_socket(raw, server_side=True)
             with lock:
+                conn = context.wrap_socket(raw, server_side=True, do_handshake_on_connect=False)
                 sockets.discard(raw)
                 sockets.add(conn)
+                pending[raw] = conn
+            conn.do_handshake()
             if conn.selected_alpn_protocol() == "h2":
                 protocol = h2.connection.H2Connection(config=h2.config.H2Configuration(client_side=False, header_encoding="utf-8"))
                 protocol.initiate_connection()
@@ -266,6 +281,9 @@ def transport(evidence):
                         if isinstance(event, h2.events.RequestReceived):
                             headers = dict(event.headers)
                             authenticated = headers.get("authorization") == "Bearer " + token
+                            if authenticated:
+                                with lock:
+                                    pending.pop(raw, None)
                             if not authenticated and not owned:
                                 owned = preauth.acquire(blocking=False)
                             status = "200" if authenticated else ("401" if owned else "429")
@@ -279,6 +297,9 @@ def transport(evidence):
                         return
                     data += piece
                 authenticated = ("Authorization: Bearer " + token).encode() in data
+                if authenticated:
+                    with lock:
+                        pending.pop(raw, None)
                 if not authenticated:
                     owned = preauth.acquire(blocking=False)
                 status = "200" if authenticated else ("401" if owned else "429")
@@ -293,6 +314,7 @@ def transport(evidence):
             with lock:
                 sockets.discard(raw)
                 sockets.discard(conn)
+                pending.pop(raw, None)
             conn.close()
             active.release()
 
@@ -312,10 +334,27 @@ def transport(evidence):
                 break
             assert address[0] == "127.0.0.1"
             if not active.acquire(blocking=False):
-                raw.close()
-                continue
+                victim = None
+                if evict_incomplete:
+                    with lock:
+                        if pending:
+                            key = next(iter(pending))
+                            victim = pending.pop(key)
+                    if victim is not None:
+                        # Unknown clients cannot consume every admission slot.
+                        # Never select a connection that already authenticated.
+                        try:
+                            victim.shutdown(socket.SHUT_RDWR)
+                        except OSError:
+                            pass
+                        victim.close()
+                        evictions.append(time.monotonic())
+                if victim is None or not active.acquire(timeout=0.1):
+                    raw.close()
+                    continue
             with lock:
                 sockets.add(raw)
+                pending[raw] = raw
             worker = threading.Thread(target=serve, args=(raw,))
             workers.append(worker)
             worker.start()
@@ -361,8 +400,12 @@ def transport(evidence):
                 conn, row = query(protocol, False)
                 held.append(conn)
                 rows.append(row)
+            arrivals = threading.Barrier(25)
+            def concurrent_query(_):
+                arrivals.wait(timeout=5)
+                return query(protocol, True)
             with concurrent.futures.ThreadPoolExecutor(max_workers=25) as pool:
-                for conn, row in pool.map(lambda _: query(protocol, True), range(25)):
+                for conn, row in pool.map(concurrent_query, range(25)):
                     conn.close()
                     rows.append(row)
             for conn in held:
@@ -370,6 +413,18 @@ def transport(evidence):
             held.clear()
             # h1 handlers deliberately retain their preauth reservation until
             # 3s close deadline; this is part of the measured experiment.
+        # Isolate the next attack from the completed-preauth handlers' 3s
+        # retention. Otherwise "64 active" includes stale handlers rather than
+        # 64 stalled TLS sockets, and oldest-unknown eviction hits those first.
+        drained_until = time.monotonic() + 6
+        while time.monotonic() < drained_until:
+            with lock:
+                remaining_completed = len(sockets)
+            if remaining_completed == 0:
+                break
+            time.sleep(0.001)
+        if remaining_completed:
+            raise RuntimeError("completed transport phase did not drain")
         # Also attack BEFORE TLS authentication. A post-header reservation
         # alone cannot claim to protect this stage. Preserve the failing result
         # rather than quietly limiting exhaustion to completed handshakes.
@@ -389,6 +444,24 @@ def transport(evidence):
             stalled_result = {"status": "pass" if occupied == 64 and row["status"] == "200" and row["latency_ms"] <= 5000 else "fail", "active_at_attack": occupied, "response": row}
         except Exception as error:
             stalled_result = {"status": "fail", "active_at_attack": occupied, "exception": type(error).__name__, "latency_ms": (time.monotonic() - start) * 1000}
+        if evict_incomplete and stalled_result["status"] == "pass":
+            reserve_rows = []
+            def reserve_query(protocol):
+                arrivals.wait(timeout=5)
+                started = time.monotonic()
+                try:
+                    conn, row = query(protocol, True)
+                    conn.close()
+                    return row
+                except Exception as error:
+                    return {"protocol":protocol,"exception":type(error).__name__,"latency_ms":(time.monotonic()-started)*1000}
+            for protocol in ("http/1.1", "h2"):
+                arrivals = threading.Barrier(25)
+                with concurrent.futures.ThreadPoolExecutor(max_workers=25) as pool:
+                    reserve_rows.extend(pool.map(reserve_query, [protocol]*25))
+            stalled_result["reserve_25_h1_h2"] = reserve_rows
+            if not all(row.get("status") == "200" and row["latency_ms"] <= 5000 for row in reserve_rows):
+                stalled_result["status"] = "fail"
     finally:
         stop.set()
         listener.close()
@@ -407,15 +480,15 @@ def transport(evidence):
         thread.join(6)
         for worker in workers:
             worker.join(6)
-        (evidence / "transport.json").write_text(json.dumps({"rows": rows, "errors": errors, "stalled_tls_reserve": stalled_result}, indent=2) + "\n")
+        (evidence / ("transport-incomplete-eviction.json" if evict_incomplete else "transport.json")).write_text(json.dumps({"rows": rows, "errors": errors, "stalled_tls_reserve": stalled_result,"evict_incomplete":evict_incomplete,"incomplete_evictions":len(evictions)}, indent=2) + "\n")
     auth = [row for row in rows if row["authenticated"]]
     completed_passed = len(auth) == 50 and all(row["status"] == "200" and row["latency_ms"] <= 5000 for row in auth) and any(row["status"] == "429" for row in rows)
     passed = completed_passed and stalled_result["status"] == "pass"
     return {"status": "pass" if passed else "fail", "authenticated_queries": len(auth),
             "max_authenticated_ms": max((x["latency_ms"] for x in auth), default=None),
-            "completed_preauth_reserve": "pass" if completed_passed else "fail", "stalled_tls_reserve": stalled_result,
+            "completed_preauth_reserve": "pass" if completed_passed else "fail", "stalled_tls_reserve": stalled_result, "evict_incomplete":evict_incomplete,"incomplete_evictions":len(evictions),
             "experimental_caps": {"connections": 64, "preauth": 8, "authenticated_reserve_target": 25, "header_bytes": 16384, "handshake_header_s": 5},
-            "limits": "single-IP test token, no OIDC; not NAT/VPN/VDI qualification; stalled TLS/global-cap attack remains unresolved"}
+            "limits": "single-IP finite stalled-TLS attack, test token, no OIDC; eviction does not prove admission under sustained churn or NAT/VPN/VDI fairness; final caps unaccepted"}
 
 
 def rust(evidence, count, cargo):
@@ -509,7 +582,7 @@ def main():
     command(["sh", "-c", "uname -a; sysctl -n machdep.cpu.brand_string hw.memsize; sw_vers; pmset -g batt"], evidence, "host")
     if platform.system() == "Darwin":
         command(["system_profiler", "SPDisplaysDataType", "-json"], evidence, "gpu")
-    manifest["pins"]["source_files_sha256"] = {str(path.relative_to(ROOT)): digest(path) for path in [ROOT / "scripts/office-feasibility.py", ROOT / "crates/vz-core/tests/office_feasibility.rs", ROOT / "crates/vz-core/src/engine.rs", ROOT / "app/src-tauri/src/office/spikes.rs", ROOT / "app/src-tauri/src/main.rs", ROOT / "crates/vz-core/Cargo.toml", ROOT / "app/src-tauri/Cargo.toml"]}
+    manifest["pins"]["source_files_sha256"] = {str(path.relative_to(ROOT)): digest(path) for path in [ROOT / "scripts/office-feasibility.py", ROOT / "crates/vz-core/tests/office_feasibility.rs", ROOT / "crates/vz-core/src/engine.rs", ROOT / "crates/vz-core/src/storage/office.rs", ROOT / "app/src-tauri/src/office/spikes.rs", ROOT / "app/src-tauri/src/models.rs", ROOT / "app/src-tauri/src/main.rs", ROOT / "crates/vz-core/Cargo.toml", ROOT / "app/src-tauri/Cargo.toml"]}
     command(["openssl", "version", "-a"], evidence, "openssl-version")
     command([sys.executable, "-m", "pip", "freeze"], evidence, "python-package-pins")
     manifest["workload"] = corpus(evidence, args.documents, args.public_docs)
@@ -540,6 +613,11 @@ def main():
         except Exception as error:
             (evidence / (name + "-exception.log")).write_text(traceback.format_exc())
             manifest["results"][name] = {"status": "fail", "reason": str(error)}
+    try:
+        manifest["results"]["transport_incomplete_eviction"] = transport(evidence, evict_incomplete=True)
+    except Exception as error:
+        (evidence / "transport-incomplete-eviction-exception.log").write_text(traceback.format_exc())
+        manifest["results"]["transport_incomplete_eviction"] = {"status":"fail","reason":str(error)}
     manifest["certificate_capabilities"] = manifest["results"]["pem"]
     manifest["worker_limits"] = manifest["results"]["confinement"]
     manifest["worker_limits"]["proposed_render_jobs"] = 4
@@ -551,7 +629,10 @@ def main():
         if path.exists():
             data = json.loads(path.read_text())
             samples = data["samples"]
-            manifest["results"]["search_25"] = {"status": "pass" if all(x["correct"] and x["latency_ms"] <= 5000 for x in samples) else "fail", "max_ms": max(x["latency_ms"] for x in samples), "correct": sum(x["correct"] for x in samples), "count": len(samples), "proof_limit": data["kind"], "documents": data["documents"]}
+            for implementation, name in (("baseline", "search_25"), ("snapshot", "search_25_snapshot")):
+                rows = [x for x in samples if x.get("implementation", "baseline") == implementation and x["mode"] != "single"]
+                if rows:
+                    manifest["results"][name] = {"status": "pass" if all(x["correct"] and x["latency_ms"] <= 5000 for x in rows) else "fail", "max_ms": max(x["latency_ms"] for x in rows), "correct": sum(x["correct"] for x in rows), "count": len(rows), "proof_limit": data["kind"], "documents": data["documents"], "snapshot_build_ms":data.get("snapshot_build_ms"), "runtime_creation_ms":data.get("runtime_creation_ms")}
             manifest["pins"]["recipe"] = data.get("recipe") or manifest["pins"]["recipe"]
         if (evidence / "refusal.json").exists():
             manifest["T_search_refusal_max"] = {key: {field: value for field, value in row.items() if field != "attempts"} for key, row in json.loads((evidence / "refusal.json").read_text()).items()}
@@ -563,7 +644,10 @@ def main():
         manifest["results"]["native_abort"] = {"status": "pass" if len(rows) == 2 and all(row["status"] == "pass" for row in rows) else "fail", "measurements": rows, "limit": "test-only 32-token prefill, 1-token decode; desktop Ask unchanged"}
     else:
         manifest["results"]["native_abort"] = {"status": "blocked", "reason": "explicit pinned local models and --rust required; no native abort evidence"}
-    manifest["results"]["native_full_run_exclusion"] = {"status": "fail", "reason": "current Operations::cancel advances generation while inference held; proposed test-local lease is not integrated"}
+    manifest["results"]["native_full_run_exclusion"] = {"status": "fail", "reason": "current Operations::cancel advances generation while inference held; immediate-signal/deferred-invalidation lease protocol is test-local, not integrated into product call sites"}
+    native_lease = evidence / "native-cache-lease.json"
+    if native_lease.exists():
+        manifest["results"]["native_cache_lease_protocol"] = json.loads(native_lease.read_text())
     manifest["results"]["normal_load_a1"] = {"status": "blocked", "reason": "synthetic vectors/cache-sized Lance seam do not qualify agreed native mixed-format 25-user workload with answers/indexing/Refresh"}
     manifest["decision"] = "RETURN_TO_DESIGN; C1 incomplete; no enabled distribution"
     write_manifest(evidence / "manifest-v1.json", manifest)

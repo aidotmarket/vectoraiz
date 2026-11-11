@@ -71,8 +71,17 @@ async fn generation(
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn office_feasibility_storage_and_25_searches() -> Result<()> {
+#[test]
+fn office_feasibility_storage_and_25_searches() -> Result<()> {
+    let started = Instant::now();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?;
+    let runtime_creation_ms = started.elapsed().as_secs_f64() * 1000.0;
+    runtime.block_on(storage_and_searches(runtime_creation_ms))
+}
+async fn storage_and_searches(runtime_creation_ms: f64) -> Result<()> {
     let external = output()?;
     let temp = tempfile::tempdir()?;
     let root = external.as_deref().unwrap_or(temp.path());
@@ -103,37 +112,87 @@ async fn office_feasibility_storage_and_25_searches() -> Result<()> {
     );
     generation(&old, count, "oldgeneration", engines.as_ref().as_ref()).await?;
     let mut samples = Vec::new();
-    // One inference owner; 25 simultaneous arrivals include queue time. Open
-    // State per search just as native readers do, serializing exclusive opens.
     let guard = std::sync::Arc::new(tokio::sync::Mutex::new(()));
-    for mode in ["cold_first_process_pass", "warm"] {
-        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(25));
-        let mut jobs = Vec::new();
-        for person in 0..25 {
-            let barrier = barrier.clone();
-            let guard = guard.clone();
-            let old = old.clone();
-            let engines = engines.clone();
-            jobs.push(async move {
-                barrier.wait().await;
-                let start = Instant::now();
-                let _inference = guard.lock().await;
-                let opened = State::open(&old)?;
-                let expected = format!("synthetic{person:05}");
-                let vector = if let Some(engines) = engines.as_ref() {
-                    engines.vector(&expected, true)?
-                } else {
-                    let mut vector = vec![0.0;32];
-                    vector[person % 32] = 1.0;
-                    vector
-                };
-                let hits = opened.search(&expected, &vector, 8).await?;
-                let correct = hits.iter().any(|hit| hit.chunk.doc_id == expected && hit.chunk.text.contains("oldgeneration"));
-                Ok::<_, anyhow::Error>(json!({"identity":person,"mode":mode,"correct":correct,"latency_ms":start.elapsed().as_secs_f64()*1000.0}))
-            });
+    let state = State::open(&old)?;
+    let snapshot_start = Instant::now();
+    let snapshot = std::sync::Arc::new(
+        vz_core::storage::office::Snapshot::build(&state, &run.path().join("snapshot")).await?,
+    );
+    let snapshot_build_ms = snapshot_start.elapsed().as_secs_f64() * 1000.0;
+    drop(state);
+    // Both versions use the same actual native model, queries and oracle.
+    // Baseline holds the inference guard through storage, matching prior C1.
+    for implementation in ["baseline", "snapshot"] {
+        if implementation == "baseline" && std::env::var_os("VZ_OFFICE_SKIP_BASELINE").is_some() {
+            continue;
         }
-        for result in futures::future::join_all(jobs).await {
-            samples.push(result?);
+        for (mode, people) in [("single", 1), ("cold_first_process_pass", 25), ("warm", 25)] {
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(people));
+            let mut jobs = Vec::new();
+            for person in 0..people {
+                let barrier = barrier.clone();
+                let guard = guard.clone();
+                let old = old.clone();
+                let engines = engines.clone();
+                let snapshot = snapshot.clone();
+                jobs.push(async move {
+                    let start = Instant::now();
+                    barrier.wait().await;
+                    let lock_requested = Instant::now();
+                    let inference = guard.lock().await;
+                    let queue_ms = lock_requested.elapsed().as_secs_f64() * 1000.0;
+                    let arrival_to_guard_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    let state_start = Instant::now();
+                    let (opened, state_open) = if implementation == "baseline" {
+                        let (state, timing) = State::office_open_timed(&old)?;
+                        (Some(state), timing)
+                    } else {
+                        (None, json!({}))
+                    };
+                    let state_open_ms = state_start.elapsed().as_secs_f64() * 1000.0;
+                    let expected = format!("synthetic{person:05}");
+                    let (vector, embedding) = if let Some(engines) = engines.as_ref() {
+                        engines.office_vector_timed(&expected, true)?
+                    } else {
+                        let mut vector = vec![0.0; 32];
+                        vector[person % 32] = 1.0;
+                        (vector, json!({"total_ms": 0.0}))
+                    };
+                    let search_start = Instant::now();
+                    let (hits, storage) = if let Some(opened) = opened {
+                        let (hits, timing) =
+                            opened.office_search_timed(&expected, &vector, 8).await?;
+                        drop(inference);
+                        (hits, serde_json::to_value(timing)?)
+                    } else {
+                        drop(inference);
+                        let (hits, timing) = snapshot.search_timed(&expected, &vector, 8).await?;
+                        (hits, serde_json::to_value(timing)?)
+                    };
+                    let correct = hits.iter().any(|hit| {
+                        hit.chunk.doc_id == expected && hit.chunk.text.contains("oldgeneration")
+                    });
+                    Ok::<_, anyhow::Error>(json!({
+                        "implementation":implementation, "identity":person, "mode":mode,
+                        "correct":correct, "latency_ms":start.elapsed().as_secs_f64()*1000.0,
+                        "queue_ms":queue_ms, "arrival_to_guard_ms":arrival_to_guard_ms,
+                        "state_open_ms":state_open_ms, "state_open":state_open,
+                        "embedding":embedding, "storage":storage,
+                        "search_ms":search_start.elapsed().as_secs_f64()*1000.0,
+                        "per_query_tokio_runtime_creation_ms":0
+                    }))
+                });
+            }
+            for result in futures::future::join_all(jobs).await {
+                samples.push(result?);
+            }
+            // Preserve partial results even if a later continuity probe fails.
+            if let Some(path) = &external {
+                std::fs::write(
+                    path.join("search-partial.json"),
+                    serde_json::to_vec_pretty(&samples)?,
+                )?;
+            }
         }
     }
     let next = run.path().join("next");
@@ -173,6 +232,17 @@ async fn office_feasibility_storage_and_25_searches() -> Result<()> {
         .iter()
         .all(|h| h.chunk.text.contains("oldgeneration")));
     assert!(State::open(&old).is_err(), "desktop index-locked busy seam");
+    // Snapshot readers do not acquire State's exclusive writer lock.
+    let snapshot_hits = snapshot
+        .search("oldgeneration", &continuity_vector, 8)
+        .await?;
+    ensure!(
+        !snapshot_hits.is_empty()
+            && snapshot_hits
+                .iter()
+                .all(|h| h.chunk.text.contains("oldgeneration")),
+        "snapshot reader blocked by source writer lock"
+    );
     drop(old_state);
     drop(writing);
     let pointer = run.path().join("office-generation.json");
@@ -204,7 +274,31 @@ async fn office_feasibility_storage_and_25_searches() -> Result<()> {
         !hits.is_empty() && hits.iter().all(|h| h.chunk.text.contains("newgeneration")),
         "new generation missing after promotion"
     );
-    let value = json!({"kind":if engines.is_some() {"native_embedding_real_storage"} else {"real_storage_synthetic_vectors"}, "documents":count,"chunks":count,"samples":samples,"separate_generation_and_locked_busy":true,"promotion":"test-local atomic rename; not active_index::reindex", "cold_limit":"first pass only; OS disk cache not flushed", "native_model":engines.is_some(), "recipe":engines.as_ref().as_ref().map(|x| &x.recipe)});
+    // A reader that captured the old Arc before promotion retains old data.
+    let old_hits = snapshot
+        .search("oldgeneration", &continuity_vector, 8)
+        .await?;
+    ensure!(
+        !old_hits.is_empty()
+            && old_hits
+                .iter()
+                .all(|h| h.chunk.text.contains("oldgeneration")),
+        "old snapshot changed after promotion"
+    );
+    let promoted_snapshot =
+        vz_core::storage::office::Snapshot::build(&selected, &run.path().join("promoted-snapshot"))
+            .await?;
+    let new_hits = promoted_snapshot
+        .search("newgeneration", &continuity_vector, 8)
+        .await?;
+    ensure!(
+        !new_hits.is_empty()
+            && new_hits
+                .iter()
+                .all(|h| h.chunk.text.contains("newgeneration")),
+        "promoted snapshot mixed generations"
+    );
+    let value = json!({"kind":if engines.is_some() {"native_embedding_real_storage"} else {"real_storage_synthetic_vectors"}, "documents":count,"chunks":count,"samples":samples,"snapshot_build_ms":snapshot_build_ms,"runtime_creation_ms":runtime_creation_ms,"snapshot_read_with_writer_lock":true,"old_snapshot_retained_after_promotion":true,"separate_generation_and_locked_busy":true,"promotion":"test-local atomic rename; not active_index::reindex", "cold_limit":"single then first 25-way pass after indexing/snapshot preparation; OS disk cache not flushed", "concurrency":"25 futures on one coordinator task, shared four-worker Tokio runtime; synchronous embeddings serialize polling; latency includes arrival barrier and scheduling", "native_model":engines.is_some(), "recipe":engines.as_ref().as_ref().map(|x| &x.recipe)});
     if let Some(path) = external {
         std::fs::write(
             path.join("storage.json"),
@@ -363,5 +457,29 @@ fn office_feasibility_native_contention() -> Result<()> {
         std::fs::write(root.join("refusal.json"), serde_json::to_vec_pretty(&rows)?)?;
     }
     println!("native contention scenarios complete; raw refusal traces retained");
+    Ok(())
+}
+
+#[test]
+fn office_feasibility_runtime_cost() -> Result<()> {
+    // Desktop/MCP construct a runtime per request; the original C1 harness
+    // does not. Measure this separately rather than attributing invented cost.
+    let mut samples = Vec::new();
+    for _ in 0..25 {
+        let started = Instant::now();
+        let runtime = tokio::runtime::Runtime::new()?;
+        let creation_ms = started.elapsed().as_secs_f64() * 1000.0;
+        let started = Instant::now();
+        drop(runtime);
+        samples.push(
+            json!({"creation_ms":creation_ms,"teardown_ms":started.elapsed().as_secs_f64()*1000.0}),
+        );
+    }
+    if let Some(root) = output()? {
+        std::fs::write(
+            root.join("runtime.json"),
+            serde_json::to_vec_pretty(&samples)?,
+        )?;
+    }
     Ok(())
 }

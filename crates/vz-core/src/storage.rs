@@ -497,3 +497,6 @@ mod tests {
         .contains("re-index required"));
     }
 }
+
+#[cfg(feature = "office-feasibility")]
+pub mod office;

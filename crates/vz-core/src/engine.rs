@@ -342,6 +342,76 @@ impl Engines {
         }
         Ok(vector)
     }
+    #[cfg(feature = "office-feasibility")]
+    pub fn office_vector_timed(
+        &self,
+        text: &str,
+        query: bool,
+    ) -> Result<(Vec<f32>, serde_json::Value)> {
+        let total = std::time::Instant::now();
+        let _timer = PhaseTimer::new(if query {
+            "query_embedding"
+        } else {
+            "document_embedding"
+        });
+        let text = format!(
+            "{}{text}",
+            if query {
+                &self.recipe.query_prefix
+            } else {
+                &self.recipe.document_prefix
+            }
+        );
+        let mut tokens = self.embed.str_to_token(&text, AddBos::Always)?;
+        let pins = self
+            .pins
+            .read()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        let append_eos = pin_bool(&pins, "embedding", "append_eos")?;
+        let eos = self.embed.token_eos();
+        // A vocab with add_eos_token already appended EOS in str_to_token; never
+        // end with two EOS tokens (CC Gate 3 LOW-1).
+        if append_eos && tokens.last() == Some(&eos) {
+            tokens.pop();
+        }
+        tokens.truncate(self.recipe.max_tokens - usize::from(append_eos));
+        if append_eos {
+            tokens.push(eos);
+        }
+        let max_tokens = self.recipe.max_tokens as u32;
+        let params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(max_tokens))
+            .with_n_batch(max_tokens)
+            .with_n_ubatch(max_tokens)
+            .with_embeddings(true)
+            .with_pooling_type(pooling(&self.recipe.pooling)?);
+        let context_start = std::time::Instant::now();
+        let mut ctx = self.embed.new_context(&self.backend, params)?;
+        let context_ms = context_start.elapsed().as_secs_f64() * 1000.0;
+        let inference_start = std::time::Instant::now();
+        let mut batch = LlamaBatch::new(self.recipe.max_tokens, 1);
+        batch.add_sequence(&tokens, 0, false)?;
+        if self.recipe.pooling == "last"
+            || self.embed.meta_val_str("general.architecture")? == "gemma-embedding"
+        {
+            ctx.decode(&mut batch)?;
+        } else {
+            ctx.encode(&mut batch)?;
+        }
+        let inference_ms = inference_start.elapsed().as_secs_f64() * 1000.0;
+        let mut vector = ctx.embeddings_seq_ith(0)?.to_vec();
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            bail!("invalid model embedding");
+        }
+        for value in &mut vector {
+            *value /= norm;
+        }
+        Ok((
+            vector,
+            serde_json::json!({"context_creation_ms":context_ms,"native_encode_ms":inference_ms,"total_ms":total.elapsed().as_secs_f64()*1000.0}),
+        ))
+    }
     pub fn stream(
         &self,
         question: &str,
