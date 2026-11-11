@@ -410,6 +410,8 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         }
     });
     builder.invoke_handler(tauri::generate_handler![
+        open_product_page,
+        third_party_notices,
         self_test,
         pipeline_index,
         pipeline_search,
@@ -751,6 +753,26 @@ fn reveal_extension<R: tauri::Runtime>(
             .map_err(|e| e.to_string())
     }
 }
+// Fixed destinations only: no webview navigation or caller-supplied URL/path.
+#[tauri::command]
+fn open_product_page<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url("https://ai.market/vectoraiz", None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn third_party_notices<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<String, String> {
+    use tauri::Manager;
+    let path = app
+        .path()
+        .resource_dir()
+        .map_err(|e| e.to_string())?
+        .join("THIRD_PARTY_NOTICES");
+    crate::notices::read(&path)
+}
+
 #[tauri::command]
 fn app_show_extension<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> Result<(), String> {
     reveal_extension(&app, &mcp_apps::bundle_path(&model_dir(&app)?))

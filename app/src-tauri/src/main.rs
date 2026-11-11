@@ -23,6 +23,7 @@ mod mcp_tests;
 mod mcp_tools;
 #[cfg_attr(test, allow(dead_code))]
 mod models;
+mod notices;
 #[cfg_attr(test, allow(dead_code))]
 mod settings;
 
@@ -48,6 +49,8 @@ mod tests {
             url: "https://example.com".parse().unwrap(),
         };
         for command in [
+            "open_product_page",
+            "third_party_notices",
             "self_test",
             "pipeline_index",
             "pipeline_search",

@@ -45,6 +45,10 @@
     "icon": [
       "gen/icon.png",
       "gen/icon.ico"
-    ]
+    ],
+    "publisher": "AIMARKET LLC",
+    "copyright": "© AIMARKET LLC",
+    "homepage": "https://ai.market/vectoraiz",
+    "shortDescription": "vectorAIz by ai.market"
   }
 }

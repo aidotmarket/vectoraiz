@@ -4,6 +4,7 @@ import { AiApps, M3_COPY, type AppClient } from "./AiApps";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
+import { repositoryLicenceName } from "./licence";
 
 interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
 interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
@@ -27,6 +28,7 @@ export const M1_COPY = {
   downloadSearch: (bytes: number) => `Download search model (${size(bytes)})`,
   searchNeeded: "Search model needed: download or import it first.",
   firstRun: "Your library is ready to search. vectorAIz has downloaded its search model (635 MB). You can add folders and search them now. Everything stays on this computer. Want written answers too? Choose how when you first ask a question.",
+  firstRunBrand: "vectorAIz is made by ai.market. It is free and open source, and your documents stay on this computer. If you choose, you can list data for sale on ai.market: listing is free, and ai.market earns a 5% commission only when a listing sells.",
   getAnswers: "Get written answers on this computer.",
   answerOffer: (tier: AnswerTier) => `Download an answer model (${size(tier.pin.size)}, uses about ${gb(tier.memory?.bytes ?? tier.pin.size)} of memory${tier.memory?.measured ? "" : " (estimate)"}). Your documents and questions never leave this computer. Works offline. Search keeps working without it.`,
   diskNeeded: (bytes: number) => `Disk space needed: ${size(Math.ceil(bytes * 1.1))}`,
@@ -102,7 +104,7 @@ export default function App() {
   const focusTarget = useRef<string | undefined>(undefined);
   const setupOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-api"});
   const claudeOrigin = useRef<{view: View; id: string}>({view: "Ask", id: "chooser-claude"});
-  function navigate(next: View, target?: string) { focusTarget.current = target; setView(next); }
+  function navigate(next: View, target?: string) { setShowFirstRunBrand(false); focusTarget.current = target; setView(next); }
   // Keep the request until an asynchronously rendered target is available.
   useLayoutEffect(() => {
     if (!focusTarget.current) return;
@@ -197,6 +199,28 @@ export default function App() {
       setAnswerOffers(models.offer.filter(tier => !showSmaller || tier.pin.size < (models.answer?.pin?.size ?? Infinity)).sort((a, b) => b.pin.size - a.pin.size));
     }
   }, [answerOffers, models, showSmaller, askState]);
+  const [showFirstRunBrand, setShowFirstRunBrand] = useState(false);
+  const brandChecked = useRef(false);
+  useEffect(() => {
+    if (view !== "Ask" || !models?.ready || !cloud || !appClients || brandChecked.current) return;
+    brandChecked.current = true;
+    if (models.ready && !models.last_indexed_folder && !cloud.api_key.enabled && !cloud.api_key.key_present && !cloud.cleanup_pending && !appClients.some(c => !c.revoked)) {
+      // Record only when the first-run paragraph can actually be displayed.
+      if (!localStorage.getItem("vectoraiz.brand-introduction-seen")) {
+        setShowFirstRunBrand(true);
+        localStorage.setItem("vectoraiz.brand-introduction-seen", "true");
+      }
+    }
+  }, [view, models, cloud, appClients]);
+  const [thirdPartyNotices, setThirdPartyNotices] = useState<string>();
+  const [aboutError, setAboutError] = useState("");
+  async function openAbout(command: "open_product_page" | "third_party_notices") {
+    setAboutError("");
+    try {
+      if (command === "third_party_notices") setThirdPartyNotices(await invoke<string>(command));
+      else await invoke(command);
+    } catch (cause) { setAboutError(String(cause)); }
+  }
   const [updateMessage, setUpdateMessage] = useState("");
   const [installFailure, setInstallFailure] = useState<InstallFailure>();
   const [updateProgress, setUpdateProgress] = useState("");
@@ -273,12 +297,14 @@ export default function App() {
     finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
+    setShowFirstRunBrand(false);
     setRunning(true); setError(""); setProgress("Searching…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); }
     try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
     catch (cause) { setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
   async function ask() {
+    setShowFirstRunBrand(false);
     if ([...query].length > 2000) { setError(M2_COPY.limit); return; }
     const cloudAsk = cloud?.default === "api_key";
     const generation = ++answerGeneration.current;
@@ -530,7 +556,7 @@ export default function App() {
         </article>}
         {hits.length > 0 && <section className="card stack"><h2>Matching passages</h2><ol className="stack">{hits.map(hit => <li key={hit.chunk.chunk_id}>{hit.chunk.text}<small> · {hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page {hit.chunk.page}</small></li>)}</ol></section>}
         {models && !models.ready && <div className="card stack"><p>{M1_COPY.searchNeeded}</p><div className="actions"><button className="button primary" disabled={transferBusy || installing} onClick={downloadSearch}>{M1_COPY.downloadSearch(models.files[0]?.size ?? 0)}</button><button className={buttonStyle} disabled={transferBusy || installing} onClick={importModels}>Import from a folder</button></div></div>}
-        {models?.ready && !models.last_indexed_folder && cloud && appClients && !cloud.api_key.enabled && !cloud.api_key.key_present && !cloud.cleanup_pending && !appClients.some(c => !c.revoked) && <p>{M1_COPY.firstRun}</p>}
+        {models?.ready && !models.last_indexed_folder && cloud && appClients && !cloud.api_key.enabled && !cloud.api_key.key_present && !cloud.cleanup_pending && !appClients.some(c => !c.revoked) && <div><p>{M1_COPY.firstRun}</p>{showFirstRunBrand && <p>{M1_COPY.firstRunBrand}</p>}</div>}
         {chooser}
       </section>}
       {view === "Library" && <section className="view stack" aria-label="Library"><h1>Library</h1>
@@ -643,6 +669,15 @@ export default function App() {
         <section className="card stack" aria-label="Updates"><h2>Updates</h2><p>Version {version}</p>
           <button className="button primary" disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
           {updateMessage && <p>{updateMessage}</p>}
+        </section>
+        <section className="card stack" aria-label="About"><h2>About</h2>
+          <p>vectorAIz <span>by ai.market</span></p>
+          <p>Version {version}</p>
+          <p>{repositoryLicenceName}</p>
+          <a href="https://ai.market/vectoraiz" onClick={event => {event.preventDefault(); void openAbout("open_product_page");}}>https://ai.market/vectoraiz</a>
+          <button className={buttonStyle} disabled={installing} onClick={() => void openAbout("third_party_notices")}>Third-party notices</button>
+          {thirdPartyNotices !== undefined && <pre tabIndex={0} aria-label="Third-party notices">{thirdPartyNotices}</pre>}
+          {aboutError && <p role="alert">{aboutError}</p>}
         </section>
         <details className="card stack"><summary>Network activity and diagnostics</summary>
     <aside className="stack" aria-label={M2_COPY.network}><h2>{M2_COPY.network}</h2><p>{M2_COPY.downloads}</p><p>{M2_COPY.updates}</p>

@@ -22,6 +22,8 @@ fn main() {
                 tauri_build::WindowsAttributes::new().window_icon_path("gen/icon.ico"),
             )
             .app_manifest(tauri_build::AppManifest::new().commands(&[
+                "open_product_page",
+                "third_party_notices",
                 "self_test",
                 "models_status",
                 "models_download",

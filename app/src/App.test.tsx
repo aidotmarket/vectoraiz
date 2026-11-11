@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 
 import App, { readableFolder } from "./App";
 import { version } from "../package.json";
+import { licenceName } from "./licence";
 
 const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents, appEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), appEvents: { callback: undefined as undefined | (() => void) }, modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (event: string, callback: () => void) => { const target = event === "mcp-activity" ? appEvents : modelEvents; target.callback = callback; return () => { if (target.callback === callback) target.callback = undefined; }; }}));
@@ -16,6 +17,7 @@ const readyModels = { ready: true, files: [] };
 const missingModels = { ready: false, files: [{ name: "Embedding model", file: "test.gguf", size: 100, license: "MIT", source: "https://example.com/model", verified: false }] };
 afterEach(() => { cleanup(); vi.resetAllMocks(); });
 beforeEach(() => {
+  localStorage.clear();
   appInvoke.mockResolvedValue({enabled:false,off:false,clients:[],recent:[]});
   cloudInvoke.mockResolvedValue({default:"local",api_key:{enabled:false,provider:null,key_present:false,key_last4:null},consent_current:false,cleanup_pending:false});
   invoke.mockResolvedValue({ available: false });
@@ -2074,4 +2076,80 @@ it("A8 a backend consent refusal while selecting an apparently current saved key
   await userEvent.click(await screen.findByRole("button", {name:"Use your API key"}));
   expect(await screen.findByRole("button", {name:"Use Anthropic"})).toBeInTheDocument();
   expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+});
+
+const firstRunBrand = "vectorAIz is made by ai.market. It is free and open source, and your documents stay on this computer. If you choose, you can list data for sale on ai.market: listing is free, and ai.market earns a 5% commission only when a listing sells.";
+
+it("B2 shows the exact branding paragraph once on first run, without repeating on Ask or restart", async () => {
+  const mounted = render(<App />);
+  expect(await screen.findAllByText(firstRunBrand)).toHaveLength(1);
+  await userEvent.click(screen.getByRole("button", {name:"Ask"}));
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+  at("Settings"); at("Ask");
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+  mounted.unmount();
+  render(<App />);
+  await screen.findByText(/Your library is ready to search/);
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+});
+
+it("B2 shows branding after the first search model becomes ready", async () => {
+  modelsInvoke.mockResolvedValue(missingModels);
+  render(<App />);
+  await screen.findByText(/Search model needed/);
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+  at("Settings");
+  modelsInvoke.mockResolvedValue(readyModels);
+  await act(async () => { modelEvents.callback?.(); });
+  expect(localStorage.getItem("vectoraiz.brand-introduction-seen")).toBeNull();
+  at("Ask");
+  expect(await screen.findAllByText(firstRunBrand)).toHaveLength(1);
+  at("Library"); at("Ask");
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+});
+
+it.each(["indexed library", "API key", "connected app"])("B2 omits the first-run branding for an existing %s", async state => {
+  if (state === "indexed library") modelsInvoke.mockResolvedValue({...readyModels,last_indexed_folder:"/docs"});
+  if (state === "API key") cloudInvoke.mockResolvedValue(apiReady);
+  if (state === "connected app") appInvoke.mockResolvedValue(appStatus([connectedApp]));
+  render(<App />);
+  await waitFor(() => expect(appInvoke).toHaveBeenCalledWith("app_status", undefined));
+  expect(screen.queryByText(firstRunBrand)).not.toBeInTheDocument();
+});
+
+it.each(["\n", "\r\n"])("B3 extracts the licence name with %j line endings", lineEnding => {
+  expect(licenceName(` \tElastic License 2.0 (ELv2) \t${lineEnding}Licence body`)).toBe("Elastic License 2.0 (ELv2)");
+});
+
+it("B3 shows the repository licence, current version, owner and bundled notices in About", async () => {
+  const {readFileSync} = await import("node:fs");
+  const licence = readFileSync("../LICENSE", "utf8").split("\n")[0].trim();
+  invoke.mockImplementation(async command => command === "third_party_notices" ? "Bundled dependency notices" : {available:false});
+  render(<App />);
+  const about = within(at("Settings").getByRole("region", {name:"About"}));
+  expect(about.getByText("vectorAIz")).toHaveTextContent("vectorAIz by ai.market");
+  expect(about.getByText(`Version ${version}`)).toBeVisible();
+  expect(about.getByText(licence)).toBeVisible();
+  await userEvent.click(about.getByRole("button", {name:"Third-party notices"}));
+  expect(invoke).toHaveBeenCalledWith("third_party_notices", undefined);
+  expect(await about.findByLabelText("Third-party notices")).toHaveTextContent("Bundled dependency notices");
+});
+
+it("B3 cancels webview navigation and sends the canonical link through the native external opener", async () => {
+  render(<App />);
+  const about = within(at("Settings").getByRole("region", {name:"About"}));
+  const link = about.getByRole("link", {name:"https://ai.market/vectoraiz"});
+  expect(link).toHaveAttribute("href", "https://ai.market/vectoraiz");
+  const click = new MouseEvent("click", {bubbles:true,cancelable:true});
+  await act(async () => { link.dispatchEvent(click); });
+  expect(click.defaultPrevented).toBe(true);
+  expect(invoke).toHaveBeenCalledWith("open_product_page", undefined);
+});
+
+it.each(["open_product_page", "third_party_notices"])("B3 reports %s failures in About", async command => {
+  invoke.mockImplementation(async name => { if (name === command) throw "Could not open"; return {available:false}; });
+  render(<App />);
+  const about = within(at("Settings").getByRole("region", {name:"About"}));
+  await userEvent.click(command === "open_product_page" ? about.getByRole("link") : about.getByRole("button", {name:"Third-party notices"}));
+  expect(await about.findByRole("alert")).toHaveTextContent("Could not open");
 });
