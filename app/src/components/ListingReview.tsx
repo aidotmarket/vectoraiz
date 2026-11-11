@@ -5,15 +5,15 @@ interface Current { pack_id: string; generation: string; review_hash: string }
 interface Entry { location: string; kind: string; value: string | null; warning: boolean }
 interface Review { metadata_inventory: Entry[]; warnings: string[]; exclusions: string[]; accepted_review_hash: string | null }
 interface Source { source: string; artifact: string; format: string; supported: boolean }
-interface Sources { pack_id: string; sources: Source[] }
+interface Sources { pack_id: string; sources: Source[]; protected_columns: string[] }
 interface Built { current: Current; review: Review }
 const PAGE = 50;
 const failure = (cause: unknown) => typeof cause === "object" && cause !== null && "reason" in cause ? String(cause.reason) : String(cause);
-function editable(entry: Entry) {
+function editable(entry: Entry, protectedColumns: string[] | undefined) {
   const key = entry.location;
   return entry.value !== null && ((entry.kind === "text" && (key === "README.md" || key === "examples/query.py" || key.startsWith("originals-0001.zip!document-")))
     || key === "examples/query.json/query"
-    || ((key.startsWith("documents.parquet/column/") || key.startsWith("chunks.parquet/column/")) && key.endsWith("/name"))
+    || ((key.startsWith("documents.parquet/column/") || key.startsWith("chunks.parquet/column/")) && key.endsWith("/name") && protectedColumns !== undefined && !protectedColumns.includes(entry.value))
     || (key.startsWith("documents.parquet/id/") && key.endsWith("/column/2"))
     || (key.startsWith("chunks.parquet/id/") && key.endsWith("/column/4")));
 }
@@ -114,7 +114,7 @@ export function ListingReview() {
           <strong>{entry.location}</strong> <span>({entry.kind})</span>
           {entry.warning && <p>Warning: identity or confidential-looking content at this location. You may accept it or edit/exclude and rebuild.</p>}
           <pre tabIndex={0} style={{whiteSpace: "pre-wrap", overflowWrap: "anywhere"}}>{entry.value ?? "Unknown / absent"}</pre>
-          {editable(entry) && <button id={`listing-edit-${index}`} disabled={busy} onClick={() => setEditing({entry, index, value: edits[entry.location] ?? entry.value ?? ""})}>Edit {entry.location}</button>}
+          {editable(entry, sources?.protected_columns) && <button id={`listing-edit-${index}`} disabled={busy} onClick={() => setEditing({entry, index, value: edits[entry.location] ?? entry.value ?? ""})}>Edit {entry.location}</button>}
         </li>)}
       </ol>
       <button disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous inventory page</button>

@@ -1750,7 +1750,7 @@ async fn listing_sources<R: tauri::Runtime>(
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let pack_id = uuid::Uuid::new_v4();
         let sources = vz_pack::review_build::candidates(&library, &source)?;
-        Ok(serde_json::json!({"pack_id":pack_id,"sources":sources}))
+        Ok(serde_json::json!({"pack_id":pack_id,"sources":sources,"protected_columns":vz_pack::sanitize::PROTECTED_COLUMNS}))
     })
     .await
     .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::Error::from(e)))?
