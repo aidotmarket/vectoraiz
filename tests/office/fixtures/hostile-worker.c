@@ -1,50 +1,129 @@
-/* Synthetic C1 ingest/render capability probe. No tenant data or parser. */
+/* C1 synthetic capability probes, one bounded process per operation. */
 #include <arpa/inet.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <mach/mach.h>
+#include <netdb.h>
+#include <net/if.h>
+#include <servers/bootstrap.h>
+#include <spawn.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
-
-static void read_probe(const char *name, const char *path) {
-    int fd = open(path, O_RDONLY);
-    int error = errno;
-    char byte;
-    if (fd >= 0) {
-        if (read(fd, &byte, 1) >= 0) {
-            printf("\"%s\":\"allowed\",", name);
-            close(fd);
-            return;
-        }
-        error = errno;
-        close(fd);
-    }
-    printf("\"%s\":{\"denied_errno\":%d},", name, error);
-}
+#include <xpc/xpc.h>
 
 int main(int argc, char **argv) {
-    if (argc != 4) return 2;
-    printf("{");
-    read_probe("snapshot", argv[1]);
-    read_probe("sentinel", argv[2]);
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    int error = errno;
-    int created = fd >= 0;
-    if (created) {
-        struct sockaddr_in address = {0};
-        address.sin_family = AF_INET;
-        address.sin_port = htons((unsigned short)atoi(argv[3]));
-        inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
-        if (connect(fd, (struct sockaddr *)&address, sizeof(address)) == 0) {
-            printf("\"socket\":\"allowed\",\"socket_created\":true}\n");
-            close(fd);
-            return 0;
+    if (argc != 5) return 2;
+    signal(SIGPIPE, SIG_IGN);
+    struct rlimit memory={1536ULL*1024*1024,1536ULL*1024*1024};
+    struct rlimit files={64,64}, cpu={2,2}, core={0,0};
+    if (setrlimit(RLIMIT_DATA,&memory) || setrlimit(RLIMIT_NOFILE,&files) || setrlimit(RLIMIT_CPU,&cpu) || setrlimit(RLIMIT_CORE,&core)) return 4;
+    const char *probe = argv[1], *snapshot = argv[2], *host = argv[3];
+    int rc = -1, fd = -1, created = 0;
+    errno = 0;
+    if (!strcmp(probe,"snapshot") || !strcmp(probe,"host_read")) {
+        fd = open(!strcmp(probe,"snapshot") ? snapshot : host,O_RDONLY);
+        if (fd >= 0) { char byte; rc = (int)read(fd,&byte,1); }
+    } else if (!strcmp(probe,"host_stat")) {
+        struct stat s; rc = stat(host,&s);
+    } else if (!strcmp(probe,"host_list")) {
+        DIR *d = opendir(host); if (d) { rc = 0; closedir(d); }
+    } else if (!strcmp(probe,"host_write") || !strcmp(probe,"snapshot_write")) {
+        fd = open(!strcmp(probe,"snapshot_write") ? snapshot : host,O_WRONLY);
+        if (fd >= 0) rc = (int)write(fd,"X",1);
+    } else if (!strcmp(probe,"host_create") || !strcmp(probe,"scratch_create")) {
+        fd = open(host,O_CREAT|O_WRONLY,0600); rc = fd;
+    } else if (!strcmp(probe,"host_rename")) { rc = rename(host,argv[4]);
+    } else if (!strcmp(probe,"host_unlink")) { rc = unlink(host);
+    } else if (!strcmp(probe,"child_exec")) {
+        char *args[] = {"/usr/bin/true",NULL}; char *env[] = {NULL};
+        pid_t pid; int error = posix_spawn(&pid,args[0],NULL,NULL,args,env);
+        if (error) { errno=error; rc=-1; } else { waitpid(pid,&rc,0); rc=0; }
+    } else if (!strcmp(probe,"inherited_handle")) {
+        char byte; rc=(int)read(9,&byte,1);
+    } else if (!strcmp(probe,"dns")) {
+        struct addrinfo *a=NULL;
+        int error=getaddrinfo("c1-probe.invalid",NULL,NULL,&a);
+        if (a) freeaddrinfo(a);
+        printf("{\"rc\":%d,\"errno\":%d,\"gai_error\":%d}\n",error ? -1 : 0,errno,error);
+        return 0;
+    } else if (!strncmp(probe,"mach_",5)) {
+        mach_port_t service=MACH_PORT_NULL;
+        const char *name = !strcmp(probe,"mach_open_url") ? "com.apple.coreservices.launchservicesd" : "com.apple.cfprefsd.daemon";
+        kern_return_t error=bootstrap_look_up(bootstrap_port,name,&service);
+        if (service != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),service);
+        printf("{\"rc\":%d,\"errno\":%d,\"mach_error\":%d}\n",error==KERN_SUCCESS ? 0 : -1,errno,error);
+        return 0;
+    } else if (!strcmp(probe,"xpc_broker")) {
+        xpc_connection_t c=xpc_connection_create_mach_service("com.apple.cfprefsd.daemon",NULL,0);
+        xpc_connection_set_event_handler(c, ^(xpc_object_t event) { (void)event; });
+        xpc_connection_resume(c);
+        xpc_object_t m=xpc_dictionary_create(NULL,NULL,0);
+        xpc_dictionary_set_string(m,"C1","synthetic-read-only-probe");
+        xpc_object_t reply=xpc_connection_send_message_with_reply_sync(c,m);
+        int denied = xpc_get_type(reply)==XPC_TYPE_ERROR;
+        char *desc=xpc_copy_description(reply);
+        printf("{\"rc\":%d,\"errno\":%d,\"xpc_error\":%s}\n",denied ? -1 : 0,errno,denied ? "true":"false");
+        free(desc); xpc_release(reply); xpc_release(m); xpc_connection_cancel(c); xpc_release(c);
+        return 0;
+    } else if (!strcmp(probe,"unix_connect")) {
+        fd=socket(AF_UNIX,SOCK_STREAM,0); created=fd>=0;
+        struct sockaddr_un a={0}; a.sun_family=AF_UNIX;
+        strlcpy(a.sun_path,host,sizeof(a.sun_path));
+        if (fd>=0) rc=connect(fd,(struct sockaddr *)&a,sizeof(a));
+    } else if (!strcmp(probe,"system_socket")) {
+        fd=socket(AF_SYSTEM,SOCK_DGRAM,2); created=fd>=0; rc=fd;
+    } else if (!strcmp(probe,"socketpair")) {
+        int pair[2]; rc=socketpair(AF_UNIX,SOCK_STREAM,0,pair);
+        if (!rc) {close(pair[0]);close(pair[1]);}
+    } else {
+        char operation[40], destination[40]; int family=0, udp=0;
+        if (sscanf(probe,"%39[^:]:%d:%d:%39s",operation,&family,&udp,destination)!=4) return 3;
+        int domain=family==6 ? AF_INET6 : AF_INET;
+        fd=socket(domain,udp ? SOCK_DGRAM : SOCK_STREAM,0); created=fd>=0;
+        struct timeval timeout={1,0};
+        if (fd>=0) {
+            setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout));
+            struct sockaddr_storage storage={0}; socklen_t len;
+            if (family==6) {
+                struct sockaddr_in6 *a=(void *)&storage; a->sin6_family=AF_INET6;
+                a->sin6_port=htons((unsigned short)atoi(argv[4]));
+                char *zone=strchr(destination,'%');
+                if(zone) {*zone=0; a->sin6_scope_id=if_nametoindex(zone+1);}
+                if(inet_pton(AF_INET6,destination,&a->sin6_addr)!=1) return 5; len=sizeof(*a);
+            } else {
+                struct sockaddr_in *a=(void *)&storage; a->sin_family=AF_INET;
+                a->sin_port=htons((unsigned short)atoi(argv[4]));
+                inet_pton(AF_INET,destination,&a->sin_addr); len=sizeof(*a);
+            }
+            if (!strcmp(operation,"socket")) rc=fd;
+            else if (!strcmp(operation,"connect")) rc=connect(fd,(void *)&storage,len);
+            else if (!strcmp(operation,"bind")) rc=bind(fd,(void *)&storage,len);
+            else if (!strcmp(operation,"listen")) rc=listen(fd,1);
+            else if (!strcmp(operation,"sendto")) rc=(int)sendto(fd,"C1",2,0,(void *)&storage,len);
+            else if (!strcmp(operation,"sendmsg")) {
+                struct iovec iov={"C1",2}; struct msghdr m={0};
+                m.msg_name=&storage;m.msg_namelen=len;m.msg_iov=&iov;m.msg_iovlen=1;
+                rc=(int)sendmsg(fd,&m,0);
+            } else if (!strcmp(operation,"connectx")) {
+                sa_endpoints_t e={0}; e.sae_dstaddr=(void *)&storage;e.sae_dstaddrlen=len;
+                rc=connectx(fd,&e,SAE_ASSOCID_ANY,0,NULL,0,NULL,NULL);
+            } else if (!strcmp(operation,"multicast")) {
+                if(family==6) {struct ipv6_mreq m={0};inet_pton(AF_INET6,"ff02::1",&m.ipv6mr_multiaddr);m.ipv6mr_interface=if_nametoindex("lo0");rc=setsockopt(fd,IPPROTO_IPV6,IPV6_JOIN_GROUP,&m,sizeof(m));}
+                else {struct ip_mreq m={0};inet_pton(AF_INET,"224.0.0.251",&m.imr_multiaddr);m.imr_interface.s_addr=htonl(INADDR_LOOPBACK);rc=setsockopt(fd,IPPROTO_IP,IP_ADD_MEMBERSHIP,&m,sizeof(m));}
+            }
         }
-        error = errno;
-        close(fd);
     }
-    printf("\"socket\":{\"denied_errno\":%d},\"socket_created\":%s}\n",
-           error, created ? "true" : "false");
+    int error=errno;
+    if (fd>=0) close(fd);
+    printf("{\"rc\":%d,\"errno\":%d,\"socket_created\":%s}\n",rc,error,created ? "true":"false");
     return 0;
 }

@@ -149,3 +149,67 @@ By hand — UNRUN, do not execute without separately provisioned host/IT tenant
 
 C0 remains unresolved; live CORE v9.30 is unverified. A1–A11 are not waived.
 No enabled distributable office feature follows from any local spike success.
+
+S1927 approved delta rerun (manifest v2)
+--------------------------------------
+
+Authority: runbooks `c45acd1a37d00f5ceda88aaeaf9837f265960dd4`, complete
+"C1 design delta (S1927)" and C1. Revalidated integration base:
+`af145f7280bf162e25809f380bcc95f8b638e105`, merged into the feasibility branch.
+The earlier sections document v1 evidence; v2 supersedes the described prototype
+mechanisms, without claiming C1 acceptance or changing any acceptance bound.
+
+* Snapshot storage is owned by the immutable generation and retires with its
+  last Arc. Publication binds scope/recipe/generation. Same-scope Refresh keeps
+  old readers; delivery retries once with the current recipe. Scope changes,
+  Off and revocation cancel readers via watch, remove the published snapshot,
+  and refuse replacement until the old readers drain. The five-second deadline
+  covers both attempts. Native synchronous embedding still requires the
+  separately measured cancellation seam; this is not installed qualification.
+* v2 runs native 32- and 2,048-document synthetic measurements, and, when
+  `--public-docs` is supplied, native extraction/embedding/snapshot measurements
+  for its first 1,000 public files. Every source hash, extraction failure,
+  per-query result and chunk/page count is private. Public correctness compares
+  exact first-chunk content, permitting duplicate content; human relevance,
+  viewer completeness and true cold-cache trials remain owed. RSS values are
+  process high-water marks, not instantaneous or GPU-exclusive allocations.
+* The candidate Seatbelt profile starts with deny-default. It grants only
+  runtime assets, literal root, worker, read-only snapshot and per-job scratch.
+  Both role-labelled capability workers probe host reads/metadata/list/write/
+  create/rename/unlink; socket creation, connect/bind/listen/sendto/connectx/
+  sendmsg, TCP/UDP IPv4/IPv6, loopback, candidate LAN and documentation Internet
+  addresses; AF_UNIX, AF_SYSTEM, multicast, DNS, Mach/XPC/LaunchServices broker
+  lookup, children and sanitized inherited descriptors. Non-EPERM errors and
+  unexplained broker errors fail. Socket creation remains a separate strict
+  result. Real native ingest ordinary-format controls are also attempted;
+  there is no actual render worker at this C1 base. The capability workers
+  apply DATA=1.5 GiB, NOFILE=64, CPU=2 s and CORE=0; the parent deadline is 3 s.
+* Admission and classification share one lock. Eviction selects the oldest
+  unauthenticated connection from the source with most pending connections;
+  live authenticated sessions are excluded. Eight connections/person and eight
+  pending/source are experimental. Global registry and draining-worker permits
+  are both bounded at 64 (plus one transient accept candidate). TLS/header idle
+  deadline is 2 s; header bytes are bounded at 16 KiB. Finite 64-arrival stalls
+  are followed by at least 3 s per h1/h2 of 12-worker raw-TLS/header/pre-auth
+  churn. Each protocol records three rounds of 25 established, 25 new-auth and
+  25 pre-auth sign-in requests. Sign-in success is separate; none is protected
+  before authentication. Invalid/expired session state demotes protection.
+* The fair full-run lease precedes start and inference acquisition. All four
+  named cache mutations and cancellation race every batch/yield/drain boundary.
+  Actual activation and verified import/download promotion APIs are additionally
+  wrapped in the harness lease. Cancellation signals immediately, then performs
+  generation-scoped invalidation after drain without re-signalling. Duplicate
+  deferred invalidation cannot cancel a successor. Product call sites remain
+  unchanged and therefore unqualified. The baseline product cancel gap remains
+  a recorded failure. Current read-only MCP paths are never labelled mutations.
+* Refusal traces now run desktop indexing and Refresh (two batches of at most
+  32 chunks), desktop Ask, and all three concurrently. They retain separate
+  1 ms sampling traces and null accepted maxima. A1 remains each correct search
+  <=5 s; busy never counts as success. No cap or refusal bound is accepted here.
+
+By-hand items above remain unchanged. Tenant trials are specifically pending
+Max's Partner Center check. All evidence, fixture/model copies and command
+logs must be under `$KD_BRIDGE_JOB_EVIDENCE`, outside the checkout. Use a new
+`--out` per run; `manifest-v1.schema.json` remains the historical validator and
+`manifest-v2.schema.json` pins this rerun base. No product listener or enabled
+build is created by the test-only, default-off feature.

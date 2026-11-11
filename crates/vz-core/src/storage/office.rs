@@ -116,6 +116,8 @@ impl State {
 pub struct Snapshot {
     table: lancedb::Table,
     chunks: HashMap<String, Chunk>,
+    // Last field: table is dropped before generation storage is retired.
+    _storage: tempfile::TempDir,
 }
 impl Snapshot {
     pub async fn build(state: &State, root: &Path) -> Result<Self> {
@@ -128,7 +130,9 @@ impl Snapshot {
         let mut ordered: Vec<_> = chunks.values().cloned().collect();
         ordered.sort_by(|a, b| a.chunk_id.cmp(&b.chunk_id));
         let batch = chunks_batch(&ordered)?;
-        let db = lancedb::connect(root.to_str().context("UTF-8 path")?)
+        std::fs::create_dir_all(root)?;
+        let storage = tempfile::tempdir_in(root)?;
+        let db = lancedb::connect(storage.path().to_str().context("UTF-8 path")?)
             .execute()
             .await?;
         let reader = RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema());
@@ -142,7 +146,11 @@ impl Snapshot {
             .await?;
         drop(table);
         let table = db.open_table("chunks").execute().await?;
-        Ok(Self { table, chunks })
+        Ok(Self {
+            table,
+            chunks,
+            _storage: storage,
+        })
     }
     pub async fn search(&self, query: &str, vector: &[f32], top_k: usize) -> Result<Vec<Hit>> {
         Ok(self.search_timed(query, vector, top_k).await?.0)
@@ -202,5 +210,123 @@ impl Snapshot {
             .collect();
         timing.ranking_ms = ms(started);
         Ok((hits, timing))
+    }
+}
+
+/// Test-only publication boundary. Snapshot data and its recipe/scope identity
+/// are immutable; cancellation is shared with readers of retired scopes.
+pub struct Generation {
+    pub id: u64,
+    pub scope: String,
+    pub recipe: String,
+    pub snapshot: Snapshot,
+    cancelled: tokio::sync::watch::Sender<bool>,
+}
+impl Generation {
+    pub fn new(id: u64, scope: &str, recipe: &str, snapshot: Snapshot) -> Self {
+        Self {
+            id,
+            scope: scope.into(),
+            recipe: recipe.into(),
+            snapshot,
+            cancelled: tokio::sync::watch::channel(false).0,
+        }
+    }
+    pub fn cancelled(&self) -> bool {
+        *self.cancelled.borrow()
+    }
+}
+#[derive(Default)]
+struct Published {
+    current: Option<std::sync::Arc<Generation>>,
+    retired: Vec<std::sync::Weak<Generation>>,
+    draining: bool,
+}
+#[derive(Default)]
+pub struct Publication(std::sync::RwLock<Published>);
+impl Publication {
+    /// A scope change first cancels/removes every old snapshot. Publication is
+    /// refused until old readers drain; caller prepares/retries independently.
+    pub fn publish(&self, next: Generation) -> Result<()> {
+        let mut state = self.0.write().unwrap();
+        state.retired.retain(|g| g.strong_count() > 0);
+        if let Some(old) = state.current.as_ref() {
+            anyhow::ensure!(next.id > old.id, "nonmonotonic generation");
+            if old.scope != next.scope {
+                let old = state.current.take().unwrap();
+                old.cancelled.send_replace(true);
+                state.retired.push(std::sync::Arc::downgrade(&old));
+                for old in state.retired.iter().filter_map(|g| g.upgrade()) {
+                    old.cancelled.send_replace(true);
+                }
+                state.draining = true;
+            }
+        }
+        if state.draining {
+            anyhow::ensure!(
+                state.retired.iter().all(|g| g.strong_count() == 0),
+                "scope readers still draining"
+            );
+            state.draining = false;
+        }
+        if let Some(old) = state.current.take() {
+            state.retired.push(std::sync::Arc::downgrade(&old));
+        }
+        state.current = Some(std::sync::Arc::new(next));
+        Ok(())
+    }
+    pub fn stop(&self) {
+        let mut state = self.0.write().unwrap();
+        if let Some(old) = state.current.take() {
+            old.cancelled.send_replace(true);
+            state.retired.push(std::sync::Arc::downgrade(&old));
+        }
+        for old in state.retired.iter().filter_map(|g| g.upgrade()) {
+            old.cancelled.send_replace(true);
+        }
+        state.draining = true;
+    }
+    pub fn capture(&self) -> Result<std::sync::Arc<Generation>> {
+        self.0
+            .read()
+            .unwrap()
+            .current
+            .clone()
+            .context("office unavailable")
+    }
+    /// Embedding callback owns/releases the inference guard; storage is outside
+    /// it. Each retry embeds with the captured recipe. Final gate is atomic with
+    /// publication. Authorization is supplied by the caller and checked twice.
+    pub async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+        mut embed: impl FnMut(&str, &str) -> Result<Vec<f32>>,
+        authorized: impl Fn() -> bool,
+    ) -> Result<Vec<Hit>> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        for _ in 0..2 {
+            anyhow::ensure!(authorized(), "delivery revoked");
+            let generation = self.capture()?;
+            let vector = embed(query, &generation.recipe)?;
+            let mut cancel = generation.cancelled.subscribe();
+            anyhow::ensure!(!*cancel.borrow(), "delivery revoked");
+            let hits = tokio::select! {
+                result = tokio::time::timeout_at(deadline,
+                    generation.snapshot.search(query, &vector, top_k)) => result??,
+                _ = cancel.changed() => anyhow::bail!("delivery revoked"),
+            };
+            anyhow::ensure!(!generation.cancelled() && authorized(), "delivery revoked");
+            anyhow::ensure!(tokio::time::Instant::now() <= deadline, "search deadline");
+            let current = self.0.read().unwrap();
+            if current
+                .current
+                .as_ref()
+                .is_some_and(|g| std::sync::Arc::ptr_eq(g, &generation))
+            {
+                return Ok(hits);
+            }
+        }
+        anyhow::bail!("generation changed twice; refuse within search deadline")
     }
 }

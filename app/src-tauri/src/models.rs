@@ -176,6 +176,24 @@ impl<E: CachedEngine> OperationState<E> {
     pub fn office_signal_cancel(&self) {
         self.cancel.lock().unwrap().send_replace(true);
     }
+    // Harness-only: capture the cancelled generation while signalling, then
+    // invalidate it after the fair generation lease drains. Never signal again.
+    #[cfg(all(test, feature = "office-feasibility"))]
+    pub fn office_cancel_generation(&self) -> u64 {
+        self.office_signal_cancel();
+        self.generation.load(Ordering::Acquire)
+    }
+    #[cfg(all(test, feature = "office-feasibility"))]
+    pub fn office_invalidate_generation(&self, cancelled: u64) -> bool {
+        self.generation
+            .compare_exchange(
+                cancelled,
+                cancelled + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
     pub fn cancel(&self) {
         self.checks.lock().unwrap().clear();
         self.cancel.lock().unwrap().send_replace(true);
