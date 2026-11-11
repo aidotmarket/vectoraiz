@@ -150,6 +150,7 @@ pub(super) fn create_file(path: &Path) -> Result<File> {
         }
         File::from_raw_handle(handle)
     };
+    check_private(path)?;
     Ok(file)
 }
 pub(super) fn check_private(path: &Path) -> Result<()> {

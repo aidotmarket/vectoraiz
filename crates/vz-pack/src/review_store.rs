@@ -209,7 +209,20 @@ impl ReviewStore {
             }
             Err(error) => return Err(error),
         };
-        fs2::FileExt::lock_exclusive(&lock)?;
+        loop {
+            lease.check(policy)?;
+            match fs2::FileExt::try_lock_exclusive(&lock) {
+                Ok(()) => break,
+                Err(error)
+                    if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
+                {
+                    // A waiter must observe policy cancellation even while a
+                    // different process still owns the pack's file lock.
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
         lease.check(policy)?;
         Ok(PackReview {
             store: self,
@@ -266,10 +279,12 @@ pub struct NativePackReview<'a> {
 impl NativePackReview<'_> {
     /// Only a sanitizer rebuild may call freeze with this captured binding.
     pub fn capture(&self, source: &Path) -> Result<ReviewBinding> {
+        self.pack.lease.check(self.pack.policy)?;
         let index = &self.index.selection.index;
         let mut binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
         binding.selection = Some(self.index.selection.clone());
         binding.check()?;
+        self.pack.lease.check(self.pack.policy)?;
         Ok(binding)
     }
 
@@ -363,14 +378,24 @@ impl PackReview<'_> {
             let files = tree(payload)?;
             ensure!(!files.is_empty(), "empty reviewed payload");
             for (name, expected) in &files {
+                self.lease.check(self.policy)?;
                 let target = staged.join(name);
                 private_parents(&staged, Path::new(name))?;
                 let mut input = File::open(payload.join(name))?.take(expected.size + 1);
                 let mut output = private_file(&target)?;
-                ensure!(
-                    std::io::copy(&mut input, &mut output)? == expected.size,
-                    "payload changed while staging"
-                );
+                let cancel = self.lease.cancellation_token();
+                let mut copied = 0;
+                let mut buffer = [0; 65536];
+                loop {
+                    ensure!(!cancel.is_cancelled(), ListingError::StaleGeneration);
+                    let count = input.read(&mut buffer)?;
+                    if count == 0 {
+                        break;
+                    }
+                    output.write_all(&buffer[..count])?;
+                    copied += count as u64;
+                }
+                ensure!(copied == expected.size, "payload changed while staging");
                 output.sync_all()?;
                 ensure!(
                     hash_file(&target)? == *expected,
@@ -1011,6 +1036,38 @@ mod tests {
     }
 
     #[test]
+    fn native_fence_interoperates_with_real_storage_writer_and_recovery() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        assert!(store.lock_native(&policy, id, &index).is_err());
+        drop(writer);
+        let current;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            current = fixture.freeze_bound(
+                &native.pack,
+                native.capture(&fixture.0.join("source")).unwrap(),
+            );
+            native.accept(&current).unwrap();
+            let before = tree(&index).unwrap();
+            assert!(vz_core::storage::State::open(&index).is_err());
+            assert_eq!(tree(&index).unwrap(), before);
+            native.check_accepted(&current).unwrap();
+        }
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer
+            .db
+            .execute("INSERT INTO jobs VALUES (1, 'neutral', 'ready', NULL)", [])
+            .unwrap();
+        drop(writer);
+        stale(store.lock_native_current(&policy, &current, &index));
+    }
+
+    #[test]
     fn generation_roundtrip_and_explicit_acceptance_survive_restart() {
         let fixture = Fixture::new();
         let (_, policy) = policy();
@@ -1308,10 +1365,11 @@ mod tests {
             .is_err());
         *source.0.lock().unwrap() = ManagedPolicy::Denied;
         policy.refresh();
-        drop(pack);
+        // Cancellation cannot depend on the holder releasing its mutex.
         assert!(!acquired
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap());
+        drop(pack);
         worker.join().unwrap();
     }
 }
