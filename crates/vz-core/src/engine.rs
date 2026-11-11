@@ -385,6 +385,68 @@ pub struct ChatOnly {
     pins: serde_json::Value,
 }
 impl ChatOnly {
+    /// C1 experiment only: bounded native prefill/decode steps with cooperative
+    /// abort checks. No product caller, streaming output, cloud or key access.
+    /// A native step can still exceed 1s: the harness measures, never assumes,
+    /// the cancellation bound. This does not alter desktop Ask's generation.
+    #[cfg(feature = "office-feasibility")]
+    pub fn office_abort_probe(
+        &self,
+        cancelled: &std::sync::atomic::AtomicBool,
+        phase: &std::sync::atomic::AtomicU8,
+    ) -> Result<bool> {
+        use std::sync::atomic::Ordering;
+        let n_ctx = pin_u32(&self.pins, "chat", "n_ctx", 4096)?.min(4096);
+        let output = pin_u32(&self.pins, "chat", "max_output_tokens", 192)?.min(192);
+        let text = format!(
+            "{}\nList the reference numbers in order:",
+            "Synthetic office reference 1927. ".repeat(128)
+        );
+        let tokens = self.model.str_to_token(&text, AddBos::Always)?;
+        ensure!(
+            tokens.len() + output as usize + 16 < n_ctx as usize,
+            "probe context bound"
+        );
+        let mut ctx = self.model.new_context(
+            &self.backend,
+            LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(n_ctx))
+                .with_n_batch(32),
+        )?;
+        let mut batch = LlamaBatch::new(32, 1);
+        let start = std::time::Instant::now();
+        phase.store(1, Ordering::Release);
+        for (offset, part) in tokens.chunks(32).enumerate() {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(true);
+            }
+            ensure!(start.elapsed().as_secs() < 30, "probe 30s deadline");
+            batch.clear();
+            for (j, token) in part.iter().enumerate() {
+                let i = offset * 32 + j;
+                batch.add(*token, i as i32, &[0], i + 1 == tokens.len())?;
+            }
+            ctx.decode(&mut batch)?;
+        }
+        let mut sampler = LlamaSampler::greedy();
+        phase.store(2, Ordering::Release);
+        for i in 0..output as usize {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(true);
+            }
+            ensure!(start.elapsed().as_secs() < 30, "probe 30s deadline");
+            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            sampler.accept(token);
+            if self.model.is_eog_token(token) {
+                return Ok(false);
+            }
+            batch.clear();
+            batch.add(token, (tokens.len() + i) as i32, &[0], true)?;
+            ctx.decode(&mut batch)?;
+        }
+        Ok(false)
+    }
+
     pub fn load(assets: &Path, pins: &Path, cpu: bool) -> Result<Self> {
         let pins = serde_json::from_slice(&std::fs::read(pins)?)?;
         let backend = backend()?;

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:vectoraiz:office-feasibility:manifest:1",
+  "title": "C1 feasibility evidence, never enablement authority",
+  "type": "object",
+  "required": ["schema_version", "source_sha", "source_dirty", "accepted_base_sha", "created_utc", "host", "c0", "workload", "fixture_hashes", "pins", "batch_size", "T_search_refusal_max", "certificate_capabilities", "worker_limits", "connection_caps", "results", "by_hand_unrun", "decision"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "source_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "source_dirty": {"type": "boolean"},
+    "accepted_base_sha": {"const": "2af9e945fce07be6935ef3e4445a054d20b0b26c"},
+    "created_utc": {"type": "string"},
+    "host": {"type": "object"},
+    "c0": {"type": "object", "required": ["tenant", "directory_permissions", "workload_accepted", "viewer_coverage", "core_v930_live"]},
+    "workload": {"type": "object"},
+    "fixture_hashes": {"type": "object", "additionalProperties": {"type": "string", "pattern": "^[0-9a-f]{64}$"}},
+    "pins": {"type": "object", "required": ["cargo_lock_sha256", "model", "recipe", "python", "h2"]},
+    "batch_size": {"type": "integer", "minimum": 1, "maximum": 32},
+    "T_search_refusal_max": {
+      "type": "object",
+      "required": ["desktop_indexing", "office_refresh", "desktop_ask", "combined"],
+      "additionalProperties": {
+        "type": "object", "required": ["measured_max_ms", "accepted_max_ms", "status", "reason"],
+        "properties": {
+          "measured_max_ms": {"type": ["number", "null"], "minimum": 0},
+          "accepted_max_ms": {"type": ["number", "null"], "minimum": 0},
+          "status": {"enum": ["pass", "fail", "blocked", "unrun"]},
+          "reason": {"type": "string"}
+        }
+      }
+    },
+    "certificate_capabilities": {"type": "object"},
+    "worker_limits": {"type": "object"},
+    "connection_caps": {"type": "object"},
+    "results": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object", "required": ["status"],
+        "properties": {"status": {"enum": ["pass", "fail", "blocked", "unrun"]}}
+      }
+    },
+    "by_hand_unrun": {"type": "array", "items": {"type": "string"}},
+    "decision": {"const": "RETURN_TO_DESIGN; C1 incomplete; no enabled distribution"}
+  },
+  "additionalProperties": false
+}
