@@ -22,6 +22,7 @@ import time
 import traceback
 import uuid
 import struct
+import signal
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT / "tests/office/fixtures"
@@ -51,21 +52,44 @@ def outside(path):
     return path
 
 
-def command(argv, evidence, name, timeout=120, env=None, input_data=None, inherited_fds=()):
-    """Capture COMPLETE output, including failures, before returning status."""
+def command(argv, evidence, name, timeout=120, env=None, input_data=None, inherited_fds=(), memory_limit_bytes=None):
+    """Capture full output; kill the entire isolated group on deadline/budget."""
     target = evidence / (name + ".log")
     start = time.monotonic()
+    peak_rss = 0
+    termination = None
     with target.open("wb") as log:
-        try:
-            result = subprocess.run([RTK, "proxy", *map(str, argv)], cwd=ROOT,
-                                    stdout=log, stderr=subprocess.STDOUT,
-                                    timeout=timeout, env=env, input=input_data, pass_fds=inherited_fds, check=False)
-            code = result.returncode
-        except subprocess.TimeoutExpired:
-            log.write(b"\nHARNESS TIMEOUT (failure, full preceding output retained)\n")
-            code = 124
-    return {"exit_code": code, "elapsed_s": time.monotonic() - start,
-            "raw": target.name}
+        process = subprocess.Popen([RTK, "proxy", *map(str, argv)], cwd=ROOT,
+                                   stdout=log, stderr=subprocess.STDOUT,
+                                   stdin=subprocess.PIPE if input_data is not None else subprocess.DEVNULL,
+                                   env=env, pass_fds=inherited_fds, start_new_session=True)
+        if input_data is not None:
+            try: process.stdin.write(input_data); process.stdin.close()
+            except BrokenPipeError: pass
+        while process.poll() is None:
+            if time.monotonic()-start > timeout:
+                termination = "deadline"
+            if memory_limit_bytes:
+                raw=subprocess.check_output([RTK,"proxy","/bin/ps","-axo","pid=,ppid=,rss="],text=True)
+                entries=[tuple(map(int,line.split())) for line in raw.splitlines() if len(line.split())==3]
+                descendants={process.pid}
+                while True:
+                    found={pid for pid,ppid,_ in entries if ppid in descendants}
+                    if found.issubset(descendants): break
+                    descendants.update(found)
+                rss=sum(rss*1024 for pid,_,rss in entries if pid in descendants)
+                peak_rss=max(peak_rss,rss)
+                if rss > memory_limit_bytes: termination="rss_budget"
+            if termination:
+                try: os.killpg(process.pid,signal.SIGKILL)
+                except ProcessLookupError: pass
+                log.write(f"\nHARNESS TERMINATION: {termination} (preceding output preserved)\n".encode())
+                break
+            time.sleep(.01)
+        code=process.wait()
+    return {"exit_code":code,"elapsed_s":time.monotonic()-start,"raw":target.name,
+            "termination":termination,"peak_tree_rss_bytes":peak_rss if memory_limit_bytes else None,
+            "memory_limit_bytes":memory_limit_bytes}
 
 
 def require(result):
@@ -212,7 +236,7 @@ def confinement(evidence):
                '(allow file-read* file-write* (subpath ' + json.dumps(str(scratch)) + '))'
                '(allow sysctl-read)')
     (evidence / "office-worker.sb").write_text(profile + "\n")
-    probes = ["snapshot", "scratch_create", "host_read", "host_stat", "host_list", "host_write", "host_create", "host_rename", "host_unlink", "snapshot_write", "child_exec", "child_fork", "open_url", "inherited_handle", "dns", "mach_broker", "mach_open_url", "xpc_broker", "unix_connect", "system_socket", "socketpair"]
+    probes = ["snapshot", "scratch_create", "host_read", "host_stat", "host_list", "host_write", "host_create", "host_rename", "host_unlink", "snapshot_write", "child_exec", "child_fork", "open_url", "inherited_handle", "dns", "mach_broker", "mach_open_url", "xpc_broker", "unix_connect", "system_socket", "socketpair", "memory_budget"]
     for family, destinations in [(4, ["127.0.0.1", "192.168.1.1", "192.0.2.1"]), (6, ["::1", "fe80::1%lo0", "2001:db8::1"])]:
         for udp in (0, 1):
             for destination in destinations:
@@ -252,9 +276,9 @@ def confinement(evidence):
                 argv = [binary, probe, allowed, host, port if probe != "host_rename" else evidence / "forbidden-renamed"]
                 clean_env = {"PATH": "/usr/bin:/bin"}
                 # No service/broker positive control that could launch a browser.
-                positive = command(argv, evidence, f"{role}-{index}-positive", 3, clean_env) if probe not in ("mach_open_url", "open_url", "xpc_broker") and not (":" in probe and not probe.endswith(":127.0.0.1") and not probe.endswith(":%s" % "::1")) else None
+                positive = command(argv, evidence, f"{role}-{index}-positive", 3, clean_env) if probe not in ("mach_open_url", "open_url", "xpc_broker", "memory_budget") and not (":" in probe and not probe.endswith(":127.0.0.1") and not probe.endswith(":%s" % "::1")) else None
                 sentinel.write_text("synthetic sentinel\n")
-                negative = command(["/usr/bin/sandbox-exec", "-p", profile, *argv], evidence, f"{role}-{index}-confined", 3, clean_env)
+                negative = command(["/usr/bin/sandbox-exec", "-p", profile, *argv], evidence, f"{role}-{index}-confined", 3, clean_env, memory_limit_bytes=1536*1024*1024)
                 def read(result):
                     if result is None: return {}
                     try: return json.loads((evidence / result["raw"]).read_text())
@@ -267,6 +291,7 @@ def confinement(evidence):
                 if probe == "open_url": denied = raw.get("explicit_launch_denial") is True
                 # XPC errors and DNS nonexistence are NOT proof of confinement.
                 passed = negative["exit_code"] == 0 and (raw.get("rc", -1) >= 0 if positive_expected else denied)
+                if probe == "memory_budget": passed = negative["termination"] == "rss_budget"
                 rows[probe] = {"status": "pass" if passed else "fail", "raw": raw, "command": negative, "positive": positive, "positive_raw": control,
                                "control_proven": control.get("rc", -1) >= 0,
                                "interpretation": "positive startup/scratch" if positive_expected else "EPERM/EACCES or explicit broker denial required; other errors remain failures"}
@@ -288,7 +313,7 @@ def confinement(evidence):
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail", "roles": results, "strict_socket_creation": "pass" if strict else "fail",
             "outcome_contract": "pass" if all(row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if not name.startswith("socket:")) else "fail",
             "limits": "capability prototype; actual ingest format control recorded separately, actual render worker absent; documentation-prefix Internet probes, LAN address candidate 192.168.1.1; DNS/XPC errors without explicit denial fail, not silently accepted",
-            "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"data_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
+            "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
 
 
 def transport(evidence, evict_incomplete=True):

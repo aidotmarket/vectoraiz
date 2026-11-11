@@ -24,13 +24,16 @@
 int main(int argc, char **argv) {
     if (argc != 5) return 2;
     signal(SIGPIPE, SIG_IGN);
-    struct rlimit memory={1536ULL*1024*1024,1536ULL*1024*1024};
     struct rlimit files={64,64}, cpu={2,2}, core={0,0};
-    if (setrlimit(RLIMIT_DATA,&memory) || setrlimit(RLIMIT_NOFILE,&files) || setrlimit(RLIMIT_CPU,&cpu) || setrlimit(RLIMIT_CORE,&core)) return 4;
+    if (setrlimit(RLIMIT_NOFILE,&files) || setrlimit(RLIMIT_CPU,&cpu) || setrlimit(RLIMIT_CORE,&core)) return 4;
     const char *probe = argv[1], *snapshot = argv[2], *host = argv[3];
     int rc = -1, fd = -1, created = 0;
     errno = 0;
-    if (!strcmp(probe,"snapshot") || !strcmp(probe,"host_read")) {
+    if (!strcmp(probe,"memory_budget")) {
+        size_t bytes=2ULL*1024*1024*1024;
+        volatile char *allocation=malloc(bytes);
+        if(allocation) {for(size_t i=0;i<bytes;i+=4096) allocation[i]=1;rc=0;free((void *)allocation);}
+    } else if (!strcmp(probe,"snapshot") || !strcmp(probe,"host_read")) {
         fd = open(!strcmp(probe,"snapshot") ? snapshot : host,O_RDONLY);
         if (fd >= 0) { char byte; rc = (int)read(fd,&byte,1); }
     } else if (!strcmp(probe,"host_stat")) {

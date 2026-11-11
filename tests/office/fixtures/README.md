@@ -183,7 +183,10 @@ mechanisms, without claiming C1 acceptance or changing any acceptance bound.
   unexplained broker errors fail. Socket creation remains a separate strict
   result. Real native ingest ordinary-format controls are also attempted;
   there is no actual render worker at this C1 base. The capability workers
-  apply DATA=1.5 GiB, NOFILE=64, CPU=2 s and CORE=0; the parent deadline is 3 s.
+  apply NOFILE=64, CPU=2 s and CORE=0; the parent enforces a 1.5 GiB
+  process-tree RSS watchdog and a 3 s deadline. Mac RLIMIT_DATA rejects the
+  requested limit; its startup failures are preserved. A memory-budget probe
+  records watchdog termination and observed peak/overshoot separately.
 * Admission and classification share one lock. Eviction selects the oldest
   unauthenticated connection from the source with most pending connections;
   live authenticated sessions are excluded. Eight connections/person and eight
