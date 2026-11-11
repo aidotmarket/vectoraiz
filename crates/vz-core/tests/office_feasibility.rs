@@ -670,6 +670,13 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
         let entries: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(inventory)?)?;
         let root = external.join("public-state");
         let mut state = State::open(&root)?;
+        let resume=std::env::var_os("VZ_OFFICE_RESUME_PUBLIC").is_some();
+        let mut existing=if resume {state.documents()?.into_iter().map(|d|(d.doc_id.clone(),d)).collect::<std::collections::HashMap<_,_>>()} else {std::collections::HashMap::new()};
+        if resume {
+            ensure!(existing.values().all(|d|d.chunks.iter().all(|c|c.embedding.len()==engines.recipe.dimensions)),"resume recipe dimensions mismatch");
+            let previous:serde_json::Value=serde_json::from_slice(&std::fs::read(external.join("public-storage.json"))?)?;
+            ensure!(previous["recipe"]==serde_json::to_value(&engines.recipe)?,"resume recipe mismatch");
+        }
         let start = Instant::now();
         let mut documents = Vec::new();
         let mut oracles = Vec::new();
@@ -679,6 +686,17 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
             let path = PathBuf::from(entry["path"].as_str().unwrap());
             let bytes = std::fs::read(&path)?;
             ensure!(sha256(&bytes) == entry["sha256"].as_str().unwrap(), "public source changed");
+            let id=format!("public{i:05}");
+            if let Some(doc)=existing.remove(&id) {
+                ensure!(doc.sha256==entry["sha256"].as_str().unwrap(),"resume source hash mismatch");
+                if let Some(first)=doc.chunks.first() {
+                    let query=first.text.split_whitespace().take(16).collect::<Vec<_>>().join(" ");
+                    if oracles.len()<25 && !oracles.iter().any(|(q,_,_): &(String,String,String)|q==&query) {oracles.push((query,first.text.clone(),id));}
+                }
+                chunk_count+=doc.chunks.len();pages_count+=doc.pages as usize;
+                documents.push(json!({"name":path.file_name(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages,"reused_verified_document":true}));
+                continue;
+            }
             let parsed = vz_core::parsers::parse(&vz_core::worker::Request {
                 path: path.clone(), pdfium: std::env::var_os("VZ_OFFICE_PDFIUM").map(PathBuf::from),
             });
@@ -705,11 +723,11 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
                     documents.push(json!({"name":path.file_name(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages}));
                 }
             }
-            std::fs::write(external.join("public-ingest-progress.json"),serde_json::to_vec_pretty(&documents)?)?;
+            std::fs::write(external.join(if resume {"public-ingest-recovery-progress.json"} else {"public-ingest-progress.json"}),serde_json::to_vec_pretty(&documents)?)?;
         }
         let ingest_ms=start.elapsed().as_secs_f64()*1000.0;
         let start=Instant::now();
-        let snapshot=std::sync::Arc::new(vz_core::storage::office::Snapshot::build(&state,&external.join("public-snapshot")).await?);
+        let snapshot=std::sync::Arc::new(vz_core::storage::office::Snapshot::build(&state,&external.join(if resume {"public-snapshot-recovery"} else {"public-snapshot"})).await?);
         let build_ms=start.elapsed().as_secs_f64()*1000.0;
         let mut samples=Vec::new();
         for mode in ["first","warm"] {
@@ -729,7 +747,7 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
             }
             for result in futures::future::join_all(jobs).await {samples.push(result?);}
         }
-        std::fs::write(external.join("public-storage.json"),serde_json::to_vec_pretty(&json!({"documents":documents,"chunks":chunk_count,"pages":pages_count,"samples":samples,"ingest_ms":ingest_ms,"snapshot_build_ms":build_ms,"rss_peak_bytes":peak_rss_bytes(),"recipe":engines.recipe,"oracle":"exact first-chunk content, duplicates accepted by content; extracted text query, relevance not human-qualified","limits":"public inventory, direct native extraction (not confined worker), no OS cold-cache flush; omissions remain failures"}))?)?;
+        std::fs::write(external.join(if resume {"public-storage-recovery.json"} else {"public-storage.json"}),serde_json::to_vec_pretty(&json!({"documents":documents,"chunks":chunk_count,"pages":pages_count,"samples":samples,"ingest_ms":ingest_ms,"resumed":resume,"snapshot_build_ms":build_ms,"rss_peak_bytes":peak_rss_bytes(),"recipe":engines.recipe,"oracle":"exact first-chunk content, duplicates accepted by content; extracted text query, relevance not human-qualified","limits":"public inventory, direct native extraction (not confined worker), no OS cold-cache flush; omissions remain failures"}))?)?;
         Ok(())
     })
 }

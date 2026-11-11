@@ -216,3 +216,10 @@ logs must be under `$KD_BRIDGE_JOB_EVIDENCE`, outside the checkout. Use a new
 `--out` per run; `manifest-v1.schema.json` remains the historical validator and
 `manifest-v2.schema.json` pins this rerun base. No product listener or enabled
 build is created by the test-only, default-off feature.
+
+For a public-corpus recovery trial, retain the first `public-storage.json`,
+ensure the native Vision OCR helper is built next to the test executable, then
+set `VZ_OFFICE_RESUME_PUBLIC=1` with the same private evidence root/inventory.
+The test verifies every source hash and the prior recipe, reuses verified
+indexed documents, retries omissions and writes `public-storage-recovery.json`.
+The first trial's omissions remain failures in the final evidence history.
