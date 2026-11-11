@@ -273,11 +273,13 @@ def confinement(evidence):
                 if probe == "host_create": host = evidence / "forbidden-created"
                 if probe == "scratch_create": host = scratch / "permitted-created"
                 if probe == "unix_connect": host = unix_path
+                if probe in ("host_create", "scratch_create"): host.unlink(missing_ok=True)
                 argv = [binary, probe, allowed, host, port if probe != "host_rename" else evidence / "forbidden-renamed"]
                 clean_env = {"PATH": "/usr/bin:/bin"}
                 # No service/broker positive control that could launch a browser.
                 positive = command(argv, evidence, f"{role}-{index}-positive", 3, clean_env) if probe not in ("mach_open_url", "open_url", "xpc_broker", "memory_budget") and not (":" in probe and not probe.endswith(":127.0.0.1") and not probe.endswith(":%s" % "::1")) else None
                 sentinel.write_text("synthetic sentinel\n")
+                if probe in ("host_create", "scratch_create"): host.unlink(missing_ok=True)
                 negative = command(["/usr/bin/sandbox-exec", "-p", profile, *argv], evidence, f"{role}-{index}-confined", 3, clean_env, memory_limit_bytes=1536*1024*1024)
                 def read(result):
                     if result is None: return {}

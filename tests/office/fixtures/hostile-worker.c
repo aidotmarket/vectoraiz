@@ -44,7 +44,7 @@ int main(int argc, char **argv) {
         fd = open(!strcmp(probe,"snapshot_write") ? snapshot : host,O_WRONLY);
         if (fd >= 0) rc = (int)write(fd,"X",1);
     } else if (!strcmp(probe,"host_create") || !strcmp(probe,"scratch_create")) {
-        fd = open(host,O_CREAT|O_WRONLY,0600); rc = fd;
+        fd = open(host,O_CREAT|O_EXCL|O_WRONLY,0600); rc = fd;
     } else if (!strcmp(probe,"host_rename")) { rc = rename(host,argv[4]);
     } else if (!strcmp(probe,"host_unlink")) { rc = unlink(host);
     } else if (!strcmp(probe,"child_exec")) {
