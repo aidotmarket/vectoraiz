@@ -11,6 +11,10 @@ serde_json.workspace = true
 serde.workspace = true
 uuid = { version = "1", features = ["serde", "v4"] }
 anyhow = "1"
+arrow-array = "56.2"
+arrow-schema = "56.2"
+arrow-cast = "56.2"
+bytes = "1"
 parquet = { version = "56.2", default-features = false, features = ["arrow", "snap"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 walkdir = "2"

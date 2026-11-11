@@ -60,6 +60,8 @@ pub struct ListingReview {
     pub pack_id: Uuid,
     pub staged_artifacts: Vec<StagedArtifact>,
     pub metadata_inventory_schema_version: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata_inventory: Vec<crate::sanitize::Entry>,
     pub source_revision: String,
     pub index_revision: String,
     pub embedding_recipe_sha256: Sha256,

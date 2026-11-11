@@ -30,6 +30,52 @@ impl Drop for FileLock {
     }
 }
 impl State {
+    /// Review builders already hold the selected index writer fence. Read the
+    /// committed visibility set without recovery, lock upgrade or SQLite writes.
+    pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
+        let path = root.join("state.sqlite");
+        let mode = if root.join("state.sqlite-wal").try_exists()? {
+            "readonly_shm=1"
+        } else {
+            "immutable=1"
+        };
+        let uri = path
+            .to_str()
+            .context("index path must be UTF-8")?
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        let db = Connection::open_with_flags(
+            format!("file:{uri}?{mode}"),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?;
+        let mut statement = db.prepare("SELECT generation FROM documents ORDER BY doc_id")?;
+        let generations = statement
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        anyhow::ensure!(generations.len() <= 50_000, "review document limit");
+        generations
+            .into_iter()
+            .map(|generation| {
+                anyhow::ensure!(
+                    !generation.is_empty()
+                        && generation
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                    "unsafe index generation"
+                );
+                let path = root
+                    .join("generations")
+                    .join(generation)
+                    .join("document.json");
+                anyhow::ensure!(
+                    std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
+                    "review document size limit"
+                );
+                Ok(serde_json::from_slice(&std::fs::read(path)?)?)
+            })
+            .collect()
+    }
     /// Inspect persisted visibility without opening/recovering a writable State.
     /// Unknown or damaged storage is an error, never evidence of an empty index.
     pub fn has_persisted_documents(root: &Path) -> Result<bool> {

@@ -28,6 +28,19 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Operation {
+    /// Rebuild private delivered bytes and inventory; does not accept the review.
+    Preview {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        pack_id: Option<String>,
+        #[arg(long)]
+        changes: Option<PathBuf>,
+        #[arg(long, default_value = "What is the orbital archive retention policy?")]
+        query: String,
+    },
     BakeoffSearch {
         #[arg(long)]
         questions: PathBuf,
@@ -112,6 +125,45 @@ fn main() -> Result<()> {
     let args = Args::parse();
     let policy = vz_pack::listing_policy::system();
     policy.refresh();
+    if let Operation::Preview {
+        store,
+        source,
+        pack_id,
+        changes,
+        query,
+    } = &args.command
+    {
+        policy.require_preview()?;
+        let changes = changes
+            .as_ref()
+            .map(|path| read_reference(path, 1024 * 1024))
+            .transpose()?
+            .unwrap_or_default();
+        let engines = Engines::load_embedding(&args.assets, &args.models, args.cpu)?;
+        let pack_id = pack_id
+            .as_ref()
+            .map(|id| id.parse())
+            .transpose()?
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        let current = vz_pack::review_build::rebuild(
+            store,
+            &args.state,
+            source,
+            pack_id,
+            &engines,
+            query,
+            &changes,
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string(&vz_pack::listing_commands::ListingReference {
+                store: store.clone(),
+                library: args.state.clone(),
+                current
+            })?
+        );
+        return Ok(());
+    }
     if let Operation::Review {
         store,
         current,
@@ -280,6 +332,7 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&manifest)?);
             }
             Operation::SelfTest
+            | Operation::Preview { .. }
             | Operation::Review { .. }
             | Operation::Upload { .. }
             | Operation::BakeoffChat { .. }

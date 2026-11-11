@@ -163,6 +163,8 @@ struct Generation {
     current: CurrentReview,
     binding: ReviewBinding,
     review: ListingReview,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sanitizer: Option<String>,
 }
 
 /// Durable job evidence is outside the payload. An intent without a completed
@@ -279,6 +281,69 @@ pub struct NativePackReview<'a> {
 }
 
 impl NativePackReview<'_> {
+    /// Only sanitizer-certified, accepted generations expose bytes to adapters.
+    pub(crate) fn reviewed_payload(
+        &self,
+        current: &CurrentReview,
+    ) -> Result<(PathBuf, Vec<String>)> {
+        self.check_accepted(current)?;
+        let generation = self.pack.validate(current, true)?;
+        let path = self.pack.generation_path(current);
+        let private: serde_json::Value = read_json(&path.join("private.json"))?;
+        let certificate = format!("native-sanitizer-v1:{}", String::from(digest(&private)?));
+        ensure!(
+            generation.sanitizer.as_deref() == Some(&certificate),
+            ListingError::ReviewRequired
+        );
+        let terms = serde_json::from_value(private["identity_terms"].clone())?;
+        Ok((path.join("payload"), terms))
+    }
+
+    pub(crate) fn intent(
+        &self,
+        current: &CurrentReview,
+        destination: &str,
+    ) -> Result<TransferIntent> {
+        self.check_accepted(current)?;
+        self.pack
+            .record_transfer_intent(current, digest(&destination)?)
+    }
+
+    pub(crate) fn completed(
+        &self,
+        intent: &TransferIntent,
+        evidence: &impl Serialize,
+    ) -> Result<()> {
+        self.check_accepted(&intent.current)?;
+        self.pack
+            .record_completed_transfer(intent, digest(&(intent, evidence))?)?;
+        Ok(())
+    }
+    pub(crate) fn index_path(&self) -> &Path {
+        &self.index.selection.index
+    }
+    pub(crate) fn check_policy(&self) -> Result<()> {
+        Ok(self.pack.lease.check(self.pack.policy)?)
+    }
+    pub(crate) fn work(&self) -> Result<PathBuf> {
+        self.check_policy()?;
+        let path = self
+            .pack
+            .path
+            .join(format!("build-{}.partial", Uuid::new_v4()));
+        private_directory(&path)?;
+        Ok(path)
+    }
+    pub(crate) fn freeze_sanitized(
+        &self,
+        binding: ReviewBinding,
+        review: ListingReview,
+        payload: &Path,
+        private: serde_json::Value,
+    ) -> Result<CurrentReview> {
+        self.pack
+            .freeze_inner(binding, review, payload, Some(private))
+    }
     /// Only a sanitizer rebuild may call freeze with this captured binding.
     pub fn capture(&self, source: &Path) -> Result<ReviewBinding> {
         self.pack.lease.check(self.pack.policy)?;
@@ -351,8 +416,18 @@ impl PackReview<'_> {
     pub fn freeze(
         &self,
         binding: ReviewBinding,
+        review: ListingReview,
+        payload: &Path,
+    ) -> Result<CurrentReview> {
+        self.freeze_inner(binding, review, payload, None)
+    }
+
+    fn freeze_inner(
+        &self,
+        binding: ReviewBinding,
         mut review: ListingReview,
         payload: &Path,
+        private: Option<serde_json::Value>,
     ) -> Result<CurrentReview> {
         self.lease.check(self.policy)?;
         for protected in [&binding.source, &binding.index] {
@@ -418,7 +493,15 @@ impl PackReview<'_> {
                 .collect();
             (review.source_revision, review.index_revision) = binding.revisions()?;
             review.embedding_recipe_sha256 = binding.recipe_sha256.clone();
-            let review_hash = digest(&(&binding, &review))?;
+            let sanitizer = private
+                .as_ref()
+                .map(digest)
+                .transpose()?
+                .map(|hash| format!("native-sanitizer-v1:{}", String::from(hash)));
+            if let Some(private) = &private {
+                write_json(&partial.join("private.json"), private)?;
+            }
+            let review_hash = generation_hash(&binding, &review, &sanitizer)?;
             let current = CurrentReview {
                 pack_id: self.pack_id,
                 generation,
@@ -430,6 +513,7 @@ impl PackReview<'_> {
                     current: current.clone(),
                     binding: binding.clone(),
                     review,
+                    sanitizer,
                 },
             )?;
             binding.check()?;
@@ -622,7 +706,11 @@ impl PackReview<'_> {
             read_json(&path.join("generation.json")).map_err(|_| ListingError::StaleGeneration)?;
         ensure!(
             generation.current == *current
-                && digest(&(&generation.binding, &generation.review))? == current.review_hash,
+                && generation_hash(
+                    &generation.binding,
+                    &generation.review,
+                    &generation.sanitizer
+                )? == current.review_hash,
             ListingError::StaleGeneration
         );
         let expected = generation
@@ -688,6 +776,18 @@ fn digest(value: &impl Serialize) -> Result<Sha256> {
     format!("{:x}", Hasher::digest(serde_json::to_vec(&value)?))
         .try_into()
         .map_err(anyhow::Error::msg)
+}
+
+fn generation_hash(
+    binding: &ReviewBinding,
+    review: &ListingReview,
+    sanitizer: &Option<String>,
+) -> Result<Sha256> {
+    if sanitizer.is_some() {
+        digest(&(binding, review, sanitizer))
+    } else {
+        digest(&(binding, review))
+    }
 }
 
 fn check_regular(path: &Path) -> Result<fs::Metadata> {
@@ -775,7 +875,7 @@ fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
     Ok(files)
 }
 
-fn private_directory(path: &Path) -> Result<()> {
+pub(crate) fn private_directory(path: &Path) -> Result<()> {
     if !path.try_exists()? {
         #[cfg(windows)]
         windows::create_directory(path)?;
@@ -826,7 +926,7 @@ fn private_parents(root: &Path, name: &Path) -> Result<()> {
     Ok(())
 }
 
-fn private_file(path: &Path) -> Result<File> {
+pub(crate) fn private_file(path: &Path) -> Result<File> {
     #[cfg(windows)]
     return windows::create_file(path);
     #[cfg(not(windows))]
@@ -948,6 +1048,7 @@ mod tests {
                     pack_id: pack.pack_id,
                     staged_artifacts: vec![],
                     metadata_inventory_schema_version: 1,
+                    metadata_inventory: Vec::new(),
                     source_revision: String::new(),
                     index_revision: String::new(),
                     embedding_recipe_sha256: digest(&"placeholder").unwrap(),
@@ -1342,6 +1443,7 @@ mod tests {
             pack_id: pack.pack_id,
             staged_artifacts: vec![],
             metadata_inventory_schema_version: 1,
+            metadata_inventory: Vec::new(),
             source_revision: String::new(),
             index_revision: String::new(),
             embedding_recipe_sha256: digest(&"recipe").unwrap(),

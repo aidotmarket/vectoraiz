@@ -10990,6 +10990,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
  "vz-core",
  "vz-pack",
 ]
@@ -11052,6 +11053,10 @@ name = "vz-pack"
 version = "0.0.23"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "bytes",
  "chrono",
  "core-foundation-sys",
  "fs2",
