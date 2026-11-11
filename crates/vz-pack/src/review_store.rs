@@ -336,6 +336,24 @@ impl PackReview<'_> {
         Ok(review)
     }
 
+    /// Recover the exact completed transfer binding after restart. Do not use
+    /// an arbitrary latest destination when building a later handoff.
+    pub fn completed_transfer(&self, intent: &TransferIntent) -> Result<ListingReview> {
+        let mut review = self.check_accepted(&intent.current)?;
+        let path = self.generation_path(&intent.current);
+        let stored: TransferIntent =
+            read_json(&path.join(format!("transfer-{}.json", intent.job_id)))?;
+        ensure!(
+            stored.current == intent.current
+                && stored.destination_commitment == intent.destination_commitment,
+            ListingError::StaleGeneration
+        );
+        review.completed_transfer_fingerprint = Some(read_json(
+            &path.join(format!("completed-{}.json", intent.job_id)),
+        )?);
+        Ok(review)
+    }
+
     pub fn uncertain_transfers(&self, current: &CurrentReview) -> Result<Vec<TransferIntent>> {
         ensure!(
             current.pack_id == self.pack_id,
@@ -371,7 +389,8 @@ impl PackReview<'_> {
             &self
                 .generation_path(&generation.current)
                 .join("accepted.json"),
-        )?;
+        )
+        .map_err(|_| ListingError::StaleGeneration)?;
         ensure!(
             accepted == generation.current.review_hash,
             ListingError::StaleGeneration
@@ -388,7 +407,11 @@ impl PackReview<'_> {
         self.lease.check(self.policy)?;
         ensure!(
             current.pack_id == self.pack_id
-                && self.head()?.map(|(_, h)| h) == Some(current.clone()),
+                && self
+                    .head()
+                    .map_err(|_| ListingError::StaleGeneration)?
+                    .map(|(_, h)| h)
+                    == Some(current.clone()),
             ListingError::StaleGeneration
         );
         let path = self.generation_path(current);
@@ -396,7 +419,8 @@ impl PackReview<'_> {
             !path.join("invalidated.json").try_exists()?,
             ListingError::StaleGeneration
         );
-        let generation: Generation = read_json(&path.join("generation.json"))?;
+        let generation: Generation =
+            read_json(&path.join("generation.json")).map_err(|_| ListingError::StaleGeneration)?;
         ensure!(
             generation.current == *current
                 && digest(&(&generation.binding, &generation.review))? == current.review_hash,
@@ -433,6 +457,9 @@ impl PackReview<'_> {
                 ListingError::ReviewRequired
             );
         }
+        // Hashing can be long-running. A policy change during verification must
+        // cancel the operation before it returns authority to its caller.
+        self.lease.check(self.policy)?;
         Ok(generation)
     }
 
@@ -459,9 +486,9 @@ impl PackReview<'_> {
 fn digest(value: &impl Serialize) -> Result<Sha256> {
     let mut value = serde_json::to_value(value)?;
     value.sort_all_objects();
-    Ok(format!("{:x}", Hasher::digest(serde_json::to_vec(&value)?))
+    format!("{:x}", Hasher::digest(serde_json::to_vec(&value)?))
         .try_into()
-        .map_err(anyhow::Error::msg)?)
+        .map_err(anyhow::Error::msg)
 }
 
 fn check_regular(path: &Path) -> Result<fs::Metadata> {
@@ -751,6 +778,21 @@ mod tests {
     }
 
     #[test]
+    fn recipe_commitment_matches_native_canonical_embedding_recipe() {
+        let fixture = Fixture::new();
+        let pins =
+            serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+        let recipe = vz_core::engine::Recipe::from_pins(&pins, 384).unwrap();
+        fs::write(
+            fixture.0.join("index/recipe.json"),
+            serde_json::to_vec_pretty(&recipe).unwrap(),
+        )
+        .unwrap();
+        let expected: String = fixture.binding().recipe_sha256.into();
+        assert_eq!(expected, crate::embedding_recipe_sha256(&recipe).unwrap());
+    }
+
+    #[test]
     fn source_index_recipe_and_staged_changes_permanently_invalidate() {
         for relative in [
             "source/original.txt",
@@ -809,12 +851,26 @@ mod tests {
             completed.completed_transfer_fingerprint,
             Some(fingerprint.clone())
         );
+        assert_eq!(
+            pack.completed_transfer(&intent)
+                .unwrap()
+                .completed_transfer_fingerprint,
+            Some(fingerprint.clone())
+        );
         pack.record_completed_transfer(&intent, fingerprint)
             .unwrap();
         assert!(pack
             .record_completed_transfer(&intent, digest(&"conflict").unwrap())
             .is_err());
         assert!(pack.uncertain_transfers(&first).unwrap().is_empty());
+        let id = pack.pack_id;
+        drop(pack);
+        let pack = store.lock(&policy, id).unwrap();
+        assert!(pack
+            .completed_transfer(&intent)
+            .unwrap()
+            .completed_transfer_fingerprint
+            .is_some());
         let second = fixture.freeze(&pack);
         stale(pack.check_accepted(&first));
         let accepted = pack.accept(&second).unwrap();
@@ -905,6 +961,46 @@ mod tests {
         )
         .unwrap();
         assert!(ReviewStore::open(&fixture.0.join("source/reviews")).is_err());
+    }
+
+    #[test]
+    fn oversized_inputs_and_excessive_depth_block_instead_of_truncating_inventory() {
+        let fixture = Fixture::new();
+        let large = fixture.0.join("rebuilt/large.bin");
+        File::create(&large)
+            .unwrap()
+            .set_len(MAX_BYTES + 1)
+            .unwrap();
+        assert!(tree(&fixture.0.join("rebuilt")).is_err());
+        fs::remove_file(large).unwrap();
+        let mut path = fixture.0.join("rebuilt");
+        for _ in 0..64 {
+            path.push("nested");
+            private_directory(&path).unwrap();
+        }
+        fs::write(path.join("hidden.txt"), "must not be silently skipped").unwrap();
+        assert!(tree(&fixture.0.join("rebuilt")).is_err());
+    }
+
+    #[test]
+    fn corrupt_committed_records_and_torn_heads_fail_closed() {
+        let fixture = Fixture::new();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let pack = store.lock(&policy, Uuid::new_v4()).unwrap();
+        let current = fixture.freeze(&pack);
+        pack.accept(&current).unwrap();
+        let record = pack.generation_path(&current).join("generation.json");
+        let original = fs::read(&record).unwrap();
+        fs::write(&record, "{").unwrap();
+        stale(pack.check_accepted(&current));
+        fs::write(&record, original).unwrap();
+        // A partial head from a crash is invisible; a damaged committed head
+        // refuses all work instead of selecting an older accepted generation.
+        fs::write(pack.path.join("head-00000000000000000001.partial"), "{").unwrap();
+        pack.check_accepted(&current).unwrap();
+        fs::write(pack.path.join("head-00000000000000000001.json"), "{").unwrap();
+        stale(pack.check_accepted(&current));
     }
 
     #[test]

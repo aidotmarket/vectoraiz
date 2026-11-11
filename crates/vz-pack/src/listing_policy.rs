@@ -40,7 +40,7 @@ impl std::fmt::Display for ListingError {
             Self::PolicyUnreadable => "The managed listing policy cannot be read or is invalid. Listing is disabled. Contact IT.",
             Self::PreviewDisabled => "Listing preview is not available in this build.",
             Self::ReviewRequired => "A current purchaser review is required. Listing is unavailable until review support is complete.",
-            Self::StaleGeneration => "Listing policy changed. Start a new purchaser review.",
+            Self::StaleGeneration => "Listing policy, source or reviewed generation changed. Start a new purchaser review.",
         })
     }
 }
