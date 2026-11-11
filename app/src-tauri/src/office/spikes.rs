@@ -389,7 +389,11 @@ async fn office_feasibility_real_mutation_seams() -> anyhow::Result<()> {
                         if mutation == "download_promotion" {
                             let (mut connection, _) = server.accept().await?;
                             let mut buffer = [0; 4096];
-                            connection.read(&mut buffer).await?;
+                            let received = connection.read(&mut buffer).await?;
+                            anyhow::ensure!(
+                                received > 0,
+                                "loopback transfer closed before request"
+                            );
                             connection.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",content.len()).as_bytes()).await?;
                             connection.write_all(content).await?;
                         }

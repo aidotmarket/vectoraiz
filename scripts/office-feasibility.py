@@ -51,7 +51,7 @@ def outside(path):
     return path
 
 
-def command(argv, evidence, name, timeout=120, env=None, input_data=None):
+def command(argv, evidence, name, timeout=120, env=None, input_data=None, inherited_fds=()):
     """Capture COMPLETE output, including failures, before returning status."""
     target = evidence / (name + ".log")
     start = time.monotonic()
@@ -59,7 +59,7 @@ def command(argv, evidence, name, timeout=120, env=None, input_data=None):
         try:
             result = subprocess.run([RTK, "proxy", *map(str, argv)], cwd=ROOT,
                                     stdout=log, stderr=subprocess.STDOUT,
-                                    timeout=timeout, env=env, input=input_data, check=False)
+                                    timeout=timeout, env=env, input=input_data, pass_fds=inherited_fds, check=False)
             code = result.returncode
         except subprocess.TimeoutExpired:
             log.write(b"\nHARNESS TIMEOUT (failure, full preceding output retained)\n")
@@ -201,7 +201,7 @@ def confinement(evidence):
     scratch.mkdir()
     allowed.write_text("synthetic allowed snapshot\n")
     binary = evidence / "hostile-worker"
-    require(command(["xcrun", "clang", "-Wall", "-Wextra", "-Werror", "-fblocks", FIXTURES / "hostile-worker.c", "-o", binary], evidence, "confinement-compile"))
+    require(command(["xcrun", "clang", "-Wall", "-Wextra", "-Werror", "-fblocks", "-framework", "CoreServices", FIXTURES / "hostile-worker.c", "-o", binary], evidence, "confinement-compile"))
     # Only dyld/runtime data and the supplied snapshot are readable. No mach
     # services, network, children or metadata outside this explicit allowlist.
     profile = ('(version 1)(deny default)'
@@ -212,7 +212,7 @@ def confinement(evidence):
                '(allow file-read* file-write* (subpath ' + json.dumps(str(scratch)) + '))'
                '(allow sysctl-read)')
     (evidence / "office-worker.sb").write_text(profile + "\n")
-    probes = ["snapshot", "scratch_create", "host_read", "host_stat", "host_list", "host_write", "host_create", "host_rename", "host_unlink", "snapshot_write", "child_exec", "inherited_handle", "dns", "mach_broker", "mach_open_url", "xpc_broker", "unix_connect", "system_socket", "socketpair"]
+    probes = ["snapshot", "scratch_create", "host_read", "host_stat", "host_list", "host_write", "host_create", "host_rename", "host_unlink", "snapshot_write", "child_exec", "child_fork", "open_url", "inherited_handle", "dns", "mach_broker", "mach_open_url", "xpc_broker", "unix_connect", "system_socket", "socketpair"]
     for family, destinations in [(4, ["127.0.0.1", "192.168.1.1", "192.0.2.1"]), (6, ["::1", "fe80::1%lo0", "2001:db8::1"])]:
         for udp in (0, 1):
             for destination in destinations:
@@ -241,7 +241,7 @@ def confinement(evidence):
                 argv = [binary, probe, allowed, host, port if probe != "host_rename" else evidence / "forbidden-renamed"]
                 clean_env = {"PATH": "/usr/bin:/bin"}
                 # No service/broker positive control that could launch a browser.
-                positive = command(argv, evidence, f"{role}-{index}-positive", 3, clean_env) if probe not in ("mach_open_url", "xpc_broker") and not (":" in probe and not probe.endswith(":127.0.0.1") and not probe.endswith(":%s" % "::1")) else None
+                positive = command(argv, evidence, f"{role}-{index}-positive", 3, clean_env) if probe not in ("mach_open_url", "open_url", "xpc_broker") and not (":" in probe and not probe.endswith(":127.0.0.1") and not probe.endswith(":%s" % "::1")) else None
                 sentinel.write_text("synthetic sentinel\n")
                 negative = command(["/usr/bin/sandbox-exec", "-p", profile, *argv], evidence, f"{role}-{index}-confined", 3, clean_env)
                 def read(result):
@@ -253,11 +253,18 @@ def confinement(evidence):
                 denied = raw.get("rc", 0) < 0 and raw.get("errno") in (1, 13)
                 if probe == "inherited_handle": denied = raw.get("errno") == 9
                 if probe.startswith("mach_"): denied = raw.get("mach_error") == 1100  # BOOTSTRAP_NOT_PRIVILEGED
+                if probe == "open_url": denied = raw.get("explicit_launch_denial") is True
                 # XPC errors and DNS nonexistence are NOT proof of confinement.
                 passed = negative["exit_code"] == 0 and (raw.get("rc", -1) >= 0 if positive_expected else denied)
                 rows[probe] = {"status": "pass" if passed else "fail", "raw": raw, "command": negative, "positive": positive, "positive_raw": control,
                                "control_proven": control.get("rc", -1) >= 0,
                                "interpretation": "positive startup/scratch" if positive_expected else "EPERM/EACCES or explicit broker denial required; other errors remain failures"}
+            with sentinel.open("rb") as inherited:
+                argv=[binary,"inherited_host_read",allowed,sentinel,str(inherited.fileno())]
+                result=command(["/usr/bin/sandbox-exec","-p",profile,*argv],evidence,f"{role}-inherited-bypass",3,{"PATH":"/usr/bin:/bin"},inherited_fds=(inherited.fileno(),))
+                try: raw=json.loads((evidence/result["raw"]).read_text())
+                except (ValueError,OSError):raw={}
+                rows["inherited_descriptor_bypass_diagnostic"]={"status":"pass" if raw.get("rc",0)<0 and raw.get("errno") in (1,9,13) else "fail","raw":raw,"command":result,"interpretation":"intentional inherited host descriptor; actual clean launch closes all non-stdio descriptors"}
             results[role] = {"status": "pass" if all(v["status"] == "pass" for v in rows.values()) else "fail", "probes": rows}
     strict = all(row["raw"].get("socket_created") is False and row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if name.startswith("socket:"))
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail", "roles": results, "strict_socket_creation": "pass" if strict else "fail",
@@ -430,6 +437,13 @@ def transport(evidence, evict_incomplete=True):
             return {"identity":identity,"exception":type(error).__name__,"latency_ms":(time.monotonic()-start)*1000}
         finally:
             if existing is None and c: close(c[0])
+    def drain_phase():
+        until=time.monotonic()+5
+        while time.monotonic()<until:
+            with lock:
+                if not workers: return
+            time.sleep(.005)
+        raise RuntimeError("previous transport phase failed to drain")
     rows, finite, flood_rows, abuse = [], {}, {}, {}
     held=[]; flood_stop=threading.Event();flood_threads=[]
     try:
@@ -442,7 +456,7 @@ def transport(evidence, evict_incomplete=True):
         finite={p:query(p,"person0") for p in ("http/1.1","h2")}
         finite["active_at_attack"]=occupied
         for c in held: close(c)
-        held.clear();time.sleep(.2)
+        held.clear();drain_phase()
         # Existing authenticated requests stay protected; unknown new arrivals
         # remain eligible for eviction. Sign-in callbacks are always pre-auth.
         for protocol in ("http/1.1","h2"):
@@ -485,7 +499,7 @@ def transport(evidence, evict_incomplete=True):
             for t in flood_threads:t.join(3)
             flood_rows[protocol]={"duration_s":time.monotonic()-start,"flood_arrivals":arrivals,"trials":trials}
             for c in established:close(c[0])
-            time.sleep(.2)
+            drain_phase()
         # Eight-per-person bound and live-session revocation/expiry.
         for protocol in ("http/1.1","h2"):
             clients=[];statuses=[]

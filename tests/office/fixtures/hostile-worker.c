@@ -1,5 +1,6 @@
 /* C1 synthetic capability probes, one bounded process per operation. */
 #include <arpa/inet.h>
+#include <CoreServices/CoreServices.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -47,6 +48,21 @@ int main(int argc, char **argv) {
         char *args[] = {"/usr/bin/true",NULL}; char *env[] = {NULL};
         pid_t pid; int error = posix_spawn(&pid,args[0],NULL,NULL,args,env);
         if (error) { errno=error; rc=-1; } else { waitpid(pid,&rc,0); rc=0; }
+    } else if (!strcmp(probe,"child_fork")) {
+        pid_t child=fork();
+        if (child==0) _exit(0);
+        if (child>0) {int status;waitpid(child,&status,0);rc=0;}
+    } else if (!strcmp(probe,"open_url")) {
+        CFURLRef url=CFURLCreateWithString(NULL,CFSTR("c1-feasibility-probe://blocked"),NULL);
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        OSStatus error=LSOpenCFURLRef(url,NULL);
+#pragma clang diagnostic pop
+        CFRelease(url);
+        printf("{\"rc\":%d,\"errno\":%d,\"ls_error\":%d,\"explicit_launch_denial\":%s}\n",error ? -1 : 0,errno,(int)error,error==kLSNoLaunchPermissionErr ? "true":"false");
+        return 0;
+    } else if (!strcmp(probe,"inherited_host_read")) {
+        char byte; rc=(int)read(atoi(argv[4]),&byte,1);
     } else if (!strcmp(probe,"inherited_handle")) {
         char byte; rc=(int)read(9,&byte,1);
     } else if (!strcmp(probe,"dns")) {
