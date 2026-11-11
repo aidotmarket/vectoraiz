@@ -7,6 +7,91 @@ import App, { readableFolder } from "./App";
 import { version } from "../package.json";
 import { licenceName } from "./licence";
 
+const listingCurrent = {pack_id: "550e8400-e29b-41d4-a716-446655440000", generation: "550e8400-e29b-41d4-a716-446655440001", review_hash: "a".repeat(64)};
+function listingFixture() {
+  const inventory = Array.from({length: 53}, (_, index) => ({location: `manifest.json/property/${index}`, kind: "property", value: `complete value ${index}`, warning: false}));
+  inventory[0] = {location: "README.md", kind: "text", value: "Confidential Project Orion", warning: true};
+  return {metadata_inventory: [...inventory, {location: "manifest.json/date_ranges", kind: "value", value: null, warning: false}], warnings: ["README.md: text"], exclusions: [], accepted_review_hash: null as string | null};
+}
+function mockListing() {
+  let review = listingFixture();
+  invoke.mockImplementation(async (command: string, args: unknown) => {
+    const params = args as {changes?: {edits: Record<string, string>}};
+    if (command === "listing_status") return {listing_authority_preview_v1: true, code: "REVIEW_REQUIRED", reason: "Review required"};
+    if (command === "listing_sources") return {pack_id: listingCurrent.pack_id, sources: [
+      {source: "private.md", artifact: "originals-0001.zip!document-0001.md", format: "md", supported: true},
+      {source: "unsupported.pdf", artifact: "originals-0001.zip!document-0002.pdf", format: "pdf", supported: false},
+    ]};
+    if (command === "listing_rebuild") {
+      review = listingFixture();
+      if (params.changes?.edits["README.md"]) review.metadata_inventory[0].value = params.changes.edits["README.md"];
+      return {current: listingCurrent, review};
+    }
+    if (command === "listing_review") return {...review, accepted_review_hash: listingCurrent.review_hash};
+    return {available: false};
+  });
+}
+async function openListing() {
+  render(<App />); at("Settings");
+  await userEvent.click(await screen.findByRole("button", {name: "Review what your buyer receives"}));
+  return screen.findByRole("region", {name: "What your buyer receives"});
+}
+
+it("requires explicit unsupported exclusions, exposes full inventory pages/search and never preselects acceptance", async () => {
+  mockListing();
+  const region = within(await openListing());
+  await waitFor(() => expect(region.getByRole("button", {name: "Rebuild purchaser preview"})).toBeDisabled());
+  await userEvent.click(region.getByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  const accept = await region.findByRole("button", {name: "Accept this exact generation"});
+  expect(accept).toBeDisabled();
+  const confirm = region.getByRole("checkbox", {name: /I reviewed the complete purchaser inventory/});
+  expect(confirm).not.toBeChecked();
+  expect(region.getByText("Confidential Project Orion")).toBeInTheDocument();
+  expect(region.queryByText("complete value 52")).not.toBeInTheDocument();
+  await userEvent.click(region.getByRole("button", {name: "Next inventory page"}));
+  expect(region.getByText("complete value 52")).toBeInTheDocument();
+  expect(region.getByText("Unknown / absent")).toBeInTheDocument();
+  await userEvent.type(region.getByRole("searchbox", {name: "Search delivered inventory"}), "README");
+  expect(region.getByText("Confidential Project Orion")).toBeInTheDocument();
+  await userEvent.click(confirm); await userEvent.click(accept);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_review", {current: listingCurrent, accept: true}));
+  expect(await region.findByText(`Accepted review: ${listingCurrent.review_hash}`)).toBeInTheDocument();
+});
+
+it("applies real edits through rebuild, invalidates acceptance, restores focus and surfaces stale-generation errors", async () => {
+  mockListing();
+  const region = within(await openListing());
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  const edit = await region.findByRole("button", {name: "Edit README.md"});
+  edit.focus(); await userEvent.keyboard("{Enter}");
+  const replacement = region.getByRole("textbox", {name: "Replacement value"});
+  expect(replacement).toHaveFocus();
+  await userEvent.clear(replacement); await userEvent.type(replacement, "Reviewed delivered text");
+  await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
+  expect(edit).toHaveFocus();
+  expect(region.getByRole("button", {name: "Accept this exact generation"})).toBeDisabled();
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_invalidate", {current: listingCurrent}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  expect(await region.findByText("Reviewed delivered text")).toBeInTheDocument();
+  expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {"README.md": "Reviewed delivered text"}, exclusions: ["unsupported.pdf"], identity_terms: []}});
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation((command, args) => command === "listing_review" ? Promise.reject({code: "STALE_GENERATION", reason: "Source changed. Rebuild required."}) : original(command, args));
+  await userEvent.click(region.getByRole("checkbox", {name: /I reviewed the complete purchaser inventory/}));
+  await userEvent.click(region.getByRole("button", {name: "Accept this exact generation"}));
+  expect(await region.findByRole("alert")).toHaveTextContent("Source changed. Rebuild required.");
+  expect(region.getByRole("button", {name: "Accept this exact generation"})).toBeDisabled();
+});
+
+it("hides purchaser review when the exposure flag is off or managed policy denies", async () => {
+  invoke.mockImplementation(async command => command === "listing_status" ? {listing_authority_preview_v1: true, code: "POLICY_DENIED", reason: "Contact IT"} : {available: false});
+  render(<App />); at("Settings");
+  await screen.findByText("Contact IT");
+  expect(screen.queryByRole("button", {name: "Review what your buyer receives"})).not.toBeInTheDocument();
+  expect(invoke.mock.calls.some(([command]) => command === "listing_sources")).toBe(false);
+});
+
 const { invoke, modelsInvoke, cloudInvoke, appInvoke, modelEvents, appEvents } = vi.hoisted(() => ({ invoke: vi.fn(), appInvoke: vi.fn(), modelsInvoke: vi.fn(), cloudInvoke: vi.fn(), appEvents: { callback: undefined as undefined | (() => void) }, modelEvents: { callback: undefined as undefined | (() => void) } }));
 vi.mock("@tauri-apps/api/event", () => ({listen: async (event: string, callback: () => void) => { const target = event === "mcp-activity" ? appEvents : modelEvents; target.callback = callback; return () => { if (target.callback === callback) target.callback = undefined; }; }}));
 vi.mock("@tauri-apps/api/core", () => ({

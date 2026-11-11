@@ -19,6 +19,50 @@ use vz_core::{
     storage::{chunks_batch, documents_batch, State},
 };
 
+#[derive(serde::Serialize)]
+pub struct Candidate {
+    pub source: String,
+    pub artifact: String,
+    pub format: String,
+    pub supported: bool,
+}
+
+pub fn candidates(
+    store: &Path,
+    library: &Path,
+    source: &Path,
+    pack_id: Uuid,
+) -> Result<Vec<Candidate>> {
+    let policy = crate::listing_policy::system();
+    policy.require_preview()?;
+    let store = ReviewStore::open(store)?;
+    let pack = store.lock_native(policy, pack_id, library)?;
+    let _binding = pack.capture(source)?;
+    let source = source.canonicalize()?;
+    let candidates = State::review_documents(pack.index_path())?
+        .into_iter()
+        .enumerate()
+        .map(|(position, doc)| {
+            Ok(Candidate {
+                source: Path::new(&doc.path)
+                    .strip_prefix(&source)?
+                    .to_str()
+                    .context("source path must be UTF-8")?
+                    .replace('\\', "/"),
+                artifact: format!(
+                    "originals-0001.zip!document-{:04}.{}",
+                    position + 1,
+                    doc.kind
+                ),
+                supported: ["txt", "md", "markdown"].contains(&doc.kind.as_str()),
+                format: doc.kind,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    pack.check_policy()?;
+    Ok(candidates)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn rebuild(
     store: &Path,
@@ -53,7 +97,7 @@ fn build(
     pack: &NativePackReview<'_>,
     source: &Path,
     pack_id: Uuid,
-    engines: &Engines,
+    engines: &impl BuildEngine,
     query: &str,
     changes: &Changes,
 ) -> Result<CurrentReview> {
@@ -63,7 +107,7 @@ fn build(
     let recipe: vz_core::engine::Recipe =
         serde_json::from_slice(&std::fs::read(index.join("recipe.json"))?)?;
     ensure!(
-        recipe == engines.recipe,
+        recipe == *engines.recipe(),
         "embedding recipe mismatch; re-index required"
     );
     let indexed = State::review_documents(index)?;
@@ -292,5 +336,272 @@ fn build(
             Ok(current)
         }
         Err(error) => Err(error),
+    }
+}
+
+trait BuildEngine {
+    fn recipe(&self) -> &vz_core::engine::Recipe;
+    fn vector(&self, text: &str, query: bool) -> Result<Vec<f32>>;
+}
+impl BuildEngine for Engines {
+    fn recipe(&self) -> &vz_core::engine::Recipe {
+        &self.recipe
+    }
+    fn vector(&self, text: &str, query: bool) -> Result<Vec<f32>> {
+        self.vector(text, query)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::listing_policy::{ListingPolicy, ManagedPolicy, PolicySource};
+    use std::sync::{Arc, Mutex};
+    struct Source(Mutex<ManagedPolicy>);
+    impl PolicySource for Source {
+        fn read(&self) -> ManagedPolicy {
+            *self.0.lock().unwrap()
+        }
+    }
+    struct FakeEngine {
+        recipe: vz_core::engine::Recipe,
+        texts: Mutex<Vec<String>>,
+    }
+    impl BuildEngine for FakeEngine {
+        fn recipe(&self) -> &vz_core::engine::Recipe {
+            &self.recipe
+        }
+        fn vector(&self, text: &str, _: bool) -> Result<Vec<f32>> {
+            self.texts.lock().unwrap().push(text.into());
+            Ok(if text.contains("Reviewed") {
+                vec![0., 1., 0.]
+            } else {
+                vec![1., 0., 0.]
+            })
+        }
+    }
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: std::path::PathBuf,
+        engine: FakeEngine,
+        policy: ListingPolicy,
+        policy_source: Arc<Source>,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let pins =
+                serde_json::from_str(include_str!("../../../spike/fixtures/models.json")).unwrap();
+            let recipe = vz_core::engine::Recipe::from_pins(&pins, 3).unwrap();
+            let source = root.join("source");
+            let index = root.join("index");
+            std::fs::create_dir(&source).unwrap();
+            std::fs::create_dir(&index).unwrap();
+            std::fs::write(
+                index.join("recipe.json"),
+                serde_json::to_vec(&recipe).unwrap(),
+            )
+            .unwrap();
+            let mut state = State::open(&index).unwrap();
+            for (id, name, bytes, kind) in [
+                (
+                    "a",
+                    "client-original.md",
+                    b"# Project ORION\nConfidential fixture-identity client notes.\n".as_slice(),
+                    "md",
+                ),
+                (
+                    "b",
+                    "unsupported.pdf",
+                    b"%PDF-unsupported".as_slice(),
+                    "pdf",
+                ),
+            ] {
+                let path = source.join(name);
+                std::fs::write(&path, bytes).unwrap();
+                let doc = vz_core::pipeline::Document {
+                    doc_id: id.into(),
+                    path: path.to_str().unwrap().into(),
+                    sha256: sha256(bytes),
+                    bytes: bytes.len() as u64,
+                    pages: 1,
+                    kind: kind.into(),
+                    needs_ocr_pages: vec![],
+                    chunks: vec![],
+                };
+                let generation = Uuid::new_v4().to_string();
+                let directory = index.join("generations").join(&generation);
+                std::fs::create_dir(&directory).unwrap();
+                std::fs::write(
+                    directory.join("document.json"),
+                    serde_json::to_vec(&doc).unwrap(),
+                )
+                .unwrap();
+                state.commit(&doc, "fixture", &generation).unwrap();
+            }
+            drop(state);
+            let policy_source = Arc::new(Source(Mutex::new(ManagedPolicy::Allowed)));
+            Self {
+                _temp: temp,
+                root,
+                engine: FakeEngine {
+                    recipe,
+                    texts: Mutex::new(vec![]),
+                },
+                policy: ListingPolicy::new(policy_source.clone()),
+                policy_source,
+            }
+        }
+        fn changes() -> Changes {
+            Changes {
+                exclusions: ["unsupported.pdf".into()].into(),
+                identity_terms: vec!["fixture-identity".into()],
+                ..Changes::default()
+            }
+        }
+    }
+
+    #[test]
+    fn delivered_inventory_roundtrip_native_generation_and_changed_embeddings() {
+        let f = Fixture::new();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        assert!(build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Changes::default()
+        )
+        .is_err());
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Fixture::changes(),
+        )
+        .unwrap();
+        let review = guard.inspect(&current).unwrap();
+        assert!(review
+            .metadata_inventory
+            .iter()
+            .any(|e| e.warning && e.location.contains("originals-0001.zip!document-0001.md")));
+        assert!(guard.reviewed_payload(&current).is_err());
+        guard.accept(&current).unwrap();
+        let (payload, terms) = guard.reviewed_payload(&current).unwrap();
+        assert_eq!(terms, ["fixture-identity"]);
+        let output = f.root.join("delivered");
+        let manifest =
+            crate::review_transfer::package(&guard, &current, &payload, &output).unwrap();
+        assert_eq!(manifest["pack_id"], id.to_string());
+        for artifact in &review.staged_artifacts {
+            let bytes = std::fs::read(output.join(&artifact.artifact)).unwrap();
+            assert_eq!(bytes.len() as u64, artifact.size);
+            assert_eq!(sha256(&bytes), String::from(artifact.sha256.clone()));
+            assert!(!bytes
+                .windows(b"client-original.md".len())
+                .any(|w| w == b"client-original.md"));
+        }
+        let mut changes = Fixture::changes();
+        changes.edits.insert(
+            "originals-0001.zip!document-0001.md".into(),
+            "# Reviewed title\nReviewed delivered content".into(),
+        );
+        let next = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(guard.check_accepted(&current).is_err());
+        let next_review = guard.inspect(&next).unwrap();
+        assert!(next_review.accepted_review_hash.is_none());
+        assert!(next_review
+            .metadata_inventory
+            .iter()
+            .any(|e| e.value.as_deref() == Some("# Reviewed title\nReviewed delivered content")));
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|text| text.contains("Reviewed delivered content")));
+        assert!(
+            std::fs::read_to_string(f.root.join("source/client-original.md"))
+                .unwrap()
+                .contains("Confidential")
+        );
+        // A failed rebuild still invalidates the previous review permanently.
+        guard.accept(&next).unwrap();
+        changes
+            .edits
+            .insert("unhandled/location".into(), "edit".into());
+        assert!(build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes
+        )
+        .is_err());
+        assert!(guard.check_accepted(&next).is_err());
+    }
+
+    #[test]
+    fn managed_policy_cancels_reviewed_writes_and_keeps_completed_artifacts() {
+        let f = Fixture::new();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Fixture::changes(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        let completed = f.root.join("completed");
+        crate::review_transfer::package(&guard, &current, &payload, &completed).unwrap();
+        let bytes = std::fs::read(completed.join("manifest.json")).unwrap();
+        *f.policy_source.0.lock().unwrap() = ManagedPolicy::Denied;
+        f.policy.refresh();
+        assert!(crate::review_transfer::package(
+            &guard,
+            &current,
+            &payload,
+            &f.root.join("denied")
+        )
+        .is_err());
+        assert!(!f.root.join("denied").exists());
+        assert_eq!(
+            std::fs::read(completed.join("manifest.json")).unwrap(),
+            bytes
+        );
+        *f.policy_source.0.lock().unwrap() = ManagedPolicy::Allowed;
+        f.policy.refresh();
+        assert!(guard.check_accepted(&current).is_err());
+        drop(guard);
+        let restarted = store.lock_native_current(&f.policy, &current, &f.root.join("index"));
+        // Cancellation invalidates the live lease; source/staged mutations have
+        // independent durable invalidations tested in review_store.
+        drop(restarted);
     }
 }

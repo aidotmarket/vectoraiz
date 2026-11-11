@@ -419,6 +419,9 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         cloud_status,
         listing_status,
         listing_review,
+        listing_sources,
+        listing_rebuild,
+        listing_invalidate,
         app_status,
         app_disclosure,
         app_connect_claude,
@@ -1723,6 +1726,90 @@ async fn pipeline_ask_cloud<R: tauri::Runtime>(
 #[tauri::command]
 fn listing_status() -> vz_pack::listing_policy::ListingStatus {
     vz_pack::listing_policy::system().status()
+}
+
+fn listing_context<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf, std::path::PathBuf)> {
+    use tauri::Manager;
+    vz_pack::listing_policy::system().require_preview()?;
+    let library = data_root(app).map_err(anyhow::Error::msg)?;
+    let index = vz_core::active_index::resolve_state(&library);
+    let source = vz_core::active_index::last_indexed_folder(&index)
+        .ok_or_else(|| anyhow::anyhow!("Index a folder before preparing a listing review"))?;
+    let parent = app.path().app_local_data_dir()?;
+    std::fs::create_dir_all(&parent)?;
+    Ok((parent.join("listing-reviews"), library, source.into()))
+}
+
+#[tauri::command]
+async fn listing_sources<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<serde_json::Value, vz_pack::listing_commands::ListingFailure> {
+    let (store, library, source) = listing_context(&app)?;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let pack_id = uuid::Uuid::new_v4();
+        let sources = vz_pack::review_build::candidates(&store, &library, &source, pack_id)?;
+        Ok(serde_json::json!({"pack_id":pack_id,"sources":sources}))
+    })
+    .await
+    .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::Error::from(e)))?
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn listing_rebuild<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    pack_id: String,
+    changes: vz_pack::sanitize::Changes,
+) -> Result<serde_json::Value, vz_pack::listing_commands::ListingFailure> {
+    let (store, library, source) = listing_context(&app)?;
+    let (_, assets, pins) = pipeline_paths(&app)
+        .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::anyhow!(e)))?;
+    tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
+        let engines =
+            vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())?;
+        let current = vz_pack::review_build::rebuild(
+            &store,
+            &library,
+            &source,
+            pack_id.parse()?,
+            &engines,
+            "What information does this collection contain?",
+            &changes,
+        )?;
+        let review = vz_pack::listing_commands::review(
+            vz_pack::listing_policy::system(),
+            &store,
+            &library,
+            &current,
+            false,
+        )?;
+        Ok(serde_json::json!({"current":current,"review":review}))
+    })
+    .await
+    .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::Error::from(e)))?
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn listing_invalidate<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: vz_pack::review_store::CurrentReview,
+) -> Result<(), vz_pack::listing_commands::ListingFailure> {
+    let (store, library, _) = listing_context(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        vz_pack::listing_commands::invalidate(
+            vz_pack::listing_policy::system(),
+            &vz_pack::listing_commands::ListingReference {
+                store,
+                library,
+                current,
+            },
+        )
+    })
+    .await
+    .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::Error::from(e)))?
 }
 
 #[tauri::command]

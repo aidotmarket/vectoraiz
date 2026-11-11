@@ -87,3 +87,16 @@ pub fn review(
     };
     run().map_err(Into::into)
 }
+
+pub fn invalidate(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+) -> Result<(), ListingFailure> {
+    let run = || -> anyhow::Result<()> {
+        policy.require_preview()?;
+        let store = ReviewStore::open(&reference.store)?;
+        let pack = store.lock_native_current(policy, &reference.current, &reference.library)?;
+        pack.begin_rebuild()
+    };
+    run().map_err(Into::into)
+}
