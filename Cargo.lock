@@ -10987,6 +10987,7 @@ version = "0.0.23"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
  "vz-core",

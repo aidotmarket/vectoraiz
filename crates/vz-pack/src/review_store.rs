@@ -739,7 +739,12 @@ fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
     let mut files = BTreeMap::new();
     let mut bytes = 0_u64;
-    for entry in walkdir::WalkDir::new(root).max_depth(64) {
+    for (count, entry) in walkdir::WalkDir::new(root)
+        .max_depth(64)
+        .into_iter()
+        .enumerate()
+    {
+        ensure!(count <= MAX_FILES, "review tree entry count limit");
         let entry = entry?;
         if entry.file_type().is_dir() {
             ensure!(entry.depth() < 64, "review directory depth limit");
@@ -853,11 +858,15 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
 }
 
 fn read_input_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
+    const LIMIT: u64 = 64 * 1024 * 1024;
     ensure!(
-        check_regular(path)?.len() <= 64 * 1024 * 1024,
+        check_regular(path)?.len() <= LIMIT,
         "review record size limit"
     );
-    Ok(serde_json::from_reader(File::open(path)?)?)
+    let mut bytes = Vec::new();
+    File::open(path)?.take(LIMIT + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() as u64 <= LIMIT, "review record size limit");
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn sync_directory(path: &Path) -> Result<()> {

@@ -1,7 +1,10 @@
 //! Headless pipeline. Network is used by explicit upload and SFTP export commands.
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::{io::Write, path::PathBuf};
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 use vz_core::{
     engine::{ChatOnly, Engines},
     storage::State,
@@ -117,11 +120,7 @@ fn main() -> Result<()> {
     {
         // Availability precedes even opening the caller's reference file.
         policy.require_preview()?;
-        anyhow::ensure!(
-            std::fs::metadata(current)?.len() <= 4096,
-            "review reference size limit"
-        );
-        let current = serde_json::from_slice(&std::fs::read(current)?)?;
+        let current = read_reference(current, 4096)?;
         let review =
             vz_pack::listing_commands::review(policy, store, &args.state, &current, *accept)?;
         println!("{}", serde_json::to_string(&review)?);
@@ -136,13 +135,7 @@ fn main() -> Result<()> {
             .review_reference
             .as_ref()
             .ok_or(vz_pack::listing_policy::ListingError::ReviewRequired)?;
-        anyhow::ensure!(
-            std::fs::metadata(path)?.len() <= 16384,
-            "listing reference size limit"
-        );
-        Some(serde_json::from_slice::<
-            vz_pack::listing_commands::ListingReference,
-        >(&std::fs::read(path)?)?)
+        Some(read_reference::<vz_pack::listing_commands::ListingReference>(path, 16384)?)
     } else {
         None
     };
@@ -297,6 +290,19 @@ fn main() -> Result<()> {
 }
 fn tokio_runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
+}
+
+fn read_reference<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
+    anyhow::ensure!(
+        std::fs::symlink_metadata(path)?.is_file(),
+        "review reference must be a regular file"
+    );
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= limit, "review reference size limit");
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn read_questions(path: &std::path::Path) -> Result<Vec<serde_json::Value>> {
