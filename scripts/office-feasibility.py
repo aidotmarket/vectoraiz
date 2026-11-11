@@ -222,6 +222,17 @@ def confinement(evidence):
                 probes.append(f"listen:{family}:0:" + ("::1" if family == 6 else "127.0.0.1"))
             else:
                 probes.append(f"multicast:{family}:1:" + ("::1" if family == 6 else "127.0.0.1"))
+    routes={}
+    for family,args in [(4,["/sbin/route","-n","get","default"]),(6,["/sbin/route","-n","get","-inet6","default"])]:
+        route=command(args,evidence,f"confinement-route-{family}")
+        data=(evidence/route["raw"]).read_text()
+        gateway=next((line.split(":",1)[1].strip() for line in data.splitlines() if line.strip().startswith("gateway:")),None)
+        routes[family]={"gateway":gateway,"command":route}
+    # Probe actual public resolver addresses only under confinement. External
+    # positive controls are deliberately omitted. No tenant payload is used.
+    lan4=routes[4]["gateway"] or "192.168.1.1"
+    lan6=routes[6]["gateway"] or "fe80::1%lo0"
+    probes=[name.replace(":192.168.1.1",":"+lan4).replace(":fe80::1%lo0",":"+lan6).replace(":192.0.2.1",":1.1.1.1").replace(":2001:db8::1",":2606:4700:4700::1111") for name in probes]
     results = {}
     # Loopback and Unix positive listeners are isolated evidence fixtures.
     with socket.socket() as listener, socket.socket(socket.AF_UNIX) as unix:
@@ -265,12 +276,19 @@ def confinement(evidence):
                 try: raw=json.loads((evidence/result["raw"]).read_text())
                 except (ValueError,OSError):raw={}
                 rows["inherited_descriptor_bypass_diagnostic"]={"status":"pass" if raw.get("rc",0)<0 and raw.get("errno") in (1,9,13) else "fail","raw":raw,"command":result,"interpretation":"intentional inherited host descriptor; actual clean launch closes all non-stdio descriptors"}
+            with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as inherited, socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as sender:
+                inherited.bind(("127.0.0.1",0));sender.sendto(b"C1",inherited.getsockname())
+                argv=[binary,"inherited_host_read",allowed,sentinel,str(inherited.fileno())]
+                result=command(["/usr/bin/sandbox-exec","-p",profile,*argv],evidence,f"{role}-inherited-socket-bypass",3,{"PATH":"/usr/bin:/bin"},inherited_fds=(inherited.fileno(),))
+                try:raw=json.loads((evidence/result["raw"]).read_text())
+                except (ValueError,OSError):raw={}
+                rows["inherited_socket_bypass_diagnostic"]={"status":"pass" if raw.get("rc",0)<0 and raw.get("errno") in (1,9,13) else "fail","raw":raw,"command":result,"interpretation":"intentional inherited socket with queued parent datagram; clean launch inherits none"}
             results[role] = {"status": "pass" if all(v["status"] == "pass" for v in rows.values()) else "fail", "probes": rows}
     strict = all(row["raw"].get("socket_created") is False and row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if name.startswith("socket:"))
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail", "roles": results, "strict_socket_creation": "pass" if strict else "fail",
             "outcome_contract": "pass" if all(row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if not name.startswith("socket:")) else "fail",
             "limits": "capability prototype; actual ingest format control recorded separately, actual render worker absent; documentation-prefix Internet probes, LAN address candidate 192.168.1.1; DNS/XPC errors without explicit denial fail, not silently accepted",
-            "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"data_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
+            "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"data_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
 
 
 def transport(evidence, evict_incomplete=True):

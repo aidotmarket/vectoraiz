@@ -177,9 +177,9 @@ mechanisms, without claiming C1 acceptance or changing any acceptance bound.
   runtime assets, literal root, worker, read-only snapshot and per-job scratch.
   Both role-labelled capability workers probe host reads/metadata/list/write/
   create/rename/unlink; socket creation, connect/bind/listen/sendto/connectx/
-  sendmsg, TCP/UDP IPv4/IPv6, loopback, candidate LAN and documentation Internet
-  addresses; AF_UNIX, AF_SYSTEM, multicast, DNS, Mach/XPC/LaunchServices broker
-  lookup, children and sanitized inherited descriptors. Non-EPERM errors and
+  sendmsg, TCP/UDP IPv4/IPv6, loopback, route gateway LAN and public resolver Internet
+  addresses (external destinations only under confinement); AF_UNIX, AF_SYSTEM, multicast, DNS, Mach/XPC/LaunchServices broker
+  lookup, children and sanitized inherited descriptors plus deliberately inherited file/socket bypass diagnostics. Non-EPERM errors and
   unexplained broker errors fail. Socket creation remains a separate strict
   result. Real native ingest ordinary-format controls are also attempted;
   there is no actual render worker at this C1 base. The capability workers
