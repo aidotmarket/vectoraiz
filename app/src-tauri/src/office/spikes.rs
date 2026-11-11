@@ -395,7 +395,7 @@ async fn office_feasibility_real_mutation_seams() -> anyhow::Result<()> {
                         }
                         Ok::<_, anyhow::Error>(())
                     });
-                    let client = models::client()?;
+                    let client = models::office_loopback_client()?;
                     let source = if mutation == "download_promotion" {
                         Source::Download(&client)
                     } else {

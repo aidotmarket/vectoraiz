@@ -471,6 +471,12 @@ fn client_builder() -> reqwest::ClientBuilder {
         .retry(reqwest::retry::never())
 }
 
+// Only the C1 loopback transfer fixture may use cleartext HTTP. Production
+// callers keep the HTTPS-only builder and this symbol is absent outside tests.
+#[cfg(all(test, feature = "office-feasibility"))]
+pub fn office_loopback_client() -> Result<Client> {
+    Ok(client_builder().https_only(false).no_proxy().build()?)
+}
 pub fn client() -> Result<Client> {
     Ok(client_builder().build()?)
 }
