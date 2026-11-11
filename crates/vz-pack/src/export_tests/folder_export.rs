@@ -170,3 +170,41 @@ fn late_staged_swap_refuses_promotion_and_preserves_other_jobs() {
     );
     assert_eq!(fs::read_dir(&f.staging).unwrap().count(), 1);
 }
+
+#[test]
+fn multi_chunk_copy_checks_policy_per_chunk_and_binding_at_fences() {
+    use std::cell::Cell;
+    let f = Fixture::new();
+    let bytes = vec![b'x'; 5 * 65536 + 7];
+    fs::write(f.pack.join("documents.parquet"), &bytes).unwrap();
+    let manifest_path = f.pack.join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["files"]["documents.parquet"] = vz_core::pipeline::sha256(&bytes).into();
+    fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let fences = Cell::new(0);
+    let chunks = Cell::new(0);
+    let result = super::folder_inner(
+        &f.pack,
+        "fixture",
+        &f.source,
+        &f.staging,
+        |_, _| Ok(true),
+        |_| Ok(()),
+        || Ok(()),
+        || {
+            fences.set(fences.get() + 1);
+            Ok(())
+        },
+        || {
+            chunks.set(chunks.get() + 1);
+            Ok(())
+        },
+    )
+    .unwrap();
+    // Three files, then pre-promotion and post-promotion checks. Full tree
+    // validation must not scale with the number of 64 KiB payload chunks.
+    assert_eq!(fences.get(), 5);
+    assert_eq!(chunks.get(), 8);
+    f.assert_pack(&f.source.join("vz/fixture"), &result);
+}

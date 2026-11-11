@@ -1746,10 +1746,10 @@ fn listing_context<R: tauri::Runtime>(
 async fn listing_sources<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, vz_pack::listing_commands::ListingFailure> {
-    let (store, library, source) = listing_context(&app)?;
+    let (_, library, source) = listing_context(&app)?;
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let pack_id = uuid::Uuid::new_v4();
-        let sources = vz_pack::review_build::candidates(&store, &library, &source, pack_id)?;
+        let sources = vz_pack::review_build::candidates(&library, &source)?;
         Ok(serde_json::json!({"pack_id":pack_id,"sources":sources}))
     })
     .await

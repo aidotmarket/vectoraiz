@@ -75,7 +75,6 @@ fn package_inner(
     ensure!(!output.try_exists()?, "pack output already exists");
     let stage = parent.join(format!(".vz-{}.partial", uuid::Uuid::new_v4()));
     let files = inventory(payload, &current.pack_id.to_string())?;
-    let intent = guard.intent(current, &format!("package:{}", output.display()))?;
     fs::create_dir(&stage)?;
     let mut promoted = false;
     let result = (|| {
@@ -109,6 +108,7 @@ fn package_inner(
         }
         check(Point::BeforePromotion)?;
         guard.check_accepted(current)?;
+        let intent = guard.intent(current, &format!("package:{}", output.display()))?;
         crate::export::publish_folder(&stage, &output)?;
         promoted = true;
         check(Point::AfterPromotion)?;

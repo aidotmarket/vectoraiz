@@ -5,8 +5,10 @@ use crate::{
     sanitize::{self, Budget, Changes},
 };
 use anyhow::{ensure, Context, Result};
+use hmac::{Hmac, Mac};
 use parquet::arrow::ArrowWriter;
 use serde_json::json;
+use sha2::Sha256;
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read, Write},
@@ -27,19 +29,12 @@ pub struct Candidate {
     pub supported: bool,
 }
 
-pub fn candidates(
-    store: &Path,
-    library: &Path,
-    source: &Path,
-    pack_id: Uuid,
-) -> Result<Vec<Candidate>> {
+pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
     let policy = crate::listing_policy::system();
     policy.require_preview()?;
-    let store = ReviewStore::open(store)?;
-    let pack = store.lock_native(policy, pack_id, library)?;
-    let _binding = pack.capture(source)?;
+    let lease = policy.policy_lease()?;
     let source = source.canonicalize()?;
-    let candidates = State::review_documents(pack.index_path())?
+    let candidates = crate::review_store::NativeIndexFence::candidate_documents(library, &source)?
         .into_iter()
         .enumerate()
         .map(|(position, doc)| {
@@ -59,7 +54,7 @@ pub fn candidates(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    pack.check_policy()?;
+    lease.check(policy)?;
     Ok(candidates)
 }
 
@@ -112,11 +107,13 @@ fn build(
         "embedding recipe mismatch; re-index required"
     );
     let indexed = State::review_documents(index)?;
+    let identity_key = pack.identity_key()?;
     let work = pack.work()?;
     let result = (|| {
         let mut docs = Vec::new();
         let mut originals = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let mut mapping = BTreeMap::new();
+        let mut document_ids = BTreeMap::new();
         let mut budget = Budget::default();
         // Refuse edits which a handler cannot apply; never accept a cosmetic
         // preview change while silently delivering the previous value.
@@ -166,6 +163,13 @@ fn build(
             let bytes = sanitize::rewrite(&location, &bytes, changes, &mut mapping, &mut budget)?;
             mapping.insert(relative, location);
             let text = std::str::from_utf8(&bytes)?;
+            // A stable per-pack pseudonym preserves identity-bound edits without
+            // exposing a path digest or linking independent packs to one index.
+            let mut identity = Hmac::<Sha256>::new_from_slice(&identity_key)?;
+            identity.update(doc.doc_id.as_bytes());
+            let public_id = format!("{:x}", identity.finalize().into_bytes());
+            document_ids.insert(doc.doc_id.clone(), public_id.clone());
+            doc.doc_id = public_id;
             doc.chunks = chunk(
                 &doc.doc_id,
                 &[Page {
@@ -326,7 +330,7 @@ fn build(
             binding,
             review,
             &work,
-            json!({"mapping":mapping,"identity_terms":changes.identity_terms}),
+            json!({"mapping":mapping,"document_ids":document_ids,"identity_terms":changes.identity_terms}),
         )
     })();
     // The UUID-owned private scratch is never a seller destination.
@@ -390,6 +394,9 @@ mod tests {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_path_ids(false)
+        }
+        fn with_path_ids(path_ids: bool) -> Self {
             let temp = tempfile::tempdir().unwrap();
             let root = temp.path().canonicalize().unwrap();
             let pins =
@@ -422,7 +429,11 @@ mod tests {
                 let path = source.join(name);
                 std::fs::write(&path, bytes).unwrap();
                 let doc = vz_core::pipeline::Document {
-                    doc_id: id.into(),
+                    doc_id: if path_ids {
+                        sha256(path.to_str().unwrap().as_bytes())
+                    } else {
+                        id.into()
+                    },
                     path: path.to_str().unwrap().into(),
                     sha256: sha256(bytes),
                     bytes: bytes.len() as u64,
@@ -461,6 +472,68 @@ mod tests {
                 ..Changes::default()
             }
         }
+    }
+
+    #[test]
+    fn path_ids_are_private_and_independent_packs_cannot_be_linked_by_id() {
+        let f = Fixture::with_path_ids(true);
+        let source_id = sha256(
+            f.root
+                .join("source/client-original.md")
+                .to_str()
+                .unwrap()
+                .as_bytes(),
+        );
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let mut public_ids = Vec::new();
+        for _ in 0..2 {
+            let id = Uuid::new_v4();
+            let guard = store
+                .lock_native(&f.policy, id, &f.root.join("index"))
+                .unwrap();
+            let current = build(
+                &guard,
+                &f.root.join("source"),
+                id,
+                &f.engine,
+                "query",
+                &Fixture::changes(),
+            )
+            .unwrap();
+            let review = guard.inspect(&current).unwrap();
+            assert!(review.metadata_inventory.iter().all(|entry| {
+                !entry.location.contains(&source_id)
+                    && !entry
+                        .value
+                        .as_deref()
+                        .unwrap_or_default()
+                        .contains(&source_id)
+            }));
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            for entry in walkdir::WalkDir::new(&payload) {
+                let entry = entry.unwrap();
+                if entry.file_type().is_file() {
+                    let bytes = std::fs::read(entry.path()).unwrap();
+                    assert!(!bytes
+                        .windows(source_id.len())
+                        .any(|w| w == source_id.as_bytes()));
+                }
+            }
+            assert!(!payload.join("identity-key.json").exists());
+            let private: serde_json::Value = serde_json::from_slice(
+                &std::fs::read(payload.parent().unwrap().join("private.json")).unwrap(),
+            )
+            .unwrap();
+            let public_id = private["document_ids"][&source_id].as_str().unwrap();
+            assert_ne!(public_id, source_id);
+            assert!(review
+                .metadata_inventory
+                .iter()
+                .any(|e| e.value.as_deref() == Some(public_id)));
+            public_ids.push(public_id.to_owned());
+        }
+        assert_ne!(public_ids[0], public_ids[1]);
     }
 
     #[test]

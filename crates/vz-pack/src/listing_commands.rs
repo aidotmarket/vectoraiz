@@ -53,7 +53,7 @@ impl From<anyhow::Error> for ListingFailure {
             code: error
                 .downcast_ref::<ListingError>()
                 .copied()
-                .unwrap_or(ListingError::StaleGeneration),
+                .unwrap_or(ListingError::OperationFailed),
             reason: format!("{error:#}"),
         }
     }
@@ -98,4 +98,17 @@ pub fn invalidate(
         pack.begin_rebuild()
     };
     run().map_err(Into::into)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrelated_errors_do_not_claim_the_generation_is_stale() {
+        let error = ListingFailure::from(anyhow::anyhow!("destination cannot be read"));
+        assert_eq!(error.code, ListingError::OperationFailed);
+        let stale = ListingFailure::from(anyhow::Error::from(ListingError::StaleGeneration));
+        assert_eq!(stale.code, ListingError::StaleGeneration);
+    }
 }

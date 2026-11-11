@@ -12,6 +12,7 @@ custom-protocol = ["tauri/custom-protocol"]
 vulkan = ["vz-core/vulkan"]
 
 [build-dependencies]
+serde_json.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]

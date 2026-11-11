@@ -86,6 +86,16 @@ pub struct NativeIndexFence {
 }
 
 impl NativeIndexFence {
+    pub(crate) fn candidate_documents(
+        library: &Path,
+        source: &Path,
+    ) -> Result<Vec<vz_core::pipeline::Document>> {
+        let fence = Self::acquire(library)?;
+        let index = &fence.selection.index;
+        let _binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
+        vz_core::storage::State::review_documents(index)
+    }
+
     fn acquire(library: &Path) -> Result<Self> {
         plain_directory(library)?;
         let selection = vz_core::active_index::selection_fence(library, false)?;
@@ -322,7 +332,9 @@ impl NativePackReview<'_> {
         );
         let path = self.pack.generation_path(current);
         let private: serde_json::Value = read_json(&path.join("private.json"))?;
-        let certificate = format!("native-sanitizer-v1:{}", String::from(digest(&private)?));
+        // v1 permitted path-derived IDs. Even accepted v1 generations require
+        // rebuilding; a software upgrade must not keep delivering those IDs.
+        let certificate = format!("native-sanitizer-v2:{}", String::from(digest(&private)?));
         ensure!(
             generation.sanitizer.as_deref() == Some(&certificate),
             ListingError::ReviewRequired
@@ -367,6 +379,20 @@ impl NativePackReview<'_> {
     pub(crate) fn check_policy(&self) -> Result<()> {
         Ok(self.pack.lease.check(self.pack.policy)?)
     }
+    /// The per-pack random key never enters a delivered generation. Holding the
+    /// pack mutex serializes creation; private_file enforces owner-only storage.
+    pub(crate) fn identity_key(&self) -> Result<[u8; 32]> {
+        self.check_policy()?;
+        let path = self.pack.path.join("identity-key.json");
+        if !path.try_exists()? {
+            let mut key = [0; 32];
+            key[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+            key[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+            write_json(&path, &key)?;
+        }
+        read_json(&path)
+    }
+
     pub(crate) fn work(&self) -> Result<PathBuf> {
         self.check_policy()?;
         let path = self
@@ -539,7 +565,7 @@ impl PackReview<'_> {
                 .as_ref()
                 .map(digest)
                 .transpose()?
-                .map(|hash| format!("native-sanitizer-v1:{}", String::from(hash)));
+                .map(|hash| format!("native-sanitizer-v2:{}", String::from(hash)));
             if let Some(private) = &private {
                 write_json(&partial.join("private.json"), private)?;
             }
@@ -1158,6 +1184,71 @@ mod tests {
         assert!(matches!(
             result.err().unwrap().downcast_ref::<ListingError>(),
             Some(ListingError::StaleGeneration)
+        ));
+    }
+
+    #[test]
+    fn accepted_legacy_sanitizer_generation_requires_rebuild_before_delivery() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        fs::write(index.join("writer.lock"), b"").unwrap();
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let native = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
+        let initial = fixture.freeze_bound(
+            &native.pack,
+            native.capture(&fixture.0.join("source")).unwrap(),
+        );
+        let mut review = native.inspect(&initial).unwrap();
+        review.metadata_inventory.push(crate::sanitize::Entry {
+            location: "document-0001.txt".into(),
+            kind: "text".into(),
+            value: Some("reviewed text".into()),
+            warning: false,
+        });
+        let private = serde_json::json!({"identity_terms": []});
+        let current = native
+            .freeze_sanitized(
+                native.capture(&fixture.0.join("source")).unwrap(),
+                review,
+                &fixture.0.join("rebuilt"),
+                private.clone(),
+            )
+            .unwrap();
+        // Reconstruct an internally consistent, accepted v1 generation as it
+        // would exist on disk after upgrading. Its bindings/hashes still pass.
+        let path = native.pack.generation_path(&current);
+        let mut generation: Generation = read_json(&path.join("generation.json")).unwrap();
+        generation.sanitizer = Some(format!(
+            "native-sanitizer-v1:{}",
+            String::from(digest(&private).unwrap())
+        ));
+        generation.current.review_hash = generation_hash(
+            &generation.binding,
+            &generation.review,
+            &generation.sanitizer,
+        )
+        .unwrap();
+        let legacy = generation.current.clone();
+        fs::write(
+            path.join("generation.json"),
+            serde_json::to_vec(&generation).unwrap(),
+        )
+        .unwrap();
+        let (sequence, _) = native.pack.head().unwrap().unwrap();
+        fs::write(
+            native.pack.path.join(format!("head-{sequence:020}.json")),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
+        native.accept(&legacy).unwrap();
+        native.check_accepted(&legacy).unwrap();
+        assert!(matches!(
+            native
+                .reviewed_payload(&legacy)
+                .unwrap_err()
+                .downcast_ref::<ListingError>(),
+            Some(ListingError::ReviewRequired)
         ));
     }
 

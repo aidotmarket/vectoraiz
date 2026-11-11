@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -17,14 +18,14 @@ RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
 CLI = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
 # Preview is enabled only for this acceptance build, never by environment or
 # user preference. Restore the default-off CLI even when the journey fails.
-subprocess.run(["cargo", "build", "-p", "vz-cli", "-p", "vz-parser-worker", "--features", "vz-cli/listing-preview-harness"], cwd=ROOT, check=True)
+subprocess.run([*RTK, "cargo", "build", "-p", "vz-cli", "-p", "vz-parser-worker", "--features", "vz-cli/listing-preview-harness"], cwd=ROOT, check=True)
 try:
     with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
         temp = str(Path(temp).resolve())
         state = Path(temp) / 'state'
         pack = Path(temp) / 'pack'
         def cli(*args):
-            result = subprocess.run([str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=600)
+            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=600)
             print(result.stderr, file=sys.stderr)
             if result.returncode:
                 print(result.stdout)
@@ -93,7 +94,7 @@ try:
             # Live loopback SFTP uses the production reviewed entry point.
             remote = Path(temp) / ("sftp-" + manifest["pack_id"])
             remote.mkdir(); (remote / "source").mkdir(); (remote / "staging").mkdir()
-            server = subprocess.Popen([sys.executable, str(ROOT / "scripts/sftp-test-server.py"), str(remote)], stdout=subprocess.PIPE, text=True, encoding="utf-8")
+            server = subprocess.Popen([*RTK, sys.executable, str(ROOT / "scripts/sftp-test-server.py"), str(remote)], stdout=subprocess.PIPE, text=True, encoding="utf-8", start_new_session=os.name != "nt")
             try:
                 ready = json.loads(server.stdout.readline())
                 report = cli("--review-reference", str(reference_path), "export", str(output), "--pack-id", manifest["pack_id"], "--sftp", f"fixture@127.0.0.1:{ready['port']}:/source", "--sftp-staging", "/staging", "--identity", str(remote / "client.pem"), "--known-hosts", str(remote / "pins.json"))
@@ -105,7 +106,7 @@ try:
                 # destination-bound intent when the rename acknowledgement is lost.
                 (remote / "source-lost-ack").mkdir()
                 (remote / "lost-rename-ack").write_text("fixture fault")
-                uncertain = subprocess.run([str(CLI), "--review-reference", str(reference_path), "export", str(output), "--pack-id", manifest["pack_id"], "--sftp", f"fixture@127.0.0.1:{ready['port']}:/source-lost-ack", "--sftp-staging", "/staging", "--identity", str(remote / "client.pem"), "--known-hosts", str(remote / "pins.json")], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
+                uncertain = subprocess.run([*RTK, str(CLI), "--review-reference", str(reference_path), "export", str(output), "--pack-id", manifest["pack_id"], "--sftp", f"fixture@127.0.0.1:{ready['port']}:/source-lost-ack", "--sftp-staging", "/staging", "--identity", str(remote / "client.pem"), "--known-hosts", str(remote / "pins.json")], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
                 print(uncertain.stderr, file=sys.stderr)
                 assert uncertain.returncode == 3, uncertain.stderr
                 assert (remote / "source-lost-ack/vz" / manifest["pack_id"] / "manifest.json").read_bytes() == (output / "manifest.json").read_bytes()
@@ -115,7 +116,9 @@ try:
                 assert len(lost) == 1 and "|stage:/staging/" in lost[0]["destination"], lost
                 assert not (generation / f"completed-{lost[0]['job_id']}.json").exists()
             finally:
-                server.terminate(); server.wait(timeout=15)
+                if os.name == 'nt': server.terminate()
+                else: os.killpg(server.pid, signal.SIGTERM)
+                server.wait(timeout=15)
             return manifest, reference_path
         manifest, reference_path = reviewed_pack(pack)
         # object_pairs_hook runs bottom-up, including objects nested inside arrays.
@@ -126,25 +129,37 @@ try:
         for name in ['examples/query.json', 'manifest.json']:
             json.loads((pack / name).read_text(encoding='utf-8'), object_pairs_hook=sorted_object)
         docs = {doc['doc_id']: doc for doc in pq.read_table(pack / 'documents.parquet').to_pylist()}
+        reference = json.loads(reference_path.read_text())
+        private = json.loads((Path(reference['store']) / manifest['pack_id'] / reference['current']['generation'] / 'private.json').read_text())
+        public_ids = private['document_ids']
+        chunks = {c['chunk_id']: c for c in pq.read_table(pack / 'chunks.parquet').to_pylist()}
+        assert set(docs) == set(public_ids.values()) and not (set(docs) & set(public_ids))
         for hit in hits:
             chunk = hit['chunk']
-            if chunk['doc_id'] not in docs: continue  # explicitly excluded unsupported original
-            assert 1 <= chunk['page'] <= docs[chunk['doc_id']]['pages']
-        chunks = {c['chunk_id']: c for c in pq.read_table(pack / 'chunks.parquet').to_pylist()}
+            public_id = public_ids.get(chunk['doc_id'])
+            if public_id is None: continue  # explicitly excluded unsupported original
+            assert 1 <= chunk['page'] <= docs[public_id]['pages']
         for citation in answer['citations']:
-            if citation['doc_id'] not in docs: continue
-            source = chunks[citation['chunk_id']]
-            assert (source['doc_id'], source['page']) == (citation['doc_id'], citation['page'])
-            assert citation['doc_id'] in docs
-            assert 1 <= citation['page'] <= docs[citation['doc_id']]['pages']
+            public_id = public_ids.get(citation['doc_id'])
+            if public_id is None: continue
+            public_chunk = public_id + citation['chunk_id'][len(citation['doc_id']):]
+            delivered = chunks[public_chunk]
+            assert (delivered['doc_id'], delivered['page']) == (public_id, citation['page'])
+            assert 1 <= citation['page'] <= docs[public_id]['pages']
+        # Inspect decompressed Parquet values as well as every raw delivered file.
+        delivered_values = json.dumps([*docs.values(), *chunks.values()])
+        for source_id in public_ids:
+            assert source_id not in delivered_values
+            for path in pack.rglob('*'):
+                if path.is_file(): assert source_id.encode() not in path.read_bytes()
         for name, digest in manifest['files'].items():
             assert hashlib.sha256((pack / name).read_bytes()).hexdigest() == digest
             if name.endswith(('.md', '.py', '.json')):
                 first = (pack / name).read_text().splitlines()[0]
                 assert ',' not in first and '\t' not in first, name
-        subprocess.run([sys.executable, str(pack / 'examples/query.py'), str(pack), str(CLI)], check=True)
+        subprocess.run([*RTK, sys.executable, str(pack / 'examples/query.py'), str(pack), str(CLI)], check=True)
         if os.environ.get('VZ_MINIO_ENDPOINT'):
-            subprocess.run([sys.executable, str(ROOT / 'scripts/upload-e2e.py'), str(pack), str(reference_path)], check=True)
+            subprocess.run([*RTK, sys.executable, str(ROOT / 'scripts/upload-e2e.py'), str(pack), str(reference_path)], check=True)
         # Same dimensions and model bytes, different model identity: dimensions alone
         # must never authorize queries or relabel an export.
         pins = json.loads((ROOT / 'spike/fixtures/models.json').read_text())
@@ -152,7 +167,7 @@ try:
         alternate = Path(temp) / 'alternate-models.json'
         alternate.write_text(json.dumps(pins))
         for operation in [('search', query), ('ask', query), ('pack', str(Path(temp) / 'wrong-pack'))]:
-            refused = subprocess.run([str(CLI), '--review-reference', str(reference_path), '--cpu', '--state', str(state),
+            refused = subprocess.run([*RTK, str(CLI), '--review-reference', str(reference_path), '--cpu', '--state', str(state),
                                       '--models', str(alternate), *operation],
                                      cwd=ROOT, text=True, encoding='utf-8', capture_output=True, timeout=600)
             assert refused.returncode != 0 and 're-index required' in refused.stderr, refused.stderr
@@ -195,7 +210,7 @@ try:
             return target
 
         def refused_index(folder, assets=ROOT / '.assets'):
-            result = subprocess.run([str(CLI), '--cpu', '--state', str(state), '--assets', str(assets),
+            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), '--assets', str(assets),
                                      'index', str(folder)], cwd=ROOT, text=True, encoding='utf-8', capture_output=True, timeout=600)
             print(result.stderr, file=sys.stderr)
             assert result.returncode != 0 and 'Re-index did not finish' in result.stderr, result.stderr
@@ -260,7 +275,7 @@ try:
 
         state = Path(temp) / 'interrupted-first-library'
         (state / 'indexes').mkdir(parents=True)
-        missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'search', query],
+        missing = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), 'search', query],
                                  cwd=ROOT, text=True, encoding='utf-8', capture_output=True, timeout=600)
         assert missing.returncode != 0 and 're-index required' in missing.stderr
         assert not (state / 'phase0-index').exists(), 'read must not create legacy state'
@@ -358,9 +373,9 @@ try:
         assert broken_result['completed'] == 1 and broken_result['failed'] == 1, broken_result
         assert broken_result.get('infrastructure_failed', 0) == 0, broken_result
         state = Path(temp) / 'state'
-        missing = subprocess.run([str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
+        missing = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
         assert missing.returncode != 0 and 'source unavailable' in missing.stderr
         assert cli('search', query) == [], 'unavailable source must revoke cached content'
         print(json.dumps({'source_revocation': 'OK', 'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'small_answers': small_answers, 'pack_hashes': 'OK', 'example_query': 'OK'}))
 finally:
-    subprocess.run(["cargo", "build", "-p", "vz-cli"], cwd=ROOT, check=True)
+    subprocess.run([*RTK, "cargo", "build", "-p", "vz-cli"], cwd=ROOT, check=True)

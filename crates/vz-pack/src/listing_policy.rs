@@ -33,6 +33,7 @@ pub enum ListingError {
     PreviewDisabled,
     ReviewRequired,
     StaleGeneration,
+    OperationFailed,
 }
 impl std::fmt::Display for ListingError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -41,6 +42,7 @@ impl std::fmt::Display for ListingError {
             Self::PolicyUnreadable => "The managed listing policy cannot be read or is invalid. Listing is disabled. Contact IT.",
             Self::PreviewDisabled => "Listing preview is not available in this build.",
             Self::ReviewRequired => "A current, explicitly accepted purchaser review is required before transfer.",
+            Self::OperationFailed => "Listing operation failed. Check the details and try again.",
             Self::StaleGeneration => "Listing policy, source or reviewed generation changed. Start a new purchaser review.",
         })
     }
@@ -191,14 +193,16 @@ pub fn system() -> &'static ListingPolicy {
     static POLICY: OnceLock<ListingPolicy> = OnceLock::new();
     static MONITOR: OnceLock<()> = OnceLock::new();
     let policy = POLICY.get_or_init(|| ListingPolicy::new(Arc::new(OsPolicy)));
-    MONITOR.get_or_init(|| {
-        #[cfg(windows)]
-        std::thread::spawn(move || watch_registry(policy));
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            policy.refresh();
+    if LISTING_AUTHORITY_PREVIEW_V1 {
+        MONITOR.get_or_init(|| {
+            #[cfg(windows)]
+            std::thread::spawn(move || watch_registry(policy));
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                policy.refresh();
+            });
         });
-    });
+    }
     policy
 }
 

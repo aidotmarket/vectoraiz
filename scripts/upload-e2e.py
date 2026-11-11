@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -30,7 +31,7 @@ endpoint = f'http://127.0.0.1:{port}'
 server = ROOT / ('.tools/minio.exe' if os.name == 'nt' else '.tools/minio')
 cli = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
 with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.get('KD_BRIDGE_JOB_EVIDENCE', data)) / 'minio-test.log').open('w') as log:
-    child = subprocess.Popen([str(server), 'server', data, '--address', f'127.0.0.1:{port}', '--console-address', '127.0.0.1:0'], env=env, stdout=log, stderr=subprocess.STDOUT)
+    child = subprocess.Popen([*RTK, str(server), 'server', data, '--address', f'127.0.0.1:{port}', '--console-address', '127.0.0.1:0'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
     try:
         deadline = time.monotonic() + 60
         while True:
@@ -41,15 +42,29 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
                 time.sleep(.2)
         s3 = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=env['AWS_ACCESS_KEY_ID'], aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'], region_name='us-east-1', config=Config(s3={'addressing_style': 'path'}))
         s3.create_bucket(Bucket='phase0-pack')
-        subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack'], env=env, check=True)
+        subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack'], env=env, check=True)
         for name in [*manifest['files'], 'manifest.json']:
             body = s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read()
             assert body == (pack / name).read_bytes(), name
-        retry = subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        retry = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
         assert retry.returncode != 0 and 'conditional write failed' in retry.stderr, retry.stderr
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
-        assert not s3.list_objects_v2(Bucket='phase0-pack', Prefix='_vz-staging/').get('Contents'), 'job-owned staging must be cleaned'
+        keys = {obj['Key'] for obj in s3.list_objects_v2(Bucket='phase0-pack').get('Contents', [])}
+        assert keys == {prefix + '/' + name for name in [*manifest['files'], 'manifest.json']}, keys
+        # A partial final namespace resumes only matching bytes, without staging.
+        s3.create_bucket(Bucket='partial-pack')
+        first = next(iter(manifest['files']))
+        s3.put_object(Bucket='partial-pack', Key=prefix + '/' + first, Body=(pack / first).read_bytes())
+        subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'partial-pack'], env=env, check=True)
+        for name in [*manifest['files'], 'manifest.json']:
+            assert s3.get_object(Bucket='partial-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
+        s3.create_bucket(Bucket='conflict-pack')
+        s3.put_object(Bucket='conflict-pack', Key=prefix + '/' + first, Body=b'conflicting bytes')
+        conflict = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'conflict-pack'], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert conflict.returncode != 0 and 'readback mismatch' in conflict.stderr, conflict.stderr
+        assert s3.get_object(Bucket='conflict-pack', Key=prefix + '/' + first)['Body'].read() == b'conflicting bytes'
+        assert 'manifest.json' not in {obj['Key'].removeprefix(prefix + '/') for obj in s3.list_objects_v2(Bucket='conflict-pack').get('Contents', [])}
         # Fresh bucket permits a second completion boundary without overwriting
         # any prior pack. Lose only the private receipt after manifest readback.
         s3.create_bucket(Bucket='uncertain-pack')
@@ -66,6 +81,10 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         assert not (generation / f"completed-{pending[0]['job_id']}.json").exists()
         print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
     finally:
-        child.terminate()
+        if os.name == 'nt': child.terminate()
+        else: os.killpg(child.pid, signal.SIGTERM)
         try: child.wait(timeout=15)
-        except subprocess.TimeoutExpired: child.kill(); child.wait()
+        except subprocess.TimeoutExpired:
+            if os.name == 'nt': child.kill()
+            else: os.killpg(child.pid, signal.SIGKILL)
+            child.wait()

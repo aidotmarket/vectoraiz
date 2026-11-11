@@ -197,10 +197,7 @@ pub fn folder(
         ensure!(id == current.pack_id.to_string(), "review pack id mismatch");
         crate::review_transfer::check_input(guard, current, pack, payload)?;
         crate::sanitize::check_identifier(id, terms)?;
-        let intent = guard.intent(
-            current,
-            &format!("folder:{}:{id}", source.canonicalize()?.display()),
-        )?;
+        let intent = std::sync::Mutex::new(None);
         let result = folder_inner(
             payload,
             id,
@@ -208,20 +205,35 @@ pub fn folder(
             staging,
             same_filesystem,
             |_| Ok(()),
-            || Ok(()),
+            || {
+                *intent.lock().unwrap() = Some(guard.intent(
+                    current,
+                    &format!("folder:{}:{id}", source.canonicalize()?.display()),
+                )?);
+                Ok(())
+            },
             || {
                 guard.check_accepted(current)?;
                 Ok(())
             },
+            || guard.check_policy(),
         )?;
-        guard.completed(&intent, &result).map_err(|error| {
-            crate::review_transfer::uncertain(
-                result["destination"]
-                    .as_str()
-                    .unwrap_or("folder destination"),
-                error,
+        guard
+            .completed(
+                &intent
+                    .into_inner()
+                    .unwrap()
+                    .context("missing folder intent")?,
+                &result,
             )
-        })?;
+            .map_err(|error| {
+                crate::review_transfer::uncertain(
+                    result["destination"]
+                        .as_str()
+                        .unwrap_or("folder destination"),
+                    error,
+                )
+            })?;
         Ok(result)
     })
 }
@@ -236,6 +248,7 @@ fn folder_unreviewed(pack: &Path, id: &str, source: &Path, staging: &Path) -> Re
         staging,
         same_filesystem,
         |_| Ok(()),
+        || Ok(()),
         || Ok(()),
         || Ok(()),
     )
@@ -260,6 +273,7 @@ fn folder_with_checks(
         |_| Ok(()),
         before_rename,
         || Ok(()),
+        || Ok(()),
     )
 }
 
@@ -281,6 +295,7 @@ fn folder_with_staged_check(
         after_copy,
         || Ok(()),
         || Ok(()),
+        || Ok(()),
     )
 }
 
@@ -294,6 +309,7 @@ fn folder_inner(
     after_copy: impl FnOnce(&Path) -> Result<()>,
     before_rename: impl FnOnce() -> Result<()>,
     check: impl Fn() -> Result<()>,
+    check_chunk: impl Fn() -> Result<()>,
 ) -> Result<Value> {
     let start = Instant::now();
     let files = inventory(pack, id)?;
@@ -349,7 +365,7 @@ fn folder_inner(
                 if count == 0 {
                     break;
                 }
-                check()?;
+                check_chunk()?;
                 output.write_all(&buffer[..count])?;
             }
             output.sync_all()?;
@@ -619,6 +635,7 @@ pub async fn sftp(
             guard.check_accepted(&reference.current)?;
             Ok(())
         },
+        || guard.check_policy(),
         |destination, stage| {
             crate::sanitize::check_identifier(destination, &terms)?;
             *intent.lock().unwrap() =
@@ -646,7 +663,7 @@ pub async fn sftp(
 
 #[cfg(test)]
 async fn sftp_unreviewed(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
-    sftp_inner(pack, id, options, || Ok(()), |_, _| Ok(())).await
+    sftp_inner(pack, id, options, || Ok(()), || Ok(()), |_, _| Ok(())).await
 }
 
 async fn verify_remote(
@@ -721,6 +738,7 @@ async fn sftp_inner(
     id: &str,
     options: &SftpOptions,
     check: impl Fn() -> Result<()>,
+    check_chunk: impl Fn() -> Result<()>,
     record: impl Fn(&str, &str) -> Result<()>,
 ) -> Result<Value> {
     let start = Instant::now();
@@ -796,7 +814,6 @@ async fn sftp_inner(
     );
     let stage = format!("{}/{}", staging.trim_end_matches('/'), partial_name(id));
     let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
-    record(&destination_url, &stage)?;
     check()?;
     sftp.create_dir(&stage).await?;
     let mut promotion_attempted = false;
@@ -821,7 +838,7 @@ async fn sftp_inner(
             if n == 0 {
                 break;
             }
-            check()?;
+            check_chunk()?;
             remote.write_all(&buffer[..n]).await?;
         }
         remote.shutdown().await?;
@@ -849,6 +866,7 @@ async fn sftp_inner(
     // SFTP v3 RENAME must fail if the destination exists; do not use posix-rename
     // extensions, which overwrite an existing destination.
     verify_remote(&sftp, &stage, &files, &check).await?;
+    record(&destination_url, &stage)?;
         check()?;
         promotion_attempted = true;
     if let Err(error) = sftp.rename(&stage, &destination).await {

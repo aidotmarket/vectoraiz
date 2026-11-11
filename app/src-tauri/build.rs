@@ -1,3 +1,44 @@
+const COMMANDS: &[&str] = &[
+    "open_product_page",
+    "third_party_notices",
+    "self_test",
+    "models_status",
+    "models_download",
+    "models_cancel",
+    "models_import",
+    "answer_add",
+    "answer_switch",
+    "answer_turn_off",
+    "delete_unused_model",
+    "pipeline_index",
+    "pipeline_search",
+    "pipeline_ask",
+    "cloud_status",
+    "listing_status",
+    "listing_review",
+    "listing_sources",
+    "listing_rebuild",
+    "listing_invalidate",
+    "app_status",
+    "app_disclosure",
+    "app_connect_claude",
+    "app_connect_other",
+    "app_confirm",
+    "app_test_connection",
+    "app_disconnect",
+    "app_path_set",
+    "app_access_retry",
+    "app_show_extension",
+    "api_key_disclosure",
+    "api_key_confirm",
+    "api_key_set",
+    "api_key_stop",
+    "api_key_cleanup_retry",
+    "answer_path_set",
+    "update_check",
+    "update_install",
+];
+
 // Generate Tauri's required placeholder icon as a build input only.
 // No image asset or installer is published by the scaffold.
 fn main() {
@@ -16,46 +57,41 @@ fn main() {
     ico.extend_from_slice(&22_u32.to_le_bytes());
     ico.extend_from_slice(png);
     std::fs::write(generated.join("icon.ico"), ico).expect("write Windows build icon");
+    // Keep the real invoke handler, generated permissions and enabled capability
+    // aligned. Frontend mocks cannot detect a command rejected by Tauri's ACL.
+    let desktop = include_str!("src/desktop.rs");
+    let capability: serde_json::Value =
+        serde_json::from_str(include_str!("capabilities/self-test.json")).expect("capability JSON");
+    let handler = desktop
+        .split("tauri::generate_handler![")
+        .nth(1)
+        .expect("desktop invoke handler")
+        .split(']')
+        .next()
+        .unwrap();
+    for command in handler.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        assert!(
+            COMMANDS.contains(&command),
+            "registered command {command} missing from AppManifest"
+        );
+        let permission = format!("allow-{}", command.replace('_', "-"));
+        assert!(
+            capability["permissions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p == &permission),
+            "registered command {command} missing capability {permission}"
+        );
+    }
+    println!("cargo:rerun-if-changed=src/desktop.rs");
+    println!("cargo:rerun-if-changed=capabilities/self-test.json");
     tauri_build::try_build(
         tauri_build::Attributes::new()
             .windows_attributes(
                 tauri_build::WindowsAttributes::new().window_icon_path("gen/icon.ico"),
             )
-            .app_manifest(tauri_build::AppManifest::new().commands(&[
-                "open_product_page",
-                "third_party_notices",
-                "self_test",
-                "models_status",
-                "models_download",
-                "models_cancel",
-                "models_import",
-                "answer_add",
-                "answer_switch",
-                "answer_turn_off",
-                "delete_unused_model",
-                "pipeline_index",
-                "pipeline_search",
-                "pipeline_ask",
-                "cloud_status",
-                "app_status",
-                "app_disclosure",
-                "app_connect_claude",
-                "app_connect_other",
-                "app_confirm",
-                "app_test_connection",
-                "app_disconnect",
-                "app_path_set",
-                "app_access_retry",
-                "app_show_extension",
-                "api_key_disclosure",
-                "api_key_confirm",
-                "api_key_set",
-                "api_key_stop",
-                "api_key_cleanup_retry",
-                "answer_path_set",
-                "update_check",
-                "update_install",
-            ])),
+            .app_manifest(tauri_build::AppManifest::new().commands(COMMANDS)),
     )
     .expect("failed to build Tauri app");
 }
