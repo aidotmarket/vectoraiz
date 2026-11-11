@@ -128,8 +128,8 @@ fn build(
                 || ((key.starts_with("documents.parquet/column/")
                     || key.starts_with("chunks.parquet/column/"))
                     && key.ends_with("/name"))
-                || (key.starts_with("documents.parquet/row/") && key.ends_with("/column/2"))
-                || (key.starts_with("chunks.parquet/row/") && key.ends_with("/column/4"));
+                || (key.starts_with("documents.parquet/id/") && key.ends_with("/column/2"))
+                || (key.starts_with("chunks.parquet/id/") && key.ends_with("/column/4"));
             ensure!(allowed, "edit location has no proven rebuild handler");
         }
         let source = source.canonicalize()?;
@@ -461,6 +461,122 @@ mod tests {
                 ..Changes::default()
             }
         }
+    }
+
+    #[test]
+    fn title_edit_follows_document_after_exclusion_and_heading_retarget_refuses() {
+        let f = Fixture::new();
+        let mut state = State::open(&f.root.join("index")).unwrap();
+        let bytes = b"# Second heading\nSecond document text.\n";
+        let path = f.root.join("source/second.md");
+        std::fs::write(&path, bytes).unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "c".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: sha256(bytes),
+            bytes: bytes.len() as u64,
+            pages: 1,
+            kind: "md".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let generation = Uuid::new_v4().to_string();
+        let directory = f.root.join("index/generations").join(&generation);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("document.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
+        state.commit(&doc, "fixture", &generation).unwrap();
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let mut changes = Fixture::changes();
+        let first = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        let inventory = guard.inspect(&first).unwrap().metadata_inventory;
+        let title = inventory
+            .iter()
+            .find(|e| e.kind == "title" && e.value.as_deref() == Some("Document 2"))
+            .unwrap()
+            .location
+            .clone();
+        let heading = inventory
+            .iter()
+            .rfind(|e| e.kind == "heading_path")
+            .unwrap()
+            .location
+            .clone();
+        changes
+            .edits
+            .insert(title.clone(), "Reviewed second title".into());
+        changes.exclusions.insert("client-original.md".into());
+        let next = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(guard
+            .inspect(&next)
+            .unwrap()
+            .metadata_inventory
+            .iter()
+            .any(|e| e.location == title && e.value.as_deref() == Some("Reviewed second title")));
+        changes
+            .edits
+            .insert(heading, r#"["Reviewed heading"]"#.into());
+        let heading_review = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(guard
+            .inspect(&heading_review)
+            .unwrap()
+            .metadata_inventory
+            .iter()
+            .any(|e| e.kind == "heading_path"
+                && e.value.as_deref() == Some(r#"["Reviewed heading"]"#)));
+        // Replacing the original causes rechunking; the retained heading edit
+        // must not apply to a different chunk at the same ordinal.
+        changes.edits.insert(
+            "originals-0001.zip!document-0003.md".into(),
+            "# Replacement heading\nCompletely different content.".into(),
+        );
+        let error = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("edit did not reach delivered readback"),
+            "{error:#}"
+        );
     }
 
     #[test]

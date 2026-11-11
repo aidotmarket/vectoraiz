@@ -14,8 +14,8 @@ function editable(entry: Entry) {
   return entry.value !== null && ((entry.kind === "text" && (key === "README.md" || key === "examples/query.py" || key.startsWith("originals-0001.zip!document-")))
     || key === "examples/query.json/query"
     || ((key.startsWith("documents.parquet/column/") || key.startsWith("chunks.parquet/column/")) && key.endsWith("/name"))
-    || (key.startsWith("documents.parquet/row/") && key.endsWith("/column/2"))
-    || (key.startsWith("chunks.parquet/row/") && key.endsWith("/column/4")));
+    || (key.startsWith("documents.parquet/id/") && key.endsWith("/column/2"))
+    || (key.startsWith("chunks.parquet/id/") && key.endsWith("/column/4")));
 }
 
 export function ListingReview() {

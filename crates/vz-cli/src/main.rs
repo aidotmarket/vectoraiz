@@ -122,7 +122,14 @@ enum Operation {
         prefix: Option<String>,
     },
 }
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("Error: {error:#}");
+        std::process::exit(vz_pack::export::exit_code(&error));
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
     let policy = vz_pack::listing_policy::system();
     policy.refresh();
@@ -212,22 +219,17 @@ fn main() -> Result<()> {
                 current.as_ref(),
             )?
         } else {
-            tokio_runtime()?
-                .block_on(vz_pack::export::sftp(
-                    pack,
-                    pack_id,
-                    &vz_pack::export::SftpOptions {
-                        target: sftp.clone().expect("clap requires mode"),
-                        staging: sftp_staging.clone().expect("clap requires SFTP staging"),
-                        identity: identity.clone(),
-                        known_hosts: known_hosts.clone(),
-                    },
-                    current.as_ref(),
-                ))
-                .unwrap_or_else(|error| {
-                    eprintln!("Error: {error:#}");
-                    std::process::exit(vz_pack::export::exit_code(&error));
-                })
+            tokio_runtime()?.block_on(vz_pack::export::sftp(
+                pack,
+                pack_id,
+                &vz_pack::export::SftpOptions {
+                    target: sftp.clone().expect("clap requires mode"),
+                    staging: sftp_staging.clone().expect("clap requires SFTP staging"),
+                    identity: identity.clone(),
+                    known_hosts: known_hosts.clone(),
+                },
+                current.as_ref(),
+            ))?
         };
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());

@@ -371,6 +371,55 @@ fn supported(data_type: &DataType) -> bool {
     ) || matches!(data_type, DataType::FixedSizeList(field, _) if field.data_type() == &DataType::Float32 && field.name() == "item" && field.metadata().is_empty())
 }
 
+// Native rows use content-bound identities so exclusions cannot retarget edits.
+// Chunk ids alone are ordinal within a document and change meaning on rechunking.
+fn row_location(name: &str, batch: &RecordBatch, row: usize, offset: usize) -> Result<String> {
+    let identity = match name {
+        "documents.parquet" => Some(("doc_id", false)),
+        "chunks.parquet" => Some(("chunk_id", true)),
+        _ => None,
+    };
+    if let Some((column, chunk)) = identity {
+        let strings = |column: &str| -> Result<&StringArray> {
+            batch
+                .column_by_name(column)
+                .context("missing row identity")?
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .context("invalid row identity")
+        };
+        let id = strings(column)?.value(row);
+        let target = if chunk {
+            serde_json::to_vec(&(id, strings("text")?.value(row)))?
+        } else {
+            serde_json::to_vec(&id)?
+        };
+        Ok(format!("{name}/id/{}", vz_core::pipeline::sha256(&target)))
+    } else {
+        Ok(format!("{name}/row/{}", offset + row))
+    }
+}
+
+// These fields are consumed by the format, query example, citation resolution
+// or native row identity. Descriptive columns may still be renamed.
+fn structural_column(name: &str) -> bool {
+    matches!(
+        name,
+        "embedding"
+            | "doc_id"
+            | "chunk_id"
+            | "text"
+            | "page"
+            | "pages"
+            | "file_name"
+            | "sha256"
+            | "type"
+            | "bytes"
+            | "token_count"
+            | "heading_path"
+    )
+}
+
 fn rewrite_parquet(
     name: &str,
     input: &[u8],
@@ -389,13 +438,22 @@ fn rewrite_parquet(
         .enumerate()
         .map(|(i, field)| {
             let key = format!("{name}/column/{i}/name");
-            Field::new(
-                changes.edits.get(&key).unwrap_or(field.name()),
+            let renamed = changes.edits.get(&key).unwrap_or(field.name());
+            ensure!(
+                !structural_column(field.name()) || renamed == field.name(),
+                "required format column cannot be renamed"
+            );
+            ensure!(
+                renamed == field.name() || !structural_column(renamed),
+                "required format column name is reserved"
+            );
+            Ok(Field::new(
+                renamed,
                 field.data_type().clone(),
                 field.is_nullable(),
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     let mut names = BTreeSet::new();
     ensure!(
         fields.iter().all(|f| names.insert(f.name())),
@@ -414,10 +472,13 @@ fn rewrite_parquet(
                     .iter()
                     .enumerate()
                     .map(|(row, value)| {
-                        let key = format!("{name}/row/{}/column/{column}", row_offset + row);
-                        changes.edits.get(&key).map(String::as_str).or(value)
+                        let key = format!(
+                            "{}/column/{column}",
+                            row_location(name, &batch, row, row_offset)?
+                        );
+                        Ok(changes.edits.get(&key).map(String::as_str).or(value))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>>>()?;
                 if batch.schema().field(column).name() == "heading_path" {
                     for text in values.iter().flatten() {
                         serde_json::from_str::<Vec<String>>(text)
@@ -540,7 +601,10 @@ fn inspect_at(
                         };
                         entry(
                             out,
-                            &format!("{name}/row/{}/column/{column}", offset + row),
+                            &format!(
+                                "{}/column/{column}",
+                                row_location(name, &batch, row, offset)?
+                            ),
                             batch.schema().field(column).name(),
                             value,
                             changes,
@@ -665,6 +729,42 @@ fn inspect_json(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn required_format_columns_cannot_be_renamed_or_shadowed() {
+        for column in [
+            "embedding",
+            "doc_id",
+            "chunk_id",
+            "page",
+            "pages",
+            "text",
+            "file_name",
+            "sha256",
+            "type",
+            "bytes",
+            "token_count",
+            "heading_path",
+        ] {
+            let schema = Arc::new(Schema::new(vec![Field::new(column, DataType::Utf8, false)]));
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![Arc::new(StringArray::from(vec!["value"]))],
+            )
+            .unwrap();
+            let mut writer = ArrowWriter::try_new(Vec::new(), schema, None).unwrap();
+            writer.write(&batch).unwrap();
+            let bytes = writer.into_inner().unwrap();
+            let mut changes = Changes::default();
+            changes
+                .edits
+                .insert("x.parquet/column/0/name".into(), "renamed".into());
+            assert!(
+                rebuild_artifact("x.parquet", &bytes, &changes).is_err(),
+                "{column}"
+            );
+        }
+    }
+
     #[test]
     fn unhandled_nested_parquet_properties_block() {
         let child = Arc::new(Field::new("item", DataType::Float32, true).with_metadata(

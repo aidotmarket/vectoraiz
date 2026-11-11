@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,7 @@ import boto3
 from botocore.config import Config
 
 ROOT = Path(__file__).resolve().parents[1]
+RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
 pack = Path(sys.argv[1])
 reference = Path(sys.argv[2])
 prefix = "vz/" + json.loads((pack / "manifest.json").read_text())["pack_id"]
@@ -48,6 +50,20 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
         assert not s3.list_objects_v2(Bucket='phase0-pack', Prefix='_vz-staging/').get('Contents'), 'job-owned staging must be cleaned'
+        # Fresh bucket permits a second completion boundary without overwriting
+        # any prior pack. Lose only the private receipt after manifest readback.
+        s3.create_bucket(Bucket='uncertain-pack')
+        uncertain_env = dict(env, VZ_TEST_LOST_TRANSFER_RECEIPT='1')
+        failed = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'uncertain-pack'], env=uncertain_env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert failed.returncode == 3 and 'injected lost transfer receipt' in failed.stderr, failed.stderr
+        for name in [*manifest['files'], 'manifest.json']:
+            assert s3.get_object(Bucket='uncertain-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
+        ref = json.loads(reference.read_text())
+        generation = Path(ref['store']) / manifest['pack_id'] / ref['current']['generation']
+        intents = [json.loads(path.read_text()) for path in generation.glob('transfer-*.json')]
+        pending = [intent for intent in intents if '/uncertain-pack/' in (intent.get('destination') or '')]
+        assert len(pending) == 1, pending
+        assert not (generation / f"completed-{pending[0]['job_id']}.json").exists()
         print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
     finally:
         child.terminate()

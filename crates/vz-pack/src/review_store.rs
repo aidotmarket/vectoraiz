@@ -16,6 +16,8 @@ use std::{
 };
 use uuid::Uuid;
 
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(windows)]
 mod windows;
 
@@ -348,6 +350,13 @@ impl NativePackReview<'_> {
         evidence: &impl Serialize,
     ) -> Result<()> {
         self.check_accepted(&intent.current)?;
+        // Acceptance harness only: fail after destination promotion but before
+        // the durable receipt. Release builds cannot enable this fault.
+        #[cfg(all(debug_assertions, feature = "listing-preview-harness"))]
+        ensure!(
+            std::env::var_os("VZ_TEST_LOST_TRANSFER_RECEIPT").is_none(),
+            "injected lost transfer receipt"
+        );
         self.pack
             .record_completed_transfer(intent, digest(&(intent, evidence))?)?;
         Ok(())
@@ -745,6 +754,7 @@ impl PackReview<'_> {
             ListingError::StaleGeneration
         );
         let path = self.generation_path(current);
+        check_private_tree(&path)?;
         ensure!(
             !path.join("invalidated.json").try_exists()?,
             ListingError::StaleGeneration
@@ -935,6 +945,8 @@ pub(crate) fn private_directory(path: &Path) -> Result<()> {
                 builder.mode(0o700);
             }
             builder.create(path)?;
+            #[cfg(target_os = "macos")]
+            macos::clear(&File::open(path)?)?;
         }
     }
     plain_directory(path)?;
@@ -950,11 +962,30 @@ fn check_private(path: &Path) -> Result<()> {
             "review storage must be owner-only"
         );
     }
+    #[cfg(target_os = "macos")]
+    macos::check(&File::open(path)?)?;
     #[cfg(windows)]
     windows::check_private(path)?;
     #[cfg(not(any(unix, windows)))]
     anyhow::bail!("private review directory ACL enforcement is not implemented on this platform");
     #[allow(unreachable_code)]
+    Ok(())
+}
+
+fn check_private_tree(root: &Path) -> Result<()> {
+    for (count, entry) in walkdir::WalkDir::new(root)
+        .max_depth(64)
+        .into_iter()
+        .enumerate()
+    {
+        ensure!(count <= MAX_FILES, "private storage entry limit");
+        let entry = entry?;
+        ensure!(
+            entry.file_type().is_dir() || entry.file_type().is_file(),
+            "private storage must not contain links or special files"
+        );
+        check_private(entry.path())?;
+    }
     Ok(())
 }
 
@@ -985,7 +1016,12 @@ pub(crate) fn private_file(path: &Path) -> Result<File> {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        Ok(options.open(path)?)
+        let file = options.open(path)?;
+        // Remove inherited grants while the file is still empty, before any
+        // caller can write private bytes through this handle.
+        #[cfg(target_os = "macos")]
+        macos::clear(&file)?;
+        Ok(file)
     }
 }
 

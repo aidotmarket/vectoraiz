@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
+RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
 CLI = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
 # Preview is enabled only for this acceptance build, never by environment or
 # user preference. Restore the default-off CLI even when the journey fails.
@@ -44,7 +46,7 @@ try:
         def reviewed_pack(output):
             source = ROOT / "spike/fixtures/documents"
             changes = Path(temp) / "changes.json"
-            changes.write_text(json.dumps({"exclusions": [p.name for p in source.iterdir() if p.suffix not in (".txt", ".md", ".markdown")], "identity_terms": ["private-fixture-identity"]}))
+            changes.write_text(json.dumps({"edits": {"documents.parquet/column/2/name": "reviewed_title", "documents.parquet/column/5/name": "reviewed_language"}, "exclusions": [p.name for p in source.iterdir() if p.suffix not in (".txt", ".md", ".markdown")], "identity_terms": ["private-fixture-identity"]}))
             reference = cli("preview", "--store", str(Path(temp) / "reviews"), "--source", str(source), "--changes", str(changes), "--query", query)
             reference_path = Path(temp) / "reference.json"
             reference_path.write_text(json.dumps(reference))
@@ -68,6 +70,26 @@ try:
             for path in output.rglob("*"):
                 if path.is_file():
                     assert (gateway / "vz" / manifest["pack_id"] / path.relative_to(output)).read_bytes() == path.read_bytes()
+            # Exercise the shared CLI error boundary for local transfers after
+            # promotion: destination bytes survive, receipt remains uncertain.
+            fault_env = dict(os.environ, VZ_TEST_LOST_TRANSFER_RECEIPT="1")
+            lost_package = Path(temp) / ("lost-package-" + manifest["pack_id"])
+            lost_folder = Path(temp) / ("lost-folder-" + manifest["pack_id"])
+            lost_folder.mkdir()
+            for command, destination in [
+                (["--cpu", "--state", str(state), "pack", str(lost_package), "--query", query], lost_package),
+                (["export", str(output), "--pack-id", manifest["pack_id"], "--folder", str(lost_folder), "--staging", str(staging)], lost_folder / "vz" / manifest["pack_id"]),
+            ]:
+                failed = subprocess.run([*RTK, str(CLI), "--review-reference", str(reference_path), *command], env=fault_env, cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=600)
+                assert failed.returncode == 3 and "injected lost transfer receipt" in failed.stderr, failed.stderr
+                for path in output.rglob("*"):
+                    if path.is_file():
+                        assert (destination / path.relative_to(output)).read_bytes() == path.read_bytes()
+                generation = Path(reference["store"]) / manifest["pack_id"] / reference["current"]["generation"]
+                intents = [json.loads(path.read_text()) for path in generation.glob("transfer-*.json")]
+                pending = [intent for intent in intents if str(lost_package if destination == lost_package else lost_folder) in (intent.get("destination") or "")]
+                assert len(pending) == 1, pending
+                assert not (generation / f"completed-{pending[0]['job_id']}.json").exists()
             # Live loopback SFTP uses the production reviewed entry point.
             remote = Path(temp) / ("sftp-" + manifest["pack_id"])
             remote.mkdir(); (remote / "source").mkdir(); (remote / "staging").mkdir()

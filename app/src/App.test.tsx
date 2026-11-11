@@ -11,6 +11,8 @@ const listingCurrent = {pack_id: "550e8400-e29b-41d4-a716-446655440000", generat
 function listingFixture() {
   const inventory = Array.from({length: 53}, (_, index) => ({location: `manifest.json/property/${index}`, kind: "property", value: `complete value ${index}`, warning: false}));
   inventory[0] = {location: "README.md", kind: "text", value: "Confidential Project Orion", warning: true};
+  inventory[1] = {location: `documents.parquet/id/${"b".repeat(64)}/column/2`, kind: "title", value: "Document B", warning: false};
+  inventory[2] = {location: `chunks.parquet/id/${"c".repeat(64)}/column/4`, kind: "heading_path", value: '["Heading B"]', warning: false};
   return {metadata_inventory: [...inventory, {location: "manifest.json/date_ranges", kind: "value", value: null, warning: false}], warnings: ["README.md: text"], exclusions: [], accepted_review_hash: null as string | null};
 }
 function mockListing() {
@@ -82,6 +84,24 @@ it("applies real edits through rebuild, invalidates acceptance, restores focus a
   await userEvent.click(region.getByRole("button", {name: "Accept this exact generation"}));
   expect(await region.findByRole("alert")).toHaveTextContent("Source changed. Rebuild required.");
   expect(region.getByRole("button", {name: "Accept this exact generation"})).toBeDisabled();
+});
+
+it("sends document and chunk edits with their stable inventory identities", async () => {
+  mockListing();
+  const region = within(await openListing());
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  const title = `documents.parquet/id/${"b".repeat(64)}/column/2`;
+  const heading = `chunks.parquet/id/${"c".repeat(64)}/column/4`;
+  const edits = {[title]: "Reviewed B", [heading]: '["Reviewed B heading"]'};
+  for (const [location, value] of Object.entries(edits)) {
+    await userEvent.click(await region.findByRole("button", {name: `Edit ${location}`}));
+    const replacement = region.getByRole("textbox", {name: "Replacement value"});
+    fireEvent.change(replacement, {target: {value}});
+    await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
+  }
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: []}}));
 });
 
 it("hides purchaser review when the exposure flag is off or managed policy denies", async () => {
