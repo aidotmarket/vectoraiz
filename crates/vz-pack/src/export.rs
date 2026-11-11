@@ -38,14 +38,16 @@ impl std::error::Error for PublicationOutcomeUnknown {
 
 /// Export CLI exit codes: 1 for ordinary failure, 3 for uncertain publication.
 pub fn exit_code(error: &anyhow::Error) -> i32 {
-    if error.is::<PublicationOutcomeUnknown>() {
+    if error.is::<PublicationOutcomeUnknown>()
+        || error.is::<crate::review_transfer::PromotionOutcomeUnknown>()
+    {
         3
     } else {
         1
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct PackFile {
     pub path: String,
     pub size: u64,
@@ -56,7 +58,7 @@ fn hash_file(path: &Path) -> Result<(u64, String)> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     let mut size = 0;
-    let mut buffer = [0; 65536];
+    let mut buffer = vec![0; 65536];
     loop {
         let n = file.read(&mut buffer)?;
         if n == 0 {
@@ -80,7 +82,7 @@ fn regular(metadata: &fs::Metadata) -> bool {
 }
 
 /// Include the manifest itself; refuse links, special files and unmanifested payloads.
-fn inventory(pack: &Path, id: &str) -> Result<Vec<PackFile>> {
+pub(crate) fn inventory(pack: &Path, id: &str) -> Result<Vec<PackFile>> {
     ensure!(
         !id.is_empty()
             && id.len() <= 128
@@ -184,7 +186,61 @@ fn same_filesystem(a: &Path, b: &Path) -> Result<bool> {
 }
 
 /// Export to existing source/staging directories. Interrupted partials are left alone.
-pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
+pub fn folder(
+    pack: &Path,
+    id: &str,
+    source: &Path,
+    staging: &Path,
+    current: Option<&crate::listing_commands::ListingReference>,
+) -> Result<Value> {
+    crate::listing_commands::with_reviewed(current, |guard, current, payload, terms| {
+        ensure!(id == current.pack_id.to_string(), "review pack id mismatch");
+        crate::review_transfer::check_input(guard, current, pack, payload)?;
+        crate::sanitize::check_identifier(id, terms)?;
+        let intent = std::sync::Mutex::new(None);
+        let result = folder_inner(
+            payload,
+            id,
+            source,
+            staging,
+            same_filesystem,
+            |_| Ok(()),
+            || {
+                *intent.lock().unwrap() = Some(guard.intent(
+                    current,
+                    &format!("folder:{}:{id}", source.canonicalize()?.display()),
+                )?);
+                Ok(())
+            },
+            || {
+                guard.check_accepted(current)?;
+                Ok(())
+            },
+            || guard.check_policy(),
+        )?;
+        guard
+            .completed(
+                &intent
+                    .into_inner()
+                    .unwrap()
+                    .context("missing folder intent")?,
+                &result,
+            )
+            .map_err(|error| {
+                crate::review_transfer::uncertain(
+                    result["destination"]
+                        .as_str()
+                        .unwrap_or("folder destination"),
+                    error,
+                )
+            })?;
+        Ok(result)
+    })
+}
+
+// Private legacy copier. No production caller can reach it without the gate.
+#[cfg(test)]
+fn folder_unreviewed(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Value> {
     folder_inner(
         pack,
         id,
@@ -193,12 +249,14 @@ pub fn folder(pack: &Path, id: &str, source: &Path, staging: &Path) -> Result<Va
         same_filesystem,
         |_| Ok(()),
         || Ok(()),
+        || Ok(()),
+        || Ok(()),
     )
 }
 
 /// Fault injection seam for export acceptance tests. Normal callers use `folder`.
-#[doc(hidden)]
-pub fn folder_with_checks(
+#[cfg(test)]
+fn folder_with_checks(
     pack: &Path,
     id: &str,
     source: &Path,
@@ -214,12 +272,14 @@ pub fn folder_with_checks(
         |_, _| Ok(same_device),
         |_| Ok(()),
         before_rename,
+        || Ok(()),
+        || Ok(()),
     )
 }
 
 /// Fault injection after copy and before staged verification. Normal callers use `folder`.
-#[doc(hidden)]
-pub fn folder_with_staged_check(
+#[cfg(test)]
+fn folder_with_staged_check(
     pack: &Path,
     id: &str,
     source: &Path,
@@ -234,9 +294,12 @@ pub fn folder_with_staged_check(
         same_filesystem,
         after_copy,
         || Ok(()),
+        || Ok(()),
+        || Ok(()),
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn folder_inner(
     pack: &Path,
     id: &str,
@@ -245,6 +308,8 @@ fn folder_inner(
     device_check: impl FnOnce(&Path, &Path) -> Result<bool>,
     after_copy: impl FnOnce(&Path) -> Result<()>,
     before_rename: impl FnOnce() -> Result<()>,
+    check: impl Fn() -> Result<()>,
+    check_chunk: impl Fn() -> Result<()>,
 ) -> Result<Value> {
     let start = Instant::now();
     let files = inventory(pack, id)?;
@@ -283,47 +348,85 @@ fn folder_inner(
     );
     let stage = staging.join(partial_name(id));
     fs::create_dir(&stage)?;
-    for file in &files {
-        let target = stage.join(&file.path);
-        fs::create_dir_all(target.parent().context("file parent")?)?;
-        let mut input = File::open(pack.join(&file.path))?;
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&target)?;
-        std::io::copy(&mut input, &mut output)?;
-        output.sync_all()?;
-    }
-    after_copy(&stage)?;
-    for file in &files {
-        let target = stage.join(&file.path);
-        ensure!(
-            hash_file(&target)? == (file.size, file.sha256.clone()),
-            "staged file verification failed: {}",
-            file.path
-        );
-    }
-    // Flush directory entries as well on Unix, including nested example directories.
-    #[cfg(unix)]
-    for entry in walkdir::WalkDir::new(&stage).contents_first(true) {
-        let entry = entry?;
-        if entry.file_type().is_dir() {
-            File::open(entry.path())?.sync_all()?;
+    let mut promoted = false;
+    let result = (|| {
+        for file in &files {
+            check()?;
+            let target = stage.join(&file.path);
+            fs::create_dir_all(target.parent().context("file parent")?)?;
+            let mut input = File::open(pack.join(&file.path))?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            let mut buffer = vec![0; 65536];
+            loop {
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                check_chunk()?;
+                output.write_all(&buffer[..count])?;
+            }
+            output.sync_all()?;
         }
+        after_copy(&stage)?;
+        for file in &files {
+            let target = stage.join(&file.path);
+            ensure!(
+                hash_file(&target)? == (file.size, file.sha256.clone()),
+                "staged file verification failed: {}",
+                file.path
+            );
+        }
+        // Flush directory entries as well on Unix, including nested example directories.
+        #[cfg(unix)]
+        for entry in walkdir::WalkDir::new(&stage).contents_first(true) {
+            let entry = entry?;
+            if entry.file_type().is_dir() {
+                File::open(entry.path())?.sync_all()?;
+            }
+        }
+        before_rename()?;
+        ensure!(
+            serde_json::to_value(inventory(&stage, id)?)? == serde_json::to_value(&files)?,
+            "staged inventory changed before promotion"
+        );
+        check()?;
+        ensure!(!destination.exists(), "export destination already exists");
+        publish_folder(&stage, &destination).map_err(|error| {
+            let message = folder_rename_error(&error);
+            anyhow::Error::new(error).context(message)
+        })?;
+        promoted = true;
+        #[cfg(unix)]
+        {
+            File::open(&parent)?.sync_all()?;
+            File::open(&staging)?.sync_all()?;
+        }
+        ensure!(
+            serde_json::to_value(inventory(&destination, id)?)? == serde_json::to_value(&files)?,
+            "destination inventory mismatch after promotion"
+        );
+        check()?;
+        Ok(report(
+            id,
+            "folder",
+            &files,
+            destination.to_string_lossy().into_owned(),
+            start,
+        ))
+    })();
+    if result.is_err() && stage.exists() {
+        let _ = fs::remove_dir_all(&stage);
     }
-    before_rename()?;
-    ensure!(!destination.exists(), "export destination already exists");
-    publish_folder(&stage, &destination).map_err(|error| {
-        let message = folder_rename_error(&error);
-        anyhow::Error::new(error).context(message)
-    })?;
-    Ok(report(
-        id,
-        "folder",
-        &files,
-        destination.to_string_lossy().into_owned(),
-        start,
-    ))
+    result.map_err(|error| {
+        if promoted {
+            crate::review_transfer::uncertain(&destination.to_string_lossy(), error)
+        } else {
+            error
+        }
+    })
 }
 
 fn folder_rename_error(error: &std::io::Error) -> &'static str {
@@ -345,7 +448,7 @@ fn folder_rename_error(error: &std::io::Error) -> &'static str {
 // Refuse a destination created by another exporter between inspection and rename.
 // Both native calls perform a single, non-replacing directory rename.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn publish_folder(stage: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn publish_folder(stage: &Path, destination: &Path) -> std::io::Result<()> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt};
     let from = CString::new(stage.as_os_str().as_bytes())?;
     let to = CString::new(destination.as_os_str().as_bytes())?;
@@ -383,7 +486,7 @@ fn publish_folder(stage: &Path, destination: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn publish_folder(stage: &Path, destination: &Path) -> std::io::Result<()> {
+pub(crate) fn publish_folder(stage: &Path, destination: &Path) -> std::io::Result<()> {
     // Windows refuses replacing an existing directory with MoveFileExW.
     fs::rename(stage, destination)
 }
@@ -505,7 +608,139 @@ impl russh::client::Handler for PinnedHost {
 }
 
 /// Key-only SFTP export. No shell commands or password/agent authentication.
-pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
+pub async fn sftp(
+    pack: &Path,
+    id: &str,
+    options: &SftpOptions,
+    current: Option<&crate::listing_commands::ListingReference>,
+) -> Result<Value> {
+    let policy = crate::listing_policy::system();
+    policy.require_preview()?;
+    let reference = current.ok_or(crate::listing_policy::ListingError::ReviewRequired)?;
+    let store = crate::review_store::ReviewStore::open(&reference.store)?;
+    let guard = store.lock_native_current(policy, &reference.current, &reference.library)?;
+    let (payload, terms) = guard.reviewed_payload(&reference.current)?;
+    ensure!(
+        id == reference.current.pack_id.to_string(),
+        "review pack id mismatch"
+    );
+    crate::review_transfer::check_input(&guard, &reference.current, pack, &payload)?;
+    crate::sanitize::check_identifier(&options.target, &terms)?;
+    let intent = std::sync::Mutex::new(None);
+    let result = sftp_inner(
+        &payload,
+        id,
+        options,
+        || {
+            guard.check_accepted(&reference.current)?;
+            Ok(())
+        },
+        || guard.check_policy(),
+        |destination, stage| {
+            crate::sanitize::check_identifier(destination, &terms)?;
+            *intent.lock().unwrap() =
+                Some(guard.intent(&reference.current, &format!("{destination}|stage:{stage}"))?);
+            Ok(())
+        },
+    )
+    .await?;
+    guard
+        .completed(
+            &intent
+                .into_inner()
+                .unwrap()
+                .context("missing SFTP intent")?,
+            &result,
+        )
+        .map_err(|error| {
+            crate::review_transfer::uncertain(
+                result["destination"].as_str().unwrap_or("SFTP destination"),
+                error,
+            )
+        })?;
+    Ok(result)
+}
+
+#[cfg(test)]
+async fn sftp_unreviewed(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
+    sftp_inner(pack, id, options, || Ok(()), || Ok(()), |_, _| Ok(())).await
+}
+
+async fn verify_remote(
+    sftp: &russh_sftp::client::SftpSession,
+    root: &str,
+    files: &[PackFile],
+    check: &impl Fn() -> Result<()>,
+) -> Result<()> {
+    let mut directories: BTreeMap<String, BTreeMap<String, bool>> = BTreeMap::new();
+    for file in files {
+        let mut directory = String::new();
+        let parts = file.path.split('/').collect::<Vec<_>>();
+        for (i, part) in parts.iter().enumerate() {
+            directories
+                .entry(directory.clone())
+                .or_default()
+                .insert((*part).into(), i + 1 < parts.len());
+            if !directory.is_empty() {
+                directory.push('/');
+            }
+            directory.push_str(part);
+        }
+    }
+    for (directory, expected) in directories {
+        check()?;
+        let mut actual = BTreeMap::new();
+        for entry in sftp.read_dir(format!("{root}/{directory}")).await? {
+            let name = entry.file_name();
+            if name == "." || name == ".." {
+                continue;
+            }
+            ensure!(
+                !name.is_empty()
+                    && !name.contains(['/', '\\'])
+                    && (entry.file_type().is_file() || entry.file_type().is_dir()),
+                "unsafe remote inventory entry"
+            );
+            ensure!(
+                actual.len() < expected.len()
+                    && actual.insert(name, entry.file_type().is_dir()).is_none(),
+                "extra or duplicate remote inventory entry"
+            );
+        }
+        ensure!(actual == expected, "remote directory inventory mismatch");
+    }
+    for file in files {
+        check()?;
+        let mut remote = sftp.open(format!("{root}/{}", file.path)).await?;
+        let mut hash = Sha256::new();
+        let mut buffer = vec![0; 65536];
+        let mut total = 0;
+        loop {
+            let n = remote.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            ensure!(total <= file.size, "remote stage grew before promotion");
+            hash.update(&buffer[..n]);
+        }
+        ensure!(
+            total == file.size && format!("{:x}", hash.finalize()) == file.sha256,
+            "remote stage changed before promotion"
+        );
+        remote.shutdown().await?;
+    }
+    Ok(())
+}
+
+async fn sftp_inner(
+    pack: &Path,
+    id: &str,
+    options: &SftpOptions,
+    check: impl Fn() -> Result<()>,
+    check_chunk: impl Fn() -> Result<()>,
+    record: impl Fn(&str, &str) -> Result<()>,
+) -> Result<Value> {
     let start = Instant::now();
     let files = inventory(pack, id)?;
     let (authority, path) = options
@@ -578,8 +813,13 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
         "export destination already exists"
     );
     let stage = format!("{}/{}", staging.trim_end_matches('/'), partial_name(id));
+    let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
+    check()?;
     sftp.create_dir(&stage).await?;
+    let mut promotion_attempted = false;
+    let result = async {
     for file in &files {
+        check()?;
         let mut directory = stage.clone();
         let parts = file.path.split('/').collect::<Vec<_>>();
         for part in &parts[..parts.len() - 1] {
@@ -592,12 +832,13 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
         let target = format!("{stage}/{}", file.path);
         let mut input = File::open(pack.join(&file.path))?;
         let mut remote = sftp.create(&target).await?;
-        let mut buffer = [0; 65536];
+        let mut buffer = vec![0; 65536];
         loop {
             let n = input.read(&mut buffer)?;
             if n == 0 {
                 break;
             }
+            check_chunk()?;
             remote.write_all(&buffer[..n]).await?;
         }
         remote.shutdown().await?;
@@ -624,7 +865,10 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
     }
     // SFTP v3 RENAME must fail if the destination exists; do not use posix-rename
     // extensions, which overwrite an existing destination.
-    let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
+    verify_remote(&sftp, &stage, &files, &check).await?;
+    record(&destination_url, &stage)?;
+        check()?;
+        promotion_attempted = true;
     if let Err(error) = sftp.rename(&stage, &destination).await {
         // Only a status reply explicitly rejects RENAME. All other variants can
         // represent a lost reply after the server committed publication.
@@ -633,18 +877,36 @@ pub async fn sftp(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value>
         }
         return Err(PublicationOutcomeUnknown {
             destination: destination_url,
-            source,
-            staging,
+            source: source.clone(),
+            staging: staging.clone(),
             id: id.into(),
             cause: error,
         }
         .into());
     }
-    // The acknowledged rename is the commit boundary; cleanup is best effort.
-    if let Err(error) = sftp.close().await {
-        eprintln!("Warning: SFTP export completed, but closing the session failed: {error}");
-    }
+    verify_remote(&sftp, &destination, &files, &check).await.map_err(|error| crate::review_transfer::uncertain(&destination_url, error))?;
     Ok(report(id, "sftp", &files, destination_url, start))
+    }.await;
+    if result.is_err() && !promotion_attempted {
+        // No recursive remote deletion: remove only the exact files and
+        // directories created in this job's random incomplete staging path.
+        let mut directories = std::collections::BTreeSet::new();
+        for file in &files {
+            let _ = sftp.remove_file(format!("{stage}/{}", file.path)).await;
+            let mut components = file.path.split('/').collect::<Vec<_>>();
+            components.pop();
+            while !components.is_empty() {
+                directories.insert(format!("{stage}/{}", components.join("/")));
+                components.pop();
+            }
+        }
+        for path in directories.into_iter().rev() {
+            let _ = sftp.remove_dir(path).await;
+        }
+        let _ = sftp.remove_dir(&stage).await;
+    }
+    let _ = sftp.close().await;
+    result
 }
 
 #[cfg(test)]
@@ -677,3 +939,14 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "export_tests/folder_export.rs"]
+mod folder_regressions;
+#[cfg(test)]
+#[path = "export_tests/sftp_export.rs"]
+mod sftp_regressions;
+
+#[cfg(test)]
+#[path = "export_tests/common/mod.rs"]
+mod regression_common;

@@ -5,6 +5,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { version } from "../package.json";
 import { repositoryLicenceName } from "./licence";
+import { ListingReview } from "./components/ListingReview";
 
 interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
 interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
@@ -212,6 +213,23 @@ export default function App() {
       }
     }
   }, [view, models, cloud, appClients]);
+  const [listingReason, setListingReason] = useState("Listing availability could not be checked. Try reopening Settings.");
+  const [listingPreview, setListingPreview] = useState(false);
+  const [showListingReview, setShowListingReview] = useState(false);
+  useEffect(() => {
+    if (view !== "Settings") return;
+    let active = true;
+    const refresh = () => {
+      void invoke<{reason: string; listing_authority_preview_v1?: boolean; code?: string}>("listing_status").then(status => {
+        if (active) setListingPreview(status?.listing_authority_preview_v1 === true && status.code === "REVIEW_REQUIRED");
+        if (active) setListingReason(typeof status?.reason === "string" ? status.reason : "Listing is unavailable.");
+      }).catch(() => { if (active) {setListingPreview(false); setListingReason("Listing availability could not be checked. Try reopening Settings.");} });
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 5000);
+    window.addEventListener("focus", refresh);
+    return () => { active = false; window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [view]);
   const [thirdPartyNotices, setThirdPartyNotices] = useState<string>();
   const [aboutError, setAboutError] = useState("");
   async function openAbout(command: "open_product_page" | "third_party_notices") {
@@ -670,6 +688,12 @@ export default function App() {
           <button className="button primary" disabled={checking || installing} onClick={() => void checkForUpdates()}>Check for updates</button>
           {updateMessage && <p>{updateMessage}</p>}
         </section>
+        <section className="card stack" aria-label="Listing availability"><h2>Listing availability</h2>
+          <p aria-live="polite">{listingReason}</p>
+          <p>Local indexing, search and answers remain available.</p>
+          {listingPreview && <button onClick={() => setShowListingReview(value => !value)} aria-expanded={showListingReview}>Review what your buyer receives</button>}
+        </section>
+        {listingPreview && showListingReview && <ListingReview />}
         <section className="card stack" aria-label="About"><h2>About</h2>
           <p>vectorAIz <span>by ai.market</span></p>
           <p>Version {version}</p>

@@ -1,0 +1,14 @@
+{
+  "fixture": "pack_names_v1",
+  "private_source_name": "fixture-client-private.zip",
+  "identity_terms": ["fixture-identity"],
+  "purchaser": {
+    "title": "Confidential fixture-identity document",
+    "heading_path": ["Client Atlas", "Project ORION"],
+    "properties": {"author": "Fixture Author", "language": null, "project_code": "ORION-X7"},
+    "counts": {"documents": 1, "unmeasured_rows": null},
+    "languages": null,
+    "date_ranges": null,
+    "nested_manifest": {"alias": "Identifying alias without a matching identity term", "columns": ["project_code", "client_name"]}
+  }
+}

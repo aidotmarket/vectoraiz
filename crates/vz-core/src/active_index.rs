@@ -1,6 +1,6 @@
 //! Library selection only; per-document storage and recovery remain unchanged.
 use crate::{engine::Recipe, pipeline::sha256};
-use anyhow::{ensure, Result};
+use anyhow::{ensure, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -12,6 +12,39 @@ use std::{
 struct Pointer {
     dir: String,
     recipe_id: String,
+}
+
+/// Cross-process selection fence. Reviewed operations take a shared fence
+/// before resolving a library; re-index holds the exclusive fence through the
+/// pointer promotion. It is separate from the selected index's writer lock.
+pub struct SelectionFence(fs::File);
+impl Drop for SelectionFence {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
+pub fn selection_fence(data: &Path, exclusive: bool) -> Result<SelectionFence> {
+    let path = data.join("index-selection.lock");
+    if path.symlink_metadata().is_ok() {
+        ensure!(
+            fs::symlink_metadata(&path)?.is_file(),
+            "invalid index selection lock"
+        );
+    }
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    if exclusive {
+        fs2::FileExt::try_lock_exclusive(&file)
+    } else {
+        fs2::FileExt::try_lock_shared(&file)
+    }
+    .context("index selection is in use; retry after the current operation")?;
+    Ok(SelectionFence(file))
 }
 
 /// Canonical JSON: recursively sorted object keys, compact UTF-8 serialization.
@@ -223,6 +256,8 @@ pub async fn reindex(
     let mut progress = progress;
     let result = async {
         ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
+        fs::create_dir_all(data)?;
+        let _selection = selection_fence(data, true)?;
         let selected = publication_dir(data, &engines.recipe)?;
         let root = data.join(&selected);
         fs::create_dir_all(&root)?;
@@ -289,6 +324,21 @@ async fn finish_reindex(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selection_fence_serializes_publication_against_native_review_readers() {
+        let data = tempfile::tempdir().unwrap();
+        let first = selection_fence(data.path(), false).unwrap();
+        let second = selection_fence(data.path(), false).unwrap();
+        assert!(selection_fence(data.path(), true).is_err());
+        drop(first);
+        assert!(selection_fence(data.path(), true).is_err());
+        drop(second);
+        let writer = selection_fence(data.path(), true).unwrap();
+        assert!(selection_fence(data.path(), false).is_err());
+        drop(writer);
+        selection_fence(data.path(), false).unwrap();
+    }
 
     fn recipe() -> Recipe {
         let pins =

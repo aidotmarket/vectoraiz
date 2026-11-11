@@ -5,15 +5,25 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Enabled solely by scripts/pipeline-e2e.py's explicit acceptance build.
+listing-preview-harness = []
+
 [dependencies]
 vz-core.workspace = true
 serde_json.workspace = true
 serde.workspace = true
-uuid = { version = "1", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v4"] }
 anyhow = "1"
+arrow-array = "56.2"
+arrow-schema = "56.2"
+arrow-cast = "56.2"
+bytes = "1"
 parquet = { version = "56.2", default-features = false, features = ["arrow", "snap"] }
 zip = { version = "4", default-features = false, features = ["deflate"] }
 walkdir = "2"
+fs2 = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["native-tls", "blocking", "system-proxy"] }
 hmac = "0.12"
 sha2 = "0.10"
@@ -21,7 +31,14 @@ chrono = "0.4"
 url = "2"
 russh = { version = "=0.65.0", default-features = false, features = ["ring", "rsa"] }
 russh-sftp = "=2.1.1"
+tokio-util = { version = "0.7", features = ["rt"] }
 tokio = { version = "1", features = ["rt-multi-thread", "io-util", "time"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_System_Registry", "Win32_Security_Authorization", "Win32_System_Threading"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[target.'cfg(target_os="macos")'.dependencies]
+core-foundation-sys = "=0.8.7"

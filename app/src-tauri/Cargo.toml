@@ -12,6 +12,7 @@ custom-protocol = ["tauri/custom-protocol"]
 vulkan = ["vz-core/vulkan"]
 
 [build-dependencies]
+serde_json.workspace = true
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
@@ -20,6 +21,7 @@ tauri-plugin-opener = "=2.7.2"
 zip = { version = "2", default-features = false }
 tauri = { version = "2", features = [] }
 vz-core.workspace = true
+vz-pack = { path = "../../crates/vz-pack" }
 
 serde_json.workspace = true
 serde.workspace = true

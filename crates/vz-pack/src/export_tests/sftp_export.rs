@@ -1,11 +1,12 @@
-mod common;
-use common::Fixture;
+use super::regression_common::Fixture;
+use super::{
+    exit_code, normalize_remote, sftp_unreviewed as sftp, PublicationOutcomeUnknown, SftpOptions,
+};
 use std::{
     fs,
     io::{BufRead, BufReader},
     process::{Child, Command, Stdio},
 };
-use vz_pack::export::{exit_code, normalize_remote, sftp, PublicationOutcomeUnknown, SftpOptions};
 
 struct Server {
     child: Child,
@@ -150,6 +151,10 @@ fn local_sftp_acceptance() {
     for (marker, message) in [
         ("bad-size", "remote size mismatch"),
         ("bad-hash", "remote hash mismatch"),
+        (
+            "extra-stage-file",
+            "extra or duplicate remote inventory entry",
+        ),
     ] {
         fs::write(f.root.join(marker), b"yes").unwrap();
         let error = runtime

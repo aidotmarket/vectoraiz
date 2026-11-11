@@ -3,12 +3,17 @@
 No model or network is needed to validate the exported vectors. To ask a new
 query embed it with the manifest's GGUF model hash, tokenizer, CLS pooling,
 query prefix and L2 normalization, using the recorded llama.cpp commit.
+Document and chunk IDs are opaque pack-local identities, unrelated to source
+paths or live-index IDs. Resolve citations using this pack's document table.
 """
 import hashlib
 import json
 from pathlib import Path
 import sys
 import subprocess
+import shutil
+
+RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
 import numpy as np
 import pyarrow.parquet as pq
 
@@ -27,7 +32,7 @@ docs = {d['doc_id']: d for d in pq.read_table(pack / 'documents.parquet').to_pyl
 query = np.asarray(example['query_embedding'], dtype=np.float32)
 if len(sys.argv) > 2:
     # Recompute from the exact recorded GGUF recipe with the same linked engine.
-    result = json.loads(subprocess.check_output([sys.argv[2], '--cpu', 'embed', example['query']], text=True, encoding="utf-8"))
+    result = json.loads(subprocess.check_output([*RTK, sys.argv[2], '--cpu', 'embed', example['query']], text=True, encoding="utf-8"))
     assert result['recipe'] == manifest['embedding_recipe']
     recomputed = np.asarray(result['embedding'], dtype=np.float32)
     np.testing.assert_allclose(query, recomputed, rtol=1e-4, atol=1e-5)

@@ -10938,6 +10938,7 @@ dependencies = [
  "uuid",
  "vz-core",
  "vz-mcp",
+ "vz-pack",
  "windows-sys 0.61.2",
  "zip 2.6.1",
 ]
@@ -10986,8 +10987,10 @@ version = "0.0.23"
 dependencies = [
  "anyhow",
  "clap",
+ "serde",
  "serde_json",
  "tokio",
+ "uuid",
  "vz-core",
  "vz-pack",
 ]
@@ -11050,7 +11053,13 @@ name = "vz-pack"
 version = "0.0.23"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-cast",
+ "arrow-schema",
+ "bytes",
  "chrono",
+ "core-foundation-sys",
+ "fs2",
  "hmac 0.12.1",
  "parquet",
  "reqwest 0.12.28",
@@ -11059,7 +11068,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
+ "tokio-util",
  "url",
  "uuid",
  "vz-core",

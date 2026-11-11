@@ -10,13 +10,16 @@ name = "vectoraiz-cli"
 path = "src/main.rs"
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 vz-core.workspace = true
 serde_json.workspace = true
+serde.workspace = true
 vz-pack = { path = "../vz-pack" }
 anyhow = "1"
 clap = { version = "4", features = ["derive", "env"] }
 
 [features]
+listing-preview-harness = ["vz-pack/listing-preview-harness"]
 vulkan = ["vz-core/vulkan"]
 
 [dependencies.tokio]

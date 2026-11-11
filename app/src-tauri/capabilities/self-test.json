@@ -41,6 +41,11 @@
     "allow-app-access-retry",
     "allow-app-show-extension",
     "allow-open-product-page",
-    "allow-third-party-notices"
+    "allow-third-party-notices",
+    "allow-listing-status",
+    "allow-listing-review",
+    "allow-listing-sources",
+    "allow-listing-rebuild",
+    "allow-listing-invalidate"
   ]
 }

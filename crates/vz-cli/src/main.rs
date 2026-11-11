@@ -1,7 +1,10 @@
 //! Headless pipeline. Network is used by explicit upload and SFTP export commands.
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::{io::Write, path::PathBuf};
+use std::{
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 use vz_core::{
     engine::{ChatOnly, Engines},
     storage::State,
@@ -17,11 +20,27 @@ struct Args {
     models: PathBuf,
     #[arg(long)]
     cpu: bool,
+    /// Private store/library/current-generation reference for listing transfers.
+    #[arg(long, global = true)]
+    review_reference: Option<PathBuf>,
     #[command(subcommand)]
     command: Operation,
 }
 #[derive(Subcommand)]
 enum Operation {
+    /// Rebuild private delivered bytes and inventory; does not accept the review.
+    Preview {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        source: PathBuf,
+        #[arg(long)]
+        pack_id: Option<String>,
+        #[arg(long)]
+        changes: Option<PathBuf>,
+        #[arg(long, default_value = "What is the orbital archive retention policy?")]
+        query: String,
+    },
     BakeoffSearch {
         #[arg(long)]
         questions: PathBuf,
@@ -62,6 +81,15 @@ enum Operation {
         known_hosts: Option<PathBuf>,
     },
     SelfTest,
+    /// Inspect or explicitly accept an immutable purchaser review generation.
+    Review {
+        #[arg(long)]
+        store: PathBuf,
+        #[arg(long)]
+        current: PathBuf,
+        #[arg(long)]
+        accept: bool,
+    },
     Embed {
         text: String,
     },
@@ -89,12 +117,88 @@ enum Operation {
         bucket: String,
         #[arg(long, default_value = "us-east-1")]
         region: String,
-        #[arg(long, default_value = "vz/phase0-pack")]
-        prefix: String,
+        /// Defaults to vz/<reviewed pack UUID>.
+        #[arg(long)]
+        prefix: Option<String>,
     },
 }
-fn main() -> Result<()> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("Error: {error:#}");
+        std::process::exit(vz_pack::export::exit_code(&error));
+    }
+}
+
+fn run() -> Result<()> {
     let args = Args::parse();
+    let policy = vz_pack::listing_policy::system();
+    policy.refresh();
+    if let Operation::Preview {
+        store,
+        source,
+        pack_id,
+        changes,
+        query,
+    } = &args.command
+    {
+        policy.require_preview()?;
+        let changes = changes
+            .as_ref()
+            .map(|path| read_reference(path, 1024 * 1024))
+            .transpose()?
+            .unwrap_or_default();
+        let engines = Engines::load_embedding(&args.assets, &args.models, args.cpu)?;
+        let pack_id = pack_id
+            .as_ref()
+            .map(|id| id.parse())
+            .transpose()?
+            .unwrap_or_else(uuid::Uuid::new_v4);
+        let current = vz_pack::review_build::rebuild(
+            store,
+            &args.state,
+            source,
+            pack_id,
+            &engines,
+            query,
+            &changes,
+        )?;
+        println!(
+            "{}",
+            serde_json::to_string(&vz_pack::listing_commands::ListingReference {
+                store: store.clone(),
+                library: args.state.clone(),
+                current
+            })?
+        );
+        return Ok(());
+    }
+    if let Operation::Review {
+        store,
+        current,
+        accept,
+    } = &args.command
+    {
+        // Availability precedes even opening the caller's reference file.
+        policy.require_preview()?;
+        let current = read_reference(current, 4096)?;
+        let review =
+            vz_pack::listing_commands::review(policy, store, &args.state, &current, *accept)?;
+        println!("{}", serde_json::to_string(&review)?);
+        return Ok(());
+    }
+    let current = if matches!(
+        args.command,
+        Operation::Pack { .. } | Operation::Upload { .. } | Operation::Export { .. }
+    ) {
+        policy.require_preview()?;
+        let path = args
+            .review_reference
+            .as_ref()
+            .ok_or(vz_pack::listing_policy::ListingError::ReviewRequired)?;
+        Some(read_reference::<vz_pack::listing_commands::ListingReference>(path, 16384)?)
+    } else {
+        None
+    };
     if let Operation::Export {
         pack,
         pack_id,
@@ -112,23 +216,20 @@ fn main() -> Result<()> {
                 pack_id,
                 source,
                 staging.as_deref().expect("clap requires staging"),
+                current.as_ref(),
             )?
         } else {
-            tokio_runtime()?
-                .block_on(vz_pack::export::sftp(
-                    pack,
-                    pack_id,
-                    &vz_pack::export::SftpOptions {
-                        target: sftp.clone().expect("clap requires mode"),
-                        staging: sftp_staging.clone().expect("clap requires SFTP staging"),
-                        identity: identity.clone(),
-                        known_hosts: known_hosts.clone(),
-                    },
-                ))
-                .unwrap_or_else(|error| {
-                    eprintln!("Error: {error:#}");
-                    std::process::exit(vz_pack::export::exit_code(&error));
-                })
+            tokio_runtime()?.block_on(vz_pack::export::sftp(
+                pack,
+                pack_id,
+                &vz_pack::export::SftpOptions {
+                    target: sftp.clone().expect("clap requires mode"),
+                    staging: sftp_staging.clone().expect("clap requires SFTP staging"),
+                    identity: identity.clone(),
+                    known_hosts: known_hosts.clone(),
+                },
+                current.as_ref(),
+            ))?
         };
         println!("{}", serde_json::to_string(&result)?);
         return Ok(());
@@ -145,7 +246,17 @@ fn main() -> Result<()> {
         prefix,
     } = &args.command
     {
-        return vz_pack::upload(pack, endpoint, bucket, region, prefix);
+        let prefix = prefix.clone().unwrap_or_else(|| {
+            format!(
+                "vz/{}",
+                current
+                    .as_ref()
+                    .expect("listing reference checked")
+                    .current
+                    .pack_id
+            )
+        });
+        return vz_pack::upload(pack, endpoint, bucket, region, &prefix, current.as_ref());
     }
     if let Operation::BakeoffChat { items, prompt } = &args.command {
         let chat = ChatOnly::load(&args.assets, &args.models, args.cpu)?;
@@ -175,7 +286,10 @@ fn main() -> Result<()> {
     }
     let engines = if matches!(
         args.command,
-        Operation::BakeoffSearch { .. } | Operation::Index { .. } | Operation::Search { .. }
+        Operation::BakeoffSearch { .. }
+            | Operation::Index { .. }
+            | Operation::Search { .. }
+            | Operation::Pack { .. }
     ) {
         Engines::load_embedding(&args.assets, &args.models, args.cpu)?
     } else {
@@ -230,10 +344,12 @@ fn main() -> Result<()> {
                 println!("{}", serde_json::to_string(&answer)?);
             }
             Operation::Pack { output, query } => {
-                let manifest = vz_pack::write(&args.state, &engines, &output, &query)?;
+                let manifest = vz_pack::write(&args.state, &engines, &output, &query, current.as_ref())?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
             Operation::SelfTest
+            | Operation::Preview { .. }
+            | Operation::Review { .. }
             | Operation::Upload { .. }
             | Operation::BakeoffChat { .. }
             | Operation::Export { .. } => unreachable!(),
@@ -243,6 +359,19 @@ fn main() -> Result<()> {
 }
 fn tokio_runtime() -> Result<tokio::runtime::Runtime> {
     Ok(tokio::runtime::Runtime::new()?)
+}
+
+fn read_reference<T: serde::de::DeserializeOwned>(path: &Path, limit: u64) -> Result<T> {
+    anyhow::ensure!(
+        std::fs::symlink_metadata(path)?.is_file(),
+        "review reference must be a regular file"
+    );
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    anyhow::ensure!(bytes.len() as u64 <= limit, "review reference size limit");
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 fn read_questions(path: &std::path::Path) -> Result<Vec<serde_json::Value>> {
