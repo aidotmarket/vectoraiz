@@ -1,8 +1,6 @@
 //! Parser implementations run exclusively inside the supervised worker.
 use crate::{pipeline::Page, worker::Request};
 use anyhow::{bail, Context, Result};
-use calamine::{open_workbook_auto, Reader};
-use quick_xml::{events::Event, Reader as XmlReader};
 use std::{fs::File, io::Read};
 
 pub const MAX_TOTAL: u64 = 512_000_000;
@@ -94,46 +92,17 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
             }
             Ok(vec![page(1, text)])
         }
-        "docx" => {
+        "docx" | "xlsx" | "pptx" => {
             let mut zip = validate_zip(path)?;
-            let mut xml = String::new();
-            zip.by_name("word/document.xml")?
-                .take(MAX_PART)
-                .read_to_string(&mut xml)?;
-            let mut reader = XmlReader::from_str(&xml);
-            let mut text = String::new();
-            loop {
-                match reader.read_event()? {
-                    Event::Text(t) => text.push_str(&quick_xml::escape::unescape(&t.decode()?)?),
-                    Event::End(e) if e.local_name().as_ref() == b"p" => text.push('\n'),
-                    Event::Empty(e) if e.local_name().as_ref() == b"tab" => text.push(' '),
-                    Event::Empty(e) if e.local_name().as_ref() == b"br" => text.push('\n'),
-                    Event::Eof => break,
-                    _ => (),
-                }
-            }
-            Ok(vec![page(1, text)])
-        }
-        "xlsx" => {
-            validate_zip(path)?;
-            let mut workbook = open_workbook_auto(path)?;
-            let names = workbook.sheet_names().to_vec();
-            let mut pages = Vec::new();
-            for (i, name) in names.into_iter().enumerate() {
-                let range = workbook.worksheet_range(&name)?;
-                let mut text = format!("# {name}\n");
-                for row in range.rows() {
-                    text.push_str(
-                        &row.iter()
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                            .join(" | "),
-                    );
-                    text.push('\n');
-                }
-                pages.push(page(i as u32 + 1, text));
-            }
-            Ok(pages)
+            // Retain ingest's tighter declared/actual and 100:1 limits.
+            let _ = &mut zip;
+            let input = std::fs::read(path)?;
+            let (_, report) = crate::office::rebuild(
+                path.to_str().context("UTF-8 Office path")?,
+                &input,
+                &Default::default(),
+            )?;
+            Ok(vec![page(1, report.text())])
         }
         "pdf" => pdf(request),
         _ => bail!("unsupported format: {ext}"),

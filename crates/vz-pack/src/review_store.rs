@@ -295,6 +295,52 @@ pub struct NativePackReview<'a> {
 }
 
 impl NativePackReview<'_> {
+    pub(crate) fn edit_origin(
+        &self,
+        current: &CurrentReview,
+    ) -> Result<(ListingReview, serde_json::Value)> {
+        // Mutation invalidation revokes delivery authority, while the latest
+        // immutable generation remains usable solely as an edit precondition.
+        let generation = self.pack.validate_inner(current, false, true)?;
+        ensure!(
+            generation.binding.selection.as_ref() == Some(&self.index.selection),
+            ListingError::StaleGeneration
+        );
+        let private: serde_json::Value =
+            read_json(&self.pack.generation_path(current).join("private.json"))?;
+        if generation
+            .review
+            .metadata_inventory
+            .iter()
+            .any(|e| e.kind == "Office part")
+        {
+            ensure!(
+                private["office_allowlist_version"].as_u64()
+                    == Some(vz_core::office::ALLOWLIST_VERSION.into()),
+                ListingError::ReviewRequired
+            );
+        }
+        ensure!(
+            generation.sanitizer.as_deref()
+                == Some(
+                    format!("native-sanitizer-v2:{}", String::from(digest(&private)?)).as_str()
+                ),
+            ListingError::ReviewRequired
+        );
+        Ok((generation.review, private))
+    }
+    pub(crate) fn origin_original(&self, current: &CurrentReview, name: &str) -> Result<Vec<u8>> {
+        self.edit_origin(current)?;
+        let path = self
+            .pack
+            .generation_path(current)
+            .join("payload/originals-0001.zip");
+        let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+        let mut part = zip.by_name(name)?;
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut part, &mut bytes)?;
+        Ok(bytes)
+    }
     pub(crate) fn cancellation_token(&self) -> tokio_util::sync::CancellationToken {
         self.pack.lease.cancellation_token()
     }
@@ -332,6 +378,18 @@ impl NativePackReview<'_> {
         );
         let path = self.pack.generation_path(current);
         let private: serde_json::Value = read_json(&path.join("private.json"))?;
+        if generation
+            .review
+            .metadata_inventory
+            .iter()
+            .any(|e| e.kind == "Office part")
+        {
+            ensure!(
+                private["office_allowlist_version"].as_u64()
+                    == Some(vz_core::office::ALLOWLIST_VERSION.into()),
+                ListingError::ReviewRequired
+            );
+        }
         // v1 permitted path-derived IDs. Even accepted v1 generations require
         // rebuilding; a software upgrade must not keep delivering those IDs.
         let certificate = format!("native-sanitizer-v2:{}", String::from(digest(&private)?));
@@ -789,6 +847,14 @@ impl PackReview<'_> {
     }
 
     fn validate(&self, current: &CurrentReview, require_accepted: bool) -> Result<Generation> {
+        self.validate_inner(current, require_accepted, false)
+    }
+    fn validate_inner(
+        &self,
+        current: &CurrentReview,
+        require_accepted: bool,
+        edit_origin: bool,
+    ) -> Result<Generation> {
         self.lease.check(self.policy)?;
         ensure!(
             current.pack_id == self.pack_id
@@ -801,8 +867,21 @@ impl PackReview<'_> {
         );
         let path = self.generation_path(current);
         check_private_tree(&path)?;
+        if edit_origin {
+            ensure!(
+                !path.join("edit-origin-revoked.json").try_exists()?,
+                ListingError::StaleGeneration
+            );
+            if path.join("invalidated.json").try_exists()? {
+                let reason: String = read_json(&path.join("invalidated.json"))?;
+                ensure!(
+                    reason == "seller requested rebuild",
+                    ListingError::StaleGeneration
+                );
+            }
+        }
         ensure!(
-            !path.join("invalidated.json").try_exists()?,
+            edit_origin || !path.join("invalidated.json").try_exists()?,
             ListingError::StaleGeneration
         );
         let generation: Generation =
@@ -833,6 +912,12 @@ impl PackReview<'_> {
         if generation.binding.check().is_err()
             || tree(&path.join("payload")).ok().as_ref() != Some(&expected)
         {
+            if edit_origin && !path.join("edit-origin-revoked.json").try_exists()? {
+                write_json(
+                    &path.join("edit-origin-revoked.json"),
+                    &"source/index/recipe/staged bytes changed",
+                )?;
+            }
             // Durable invalidation: reverting changed source/staged bytes must
             // never revive previously accepted work after restart.
             self.invalidate(

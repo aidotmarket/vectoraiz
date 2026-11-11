@@ -16,6 +16,7 @@ serde_json.workspace = true
 serde.workspace = true
 uuid = { version = "1", features = ["serde", "v4"] }
 anyhow = "1"
+quick-xml = "=0.38.4"
 arrow-array = "56.2"
 arrow-schema = "56.2"
 arrow-cast = "56.2"

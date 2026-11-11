@@ -80,7 +80,7 @@ it("applies real edits through rebuild, invalidates acceptance, restores focus a
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_invalidate", {current: listingCurrent}));
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
   expect(await region.findByText("Reviewed delivered text")).toBeInTheDocument();
-  expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {"README.md": "Reviewed delivered text"}, exclusions: ["unsupported.pdf"], identity_terms: []}});
+  expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {"README.md": "Reviewed delivered text"}, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}});
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "listing_review" ? Promise.reject({code: "STALE_GENERATION", reason: "Source changed. Rebuild required."}) : original(command, args));
   await userEvent.click(region.getByRole("checkbox", {name: /I reviewed the complete purchaser inventory/}));
@@ -104,7 +104,34 @@ it("sends document and chunk edits with their stable inventory identities", asyn
     await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
   }
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: []}}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}}));
+});
+
+it("binds Office body, cell and notes edits to their originating generation", async () => {
+  mockListing();
+  const original = invoke.getMockImplementation()!;
+  const locations = ["docx!word/document.xml/body/text", "xlsx!xl/worksheets/sheet1.xml/cell/B7/text", "pptx!ppt/notesSlides/notes1.xml/shape/2/text"]
+    .map((node, index) => `originals-0001.zip!document-000${index + 1}.${node}`);
+  invoke.mockImplementation(async (command, args) => {
+    const result = await original(command, args);
+    if (command !== "listing_rebuild") return result;
+    const built = result as {current: typeof listingCurrent; review: ReturnType<typeof listingFixture>};
+    built.review.metadata_inventory.unshift(...locations.map(location => ({location, kind: "Office text", value: "Office content", warning: true})));
+    return built;
+  });
+  const region = within(await openListing());
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  const edits: Record<string, string> = {};
+  for (const location of locations) {
+    await userEvent.click(await region.findByRole("button", {name: `Edit ${location}`}));
+    edits[location] = "Reviewed Office replacement";
+    fireEvent.change(region.getByRole("textbox", {name: "Replacement value"}), {target: {value: edits[location]}});
+    await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
+  }
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}}));
+  expect(invoke).toHaveBeenCalledWith("listing_invalidate", {current: listingCurrent});
 });
 
 it("uses the backend protected set to hide structural column edits and keeps descriptive columns editable", async () => {

@@ -139,7 +139,15 @@ pub async fn index(
                 .is_some_and(|e| {
                     matches!(
                         e.to_ascii_lowercase().as_str(),
-                        "pdf" | "docx" | "xlsx" | "txt" | "md" | "markdown" | "html" | "htm"
+                        "pdf"
+                            | "docx"
+                            | "xlsx"
+                            | "pptx"
+                            | "txt"
+                            | "md"
+                            | "markdown"
+                            | "html"
+                            | "htm"
                     )
                 })
         {
@@ -187,6 +195,7 @@ pub async fn index(
                 &worker::executable()?,
                 &worker::Request {
                     path: path.clone(),
+                    office: None,
                     pdfium: if path
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
@@ -196,7 +205,17 @@ pub async fn index(
                         None
                     },
                 },
-                Duration::from_secs(60),
+                Duration::from_secs(
+                    if path.extension().is_some_and(|ext| {
+                        ["docx", "xlsx", "pptx"]
+                            .iter()
+                            .any(|kind| ext.eq_ignore_ascii_case(kind))
+                    }) {
+                        120
+                    } else {
+                        60
+                    },
+                ),
             )?;
             if crate::pipeline::file_sha256(&path)
                 .map_err(|e| crate::failures::source_io(e.into()))?

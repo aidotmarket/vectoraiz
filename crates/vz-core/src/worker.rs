@@ -10,10 +10,38 @@ use std::{
 };
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 pub const MEMORY_BYTES: u64 = 1536 * 1024 * 1024;
+pub const OFFICE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+#[derive(Serialize, Deserialize)]
+pub struct OfficeJob {
+    pub name: String,
+    pub output: PathBuf,
+    pub edits: std::collections::BTreeMap<String, crate::office::Edit>,
+    pub readback: bool,
+    #[serde(default)]
+    pub sanitized_input: bool,
+}
 #[derive(Serialize, Deserialize)]
 pub struct Request {
     pub path: PathBuf,
     pub pdfium: Option<PathBuf>,
+    #[serde(default)]
+    pub office: Option<OfficeJob>,
+}
+impl Request {
+    pub fn office_label(&self) -> Option<&str> {
+        if let Some(job) = &self.office {
+            return Some(&job.name);
+        }
+        self.path
+            .extension()
+            .and_then(|s| s.to_str())
+            .filter(|s| {
+                ["docx", "xlsx", "pptx"]
+                    .iter()
+                    .any(|ext| s.eq_ignore_ascii_case(ext))
+            })
+            .and_then(|_| self.path.to_str())
+    }
 }
 #[derive(Serialize, Deserialize)]
 pub struct Response {
@@ -49,10 +77,16 @@ pub fn executable() -> Result<PathBuf> {
     } else {
         "vz-parser-worker"
     };
-    Ok(std::env::current_exe()?
-        .parent()
-        .context("executable directory")?
-        .join(name))
+    let current = std::env::current_exe()?;
+    let directory = current.parent().context("executable directory")?;
+    // Integration tests live in target/{profile}/deps; production binaries
+    // remain siblings in the installation directory.
+    let directory = if directory.file_name().is_some_and(|n| n == "deps") {
+        directory.parent().context("profile directory")?
+    } else {
+        directory
+    };
+    Ok(directory.join(name))
 }
 pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Page>> {
     // sandbox-exec itself may spawn even when the actual worker is missing.
@@ -64,11 +98,40 @@ pub fn run(worker: &Path, request: &Request, timeout: Duration) -> Result<Vec<Pa
     run_command(command(worker), request, timeout, cfg!(target_os = "macos"))
 }
 
+pub fn run_cancellable(
+    worker: &Path,
+    request: &Request,
+    timeout: Duration,
+    check: impl Fn() -> Result<()>,
+) -> Result<Vec<Page>> {
+    anyhow::ensure!(
+        worker.is_file(),
+        "parser worker missing: {}",
+        worker.display()
+    );
+    run_command_checked(
+        command(worker),
+        request,
+        timeout,
+        cfg!(target_os = "macos"),
+        check,
+    )
+}
+
 fn run_command(
+    cmd: Command,
+    request: &Request,
+    timeout: Duration,
+    sandboxed: bool,
+) -> Result<Vec<Page>> {
+    run_command_checked(cmd, request, timeout, sandboxed, || Ok(()))
+}
+fn run_command_checked(
     mut cmd: Command,
     request: &Request,
     timeout: Duration,
     sandboxed: bool,
+    check: impl Fn() -> Result<()>,
 ) -> Result<Vec<Page>> {
     #[cfg(unix)]
     {
@@ -91,10 +154,31 @@ fn run_command(
     }
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("start parser worker")?;
+    let mut stderr = child.stderr.take().context("worker stderr")?;
+    let (diagnostic_tx, diagnostic_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut diagnostic = Vec::new();
+        let mut buffer = [0; 4096];
+        while let Ok(size) = stderr.read(&mut buffer) {
+            if size == 0 {
+                break;
+            }
+            let retain = size.min(4096 - diagnostic.len());
+            diagnostic.extend_from_slice(&buffer[..retain]);
+        }
+        let _ = diagnostic_tx.send(diagnostic);
+    });
     #[cfg(windows)]
-    let _job = windows_limit(&child)?;
+    let _job = windows_limit(
+        &child,
+        if request.office_label().is_some() {
+            OFFICE_MEMORY_BYTES
+        } else {
+            MEMORY_BYTES
+        },
+    )?;
     let mut stdin = child.stdin.take().context("worker stdin")?;
     // A wrapper can exit before consuming the request. Inspect its status and
     // stdout before classifying a broken pipe as a document failure.
@@ -108,7 +192,13 @@ fn run_command(
         let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
     });
     let start = Instant::now();
+    let mut last_usage = 0;
     loop {
+        if let Err(error) = check() {
+            let _ = terminate(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
         if let Some(status) = child.try_wait()? {
             // A descendant can keep stdout open after the worker exits. The
             // whole group goes with the worker, and collection stays bounded.
@@ -120,6 +210,29 @@ fn run_command(
                 .recv_timeout(remaining)
                 .map_err(|_| anyhow::anyhow!("worker response not received in time"));
             if !status.success() {
+                let diagnostic = diagnostic_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .unwrap_or_default();
+                if let Some(label) = request.office_label() {
+                    if diagnostic
+                        .windows(b"memory allocation of ".len())
+                        .any(|w| w == b"memory allocation of ")
+                        && diagnostic
+                            .windows(b"bytes failed".len())
+                            .any(|w| w == b"bytes failed")
+                    {
+                        return Err(crate::failures::content(format!("OFFICE_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {OFFICE_MEMORY_BYTES} bytes; last observed {last_usage} bytes; allocation denied")));
+                    }
+                }
+                #[cfg(windows)]
+                if let Some(label) = request.office_label() {
+                    if status
+                        .code()
+                        .is_some_and(|c| matches!(c as u32, 0xc0000017 | 0xc000009a))
+                    {
+                        return Err(crate::failures::content(format!("OFFICE_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {OFFICE_MEMORY_BYTES} bytes; last observed {last_usage} bytes; allocation denied")));
+                    }
+                }
                 if sandboxed
                     && status.code().is_some_and(|code| (64..=78).contains(&code))
                     && response.as_ref().is_ok_and(|(empty, _)| *empty)
@@ -147,12 +260,23 @@ fn run_command(
             }
             return Ok(response.pages);
         }
-        #[cfg(target_os = "macos")]
-        if resident_bytes(child.id()) > MEMORY_BYTES {
+        last_usage = resident_bytes(child.id());
+        if last_usage
+            > if request.office_label().is_some() {
+                OFFICE_MEMORY_BYTES
+            } else {
+                MEMORY_BYTES
+            }
+        {
+            let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
             return Err(crate::failures::content(
-                "worker resident memory exceeds 1.5 GiB",
+                if let Some(label) = request.office_label() {
+                    format!("OFFICE_MEMORY_LIMIT_EXCEEDED: {}: limit {OFFICE_MEMORY_BYTES} bytes; last observed {usage} bytes",label)
+                } else {
+                    "worker resident memory exceeds 1.5 GiB".into()
+                },
             ));
         }
         if start.elapsed() >= timeout {
@@ -190,11 +314,18 @@ pub fn command(worker: &Path) -> Command {
 }
 /// Called before reading the request, before a parser can allocate memory.
 pub fn apply_memory_limit() -> Result<()> {
+    apply_memory_limit_bytes(MEMORY_BYTES)
+}
+pub fn apply_office_memory_limit() -> Result<()> {
+    apply_memory_limit_bytes(OFFICE_MEMORY_BYTES)
+}
+fn apply_memory_limit_bytes(bytes: u64) -> Result<()> {
+    let _ = bytes;
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let limit = libc::rlimit {
-            rlim_cur: MEMORY_BYTES,
-            rlim_max: MEMORY_BYTES,
+            rlim_cur: bytes,
+            rlim_max: bytes,
         };
         // macOS rejects RLIMIT_AS. Use its heap limit plus the parent RSS watchdog.
         if unsafe { libc::setrlimit(libc::RLIMIT_AS, &limit) } != 0 {
@@ -207,7 +338,7 @@ pub fn apply_memory_limit() -> Result<()> {
     Ok(())
 }
 #[cfg(windows)]
-fn windows_limit(child: &std::process::Child) -> Result<impl Drop> {
+fn windows_limit(child: &std::process::Child, bytes: u64) -> Result<impl Drop> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::{Foundation::CloseHandle, System::JobObjects::*};
     struct Job(windows_sys::Win32::Foundation::HANDLE);
@@ -226,7 +357,7 @@ fn windows_limit(child: &std::process::Child) -> Result<impl Drop> {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         info.BasicLimitInformation.LimitFlags =
             JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        info.ProcessMemoryLimit = MEMORY_BYTES as usize;
+        info.ProcessMemoryLimit = bytes as usize;
         if SetInformationJobObject(
             job.0,
             JobObjectExtendedLimitInformation,
@@ -293,6 +424,44 @@ fn resident_bytes(pid: u32) -> u64 {
         0
     }
 }
+#[cfg(target_os = "linux")]
+fn resident_bytes(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/statm"))
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(1)?.parse::<u64>().ok())
+        .unwrap_or(0)
+        * unsafe { libc::sysconf(libc::_SC_PAGESIZE) as u64 }
+}
+#[cfg(windows)]
+fn resident_bytes(pid: u32) -> u64 {
+    use windows_sys::Win32::{
+        Foundation::CloseHandle,
+        System::{
+            ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX},
+            Threading::{OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ},
+        },
+    };
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid);
+        if process.is_null() {
+            return 0;
+        }
+        let mut counters: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();
+        let size = std::mem::size_of_val(&counters) as u32;
+        counters.cb = size;
+        let ok = K32GetProcessMemoryInfo(process, &mut counters as *mut _ as _, size);
+        CloseHandle(process);
+        if ok != 0 {
+            counters.PrivateUsage as u64
+        } else {
+            0
+        }
+    }
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn resident_bytes(_pid: u32) -> u64 {
+    0
+}
 
 #[cfg(all(test, unix))]
 mod tests {
@@ -306,6 +475,7 @@ mod tests {
             &Request {
                 path: "source.txt".into(),
                 pdfium: None,
+                office: None,
             },
             Duration::from_secs(5),
             sandboxed,

@@ -14,6 +14,7 @@ fn failed_file_does_not_prevent_next_worker() {
         &Request {
             path: bad,
             pdfium: None,
+            office: None,
         },
         Duration::from_secs(10),
     )
@@ -24,7 +25,8 @@ fn failed_file_does_not_prevent_next_worker() {
             worker,
             &Request {
                 path: good,
-                pdfium: None
+                pdfium: None,
+                office: None,
             },
             Duration::from_secs(10)
         )
@@ -34,12 +36,61 @@ fn failed_file_does_not_prevent_next_worker() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn office_time_and_cancel_bounds() {
+    use std::time::Instant;
+    let request = Request {
+        path: "timeout".into(),
+        pdfium: None,
+        office: Some(vz_core::worker::OfficeJob {
+            name: "fixture.docx".into(),
+            output: "unused".into(),
+            edits: Default::default(),
+            readback: false,
+            sanitized_input: false,
+        }),
+    };
+    let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
+    for readback in [false, true] {
+        let mut request = Request {
+            path: request.path.clone(),
+            pdfium: None,
+            office: Some(vz_core::worker::OfficeJob {
+                name: "fixture.docx".into(),
+                output: "unused".into(),
+                edits: Default::default(),
+                readback,
+                sanitized_input: false,
+            }),
+        };
+        let start = Instant::now();
+        let err = run(worker, &request, Duration::from_millis(100)).unwrap_err();
+        assert!(err.to_string().contains("timeout"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let start = Instant::now();
+        let err =
+            vz_core::worker::run_cancellable(worker, &request, Duration::from_secs(120), || {
+                if start.elapsed() > Duration::from_millis(50) {
+                    Err(std::io::Error::other("cancel").into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("cancel"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        request.path = "ok".into();
+        assert!(run(worker, &request, Duration::from_secs(5)).is_ok());
+    }
+}
 #[test]
 fn timeout_and_crash() {
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
     let request = |path: &str| Request {
         path: path.into(),
         pdfium: None,
+        office: None,
     };
     for (path, expected, timeout) in [
         ("timeout", "timeout", Duration::from_millis(500)),
@@ -70,6 +121,7 @@ fn macos_worker_denies_outbound_network() {
     let request = Request {
         path: format!("network:{port}").into(),
         pdfium: None,
+        office: None,
     };
     let mut baseline = Command::new(worker)
         .stdin(Stdio::piped())
@@ -96,6 +148,7 @@ fn macos_memory_budget_kills_worker() {
     let request = Request {
         path: "memory".into(),
         pdfium: None,
+        office: None,
     };
     let error = run(
         Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe")),
@@ -105,6 +158,35 @@ fn macos_memory_budget_kills_worker() {
     .unwrap_err();
     assert!(error.to_string().contains("memory"), "{error:#}");
     assert!(vz_core::failures::is_content(&error));
+}
+#[cfg(target_os = "macos")]
+#[test]
+fn office_memory_cap_has_named_refusal() {
+    let request = Request {
+        path: "memory".into(),
+        pdfium: None,
+        office: Some(vz_core::worker::OfficeJob {
+            name: "capacity.xlsx".into(),
+            output: "unused".into(),
+            edits: Default::default(),
+            readback: false,
+            sanitized_input: false,
+        }),
+    };
+    let error = run(
+        Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe")),
+        &request,
+        Duration::from_secs(30),
+    )
+    .unwrap_err();
+    let message = error.to_string();
+    assert!(
+        message.contains("OFFICE_MEMORY_LIMIT_EXCEEDED")
+            && message.contains("1073741824")
+            && message.contains("capacity.xlsx")
+            && message.contains("last observed"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -146,6 +228,7 @@ fn pages_without_text_use_platform_ocr_policy() {
         &Request {
             path,
             pdfium: Some(library.canonicalize().unwrap()),
+            office: None,
         },
         Duration::from_secs(60),
     )
@@ -161,6 +244,7 @@ fn pdfium_io_and_spawn_failure_remain_infrastructure_through_transport() {
     let request = Request {
         path: "pdfium-io".into(),
         pdfium: None,
+        office: None,
     };
     let failure = run(worker, &request, Duration::from_secs(5)).unwrap_err();
     assert!(!vz_core::failures::is_content(&failure));
