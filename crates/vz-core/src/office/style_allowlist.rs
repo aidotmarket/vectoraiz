@@ -174,6 +174,250 @@ pub(super) fn rule(ns: &str, element: &str) -> Option<&'static str> {
         (P,"kiosk")=>"restart",
         (P,"sldAll")=>"",
         (P,"sldRg")=>"end st",
+        (W,"removePersonalInformation")=>"val",
+        (W,"removeDateAndTime")=>"val",
+        (W,"doNotDisplayPageBoundaries")=>"val",
+        (W,"displayBackgroundShape")=>"val",
+        (W,"printFractionalCharacterWidth")=>"val",
+        (W,"alignBordersAndEdges")=>"val",
+        (W,"bordersDoNotSurroundHeader")=>"val",
+        (W,"bordersDoNotSurroundFooter")=>"val",
+        (W,"hideSpellingErrors")=>"val",
+        (W,"hideGrammaticalErrors")=>"val",
+        (W,"stylePaneFormatFilter")=>"allStyles alternateStyleNames clearFormatting customStyles directFormattingOnNumbering directFormattingOnParagraphs directFormattingOnRuns directFormattingOnTables headingStyles latentStyles numberingStyles stylesInUse tableStyles top3HeadingStyles val visibleStyles",
+        (W,"stylePaneSortMethod")=>"val",
+        (W,"defaultTabStop")=>"val",
+        (W,"clickAndTypeStyle")=>"val",
+        (W,"evenAndOddHeaders")=>"val",
+        (W,"bookFoldRevPrinting")=>"val",
+        (W,"bookFoldPrinting")=>"val",
+        (W,"bookFoldPrintingSheets")=>"val",
+        (W,"drawingGridHorizontalSpacing")=>"val",
+        (W,"drawingGridVerticalSpacing")=>"val",
+        (W,"displayHorizontalDrawingGridEvery")=>"val",
+        (W,"displayVerticalDrawingGridEvery")=>"val",
+        (W,"doNotUseMarginsForDrawingGridOrigin")=>"val",
+        (W,"drawingGridHorizontalOrigin")=>"val",
+        (W,"drawingGridVerticalOrigin")=>"val",
+        (W,"noPunctuationKerning")=>"val",
+        (W,"characterSpacingControl")=>"val",
+        (W,"strictFirstAndLastChars")=>"val",
+        (W,"footnotePr")=>"",
+        (W,"endnotePr")=>"",
+        (W,"doNotAutoCompressPictures")=>"val",
+        (W,"tblStyle")=>"val",
+        (W,"tblLook")=>"firstColumn firstRow lastColumn lastRow noHBand noVBand val",
+        (W,"tblStylePr")=>"type",
+        (W,"tblInd")=>"type w",
+        (W,"tblCellMar")=>"",
+        (W,"tblCellSpacing")=>"type w",
+        (W,"trHeight")=>"hRule val",
+        (W,"textAlignment")=>"val",
+        (W,"suppressAutoHyphens")=>"val",
+        (W,"suppressLineNumbers")=>"val",
+        (W,"adjustRightInd")=>"val",
+        (W,"autoSpaceDE")=>"val",
+        (W,"autoSpaceDN")=>"val",
+        (W,"bidi")=>"val",
+        (W,"numPr")=>"",
+        (W,"pBdr")=>"",
+        (W,"between")=>"color frame shadow space sz themeColor themeShade themeTint val",
+        (W,"bar")=>"color frame shadow space sz themeColor themeShade themeTint val",
+        (W,"separator")=>"",
+        (W,"continuationSeparator")=>"",
+        (W,"pos")=>"val",
+        (W,"numStart")=>"val",
+        (W,"numRestart")=>"val",
+        (W,"useSingleBorderforContiguousCells")=>"val",
+        (W,"wpJustification")=>"val",
+        (W,"noTabHangInd")=>"val",
+        (W,"noLeading")=>"val",
+        (W,"spaceForUL")=>"val",
+        (W,"noColumnBalance")=>"val",
+        (W,"balanceSingleByteDoubleByteWidth")=>"val",
+        (W,"noExtraLineSpacing")=>"val",
+        (W,"doNotLeaveBackslashAlone")=>"val",
+        (W,"ulTrailSpace")=>"val",
+        (W,"doNotExpandShiftReturn")=>"val",
+        (W,"spacingInWholePoints")=>"val",
+        (W,"lineWrapLikeWord6")=>"val",
+        (W,"printBodyTextBeforeHeader")=>"val",
+        (W,"printColBlack")=>"val",
+        (W,"wpSpaceWidth")=>"val",
+        (W,"showBreaksInFrames")=>"val",
+        (W,"subFontBySize")=>"val",
+        (W,"suppressBottomSpacing")=>"val",
+        (W,"suppressTopSpacing")=>"val",
+        (W,"suppressSpacingAtTopOfPage")=>"val",
+        (W,"suppressTopSpacingWP")=>"val",
+        (W,"suppressSpBfAfterPgBrk")=>"val",
+        (W,"swapBordersFacingPages")=>"val",
+        (W,"convMailMergeEsc")=>"val",
+        (W,"truncateFontHeightsLikeWP6")=>"val",
+        (W,"mwSmallCaps")=>"val",
+        (W,"usePrinterMetrics")=>"val",
+        (W,"doNotSuppressParagraphBorders")=>"val",
+        (W,"wrapTrailSpaces")=>"val",
+        (W,"footnoteLayoutLikeWW8")=>"val",
+        (W,"shapeLayoutLikeWW8")=>"val",
+        (W,"alignTablesRowByRow")=>"val",
+        (W,"forgetLastTabAlignment")=>"val",
+        (W,"adjustLineHeightInTable")=>"val",
+        (W,"autoSpaceLikeWord95")=>"val",
+        (W,"noSpaceRaiseLower")=>"val",
+        (W,"layoutRawTableWidth")=>"val",
+        (W,"layoutTableRowsApart")=>"val",
+        (W,"useWord97LineBreakRules")=>"val",
+        (W,"doNotBreakWrappedTables")=>"val",
+        (W,"doNotSnapToGridInCell")=>"val",
+        (W,"selectFldWithFirstOrLastChar")=>"val",
+        (W,"applyBreakingRules")=>"val",
+        (W,"doNotWrapTextWithPunct")=>"val",
+        (W,"doNotUseEastAsianBreakRules")=>"val",
+        (W,"useWord2002TableStyleRules")=>"val",
+        (W,"growAutofit")=>"val",
+        (W,"useFELayout")=>"val",
+        (W,"useNormalStyleForList")=>"val",
+        (W,"doNotUseIndentAsNumberingTabStop")=>"val",
+        (W,"useAltKinsokuLineBreakRules")=>"val",
+        (W,"allowSpaceOfSameStyleInTable")=>"val",
+        (W,"doNotSuppressIndentation")=>"val",
+        (W,"doNotAutofitConstrainedTables")=>"val",
+        (W,"autofitToFirstFixedWidthCell")=>"val",
+        (W,"underlineTabInNumList")=>"val",
+        (W,"displayHangulFixedWidth")=>"val",
+        (W,"splitPgBreakAndParaMark")=>"val",
+        (W,"doNotVertAlignCellWithSp")=>"val",
+        (W,"doNotBreakConstrainedForcedTable")=>"val",
+        (W,"doNotVertAlignInTxbx")=>"val",
+        (W,"useAnsiKerningPairs")=>"val",
+        (W,"cachedColBalance")=>"val",
+        (A,"fillToRect")=>"b l r t",
+        (A,"tabLst")=>"",
+        (A,"tab")=>"algn pos",
+        (A,"buSzPct")=>"val",
+        (A,"buSzPts")=>"val",
+        (A,"buSzTx")=>"",
+        (A,"buFontTx")=>"",
+        (A,"buClr")=>"",
+        (A,"buClrTx")=>"",
+        (A,"lnL")=>"algn cap cmpd w",
+        (A,"lnR")=>"algn cap cmpd w",
+        (A,"lnT")=>"algn cap cmpd w",
+        (A,"lnB")=>"algn cap cmpd w",
+        (A,"cell3D")=>"prstMaterial",
+        (A,"noFill")=>"",
         _=>return None,
     })
+}
+
+// Rendering compatibility flags contain only a schema-defined boolean value.
+// Keep these explicit: mail merge, field updates, transforms and arbitrary
+// editor settings are never admitted by the settings-part rule.
+pub(super) fn settings_element(element: &str) -> bool {
+    matches!(
+        element,
+        "removePersonalInformation"
+            | "removeDateAndTime"
+            | "doNotDisplayPageBoundaries"
+            | "displayBackgroundShape"
+            | "printFractionalCharacterWidth"
+            | "mirrorMargins"
+            | "alignBordersAndEdges"
+            | "bordersDoNotSurroundHeader"
+            | "bordersDoNotSurroundFooter"
+            | "hideSpellingErrors"
+            | "hideGrammaticalErrors"
+            | "stylePaneFormatFilter"
+            | "stylePaneSortMethod"
+            | "defaultTabStop"
+            | "autoHyphenation"
+            | "consecutiveHyphenLimit"
+            | "hyphenationZone"
+            | "doNotHyphenateCaps"
+            | "clickAndTypeStyle"
+            | "defaultTableStyle"
+            | "evenAndOddHeaders"
+            | "bookFoldRevPrinting"
+            | "bookFoldPrinting"
+            | "bookFoldPrintingSheets"
+            | "drawingGridHorizontalSpacing"
+            | "drawingGridVerticalSpacing"
+            | "displayHorizontalDrawingGridEvery"
+            | "displayVerticalDrawingGridEvery"
+            | "doNotUseMarginsForDrawingGridOrigin"
+            | "drawingGridHorizontalOrigin"
+            | "drawingGridVerticalOrigin"
+            | "noPunctuationKerning"
+            | "characterSpacingControl"
+            | "strictFirstAndLastChars"
+            | "footnotePr"
+            | "endnotePr"
+            | "doNotAutoCompressPictures"
+            | "useSingleBorderforContiguousCells"
+            | "wpJustification"
+            | "noTabHangInd"
+            | "noLeading"
+            | "spaceForUL"
+            | "noColumnBalance"
+            | "balanceSingleByteDoubleByteWidth"
+            | "noExtraLineSpacing"
+            | "doNotLeaveBackslashAlone"
+            | "ulTrailSpace"
+            | "doNotExpandShiftReturn"
+            | "spacingInWholePoints"
+            | "lineWrapLikeWord6"
+            | "printBodyTextBeforeHeader"
+            | "printColBlack"
+            | "wpSpaceWidth"
+            | "showBreaksInFrames"
+            | "subFontBySize"
+            | "suppressBottomSpacing"
+            | "suppressTopSpacing"
+            | "suppressSpacingAtTopOfPage"
+            | "suppressTopSpacingWP"
+            | "suppressSpBfAfterPgBrk"
+            | "swapBordersFacingPages"
+            | "convMailMergeEsc"
+            | "truncateFontHeightsLikeWP6"
+            | "mwSmallCaps"
+            | "usePrinterMetrics"
+            | "doNotSuppressParagraphBorders"
+            | "wrapTrailSpaces"
+            | "footnoteLayoutLikeWW8"
+            | "shapeLayoutLikeWW8"
+            | "alignTablesRowByRow"
+            | "forgetLastTabAlignment"
+            | "adjustLineHeightInTable"
+            | "autoSpaceLikeWord95"
+            | "noSpaceRaiseLower"
+            | "doNotUseHTMLParagraphAutoSpacing"
+            | "layoutRawTableWidth"
+            | "layoutTableRowsApart"
+            | "useWord97LineBreakRules"
+            | "doNotBreakWrappedTables"
+            | "doNotSnapToGridInCell"
+            | "selectFldWithFirstOrLastChar"
+            | "applyBreakingRules"
+            | "doNotWrapTextWithPunct"
+            | "doNotUseEastAsianBreakRules"
+            | "useWord2002TableStyleRules"
+            | "growAutofit"
+            | "useFELayout"
+            | "useNormalStyleForList"
+            | "doNotUseIndentAsNumberingTabStop"
+            | "useAltKinsokuLineBreakRules"
+            | "allowSpaceOfSameStyleInTable"
+            | "doNotSuppressIndentation"
+            | "doNotAutofitConstrainedTables"
+            | "autofitToFirstFixedWidthCell"
+            | "underlineTabInNumList"
+            | "displayHangulFixedWidth"
+            | "splitPgBreakAndParaMark"
+            | "doNotVertAlignCellWithSp"
+            | "doNotBreakConstrainedForcedTable"
+            | "doNotVertAlignInTxbx"
+            | "useAnsiKerningPairs"
+            | "cachedColBalance"
+    )
 }

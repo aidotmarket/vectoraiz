@@ -440,7 +440,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (W,"b"|"i"|"u"|"strike"|"dstrike"|"caps"|"smallCaps"|"sz"|"szCs"|"highlight"|"vertAlign"|"jc"|"keepNext"|"keepLines"|"pageBreakBefore"|"outlineLvl"|"contextualSpacing"|"vanish"|"webHidden"|"noProof"|"widowControl"|"vAlign"|"gridSpan"|"vMerge"|"textDirection"|"name"|"basedOn"|"next"|"link"|"uiPriority"|"qFormat"|"pStyle"|"numId"|"ilvl"|"start"|"numFmt"|"lvlText"|"lvlJc"|"abstractNumId"|"multiLevelType"|"tblLayout"|"defaultTabStop"|"characterSpacingControl")=>"val",
         (W,"color")=>"val themeColor themeTint themeShade",(W,"shd")=>"val color fill themeColor themeFill themeFillTint themeFillShade",
         (W,"cr"|"lastRenderedPageBreak"|"softHyphen"|"noBreakHyphen"|"tblBorders"|"tcBorders"|"cantSplit"|"tblHeader"|"titlePg"|"evenAndOddHeaders")=>"",
-        (W,"top"|"left"|"bottom"|"right"|"insideH"|"insideV")=>"val sz space color themeColor themeTint themeShade shadow frame",
+        (W,"top"|"left"|"bottom"|"right"|"insideH"|"insideV")=>"val sz space color themeColor themeTint themeShade shadow frame w type",
         (W,"num")=>"numId",(W,"abstractNum")=>"abstractNumId",(W,"lvl")=>"ilvl tplc tentative",(W,"lvlOverride")=>"ilvl",
         (S,"workbook")=>"conformance",(S,"worksheet"|"sheets"|"sheetData"|"si"|"r"|"rPr"|"t"|"v"|"is"|"bookViews"|"sheetViews"|"definedNames"|"styleSheet"|"colors"|"indexedColors")=>"",
         (S,"sheet")=>"name sheetId state",(S,"c")=>"r s t",(S,"row")=>"r spans s customFormat ht hidden customHeight outlineLevel collapsed thickTop thickBot",
@@ -1242,7 +1242,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns == A;
     }
     if part == "word/settings.xml" {
-        return ns==W&&words("settings zoom defaultTabStop characterSpacingControl evenAndOddHeaders displayBackgroundShape compat compatSetting proofState themeFontLang clrSchemeMapping decimalSymbol listSeparator view mirrorMargins autoHyphenation consecutiveHyphenLimit hyphenationZone doNotHyphenateCaps gutterAtTop defaultTableStyle doNotTrackMoves doNotTrackFormatting doNotUseHTMLParagraphAutoSpacing",el);
+        return ns==W&&(style_allowlist::settings_element(el)||words("settings zoom defaultTabStop characterSpacingControl evenAndOddHeaders displayBackgroundShape compat compatSetting proofState themeFontLang clrSchemeMapping decimalSymbol listSeparator view mirrorMargins autoHyphenation consecutiveHyphenLimit hyphenationZone doNotHyphenateCaps gutterAtTop defaultTableStyle doNotTrackMoves doNotTrackFormatting doNotUseHTMLParagraphAutoSpacing numFmt numStart numRestart pos footnote endnote",el));
     }
     if part == "word/fontTable.xml" {
         return ns == W

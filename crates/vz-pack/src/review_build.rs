@@ -185,8 +185,8 @@ fn build(
             if changes.exclusions.contains(&relative) {
                 continue;
             }
-            // Current proven original parsers preserve all UTF-8 text. Office,
-            // PDF and HTML must be excluded or edited/re-ingested as text.
+            // Only originals with a staged rewrite and readback handler qualify.
+            // PDF and HTML still require explicit seller exclusion.
             ensure!(
                 ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str()),
                 "original format has no proven rewrite handler; exclude or re-ingest as text"

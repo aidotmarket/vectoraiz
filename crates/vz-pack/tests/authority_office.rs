@@ -849,3 +849,50 @@ fn office_neutral_sheet_directories_rewrite_relationships() {
         .iter()
         .any(|v| v.location.starts_with("xl/worksheets/part-")));
 }
+
+#[test]
+fn office_standard_word_rendering_settings_refuse_active_neighbors() {
+    let mut p = fixture("docx");
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}"><w:hideSpellingErrors/><w:stylePaneFormatFilter w:val="3F01"/><w:doNotAutoCompressPictures/><w:compat><w:useFELayout/><w:doNotUseHTMLParagraphAutoSpacing w:val="1"/><w:useWord2002TableStyleRules/></w:compat><w:footnotePr><w:numFmt w:val="decimal"/><w:footnote w:id="-1"/></w:footnotePr></w:settings>"#
+    );
+    add(
+        &mut p,
+        "word/settings.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+        &settings,
+    );
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="04A0" w:firstRow="1" w:noVBand="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style></w:styles>"#
+    );
+    add(
+        &mut p,
+        "word/styles.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+        &styles,
+    );
+    // top/bottom are context-dependent table margins, not paragraph borders.
+    let (bytes, report) = rebuild("docx", &p);
+    assert_eq!(
+        report.inventory,
+        office::inspect("x.docx", &bytes).unwrap().inventory
+    );
+    for payload in [
+        "<w:mailMerge/>",
+        "<w:updateFields w:val=\"1\"/>",
+        "<w:saveThroughXslt/>",
+        "<w:unknownEditorSetting/>",
+        "<w:useFELayout w:privatePath=\"secret\"/>",
+    ] {
+        p.insert(
+            "word/settings.xml".into(),
+            settings
+                .replace("</w:settings>", &format!("{payload}</w:settings>"))
+                .into_bytes(),
+        );
+        let error = office::rebuild("x.docx", &archive(&p), &BTreeMap::new())
+            .err()
+            .expect("active setting must refuse");
+        assert!(format!("{error:#}").contains("word/settings.xml"));
+    }
+}
