@@ -442,3 +442,40 @@ async fn office_feasibility_real_mutation_seams() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn office_feasibility_stale_cancel_cannot_invalidate_successor() {
+    let operations = OperationState::<Engine>::default();
+    let cancelled = operations.start();
+    {
+        let mut cache = operations.acquire().unwrap();
+        cache.get_or_load(false, || Ok(Engine(1))).unwrap();
+    }
+    let stamp = operations.office_cancel_generation();
+    assert!(*cancelled.borrow());
+    // Adversarial gap before an exclusive request becomes pending: successor
+    // has started using the same engine generation. The old token is obsolete.
+    let successor = operations.start();
+    assert!(!operations.office_invalidate_generation(stamp));
+    assert!(!*successor.borrow());
+    let mut cache = operations.wait_inference().await;
+    assert_eq!(
+        cache
+            .get_or_load(false, || panic!(
+                "stale invalidation replaced successor engine"
+            ))
+            .unwrap()
+            .0,
+        1
+    );
+    drop(cache);
+    let current = operations.office_cancel_generation();
+    assert!(operations.office_invalidate_generation(current));
+    let next = operations.start();
+    assert!(!operations.office_invalidate_generation(current));
+    assert!(!*next.borrow());
+    write(
+        "stale-cancel.json",
+        json!({"status":"pass","run_epoch_and_generation_bound":true,"same_generation_successor_protected":true,"old_deferred_step_never_resignals":true}),
+    );
+}
