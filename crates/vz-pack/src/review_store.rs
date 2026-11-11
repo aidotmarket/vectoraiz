@@ -281,6 +281,13 @@ pub struct NativePackReview<'a> {
 }
 
 impl NativePackReview<'_> {
+    pub(crate) fn begin_rebuild(&self) -> Result<()> {
+        self.check_policy()?;
+        if let Some((_, current)) = self.pack.head()? {
+            self.pack.invalidate(&current, "seller requested rebuild")?;
+        }
+        Ok(())
+    }
     /// Only sanitizer-certified, accepted generations expose bytes to adapters.
     pub(crate) fn reviewed_payload(
         &self,

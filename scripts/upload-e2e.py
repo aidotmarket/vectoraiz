@@ -15,6 +15,8 @@ from botocore.config import Config
 
 ROOT = Path(__file__).resolve().parents[1]
 pack = Path(sys.argv[1])
+reference = Path(sys.argv[2])
+prefix = "vz/" + json.loads((pack / "manifest.json").read_text())["pack_id"]
 manifest = json.loads((pack / 'manifest.json').read_text())
 # Test-only credentials never leave the local ephemeral server.
 env = os.environ.copy()
@@ -25,7 +27,7 @@ with socket.socket() as sock:
 endpoint = f'http://127.0.0.1:{port}'
 server = ROOT / ('.tools/minio.exe' if os.name == 'nt' else '.tools/minio')
 cli = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
-with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (ROOT / 'minio-test.log').open('w') as log:
+with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.get('KD_BRIDGE_JOB_EVIDENCE', data)) / 'minio-test.log').open('w') as log:
     child = subprocess.Popen([str(server), 'server', data, '--address', f'127.0.0.1:{port}', '--console-address', '127.0.0.1:0'], env=env, stdout=log, stderr=subprocess.STDOUT)
     try:
         deadline = time.monotonic() + 60
@@ -37,9 +39,9 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (ROOT / 'minio-tes
                 time.sleep(.2)
         s3 = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=env['AWS_ACCESS_KEY_ID'], aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'], region_name='us-east-1', config=Config(s3={'addressing_style': 'path'}))
         s3.create_bucket(Bucket='phase0-pack')
-        subprocess.run([str(cli), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', 'vz/fixture-pack'], env=env, check=True)
+        subprocess.run([str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, check=True)
         for name in [*manifest['files'], 'manifest.json']:
-            body = s3.get_object(Bucket='phase0-pack', Key='vz/fixture-pack/' + name)['Body'].read()
+            body = s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read()
             assert body == (pack / name).read_bytes(), name
         print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
     finally:

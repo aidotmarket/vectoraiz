@@ -57,6 +57,7 @@ fn build(
     query: &str,
     changes: &Changes,
 ) -> Result<CurrentReview> {
+    pack.begin_rebuild()?;
     let binding = pack.capture(source)?;
     let index = pack.index_path();
     let recipe: vz_core::engine::Recipe =

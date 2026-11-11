@@ -579,19 +579,36 @@ pub async fn sftp(
     );
     crate::review_transfer::check_input(&guard, &reference.current, pack, &payload)?;
     crate::sanitize::check_identifier(&options.target, &terms)?;
-    let intent = guard.intent(&reference.current, &format!("sftp:{}:{id}", options.target))?;
-    let result = sftp_inner(&payload, id, options, || {
-        guard.check_accepted(&reference.current)?;
-        Ok(())
-    })
+    let intent = std::sync::Mutex::new(None);
+    let result = sftp_inner(
+        &payload,
+        id,
+        options,
+        || {
+            guard.check_accepted(&reference.current)?;
+            Ok(())
+        },
+        |destination, stage| {
+            crate::sanitize::check_identifier(destination, &terms)?;
+            *intent.lock().unwrap() =
+                Some(guard.intent(&reference.current, &format!("{destination}|stage:{stage}"))?);
+            Ok(())
+        },
+    )
     .await?;
-    guard.completed(&intent, &result)?;
+    guard.completed(
+        &intent
+            .into_inner()
+            .unwrap()
+            .context("missing SFTP intent")?,
+        &result,
+    )?;
     Ok(result)
 }
 
 #[cfg(test)]
 async fn sftp_unreviewed(pack: &Path, id: &str, options: &SftpOptions) -> Result<Value> {
-    sftp_inner(pack, id, options, || Ok(())).await
+    sftp_inner(pack, id, options, || Ok(()), |_, _| Ok(())).await
 }
 
 async fn sftp_inner(
@@ -599,6 +616,7 @@ async fn sftp_inner(
     id: &str,
     options: &SftpOptions,
     check: impl Fn() -> Result<()>,
+    record: impl Fn(&str, &str) -> Result<()>,
 ) -> Result<Value> {
     let start = Instant::now();
     let files = inventory(pack, id)?;
@@ -672,6 +690,8 @@ async fn sftp_inner(
         "export destination already exists"
     );
     let stage = format!("{}/{}", staging.trim_end_matches('/'), partial_name(id));
+    let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
+    record(&destination_url, &stage)?;
     check()?;
     sftp.create_dir(&stage).await?;
     let mut promotion_attempted = false;
@@ -723,7 +743,6 @@ async fn sftp_inner(
     }
     // SFTP v3 RENAME must fail if the destination exists; do not use posix-rename
     // extensions, which overwrite an existing destination.
-    let destination_url = format!("sftp://{user}@{host}:{port}{destination}");
         for file in &files {
             check()?;
             let mut remote = sftp.open(format!("{stage}/{}", file.path)).await?;
