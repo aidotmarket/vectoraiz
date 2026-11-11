@@ -312,8 +312,8 @@ def confinement(evidence):
     strict = all(row["raw"].get("socket_created") is False and row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if name.startswith("socket:"))
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail", "roles": results, "strict_socket_creation": "pass" if strict else "fail",
             "outcome_contract": "pass" if all(row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if not name.startswith("socket:")) else "fail",
-            "limits": "capability prototype; actual ingest format control recorded separately, actual render worker absent; documentation-prefix Internet probes, LAN address candidate 192.168.1.1; DNS/XPC errors without explicit denial fail, not silently accepted",
-            "resource_bound_status":"fail: sampled RSS can overshoot or miss allocation bursts", "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
+            "limits": "capability prototype; actual ingest format control recorded separately, actual render worker absent; public resolver addresses under confinement only, routed IPv4 LAN and IPv6 gateway if present (otherwise candidate link-local); DNS/XPC errors without explicit denial fail, not silently accepted",
+            "resource_bound_status":"fail: sampled RSS can overshoot or miss allocation bursts", "network_destinations":routes, "ipv6_lan_route_available":routes[6]["gateway"] is not None, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
 
 
 def transport(evidence, evict_incomplete=True):

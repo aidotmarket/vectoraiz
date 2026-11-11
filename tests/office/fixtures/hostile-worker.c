@@ -102,7 +102,7 @@ int main(int argc, char **argv) {
         fd=socket(AF_SYSTEM,SOCK_DGRAM,2); created=fd>=0; rc=fd;
     } else if (!strcmp(probe,"socketpair")) {
         int pair[2]; rc=socketpair(AF_UNIX,SOCK_STREAM,0,pair);
-        if (!rc) {close(pair[0]);close(pair[1]);}
+        if (!rc) {created=1;close(pair[0]);close(pair[1]);}
     } else {
         char operation[40], destination[40]; int family=0, udp=0;
         if (sscanf(probe,"%39[^:]:%d:%d:%39s",operation,&family,&udp,destination)!=4) return 3;
