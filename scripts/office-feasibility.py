@@ -364,6 +364,7 @@ def transport(evidence, evict_incomplete=True):
             if record is None: return False
             if not live(identity):
                 record["closing"] = record["identity"] is not None
+                if record["closing"]:metrics["revocation_expiry_closures"]+=1
                 record["identity"] = None
                 return False
             peers = sum(r["identity"] == identity for k,r in connections.items() if k != key)
