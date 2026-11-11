@@ -144,6 +144,7 @@ fn identity_and_confidential_names() {
         "Confidential fixture-identity document",
         "Client Atlas",
         "Project ORION",
+        "ORION-X7",
         "client_name",
     ] {
         assert!(

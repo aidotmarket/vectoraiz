@@ -5,7 +5,7 @@
   "purchaser": {
     "title": "Confidential fixture-identity document",
     "heading_path": ["Client Atlas", "Project ORION"],
-    "properties": {"author": "Fixture Author", "language": null},
+    "properties": {"author": "Fixture Author", "language": null, "project_code": "ORION-X7"},
     "counts": {"documents": 1, "unmeasured_rows": null},
     "languages": null,
     "date_ranges": null,

@@ -152,9 +152,10 @@ fn entry(
 ) -> Result<()> {
     budget.charge(location.len() + value.as_ref().map_or(0, String::len))?;
     let lower = value.as_deref().unwrap_or_default().to_lowercase();
+    let category = format!("{kind} {location}").to_lowercase();
     let warning = ["confidential", "project", "client"]
         .iter()
-        .any(|s| lower.contains(s))
+        .any(|s| lower.contains(s) || category.contains(s))
         || changes
             .identity_terms
             .iter()
