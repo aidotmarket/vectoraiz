@@ -652,6 +652,32 @@ async fn office_feasibility_delivery_generation_gate() -> Result<()> {
     Ok(())
 }
 
+fn current_rss_bytes() -> Option<u64> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = std::process::Command::new("rtk")
+        .args([
+            "proxy",
+            "/bin/ps",
+            "-o",
+            "rss=",
+            "-p",
+            &std::process::id().to_string(),
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(|kb| kb * 1024)
+}
+
 #[test]
 fn office_feasibility_public_inventory_search() -> Result<()> {
     let Some(inventory) = std::env::var_os("VZ_OFFICE_PUBLIC_INVENTORY") else {
@@ -747,7 +773,23 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
             }
             for result in futures::future::join_all(jobs).await {samples.push(result?);}
         }
-        std::fs::write(external.join(if resume {"public-storage-recovery.json"} else {"public-storage.json"}),serde_json::to_vec_pretty(&json!({"documents":documents,"chunks":chunk_count,"pages":pages_count,"samples":samples,"ingest_ms":ingest_ms,"resumed":resume,"snapshot_build_ms":build_ms,"rss_peak_bytes":peak_rss_bytes(),"recipe":engines.recipe,"oracle":"exact first-chunk content, duplicates accepted by content; extracted text query, relevance not human-qualified","limits":"public inventory, direct native extraction (not confined worker), no OS cold-cache flush; omissions remain failures"}))?)?;
+        let one_snapshot_rss_bytes=current_rss_bytes();
+        let mut promotion=serde_json::Value::Null;
+        if resume {
+            let start=Instant::now();
+            let promoted=std::sync::Arc::new(vz_core::storage::office::Snapshot::build(&state,&external.join("public-promotion")).await?);
+            let preparation_ms=start.elapsed().as_secs_f64()*1000.0;
+            let two_snapshot_rss_bytes=current_rss_bytes();
+            let old_reader=snapshot.clone();
+            drop(snapshot);
+            ensure!(std::fs::read_dir(external.join("public-snapshot-recovery"))?.next().is_some(),"old storage retired before last Arc");
+            let start=Instant::now();drop(old_reader);
+            let retirement_ms=start.elapsed().as_secs_f64()*1000.0;
+            ensure!(std::fs::read_dir(external.join("public-snapshot-recovery"))?.next().is_none(),"old storage retained without Arc");
+            promotion=json!({"same_recipe_full_corpus":true,"identical_source_data":true,"second_preparation_ms":preparation_ms,"two_snapshot_rss_bytes":two_snapshot_rss_bytes,"retirement_ms":retirement_ms,"rss_after_retirement_bytes":current_rss_bytes(),"peak_rss_bytes":peak_rss_bytes(),"retired_only_after_last_arc":true});
+            drop(promoted);
+        }
+        std::fs::write(external.join(if resume {"public-storage-recovery.json"} else {"public-storage.json"}),serde_json::to_vec_pretty(&json!({"documents":documents,"chunks":chunk_count,"pages":pages_count,"samples":samples,"ingest_ms":ingest_ms,"resumed":resume,"snapshot_build_ms":build_ms,"one_snapshot_rss_bytes":one_snapshot_rss_bytes,"promotion":promotion,"rss_peak_bytes":peak_rss_bytes(),"recipe":engines.recipe,"oracle":"exact first-chunk content, duplicates accepted by content; extracted text query, relevance not human-qualified","limits":"public inventory, direct native extraction (not confined worker), no OS cold-cache flush; omissions remain failures"}))?)?;
         Ok(())
     })
 }
