@@ -184,7 +184,9 @@ mechanisms, without claiming C1 acceptance or changing any acceptance bound.
   result. Real native ingest ordinary-format controls are also attempted;
   there is no actual render worker at this C1 base. The capability workers
   apply NOFILE=64, CPU=2 s and CORE=0; the parent enforces a 1.5 GiB
-  process-tree RSS watchdog and a 3 s deadline. Mac RLIMIT_DATA rejects the
+  process-tree RSS watchdog threshold and a 3 s deadline. The sampled RSS
+  guard can overshoot or miss short allocation bursts; the hard memory bound
+  remains a failure, even if the watchdog eventually kills the process. Mac RLIMIT_DATA rejects the
   requested limit; its startup failures are preserved. A memory-budget probe
   records watchdog termination and observed peak/overshoot separately.
 * Admission and classification share one lock. Eviction selects the oldest

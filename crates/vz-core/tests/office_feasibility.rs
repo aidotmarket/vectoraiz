@@ -694,19 +694,19 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
                     if oracles.len()<25 && !oracles.iter().any(|(q,_,_): &(String,String,String)|q==&query) {oracles.push((query,first.text.clone(),id));}
                 }
                 chunk_count+=doc.chunks.len();pages_count+=doc.pages as usize;
-                documents.push(json!({"name":path.file_name(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages,"reused_verified_document":true}));
+                documents.push(json!({"name":path.file_name().unwrap().to_string_lossy(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages,"reused_verified_document":true}));
                 continue;
             }
             let parsed = vz_core::parsers::parse(&vz_core::worker::Request {
                 path: path.clone(), pdfium: std::env::var_os("VZ_OFFICE_PDFIUM").map(PathBuf::from),
             });
             match parsed {
-                Err(error) => documents.push(json!({"name":path.file_name(),"status":"fail","error":format!("{error:#}")})),
+                Err(error) => documents.push(json!({"name":path.file_name().unwrap().to_string_lossy(),"status":"fail","error":format!("{error:#}")})),
                 Ok(pages) => {
                     let id = format!("public{i:05}");
                     let mut chunks = chunk(&id, &pages);
                     if chunks.is_empty() {
-                        documents.push(json!({"name":path.file_name(),"status":"fail","error":"no extracted chunks"}));
+                        documents.push(json!({"name":path.file_name().unwrap().to_string_lossy(),"status":"fail","error":"no extracted chunks"}));
                         continue;
                     }
                     for batch in chunks.chunks_mut(32) {
@@ -720,7 +720,7 @@ fn office_feasibility_public_inventory_search() -> Result<()> {
                     chunk_count += chunks.len(); pages_count += pages.len();
                     let doc = Document {doc_id:id,path:path.file_name().unwrap().to_string_lossy().into_owned(),sha256:sha256(&bytes),bytes:bytes.len() as u64,pages:pages.len() as u32,kind:path.extension().unwrap().to_string_lossy().into_owned(),needs_ocr_pages:vec![],chunks};
                     let staged=state.stage(&doc).await?;state.commit(&doc,"public-c1",&staged)?;
-                    documents.push(json!({"name":path.file_name(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages}));
+                    documents.push(json!({"name":path.file_name().unwrap().to_string_lossy(),"status":"pass","chunks":doc.chunks.len(),"pages":doc.pages}));
                 }
             }
             std::fs::write(external.join(if resume {"public-ingest-recovery-progress.json"} else {"public-ingest-progress.json"}),serde_json::to_vec_pretty(&documents)?)?;

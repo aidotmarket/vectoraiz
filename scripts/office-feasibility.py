@@ -291,7 +291,7 @@ def confinement(evidence):
                 if probe == "open_url": denied = raw.get("explicit_launch_denial") is True
                 # XPC errors and DNS nonexistence are NOT proof of confinement.
                 passed = negative["exit_code"] == 0 and (raw.get("rc", -1) >= 0 if positive_expected else denied)
-                if probe == "memory_budget": passed = negative["termination"] == "rss_budget"
+                if probe == "memory_budget": passed = False  # sampled RSS guard is not a hard memory bound
                 rows[probe] = {"status": "pass" if passed else "fail", "raw": raw, "command": negative, "positive": positive, "positive_raw": control,
                                "control_proven": control.get("rc", -1) >= 0,
                                "interpretation": "positive startup/scratch" if positive_expected else "EPERM/EACCES or explicit broker denial required; other errors remain failures"}
@@ -313,7 +313,7 @@ def confinement(evidence):
     return {"status": "pass" if all(x["status"] == "pass" for x in results.values()) else "fail", "roles": results, "strict_socket_creation": "pass" if strict else "fail",
             "outcome_contract": "pass" if all(row["status"] == "pass" for role in results.values() for name,row in role["probes"].items() if not name.startswith("socket:")) else "fail",
             "limits": "capability prototype; actual ingest format control recorded separately, actual render worker absent; documentation-prefix Internet probes, LAN address candidate 192.168.1.1; DNS/XPC errors without explicit denial fail, not silently accepted",
-            "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
+            "resource_bound_status":"fail: sampled RSS can overshoot or miss allocation bursts", "network_destinations":routes, "probe_deadline_s": 3, "resource_limits_applied_to_probe": True, "limits_applied": {"parent_tree_rss_bytes":1610612736,"fds":64,"cpu_s":2,"core_bytes":0}}
 
 
 def transport(evidence, evict_incomplete=True):
@@ -614,9 +614,13 @@ def actual_ingest(evidence, cargo):
     pdfium=os.environ.get("VZ_OFFICE_PDFIUM")
     if pdfium: profile=profile.replace('(allow sysctl-read)', '(allow file-read* (literal '+json.dumps(str(Path(pdfium).resolve()))+'))(allow sysctl-read)')
     inventory=json.loads((evidence/"public-inventory.json").read_text())
+    helper=Path(os.environ.get("CARGO_TARGET_DIR",ROOT/"target"))/"debug/deps/vz-vision-ocr"
+    if helper.is_file():
+        bundled=evidence/"vz-vision-ocr";shutil.copyfile(helper,bundled);bundled.chmod(0o700)
+        profile+='(allow file-read* process-exec (literal '+json.dumps(str(bundled))+'))'
     rows={}
-    for extension in ("txt","md","html","docx","xlsx","pdf"):
-        fixture=next((Path(row["path"]) for row in inventory if row["format"]==extension),None)
+    for extension in ("txt","md","html","docx","xlsx","pdf","pdf_scan"):
+        fixture=next((Path(row["path"]) for row in inventory if (row["format"]==extension if extension!="pdf_scan" else row["format"]=="pdf" and "scanned" in row["name"])),None)
         if fixture is None and extension in ("txt","md","html"):
             fixture=evidence/("ordinary."+extension);fixture.write_text("<p>ordinary C1 format control</p>" if extension=="html" else "ordinary C1 format control")
         if fixture is None:
@@ -625,7 +629,7 @@ def actual_ingest(evidence, cargo):
         worker_profile=profile.replace(str(evidence/"snapshot.txt"),str(fixture.resolve()))
         request=json.dumps({"path":str(fixture.resolve()),"pdfium":str(Path(pdfium).resolve()) if pdfium else None}).encode()
         frame=struct.pack("<I",len(request))+request
-        result=command(["/usr/bin/sandbox-exec","-p",worker_profile,binary],evidence,"actual-parser-"+extension,120,{"PATH":"/usr/bin:/bin"},frame)
+        result=command(["/usr/bin/sandbox-exec","-p",worker_profile,binary],evidence,"actual-parser-"+extension,120,{"PATH":"/usr/bin:/bin"},frame,memory_limit_bytes=1536*1024*1024)
         raw=(evidence/result["raw"]).read_bytes()
         try:
             length=struct.unpack("<I",raw[:4])[0];response=json.loads(raw[4:4+length]);passed=result["exit_code"]==0 and response["error"] is None and bool(response["pages"])
