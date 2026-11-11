@@ -125,6 +125,9 @@ impl S3<'_> {
             "S3 readback failed: HTTP {}",
             response.status()
         );
+        Self::verify_readback(response, expected)
+    }
+    fn verify_readback(response: Response, expected: &[u8]) -> Result<()> {
         let mut bytes = Vec::new();
         response
             .take(expected.len() as u64 + 1)
@@ -167,6 +170,41 @@ pub(crate) fn upload(
     let mut intent = None;
     let mut promotion_attempted = false;
     let result = (|| {
+        // A repeat of a completed upload has no new promotion boundary or intent.
+        // Refuse conflicting manifests before writing any objects. A matching
+        // manifest is complete only after all reviewed payload bytes read back.
+        guard.check_accepted(current)?;
+        let manifest = files
+            .iter()
+            .find(|f| f.path == "manifest.json")
+            .context("missing manifest")?;
+        let bytes = std::fs::read(payload.join(&manifest.path))?;
+        ensure!(
+            bytes.len() as u64 == manifest.size
+                && vz_core::pipeline::sha256(&bytes) == manifest.sha256,
+            "reviewed payload changed before S3 write"
+        );
+        let existing = s3.request(Method::GET, "manifest.json", &[])?;
+        if existing.status() != reqwest::StatusCode::NOT_FOUND {
+            ensure!(
+                existing.status().is_success(),
+                "S3 manifest check failed: HTTP {}",
+                existing.status()
+            );
+            S3::verify_readback(existing, &bytes)?;
+            for file in files.iter().filter(|f| f.path != "manifest.json") {
+                guard.check_accepted(current)?;
+                let bytes = std::fs::read(payload.join(&file.path))?;
+                ensure!(
+                    bytes.len() as u64 == file.size
+                        && vz_core::pipeline::sha256(&bytes) == file.sha256,
+                    "reviewed payload changed before S3 readback"
+                );
+                s3.readback(&file.path, &bytes)?;
+            }
+            guard.check_accepted(current)?;
+            return Ok(());
+        }
         for file in &files {
             guard.check_accepted(current)?;
             if file.path == "manifest.json" {
@@ -185,17 +223,15 @@ pub(crate) fn upload(
                 "reviewed payload changed before S3 write"
             );
             // Resume only byte-identical immutable objects after a partial upload.
-            // A completed manifest still refuses a second publication.
+            // Manifest races after preflight retain the uncertain outcome.
             if file.path == "manifest.json" {
                 intent = Some(guard.intent(current, &format!("{endpoint}/{bucket}/{prefix}"))?);
                 promotion_attempted = true;
             }
             let response = s3.request(Method::PUT, &file.path, &bytes)?;
-            if response.status() == reqwest::StatusCode::PRECONDITION_FAILED
-                && file.path != "manifest.json"
+            if !(response.status() == reqwest::StatusCode::PRECONDITION_FAILED
+                && file.path != "manifest.json")
             {
-                s3.readback(&file.path, &bytes)?;
-            } else {
                 ensure!(
                     response.status().is_success(),
                     "S3 conditional write failed: HTTP {}",

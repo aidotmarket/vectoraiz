@@ -46,12 +46,25 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         for name in [*manifest['files'], 'manifest.json']:
             body = s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read()
             assert body == (pack / name).read_bytes(), name
+        ref = json.loads(reference.read_text())
+        generation = Path(ref['store']) / manifest['pack_id'] / ref['current']['generation']
+        before_retry = {path.name for path in generation.glob('*.json')}
         retry = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'phase0-pack', '--prefix', prefix], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
-        assert retry.returncode != 0 and 'conditional write failed' in retry.stderr, retry.stderr
+        assert retry.returncode == 0, retry.stderr
+        assert {path.name for path in generation.glob('*.json')} == before_retry, 'repeat created a new intent/receipt'
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='phase0-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
         keys = {obj['Key'] for obj in s3.list_objects_v2(Bucket='phase0-pack').get('Contents', [])}
         assert keys == {prefix + '/' + name for name in [*manifest['files'], 'manifest.json']}, keys
+        # A different completed manifest refuses before writes or a new intent.
+        s3.create_bucket(Bucket='manifest-conflict-pack')
+        s3.put_object(Bucket='manifest-conflict-pack', Key=prefix + '/manifest.json', Body=b'conflicting manifest')
+        before_conflict = {path.name for path in generation.glob('*.json')}
+        conflict = subprocess.run([*RTK, str(cli), '--review-reference', str(reference), 'upload', str(pack), '--endpoint', endpoint, '--bucket', 'manifest-conflict-pack'], env=env, capture_output=True, text=True, encoding='utf-8', timeout=120)
+        assert conflict.returncode == 1 and 'readback mismatch' in conflict.stderr, conflict.stderr
+        assert {path.name for path in generation.glob('*.json')} == before_conflict, 'conflict created an intent/receipt'
+        assert s3.get_object(Bucket='manifest-conflict-pack', Key=prefix + '/manifest.json')['Body'].read() == b'conflicting manifest'
+        assert {obj['Key'] for obj in s3.list_objects_v2(Bucket='manifest-conflict-pack').get('Contents', [])} == {prefix + '/manifest.json'}
         # A partial final namespace resumes only matching bytes, without staging.
         s3.create_bucket(Bucket='partial-pack')
         first = next(iter(manifest['files']))
@@ -73,13 +86,11 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
         assert failed.returncode == 3 and 'injected lost transfer receipt' in failed.stderr, failed.stderr
         for name in [*manifest['files'], 'manifest.json']:
             assert s3.get_object(Bucket='uncertain-pack', Key=prefix + '/' + name)['Body'].read() == (pack / name).read_bytes()
-        ref = json.loads(reference.read_text())
-        generation = Path(ref['store']) / manifest['pack_id'] / ref['current']['generation']
         intents = [json.loads(path.read_text()) for path in generation.glob('transfer-*.json')]
         pending = [intent for intent in intents if '/uncertain-pack/' in (intent.get('destination') or '')]
         assert len(pending) == 1, pending
         assert not (generation / f"completed-{pending[0]['job_id']}.json").exists()
-        print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'files': len(manifest['files']) + 1}))
+        print(json.dumps({'MinIO': 'RELEASE.2025-04-22T22-12-26Z', 'upload_round_trip': 'OK', 'completed_rerun_no_intent': 'OK', 'manifest_conflict_no_intent': 'OK', 'files': len(manifest['files']) + 1}))
     finally:
         if os.name == 'nt': child.terminate()
         else: os.killpg(child.pid, signal.SIGTERM)
