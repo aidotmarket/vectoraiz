@@ -2669,7 +2669,17 @@ fn rebuild_inner(
                 || part.contains("/diagrams/")
                 || part.starts_with("xl/chartsheets/")
             {
-                part.rsplit_once('/').unwrap().0.to_owned()
+                let family = if part.contains("/diagrams/") {
+                    "diagrams"
+                } else if part.starts_with("xl/chartsheets/") {
+                    "chartsheets"
+                } else {
+                    "charts"
+                };
+                format!(
+                    "{}/{family}",
+                    part.split('/').next().context("graphics root")?
+                )
             } else if part.contains("/theme/") {
                 format!("{}/theme", part.split('/').next().context("theme root")?)
             } else if part.starts_with("word/header") || part.starts_with("word/footer") {
@@ -2694,11 +2704,26 @@ fn rebuild_inner(
             };
             let suffix = file.rsplit('.').next().context("part suffix")?;
             let stem = if part.contains("/diagrams/") {
-                file.trim_end_matches(".xml")
-                    .trim_end_matches(|c: char| c.is_ascii_digit())
-            } else if part.contains("/charts/") && file.starts_with("style") {
+                match trees
+                    .get(part)
+                    .context("diagram root absent")?
+                    .local
+                    .as_str()
+                {
+                    "dataModel" => "data",
+                    "layoutDef" => "layout",
+                    "styleDef" => "quickStyle",
+                    "colorsDef" => "colors",
+                    "drawing" => "drawing",
+                    _ => bail!("unvalidated diagram part type"),
+                }
+            } else if part.contains("/charts/")
+                && trees.get(part).is_some_and(|n| n.local == "chartStyle")
+            {
                 "style"
-            } else if part.contains("/charts/") && file.starts_with("colors") {
+            } else if part.contains("/charts/")
+                && trees.get(part).is_some_and(|n| n.local == "colorStyle")
+            {
                 "colors"
             } else if part.starts_with("word/header") {
                 "header"

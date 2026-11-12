@@ -2109,3 +2109,41 @@ fn office_filtered_cache_mapping_keeps_original_source_indices() {
     );
     assert!(!edited.windows(marker.len()).any(|b| b == marker.as_bytes()));
 }
+
+#[test]
+fn office_real_smartart_part_names_are_neutral() {
+    let source = include_bytes!("fixtures/office-public/smartart-rotated-text.pptx");
+    let original = members(source);
+    let marker = "PrivateCustomer";
+    let rename: BTreeMap<_, _> = original
+        .keys()
+        .filter(|p| p.contains("/diagrams/") && p.ends_with(".xml"))
+        .map(|p| (p.clone(), p.replace(".xml", &format!("-{marker}.xml"))))
+        .collect();
+    let mut marked = BTreeMap::new();
+    for (name, bytes) in original {
+        let mut new_name = rename.get(&name).cloned().unwrap_or_else(|| name.clone());
+        let mut bytes = bytes;
+        if name.ends_with(".xml") || name.ends_with(".rels") {
+            let mut xml = String::from_utf8(bytes).unwrap();
+            for (old, new) in &rename {
+                xml = xml.replace(old, new);
+                let old_file = old.rsplit('/').next().unwrap();
+                let new_file = new.rsplit('/').next().unwrap();
+                xml = xml.replace(old_file, new_file);
+                if name.ends_with(&format!("{old_file}.rels")) {
+                    new_name = name.replace(old_file, new_file);
+                }
+            }
+            bytes = xml.into_bytes();
+        }
+        marked.insert(new_name, bytes);
+    }
+    assert!(marked.keys().any(|n| n.contains(marker)));
+    let (bytes, _) = rebuild("pptx", &marked);
+    assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+    for (name, bytes) in members(&bytes) {
+        assert!(!name.contains(marker));
+        assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+    }
+}
