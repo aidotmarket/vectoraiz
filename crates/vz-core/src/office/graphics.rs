@@ -4,7 +4,7 @@ pub(super) const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/cha
 pub(super) const CS: &str = "http://schemas.microsoft.com/office/drawing/2012/chartStyle";
 pub(super) const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
 pub(super) const DSP: &str = "http://schemas.microsoft.com/office/drawing/2008/diagram";
-fn visit<'a>(n: &'a Node, ns: &str, local: &str, out: &mut Vec<&'a Node>) {
+pub(super) fn visit<'a>(n: &'a Node, ns: &str, local: &str, out: &mut Vec<&'a Node>) {
     if n.ns == ns && n.local == local {
         out.push(n);
     }
@@ -644,7 +644,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                     &p,
                     "removed orphaned graphics dependency",
                     if p.ends_with(".xml") || p.ends_with(".rels") {
-                        String::from_utf8(bytes)?
+                        String::from_utf8_lossy(&bytes).into_owned()
                     } else {
                         format!(
                             "sha256={} bytes={}",

@@ -1740,6 +1740,8 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
     let manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("s1934-provenance.json")).unwrap())
             .unwrap();
+    let mut graphics_values = 0;
+    let mut displayed_diagrams = 0;
     for file in manifest["files"].as_array().unwrap() {
         let name = file["file"].as_str().unwrap();
         let source = std::fs::read(root.join(name)).unwrap();
@@ -1778,11 +1780,21 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
             .map(|p| p.text.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        for entry in report.inventory.iter().filter(|v| {
-            v.location.ends_with("/text")
-                && (v.location.contains("/charts/") || v.location.contains("/diagrams/"))
-                && v.content
-        }) {
+        let graphics_entries: Vec<_> = report
+            .inventory
+            .iter()
+            .filter(|v| {
+                (v.location.ends_with("/text") || v.location.ends_with("/@displayed-text"))
+                    && (v.location.contains("/charts/") || v.location.contains("/diagrams/"))
+                    && v.content
+                    && v.value.as_ref().is_some_and(|s| !s.is_empty())
+            })
+            .collect();
+        for entry in graphics_entries {
+            graphics_values += 1;
+            if entry.location.ends_with("/@displayed-text") {
+                displayed_diagrams += usize::from(entry.location.contains("/diagrams/"));
+            }
             if let Some(value) = &entry.value {
                 assert!(
                     ingested.contains(value),
@@ -1791,6 +1803,26 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
             }
         }
         if name == "smartart-rotated-text.pptx" {
+            // Exercise ordinary ingest of both the pristine committed Office
+            // file and its rebuilt output, on the slide's actual page.
+            let original_path = dir.path().join("original.pptx");
+            std::fs::write(&original_path, &source).unwrap();
+            let original_pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path: original_path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            for (label, slide_pages) in [("original", &original_pages), ("rebuilt", &pages)] {
+                assert_eq!(slide_pages.len(), 1, "{label}");
+                assert_eq!(slide_pages[0].page, 1, "{label}");
+                for value in ["abc", "def", "ghi", "jkl"] {
+                    assert!(
+                        slide_pages[0].text.contains(value),
+                        "{label}: slide 1 missing {value}"
+                    );
+                }
+            }
             assert_eq!(
                 report
                     .inventory
@@ -1825,6 +1857,70 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
                     .count(),
                 2
             );
+        }
+    }
+    assert!(graphics_values > 0, "no graphics text checked");
+    assert!(displayed_diagrams > 0, "no SmartArt text checked");
+}
+
+#[test]
+fn office_smartart_ingest_resolves_cache_from_host_or_data_only_when_internal() {
+    let source = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/office-public/smartart-rotated-text.pptx"),
+    )
+    .unwrap();
+    let drawing_type = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing";
+    let host_rels = "ppt/slides/_rels/slide1.xml.rels";
+    let drawing_rel = format!(
+        r#"<Relationship Id="rId6" Type="{drawing_type}" Target="../diagrams/drawing1.xml"/>"#
+    );
+    for owner in ["host", "data"] {
+        for mode in ["internal", "external", "wrong-type"] {
+            let mut parts = members(&source);
+            // Remove model text so these assertions can only pass through
+            // the drawing cache, independently of data-model extraction.
+            let mut model = String::from_utf8(parts["ppt/diagrams/data1.xml"].clone()).unwrap();
+            for value in ["abc", "def", "ghi", "jkl"] {
+                model = model.replace(&format!(">{value}<"), "><");
+            }
+            parts.insert("ppt/diagrams/data1.xml".into(), model.into_bytes());
+            let mut rels = String::from_utf8(parts[host_rels].clone()).unwrap();
+            assert!(rels.contains(&drawing_rel));
+            rels = rels.replace(&drawing_rel, "");
+            let mut rel = drawing_rel.clone();
+            if mode == "external" {
+                rel = rel.replace("/>", r#" TargetMode="External"/>"#);
+            } else if mode == "wrong-type" {
+                rel = rel.replace(drawing_type, &format!("{R}/chart"));
+            }
+            if owner == "host" {
+                rels = rels.replace("</Relationships>", &format!("{rel}</Relationships>"));
+            } else {
+                parts.insert(
+                    "ppt/diagrams/_rels/data1.xml.rels".into(),
+                    format!(r#"<Relationships xmlns="{REL}">{rel}</Relationships>"#).into_bytes(),
+                );
+            }
+            parts.insert(host_rels.into(), rels.into_bytes());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cache.pptx");
+            std::fs::write(&path, archive(&parts)).unwrap();
+            let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].page, 1);
+            for value in ["abc", "def", "ghi", "jkl"] {
+                assert_eq!(
+                    pages[0].text.contains(value),
+                    mode == "internal",
+                    "{owner} {mode}: {value}"
+                );
+            }
         }
     }
 }
@@ -2284,6 +2380,16 @@ fn office_cached_chart_labels_obey_sdk_text_choices() {
 fn office_ingest_keeps_host_pages_and_order_with_graphics() {
     for ext in ["pptx", "xlsx"] {
         let mut p = chart_fixture(ext, "<c:plotVisOnly/>");
+        let chart_path = if ext == "pptx" {
+            "ppt/charts/chart1.xml"
+        } else {
+            "xl/charts/chart1.xml"
+        };
+        let chart = String::from_utf8(p[chart_path].clone()).unwrap().replace(
+            "<c:plotArea>",
+            &format!(r#"<c:title><c:tx><c:rich xmlns:a="{A}"><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Rich chart title</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea>"#),
+        );
+        p.insert(chart_path.into(), chart.into_bytes());
         if ext == "pptx" {
             let host = String::from_utf8(p["ppt/slides/slide1.xml"].clone()).unwrap();
             add(
@@ -2348,7 +2454,14 @@ fn office_ingest_keeps_host_pages_and_order_with_graphics() {
             p.insert("xl/_rels/workbook.xml.rels".into(), xml.into_bytes());
         }
         let original = archive(&p);
-        let (sanitized, _) = rebuild(ext, &p);
+        let (sanitized, report) = rebuild(ext, &p);
+        assert!(report
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("/charts/")
+                && v.location.ends_with("/@displayed-text")
+                && v.content
+                && v.value.as_deref() == Some("Rich chart title")));
         for bytes in [original, sanitized] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join(format!("document.{ext}"));
@@ -2363,6 +2476,8 @@ fn office_ingest_keeps_host_pages_and_order_with_graphics() {
             assert_eq!((pages[0].page, pages[1].page), (1, 2));
             assert!(pages[0].text.contains("Second"), "{ext}: {}", pages[0].text);
             assert!(!pages[0].text.contains("Chart series marker"));
+            assert!(!pages[0].text.contains("Rich chart title"));
+            assert!(pages[1].text.contains("Rich chart title"));
             assert!(
                 pages[1].text.contains("Chart series marker"),
                 "{ext}: {}",

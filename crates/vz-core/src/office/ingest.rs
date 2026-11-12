@@ -88,10 +88,10 @@ fn display_text(n: &Node, out: &mut String) {
     }
 }
 pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> String {
-    let mut pending = vec![host.to_owned()];
+    let mut pending = vec![(host.to_owned(), None)];
     let mut visited = BTreeSet::new();
     let mut text = String::new();
-    while let Some(part) = pending.pop() {
+    while let Some((part, parent)) = pending.pop() {
         if !visited.insert(part.clone()) {
             continue;
         }
@@ -101,6 +101,43 @@ pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> Stri
         let Ok((ns, ids)) = references(&bytes) else {
             continue;
         };
+        if ns == graphics::DGM {
+            let Ok(root) = parse(&bytes, &part) else {
+                continue;
+            };
+            if root.local != "dataModel" {
+                continue;
+            }
+            display_text(&root, &mut text);
+            // dataModelExt can name a relationship on the host that referenced
+            // this model, or on the data part itself (see drawing_for).
+            let mut extensions = Vec::new();
+            graphics::visit(&root, graphics::DSP, "dataModelExt", &mut extensions);
+            if extensions.len() != 1 {
+                continue;
+            }
+            let Some(id) = extensions[0].attr("relId") else {
+                continue;
+            };
+            let mut targets = BTreeSet::new();
+            for owner in std::iter::once(&part).chain(parent.as_ref()) {
+                for rel in relationships(zip, owner).unwrap_or_default() {
+                    if rel.attr("Id") == Some(id)
+                        && rel.attr("TargetMode") != Some("External")
+                        && rel.attr("Type")
+                            == Some("http://schemas.microsoft.com/office/2007/relationships/diagramDrawing")
+                    {
+                        if let Some(target) = rel.attr("Target").and_then(|t| resolve(owner, t).ok()) {
+                            targets.insert(target);
+                        }
+                    }
+                }
+            }
+            if targets.len() == 1 {
+                pending.push((targets.pop_first().unwrap(), None));
+            }
+            continue;
+        }
         if ns == graphics::C || ns == graphics::DSP {
             let Ok(mut root) = parse(&bytes, &part) else {
                 continue;
@@ -135,7 +172,7 @@ pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> Stri
                 continue;
             }
             if let Some(target) = rel.attr("Target").and_then(|t| resolve(&part, t).ok()) {
-                pending.push(target);
+                pending.push((target, Some(part.clone())));
             }
         }
     }
