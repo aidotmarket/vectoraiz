@@ -33,7 +33,7 @@ Diagnostic selection: **Lance Exact**. Explicit exact choice at E3 scale: measur
 
 Refresh: no-op 0.0000 ms; 180 adds + 180 updates + 180 deletes (540/54,099 = 0.9982%); embedding 2542.89 ms; CoW clone 25.21 ms; FTS/table update 9308.23 ms; post-embedding preparation 9333.44 ms; aggregate incremental RSS endpoint 553.64 MiB. **Exact has no vector index to update (N2).**
 
-Missing/failing: 32/50 extraction matching is not human relevance; held-out human A1 queries absent; combined spool plus Lance/FTS preparation exceeds 60 s; agreed topped-up mixed corpus absent; cold means first-open, no OS cache flush; RSS endpoints do not prove peaks/promotion bound; supplemental sampled trace starts at PQ; synthetic Refresh lacks source-hash/extraction accounting and concurrent 25-way search; recipe-change, repeated promotion/retirement, crash/recovery, answer/indexing/refusal maximum not qualified; Lance random training row IDs not exposed; Windows NOT RUN.
+Missing/failing: 34–36/50 extraction matching is not human relevance; held-out human A1 queries absent; combined spool plus Lance/FTS preparation exceeds 60 s; agreed topped-up mixed corpus absent; cold means first-open, no OS cache flush; RSS endpoints do not prove peaks/promotion bound; supplemental sampled trace starts at PQ; synthetic Refresh lacks source-hash/extraction accounting and concurrent 25-way search; recipe-change, repeated promotion/retirement, crash/recovery, answer/indexing/refusal maximum not qualified; Lance random training row IDs not exposed; Windows NOT RUN.
 
 ## 2 memory
 
@@ -46,6 +46,43 @@ ocr: 7/8 probes demonstrate explicit kernel refusal with successful baseline-rel
 Each process records mapped baseline, baseline + 1.5 GiB requested limit, and soft/hard readback. No RSS sampler runs. Below-budget allocations may succeed; cumulative/burst refusal is the N3 criterion. Full kernel errors, cumulative allocations and writable-baseline figures are private.
 
 Missing/failing: RLIMIT_AS bounds new mappings only; reserved-dirty probe attempts 2 GiB writable baseline reservation against 1.5 GiB role budget; no hard resident/commit bound established; Windows NOT RUN.
+
+## 3 confinement
+
+**FAIL**
+
+ingest: 88/110 operation probes PASS; failures: open_url, mach_broker, mach_open_url, xpc_broker, unix_connect, socketpair, socket:4:0:127.0.0.1, socket:4:0:192.0.2.1, socket:4:0:1.1.1.1, multicast:4:0:127.0.0.1, socket:4:1:127.0.0.1, socket:4:1:192.0.2.1, socket:4:1:1.1.1.1, multicast:4:1:127.0.0.1, socket:6:0:::1, socket:6:0:fe80::1%lo0, socket:6:0:2606:4700:4700::1111, multicast:6:0:::1, socket:6:1:::1, socket:6:1:fe80::1%lo0, socket:6:1:2606:4700:4700::1111, multicast:6:1:::1.
+render: 88/110 operation probes PASS; failures: open_url, mach_broker, mach_open_url, xpc_broker, unix_connect, socketpair, socket:4:0:127.0.0.1, socket:4:0:192.0.2.1, socket:4:0:1.1.1.1, multicast:4:0:127.0.0.1, socket:4:1:127.0.0.1, socket:4:1:192.0.2.1, socket:4:1:1.1.1.1, multicast:4:1:127.0.0.1, socket:6:0:::1, socket:6:0:fe80::1%lo0, socket:6:0:2606:4700:4700::1111, multicast:6:0:::1, socket:6:1:::1, socket:6:1:fe80::1%lo0, socket:6:1:2606:4700:4700::1111, multicast:6:1:::1.
+ocr: 88/110 operation probes PASS; failures: open_url, mach_broker, mach_open_url, xpc_broker, unix_connect, socketpair, socket:4:0:127.0.0.1, socket:4:0:192.0.2.1, socket:4:0:1.1.1.1, multicast:4:0:127.0.0.1, socket:4:1:127.0.0.1, socket:4:1:192.0.2.1, socket:4:1:1.1.1.1, multicast:4:1:127.0.0.1, socket:6:0:::1, socket:6:0:fe80::1%lo0, socket:6:0:2606:4700:4700::1111, multicast:6:0:::1, socket:6:1:::1, socket:6:1:fe80::1%lo0, socket:6:1:2606:4700:4700::1111, multicast:6:1:::1.
+
+| Role | Format | Pages | Result |
+|---|---|---:|---|
+| ingest | txt | 0 | FAIL |
+| ingest | md | 1 | PASS |
+| ingest | html | 1 | PASS |
+| ingest | docx | 1 | PASS |
+| ingest | xlsx | 1 | PASS |
+| ingest | pdf | 0 | FAIL |
+| ingest | pdf_scan | 0 | FAIL |
+| ingest | supplement-ordinary.txt | 1 | PASS |
+| ingest | supplement-ordinary.pdf | 1 | PASS |
+| ingest | supplement-scan.pdf | 1 | PASS |
+| render | txt | 0 | FAIL |
+| render | md | 1 | PASS |
+| render | html | 1 | PASS |
+| render | docx | 1 | PASS |
+| render | xlsx | 1 | PASS |
+| render | pdf | 0 | FAIL |
+| render | pdf_scan | 0 | FAIL |
+| render | supplement-ordinary.txt | 1 | PASS |
+| render | supplement-ordinary.pdf | 1 | PASS |
+| render | supplement-scan.pdf | 1 | PASS |
+| ocr | ingest-scan.pdf | 0 | FAIL |
+| ocr | render-scan.pdf | 0 | FAIL |
+
+Real render path rasterizes PDF and escapes full parsed text to HTML for other formats. Original layout, all images/tables/accessibility remain unqualified. Scanned pixels are sent by parent pipes to separately confined signed OCR; parser spawn is not allowed.
+
+Missing/failing: only this macOS build; no hard resident-memory proof; inherited Mach ports and full rendered image/accessibility fidelity remain unqualified; routed LAN/internet positives and packet capture omitted: FAIL; OCR offline asset list not established: FAIL; positive routed network/broker controls and packet capture/listener enumeration absent; complete image/table/accessibility and hostile format comparisons absent; unexpected broker errors or missing routes do not pass.
 
 ## Validation and remaining obligations
 
