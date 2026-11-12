@@ -11,9 +11,9 @@ HTTP/2 established 21450/21450; reconnect 12/7150; local sign-in 0/7150: FAIL.
 Same-source bucket rejection follows the design; legitimate failures remain FAIL; both drains zero.
 Multi-source/routed unqualified: extra Mac loopback binds EADDRNOTAVAIL (49); required cases FAIL.
 Table kernel binds 0/1025; sign-in 0/1 and reconnect 0/1; model fills 1024 and rejects 3: FAIL.
-SciFact: pending scoring.
-Selected Exact scores pending.
-Office diagnostic only: 60 CC0 drafts/queries; six formats, five languages; extraction 58/60; scans discarded.
+SciFact: 5183 corpus documents plus load corpus; 300 human-judged test queries; private licences/hashes.
+Exact recall@8/10 0.713389/0.773778; nDCG@8/10 0.474449/0.493511; all ratios 1.000000.
+Office diagnostic only: intended source 17/60; 60 CC0 drafts/queries; six formats, five languages; extraction 58/60; scans discarded.
 Missing: two blinded judges, pooled Exact/ANN/FTS grades 0/1/2 with support, adjudication, frozen office qrels.
 Missing: verified passages/sources, scan extraction, complete content comparisons, 25-identity judged A1 <=5s.
 Windows NOT RUN; no corpus qualified; provider sign-in and routed/desktop trials NOT RUN.

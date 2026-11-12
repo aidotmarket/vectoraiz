@@ -174,6 +174,10 @@ def score(root):
             for row in result['per_query']]
         result['floor_0_98'] = {key: ('PASS' if ratio >= .98 else 'FAIL') if ratio is not None else 'FAIL: baseline zero; human qualification required'
                                for key, ratio in result['ratio_to_exact'].items()}
+    extracted = json.loads((root / 'office-extracted.json').read_text())
+    runs['scope']['office_documents_offered'] = len(extracted)
+    runs['scope']['office_documents_indexed'] = sum(row['status'] == 'PASS' for row in extracted)
+    runs['scope']['office_extraction_failures_discarded'] = [row['id'] for row in extracted if row['status'] != 'PASS']
     office_runs = json.loads((root / 'office-run.json').read_text())
     diagnostics = {}
     for name in sorted({row['path'] for row in office_runs}):

@@ -89,6 +89,7 @@ Missing/failing: only this macOS build; no hard resident-memory proof; inherited
 fmt: PASS; clippy: PASS; tests: PASS. Full logs retained privately.
 
 All omissions are failures. These trials do not close C0/source integration, native full-run cache exclusion, tenant consent/propagation/outages, installed power/network/browser/viewer/accessibility or IT trust/certificate obligations. No Council/review request or enabled distribution.
+
 ## Resume 2 admission
 
 FAIL. HTTP/1.1 reuses the completed previous run; HTTP/2 is a fresh 600-second trial. Local admission responses are not A1 searches or provider sign-ins.
@@ -103,5 +104,27 @@ Both protocols drained to zero. HTTP/2 completed sign-in success requires no cal
 Table exhaustion: 0/1,025 kernel addresses bound; 1,025 bind errors; source table stayed empty. Unknown-source sign-in and reconnect each 0/1 due to EADDRNOTAVAIL. Separate model: 1,024 counters filled, three arrivals rejected (overflow plus legitimate sign-in and reconnect); 2,048 same-/64 IPv6 addresses normalize to one key. Model results do not qualify kernel exhaustion.
 
 Missing: actual provider sign-in, established-session A1 searches, desktop continuity, fourth-session eviction/revocation/expiry, independent hostile deadline assertions and isolated TLS resource bounds. Windows NOT RUN.
+
+## Resume 2 relevance
+
+FAIL overall. Selected path: Lance Exact. Complete SciFact corpus and 300 human-judged test queries were indexed alongside the 1,000-document / 54,099-chunk load corpus and successfully extracted office drafts. Exact-vector plus identical FTS/RRF is the baseline; document deduplication precedes top-10 selection.
+
+| SciFact path | recall@8 | nDCG@8 | recall@10 | nDCG@10 |
+|---|---:|---:|---:|---:|
+| exact | 0.713389 | 0.474449 | 0.773778 | 0.493511 |
+| ivf_flat | 0.713389 | 0.475679 | 0.773778 | 0.494741 |
+| selected_exact | 0.713389 | 0.474449 | 0.773778 | 0.493511 |
+
+Selected Exact is measured independently against the exact baseline; all four ratios are 1.000000 (0.98 floors PASS), with zero per-query metric losses. This does not qualify the overall relevance item. Full per-query scores, query plans, source/model pins, chunk mappings and runfiles are private. Claims/annotations: CC BY 4.0; abstracts: ODC-By 1.0; BEIR conversion: CC BY-SA 4.0; original office drafts: CC0-1.0. Licence texts, attribution, archive/corpus/query/qrel and individual fixture hashes are pinned privately.
+
+Office fixtures: 60 queries, ten each PDF/DOCX/XLSX/TXT/Markdown/HTML; 12 each en/de/fr/es/ja. Extraction succeeded for 58/60; both scanned PDFs failed confined OCR (67), were discarded and remain in the diagnostic denominator.
+
+exact: author-intended source in chunk top-10 17/60; diagnostic only.
+
+ivf_flat: author-intended source in chunk top-10 17/60; diagnostic only.
+
+selected_exact: author-intended source in chunk top-10 17/60; diagnostic only.
+
+Missing before office relevance qualification: two independent humans must grade blinded pooled Exact/ANN/FTS results 0/1/2 for all 60 queries with page/sheet/passage support; adjudicate disagreements; freeze pools and qrels before evaluation; verify supporting passages/sources after extraction; complete scan extraction and full page/sheet/table/image/accessibility and hostile content comparisons; measure every judged A1 query for 25 identities within 5 s including embedding. Human validation of paraphrase/multi-chunk/duplicate/table cases is missing; the provisional English embedding model has no multilingual qualification. Office recall/nDCG at 8/10 and per-format/language 0.98 floors remain unqualified. Windows NOT RUN.
 
 Resume manifest updated in place: `/var/tmp/koskadeux/private-evidence/8588b12d5b30/manifest-v3.json`; copy: `/var/tmp/koskadeux/private-evidence/e706de79d202/manifest-v3b.json`. Private evidence stays outside the checkout. RETURN_TO_DESIGN; no enabled distribution.
