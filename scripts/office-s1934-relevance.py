@@ -147,6 +147,8 @@ def score(root):
     runs = json.loads((root / 'scifact-run.json').read_text())
     scored = {}
     for name, rows in runs['runs'].items():
+        if len(rows) != len(qrels) or {r['id'] for r in rows} != set(qrels):
+            raise ValueError('incomplete/duplicate human test-query run; cannot publish aggregate scores')
         values = []
         for row in rows:
             rel = qrels[row['id']]
@@ -163,7 +165,25 @@ def score(root):
     baseline = scored['exact']['mean']
     for name, result in scored.items():
         result['ratio_to_exact'] = {key: value/baseline[key] if baseline[key] else None for key, value in result['mean'].items()}
+        reference = {row['id']: row for row in scored['exact']['per_query']}
+        result['per_query_delta_from_exact'] = [
+            {'id': row['id'], **{key: value-reference[row['id']][key] for key, value in row.items() if key != 'id'}}
+            for row in result['per_query']]
+        result['floor_0_98'] = {key: ('PASS' if ratio >= .98 else 'FAIL') if ratio is not None else 'FAIL: baseline zero; human qualification required'
+                               for key, ratio in result['ratio_to_exact'].items()}
+    office_runs = json.loads((root / 'office-run.json').read_text())
+    diagnostics = {}
+    for name in ('exact', 'ivf_flat'):
+        selected = [r for r in office_runs if r['path'] == name]
+        diagnostics[name] = {
+            'offered': len(selected), 'author_intended_doc_in_chunk_top10': sum(r['id'] in r['documents'] for r in selected),
+            'by_format': {fmt: {'offered': sum(r['format'] == fmt for r in selected),
+                               'author_intended_doc_in_chunk_top10': sum(r['format'] == fmt and r['id'] in r['documents'] for r in selected)}
+                          for fmt in ('pdf', 'docx', 'xlsx', 'txt', 'md', 'html')},
+            'qualification': 'UNJUDGED author-intent diagnostic; not recall/nDCG or A1 correctness',
+        }
     (root / 'scores.json').write_text(json.dumps({'SciFact': scored, 'office': {'status': 'FAIL', 'reason': '60 unjudged drafts; no invented human qrels'},
+                                                'office_diagnostics': diagnostics,
                                                 'scope': runs['scope']}, indent=2))
 
 

@@ -219,9 +219,31 @@ fn s1934_relevance() -> Result<()> {
             }
         }
         if !pending.is_empty() {append_relevance(&snapshot,&mut lookup,&pending).await?;}
+        let office: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(root.join("office-extracted.json"))?)?;
+        let mut office_chunks = 0;
+        let mut mapping = Vec::new();
+        for document in &office {
+            let pages: Vec<Page> = serde_json::from_value(document["pages"].clone())?;
+            let mut chunks = chunk(document["id"].as_str().context("office id")?, &pages);
+            for batch in chunks.chunks_mut(32) {
+                for chunk in batch {
+                    chunk.embedding = engine.vector(&chunk.text, false)?;
+                    mapping.push(json!({"chunk_id":chunk.chunk_id,"doc_id":chunk.doc_id,"page":chunk.page}));
+                }
+            }
+            office_chunks += chunks.len();
+            append_relevance(&snapshot, &mut lookup, &chunks).await?;
+        }
+        std::fs::write(root.join("office-chunk-mapping.json"), serde_json::to_vec_pretty(&mapping)?)?;
         let optimize=Instant::now();
         snapshot.table.optimize(lancedb::table::OptimizeAction::Index(Default::default())).await?;
-        let optimize_ms=optimize.elapsed().as_secs_f64()*1000.;drop(snapshot);drop(lookup);
+        let optimize_ms=optimize.elapsed().as_secs_f64()*1000.;
+        // Build ANN only after every SciFact/office row is appended. Otherwise
+        // a labelled IVF trial could silently measure an unindexed exact tail.
+        let index_start = Instant::now();
+        snapshot.index().await?;
+        let index_ms = index_start.elapsed().as_secs_f64()*1000.;
+        drop(snapshot);drop(lookup);
         let exact=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::Exact,54099).await?;
         let candidate=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::IvfFlat,54099).await?;
         let ids=std::fs::read_to_string(root.join("scifact/qrels/test.tsv"))?.lines().skip(1).filter_map(|l|l.split('\t').next().map(str::to_owned)).collect::<std::collections::HashSet<_>>();
@@ -236,8 +258,21 @@ fn s1934_relevance() -> Result<()> {
                 let recall=top.iter().filter(|id|reference.contains(*id)).count() as f64/10.;
                 runs[name].as_array_mut().unwrap().push(json!({"id":id,"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"vector_recall_at10":recall}));
             }
-            std::fs::write(root.join("scifact-run.json"),serde_json::to_vec_pretty(&json!({"runs":runs,"scope":{"load_documents":1000,"load_chunks":54099,"scifact_documents":count,"office":"unjudged drafts excluded from scoring","parameters":"E3 P256, probes32, refine4, L2, 40 vector + 40 FTS, RRF60","optimize_ms":optimize_ms,"recipe":engine.recipe}}))?)?;
+            std::fs::write(root.join("scifact-run.json"),serde_json::to_vec_pretty(&json!({"runs":runs,"scope":{"load_documents":1000,"load_chunks":54099,"scifact_documents":count,"office_documents":office.len(),"office_chunks":office_chunks,"office":"extracted drafts indexed; unjudged queries excluded from human scoring","parameters":"E3 P256, probes32, refine4, L2, 40 vector + 40 FTS, RRF60","optimize_ms":optimize_ms,"index_ms":index_ms,"recipe":engine.recipe}}))?)?;
         }
+        let drafts: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(root.join("office-drafts.json"))?)?;
+        let mut office_runs = Vec::new();
+        for query in drafts {
+            let text = query["query"].as_str().context("draft query")?;
+            let vector = engine.vector(text, true)?;
+            for (name, snapshot) in [("exact", &exact), ("ivf_flat", &candidate)] {
+                let start = Instant::now();
+                let (hits, phases, _) = snapshot.search(text, &vector, 10).await?;
+                office_runs.push(json!({"path":name,"id":query["id"],"format":query["format"],"language":query["language"],"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"judgment_status":"UNJUDGED; author-intent diagnostics only"}));
+            }
+        }
+        std::fs::write(root.join("office-run.json"), serde_json::to_vec_pretty(&office_runs)?)?;
+        std::fs::write(root.join("relevance-plan.json"), serde_json::to_vec_pretty(&json!({"exact":exact.plan(&engine.vector("scientific claim",true)?).await?,"ivf_flat":candidate.plan(&engine.vector("scientific claim",true)?).await?,"indices":format!("{:?}",candidate.table.list_indices().await?)}))?)?;
         Ok::<_,anyhow::Error>(())
     })
 }

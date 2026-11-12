@@ -379,6 +379,17 @@ class Client:
 
 
 async def trial(root, protocol, seconds, certificate, key):
+    available_sources, unavailable_sources = [], {}
+    for address in ['127.0.0.1', *[f'127.0.0.{n}' for n in range(2, 10)]]:
+        raw = socket.socket()
+        try:
+            raw.bind((address, 0))
+            available_sources.append(address)
+        except OSError as exc:
+            unavailable_sources[address] = exc.errno
+        finally:
+            raw.close()
+    multi_sources = [s for s in available_sources if s != '127.0.0.1'] or ['127.0.0.1']
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certificate, key)
     context.set_alpn_protocols([protocol])
@@ -407,14 +418,14 @@ async def trial(root, protocol, seconds, certificate, key):
 
     attack_tasks = set()
     async def attack_connection(i):
-        source = '127.0.0.1' if time.monotonic()-began < seconds/2 else f'127.0.0.{2+i%8}'
+        source = '127.0.0.1' if time.monotonic()-began < seconds/2 else multi_sources[i % len(multi_sources)]
         kind = ('raw_tls', 'partial_headers', 'completed_preauth')[i%3]
         attack[kind + '_offered'] += 1
         if kind == 'raw_tls':
             raw = socket.socket()
             raw.setblocking(False)
-            raw.bind((source, 0))
             try:
+                raw.bind((source, 0))
                 await asyncio.wait_for(asyncio.get_running_loop().sock_connect(raw, ('127.0.0.1', server.port)), .5)
                 attack['tcp_connected'] += 1
                 await asyncio.get_running_loop().sock_sendall(raw, b'\x16\x03\x03\x00\xff')
@@ -492,7 +503,7 @@ async def trial(root, protocol, seconds, certificate, key):
                 await client.close()
         results.append({'kind': kind, 'person': person, 'status': status, 'error': error,
                         'latency_ms': (time.monotonic()-start)*1000,
-                        'at_s': start-began, 'same_source': start-began < seconds/2})
+                        'at_s': start-began, 'same_source': len(multi_sources) == 1 and multi_sources[0] == '127.0.0.1' or start-began < seconds/2})
 
     began = time.monotonic()
     attackers = asyncio.create_task(flood())
@@ -503,6 +514,7 @@ async def trial(root, protocol, seconds, certificate, key):
         resource_samples.append({'at_s':time.monotonic()-began,'max_rss_bytes':resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,'user_cpu_s':resource.getrusage(resource.RUSAGE_SELF).ru_utime,'system_cpu_s':resource.getrusage(resource.RUSAGE_SELF).ru_stime,'fd_count':len(os.listdir('/dev/fd')),'python_threads':threading.active_count(),'entries':len(server.registry.entries)})
         (root / (protocol.replace('/', '-') + '-partial.json')).write_text(json.dumps({'samples': results, 'metrics': server.registry.metrics, 'attack': attack}))
         await asyncio.sleep(2)
+    flood_elapsed_s = time.monotonic()-began
     stop.set()
     await attackers
     await asyncio.gather(*attack_tasks, return_exceptions=True)
@@ -520,10 +532,14 @@ async def trial(root, protocol, seconds, certificate, key):
                          'max_ms': max(r['latency_ms'] for r in selected),
                          'per_person': {str(p): {'offered': sum(r['person'] == p for r in selected), 'success': sum(r['person'] == p and r['status'] == 200 and r['latency_ms'] <= 5000 for r in selected)} for p in range(25)}}
     result = {'protocol': protocol, 'duration_s': time.monotonic()-began, 'offered_rate_target_per_s': 400,
-              'source_count': [1, 8], 'loopback_only': True, 'summary': summary, 'samples': results,
+              'source_count': [1, len(multi_sources)], 'unavailable_source_bindings': unavailable_sources,
+              'continuous_flood_s': flood_elapsed_s,
+              'multi_source_qualified': len(multi_sources) > 1,
+              'loopback_only': True, 'summary': summary, 'samples': results,
               'metrics': server.registry.metrics, 'attack': attack, 'resource_samples':resource_samples,
               'remaining_entries_after_drain': len(server.registry.entries),
               'limits': ['raw TLS, partial h1/h2 and completed preauth offered concurrently; sustained proof on loopback only',
+                         'unavailable source aliases are recorded; same-source flood continues rather than silently losing traffic; unavailable multi-source case FAIL',
                          'synthetic local sessions/callbacks; actual provider sign-ins NOT RUN and required item FAIL',
                          'no A1 search execution, routed NAT/VPN/VDI or desktop-service measurement: FAIL; resource counters include in-process attack clients',
                          'h2 CONTINUATION absolute 5s/16KiB guard implemented; separate hostile deadline assertions still required',
@@ -536,17 +552,20 @@ async def table_trial(context, client_context):
     server = Server(context)
     accept = asyncio.create_task(server.accept())
     loop = asyncio.get_running_loop()
-    offered, errors = 0, 0
+    offered, errors, bound = 0, 0, 0
+    error_codes = Counter()
     for i in range(1025):
         raw = socket.socket()
         raw.setblocking(False)
-        raw.bind((f'127.1.{i//256}.{i%256}', 0))
         offered += 1
         try:
+            raw.bind((f'127.1.{i//256}.{i%256}', 0))
+            bound += 1
             await asyncio.wait_for(loop.sock_connect(raw, ('127.0.0.1', server.port)), 1)
             await asyncio.sleep(.001)
-        except (OSError, asyncio.TimeoutError):
+        except (OSError, asyncio.TimeoutError) as exc:
             errors += 1
+            error_codes[str(getattr(exc, 'errno', type(exc).__name__))] += 1
         finally:
             raw.close()
     await asyncio.sleep(.1)
@@ -567,10 +586,22 @@ async def table_trial(context, client_context):
     server.listener.close()
     await asyncio.gather(*server.tasks, return_exceptions=True)
     ipv6 = len({source_key(f'2001:db8:1:2::{i:x}') for i in range(2048)})
+    # A separate deterministic model does not turn unavailable kernel source
+    # addresses into network evidence. Preserve both denominators explicitly.
+    model = Registry()
+    now = time.monotonic()
+    for i in range(1025):
+        model.gate(f'10.1.{i//256}.{i%256}', now+i/100)
+        model.entries.clear()
+    model_full = len(model.sources)
+    model_unknown = model.gate('10.99.99.99', now+11)
     return {'status': 'FAIL', 'offered_kernel_source_addresses': offered, 'connect_errors': errors,
+            'bound_kernel_sources': bound, 'error_codes': error_codes,
             'table_size': before, 'table_size_after': len(server.registry.sources),
             'unknown_legitimate_signin': {'offered': 1, 'success': int(status == 200), 'status': status, 'error': error, 'latency_ms':(time.monotonic()-started)*1000},
             'same_ipv6_64_unique_keys': ipv6, 'same_ipv6_64_model_addresses': 2048,
+            'separate_model': {'table_size': model_full, 'unknown_rejected': model_unknown is None,
+                               'metrics': model.metrics, 'kernel_evidence': False},
             'metrics': server.registry.metrics,
             'reason': 'IPv4 kernel accept exhaustion tested on loopback; IPv6 churn is normalization model only; unknown legitimate source rejection is a design failure'}
 
