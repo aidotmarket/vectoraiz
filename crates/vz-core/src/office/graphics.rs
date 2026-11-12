@@ -643,7 +643,15 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                 report.remove(
                     &p,
                     "removed orphaned graphics dependency",
-                    String::from_utf8_lossy(&bytes).into_owned(),
+                    if p.ends_with(".xml") || p.ends_with(".rels") {
+                        String::from_utf8(bytes)?
+                    } else {
+                        format!(
+                            "sha256={} bytes={}",
+                            crate::pipeline::sha256(&bytes),
+                            bytes.len()
+                        )
+                    },
                 );
             }
             trees.remove(&p);

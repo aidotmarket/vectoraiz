@@ -2504,3 +2504,23 @@ fn office_zero_point_chart_caches_are_present_not_missing() {
         );
     }
 }
+
+#[test]
+fn office_removed_binary_dependencies_record_digest_and_length() {
+    let source = include_bytes!("fixtures/office-public/bar-chart.pptx");
+    let original = members(source);
+    let (path, workbook) = original
+        .iter()
+        .find(|(p, _)| p.contains("/embeddings/") && p.ends_with(".xlsx"))
+        .unwrap();
+    let (_, report) = office::rebuild("document.pptx", source, &BTreeMap::new()).unwrap();
+    let removal = report
+        .removals
+        .iter()
+        .find(|r| &r.location == path && r.reason == "removed orphaned graphics dependency")
+        .unwrap();
+    assert_eq!(
+        removal.value,
+        format!("sha256={} bytes={}", sha256(workbook), workbook.len())
+    );
+}
