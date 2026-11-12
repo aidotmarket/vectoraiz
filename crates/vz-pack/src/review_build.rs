@@ -174,6 +174,7 @@ fn build(
             ensure!(allowed, "edit location has no proven rebuild handler");
         }
         let source = source.canonicalize()?;
+        let mut carried_legacy_office_removals = false;
         for (position, mut doc) in indexed.into_iter().enumerate() {
             pack.check_policy()?;
             let relative = Path::new(&doc.path)
@@ -299,9 +300,18 @@ fn build(
                 budget.from_origin.insert(location.clone());
                 if let Some((_, private)) = &origin {
                     if let Some(records) = private.get("office_removals") {
-                        budget.removals.extend(serde_json::from_value::<
-                            Vec<vz_core::office::Removal>,
-                        >(records.clone())?);
+                        budget.removals.extend(
+                            serde_json::from_value::<Vec<vz_core::office::Removal>>(
+                                records.clone(),
+                            )?
+                            .into_iter()
+                            .filter(|r| {
+                                r.location.starts_with(&format!("{location}!"))
+                                    || (!carried_legacy_office_removals
+                                        && !r.location.contains('!'))
+                            }),
+                        );
+                        carried_legacy_office_removals = true;
                     }
                 }
             }
@@ -486,6 +496,8 @@ fn build(
                 .map(|r| format!("{}: {}", r.location, r.reason)),
         );
         warnings.extend(budget.office_warnings.iter().cloned());
+        warnings.sort();
+        warnings.dedup();
         let mut office_nodes = BTreeMap::new();
         for entry in &inventory {
             if let Some((document, doc_id)) = office_document_ids
@@ -937,6 +949,92 @@ mod tests {
         )
         .is_err());
         assert!(guard.check_accepted(&next).is_err());
+    }
+
+    #[test]
+    fn office_removals_stay_linear_across_edit_generations() {
+        let f = Fixture::new();
+        let source = f.root.join("source");
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        for i in 0..3 {
+            let original = include_bytes!("../../../spike/fixtures/documents/library.docx");
+            let mut input = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+            let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for j in 0..input.len() {
+                let mut part = input.by_index(j).unwrap();
+                let name = part.name().to_owned();
+                let mut bytes = Vec::new();
+                part.read_to_end(&mut bytes).unwrap();
+                if name == "word/document.xml" {
+                    bytes = String::from_utf8(bytes)
+                        .unwrap()
+                        .replace("<w:body>", "<w:body w:rsidR=\"planted-removal-1927\">")
+                        .into_bytes();
+                }
+                output
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                output.write_all(&bytes).unwrap();
+            }
+            let bytes = output.finish().unwrap().into_inner();
+            let path = source.join(format!("office-{i}.docx"));
+            std::fs::write(&path, &bytes).unwrap();
+            let doc = vz_core::pipeline::Document {
+                doc_id: format!("office-{i}"),
+                path: path.to_str().unwrap().into(),
+                sha256: sha256(&bytes),
+                bytes: bytes.len() as u64,
+                pages: 1,
+                kind: "docx".into(),
+                needs_ocr_pages: vec![],
+                chunks: vec![],
+            };
+            let generation = Uuid::new_v4().to_string();
+            let directory = index.join("generations").join(&generation);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join("document.json"),
+                serde_json::to_vec(&doc).unwrap(),
+            )
+            .unwrap();
+            state.commit(&doc, "fixture", &generation).unwrap();
+        }
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &index).unwrap();
+        let mut changes = Fixture::changes();
+        let mut current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        for round in 0..4 {
+            let (_, private) = guard.edit_origin(&current).unwrap();
+            let records = private["office_removals"].as_array().unwrap();
+            assert_eq!(records.len(), 3, "round {round}");
+            assert!(records.iter().all(|r| r["location"]
+                .as_str()
+                .unwrap()
+                .starts_with("originals-0001.zip!document-")));
+            let review = guard.inspect(&current).unwrap();
+            let node = review
+                .metadata_inventory
+                .iter()
+                .find(|e| e.kind == "Office text" && e.value.is_some())
+                .unwrap();
+            let removal_warnings = review
+                .warnings
+                .iter()
+                .filter(|w| w.contains("removed attribute"))
+                .count();
+            assert!(removal_warnings <= 3, "duplicate removal warnings");
+            if round < 3 {
+                changes.origin = Some(current.clone());
+                changes.edits.insert(
+                    node.location.clone(),
+                    format!("Edited Office text round {round}"),
+                );
+                current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+            }
+        }
     }
 
     #[test]

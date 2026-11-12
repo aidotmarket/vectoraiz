@@ -290,8 +290,24 @@ fn transform(
                 budget.zip_entries
             );
             budget.charge(report.expanded_bytes as usize)?;
-            budget.office_warnings.extend(report.warnings);
-            budget.removals.extend(report.removals);
+            let removal_warnings: BTreeSet<_> = report
+                .removals
+                .iter()
+                .map(|r| format!("{}: {}", r.location, r.reason))
+                .collect();
+            budget.office_warnings.extend(
+                report
+                    .warnings
+                    .into_iter()
+                    .filter(|w| !removal_warnings.contains(w))
+                    .map(|w| format!("{name}!{w}")),
+            );
+            budget
+                .removals
+                .extend(report.removals.into_iter().map(|mut r| {
+                    r.location = format!("{name}!{}", r.location);
+                    r
+                }));
             Ok(bytes)
         }
         "zip" => {
