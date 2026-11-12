@@ -12,7 +12,12 @@ fn main() {
                 vz_core::office::inspect(&job.name, &input)?
             } else {
                 let (bytes, report) = if job.sanitized_input {
-                    vz_core::office::edit(&job.name, &input, &job.edits)?
+                    vz_core::office::edit_with_chart_sources(
+                        &job.name,
+                        &input,
+                        &job.edits,
+                        &job.chart_sources,
+                    )?
                 } else {
                     vz_core::office::rebuild(&job.name, &input, &job.edits)?
                 };

@@ -737,6 +737,7 @@ fn office_capacity() {
             edits: BTreeMap::new(),
             readback: false,
             sanitized_input: false,
+            chart_sources: Default::default(),
         }),
     };
     let result = vz_core::worker::run(
@@ -1525,9 +1526,7 @@ fn smartart_fixture(empty: bool) -> BTreeMap<String, Vec<u8>> {
     let shape = if empty {
         String::new()
     } else {
-        format!(
-            r#"<dsp:sp modelId="pres"><dsp:txBody><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dsp:txBody></dsp:sp>"#
-        )
+        r#"<dsp:sp modelId="pres"><dsp:txBody><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dsp:txBody></dsp:sp>"#.to_owned()
     };
     add(
         &mut p,
@@ -1593,7 +1592,28 @@ fn office_smartart_hidden_points_and_paired_edits() {
 }
 #[test]
 fn office_charted_cell_edit_refuses_without_source_mapping() {
-    let (bytes, report) = rebuild("xlsx", &chart_fixture("xlsx", "<c:plotVisOnly/>"));
+    // A legacy generation without private mappings must fail closed.
+    let marker = "planted-charted-cell-S1934-private-marker";
+    let mut parts = chart_fixture("xlsx", "<c:plotVisOnly/>");
+    for part in ["xl/worksheets/identity-sheet.xml", "xl/charts/chart1.xml"] {
+        let xml = String::from_utf8(parts[part].clone()).unwrap();
+        parts.insert(
+            part.into(),
+            xml.replace("Project ORION retained body", marker)
+                .replace("Chart series marker", marker)
+                .into_bytes(),
+        );
+    }
+    let source = archive(&parts);
+    let (bytes, report) = rebuild("xlsx", &parts);
+    assert!(report.text().contains(marker));
+    assert!(
+        members(&bytes)
+            .values()
+            .filter(|b| String::from_utf8_lossy(b).contains(marker))
+            .count()
+            >= 2
+    );
     let node = report
         .inventory
         .iter()
@@ -1603,18 +1623,27 @@ fn office_charted_cell_edit_refuses_without_source_mapping() {
         expected_sha256: sha256(node.value.as_ref().unwrap().as_bytes()),
         value: "Edited cell".into(),
     };
-    let err = office::edit(
-        "document.xlsx",
-        &bytes,
-        &BTreeMap::from([(node.location.clone(), edit)]),
-    )
-    .err()
-    .unwrap()
-    .to_string();
-    assert!(
-        err.contains("chart cache-to-source mapping") && err.contains("xl/charts/"),
-        "{err}"
-    );
+    let edits = BTreeMap::from([(node.location.clone(), edit)]);
+    for (result, part) in [
+        (
+            office::edit("document.xlsx", &bytes, &edits),
+            "xl/charts/part-000001.xml",
+        ),
+        (
+            office::rebuild("document.xlsx", &source, &edits),
+            "xl/charts/part-000001.xml",
+        ),
+    ] {
+        let err = result
+            .err()
+            .expect("charted cell edit must refuse without private mapping")
+            .to_string();
+        assert!(
+            err.contains("chart cache-to-source mapping")
+                && err.contains(&format!("{part}/{{{C}}}chart[1]")),
+            "{err}"
+        );
+    }
 }
 
 #[test]
@@ -1640,9 +1669,7 @@ fn office_chart_alternate_fallback_orphans_and_shared_media() {
         .any(|w| w.contains("AlternateContent")));
     host = host.replace(
         "</w:body>",
-        &format!(
-            r#"<w:p><w:r><w:drawing><a:blip r:embed="fallback"/></w:drawing></w:r></w:p></w:body>"#
-        ),
+        r#"<w:p><w:r><w:drawing><a:blip r:embed="fallback"/></w:drawing></w:r></w:p></w:body>"#,
     );
     p.insert("word/document.xml".into(), host.into_bytes());
     let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
@@ -1862,7 +1889,196 @@ fn office_chart_numeric_edit_refuses_and_string_edit_survives_readback() {
                 .err()
                 .unwrap()
                 .to_string()
-                .contains("cannot be edited"));
+                .contains("numeric chart cache point"));
         }
     }
+}
+
+#[test]
+fn office_charted_cell_edit_propagates_private_mappings_across_generations() {
+    let marker = "S1934-planted-charted-cell-private-marker";
+    let mut parts = chart_fixture("xlsx", "<c:plotVisOnly/>");
+    let sheet = String::from_utf8(parts["xl/worksheets/identity-sheet.xml"].clone()).unwrap();
+    parts.insert(
+        "xl/worksheets/identity-sheet.xml".into(),
+        sheet
+            .replace("Project ORION retained body", marker)
+            .replace(
+                "</s:sheetData>",
+                "<s:row r=\"2\"><s:c r=\"B2\"><s:v>42</s:v></s:c></s:row></s:sheetData>",
+            )
+            .into_bytes(),
+    );
+    let chart = String::from_utf8(parts["xl/charts/chart1.xml"].clone())
+        .unwrap()
+        .replace("Sheet1!$A$2", "'Project ORION'!$A$1")
+        .replace("Sheet1!", "'Project ORION'!")
+        .replace("Chart series marker", marker)
+        .replace("Category marker", marker);
+    let chart = chart.replace("<c:plotArea>", &format!("<c:title><c:tx><c:strRef><c:f>'Project ORION'!$A$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>{marker}</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title><c:plotArea>"));
+    parts.insert("xl/charts/chart1.xml".into(), chart.into_bytes());
+    let original = archive(&parts);
+    let (mut bytes, mut report) =
+        office::rebuild("document.xlsx", &original, &BTreeMap::new()).unwrap();
+    assert!(report.chart_sources.unmappable.is_empty());
+    assert_eq!(report.chart_sources.points.len(), 4);
+    let mut previous = marker.to_owned();
+    for value in ["Reviewed charted cell", "Second reviewed cell"] {
+        let node = report
+            .inventory
+            .iter()
+            .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+            .unwrap();
+        let edits = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: sha256(previous.as_bytes()),
+                value: value.into(),
+            },
+        )]);
+        let (edited, readback) =
+            office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+                .unwrap();
+        assert_eq!(
+            readback
+                .inventory
+                .iter()
+                .filter(|v| v.value.as_deref() == Some(value) && v.location.ends_with("/text"))
+                .count(),
+            4
+        );
+        for forbidden in [marker, previous.as_str()] {
+            assert!(!edited
+                .windows(forbidden.len())
+                .any(|b| b == forbidden.as_bytes()));
+            assert!(members(&edited).values().all(|b| !b
+                .windows(forbidden.len())
+                .any(|v| v == forbidden.as_bytes())));
+            assert!(!readback.text().contains(forbidden));
+        }
+        office::inspect("document.xlsx", &edited).unwrap();
+        if previous == marker {
+            let (direct, _) = office::rebuild("document.xlsx", &original, &edits).unwrap();
+            assert_eq!(direct, edited);
+        }
+        bytes = edited;
+        report = readback;
+        previous = value.into();
+    }
+    // Numeric cell values can update numeric caches without allowing direct
+    // text edits on numeric cache points.
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/B2/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(b"42"),
+            value: "81".into(),
+        },
+    )]);
+    let (_, numeric) =
+        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+            .unwrap();
+    assert!(numeric
+        .inventory
+        .iter()
+        .any(|v| v.location.contains("}numLit[") && v.value.as_deref() == Some("81")));
+    let bad = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(b"42"),
+            value: "text cannot be numeric".into(),
+        },
+    )]);
+    assert!(
+        office::edit_with_chart_sources("document.xlsx", &bytes, &bad, &report.chart_sources)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("numeric chart cache point")
+    );
+    // Any unmappable formula blocks cell edits throughout the workbook, even
+    // when the edited cell is unrelated to that chart.
+    let chart = String::from_utf8(parts["xl/charts/chart1.xml"].clone()).unwrap();
+    parts.insert(
+        "xl/charts/chart1.xml".into(),
+        chart
+            .replace("'Project ORION'!$B$2", "DefinedChartName")
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("xlsx", &parts);
+    assert!(!report.chart_sources.unmappable.is_empty());
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(marker.as_bytes()),
+            value: "Edited".into(),
+        },
+    )]);
+    let err =
+        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+            .err()
+            .unwrap()
+            .to_string();
+    assert!(
+        err.contains("cache-to-source mapping")
+            && err.contains(&format!("xl/charts/part-000001.xml/{{{C}}}chart[1]")),
+        "{err}"
+    );
+}
+
+#[test]
+fn office_filtered_cache_mapping_keeps_original_source_indices() {
+    let marker = "S1934-visible-second-point-marker";
+    let mut p = chart_fixture("xlsx", "<c:plotVisOnly/>");
+    let path = "xl/charts/chart1.xml";
+    let xml=String::from_utf8(p[path].clone()).unwrap()
+        .replace("Sheet1!$A$1", "'Project ORION'!$A$1")
+        .replace("Sheet1!$A$2", "'Project ORION'!$A$1:$A$2")
+        .replace("Sheet1!$B$2", "'Project ORION'!$B$1:$B$2")
+        .replace("<c:chartSpace ","<c:chartSpace xmlns:c16=\"http://schemas.microsoft.com/office/drawing/2014/chart\" ")
+        .replace("<c:v>Category marker</c:v></c:pt></c:strCache>",&format!("<c:v>Category marker</c:v></c:pt><c:pt idx=\"1\"><c:v>{marker}</c:v></c:pt></c:strCache>"))
+        .replace("<c:cat><c:strRef><c:f>'Project ORION'!$A$1:$A$2</c:f><c:strCache><c:ptCount val=\"1\"/>","<c:cat><c:strRef><c:f>'Project ORION'!$A$1:$A$2</c:f><c:strCache><c:ptCount val=\"2\"/>")
+        .replace("<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"1\"/>","<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"2\"/>")
+        .replace("</c:numCache>","<c:pt idx=\"1\"><c:v>43</c:v></c:pt></c:numCache>")
+        .replace("</c:ser>","<c:extLst><c:ext uri=\"filter\"><c16:filteredLitCache><c16:numCache><c:pt idx=\"0\"><c:v>42</c:v></c:pt></c16:numCache></c16:filteredLitCache></c:ext></c:extLst></c:ser>");
+    p.insert(path.into(), xml.into_bytes());
+    let path = "xl/worksheets/identity-sheet.xml";
+    let xml=String::from_utf8(p[path].clone()).unwrap().replace("</s:sheetData>",&format!("<s:row r=\"2\"><s:c r=\"A2\" t=\"inlineStr\"><s:is><s:t>{marker}</s:t></s:is></s:c><s:c r=\"B2\"><s:v>43</s:v></s:c></s:row></s:sheetData>"));
+    p.insert(path.into(), xml.into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report.chart_sources.unmappable.is_empty());
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/A2/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(marker.as_bytes()),
+            value: "Edited surviving point".into(),
+        },
+    )]);
+    let (edited, report) =
+        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+            .unwrap();
+    assert_eq!(
+        report
+            .inventory
+            .iter()
+            .filter(|v| v.location.ends_with("/text")
+                && v.value.as_deref() == Some("Edited surviving point"))
+            .count(),
+        2
+    );
+    assert!(!edited.windows(marker.len()).any(|b| b == marker.as_bytes()));
 }

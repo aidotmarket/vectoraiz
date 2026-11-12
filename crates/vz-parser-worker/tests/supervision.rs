@@ -49,6 +49,7 @@ fn office_time_and_cancel_bounds() {
             edits: Default::default(),
             readback: false,
             sanitized_input: false,
+            chart_sources: Default::default(),
         }),
     };
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
@@ -62,6 +63,7 @@ fn office_time_and_cancel_bounds() {
                 edits: Default::default(),
                 readback,
                 sanitized_input: false,
+                chart_sources: Default::default(),
             }),
         };
         let start = Instant::now();
@@ -171,6 +173,7 @@ fn office_memory_cap_has_named_refusal() {
             edits: Default::default(),
             readback: false,
             sanitized_input: false,
+            chart_sources: Default::default(),
         }),
     };
     let error = run(

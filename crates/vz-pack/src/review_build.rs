@@ -303,6 +303,15 @@ fn build(
                         .context("Office edit origin missing")?,
                     &name,
                 )?;
+                if let Some(sources) = origin
+                    .as_ref()
+                    .and_then(|(_, private)| private.get("office_chart_sources"))
+                    .and_then(|m| m.get(&location))
+                {
+                    budget
+                        .chart_sources
+                        .insert(location.clone(), serde_json::from_value(sources.clone())?);
+                }
                 budget.from_origin.insert(location.clone());
                 budget.removals.extend(
                     origin_removals
@@ -532,7 +541,7 @@ fn build(
             binding,
             review,
             &work,
-            json!({"mapping":mapping,"document_ids":document_ids,"identity_terms":changes.identity_terms,"office_removals":budget.removals,"office_origin":changes.origin,"office_nodes":office_nodes,"office_allowlist_version":vz_core::office::ALLOWLIST_VERSION}),
+            json!({"mapping":mapping,"document_ids":document_ids,"identity_terms":changes.identity_terms,"office_removals":budget.removals,"office_chart_sources":budget.chart_sources,"office_origin":changes.origin,"office_nodes":office_nodes,"office_allowlist_version":vz_core::office::ALLOWLIST_VERSION}),
         )
     })();
     // The UUID-owned private scratch is never a seller destination.
@@ -949,6 +958,122 @@ mod tests {
         )
         .is_err());
         assert!(guard.check_accepted(&next).is_err());
+    }
+
+    #[test]
+    fn chart_source_bindings_survive_private_review_generations() {
+        let f = Fixture::new();
+        let marker = "private-S1934-charted-cell-marker";
+        let original = include_bytes!("../tests/fixtures/office-public/57362.xlsx");
+        let mut input = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+        let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..input.len() {
+            let mut part = input.by_index(i).unwrap();
+            let name = part.name().to_owned();
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            if name.ends_with(".xml") {
+                bytes = String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("Column1", marker)
+                    .into_bytes();
+            }
+            output
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        let bytes = output.finish().unwrap().into_inner();
+        let path = f.root.join("source/chart.xlsx");
+        std::fs::write(&path, &bytes).unwrap();
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "charted-source".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: sha256(&bytes),
+            bytes: bytes.len() as u64,
+            pages: 1,
+            kind: "xlsx".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let generation = Uuid::new_v4().to_string();
+        let directory = index.join("generations").join(&generation);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("document.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
+        state.commit(&doc, "fixture", &generation).unwrap();
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &index).unwrap();
+        let mut changes = Fixture::changes();
+        let source = f.root.join("source");
+        let mut current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        for round in 0..2 {
+            let review = guard.inspect(&current).unwrap();
+            let node = review
+                .metadata_inventory
+                .iter()
+                .find(|e| {
+                    e.location.contains(".xlsx!")
+                        && e.location.contains("/cell/A1/")
+                        && e.location.ends_with("/text")
+                })
+                .unwrap();
+            let value = format!("Reviewed chart category {round}");
+            changes.origin = Some(current.clone());
+            changes.edits = BTreeMap::from([(node.location.clone(), value.clone())]);
+            let next = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+            let (review, private) = guard.edit_origin(&next).unwrap();
+            let key = node
+                .location
+                .split('!')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("!");
+            assert!(!private["office_chart_sources"][&key]["points"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                review
+                    .metadata_inventory
+                    .iter()
+                    .filter(|e| e.location.contains(".xlsx!")
+                        && e.location.ends_with("/text")
+                        && e.value.as_deref() == Some(value.as_str()))
+                    .count(),
+                3
+            );
+            assert!(review
+                .metadata_inventory
+                .iter()
+                .filter_map(|e| e.value.as_ref())
+                .all(|v| !v.contains(marker)));
+            let delivered = guard
+                .origin_original(&next, key.split('!').nth(1).unwrap())
+                .unwrap();
+            assert!(!delivered
+                .windows(marker.len())
+                .any(|b| b == marker.as_bytes()));
+            let mut archive = zip::ZipArchive::new(Cursor::new(delivered)).unwrap();
+            for i in 0..archive.len() {
+                let mut bytes = Vec::new();
+                archive
+                    .by_index(i)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+            }
+            current = next;
+        }
+        assert_eq!(sha256(&std::fs::read(path).unwrap()), doc.sha256);
     }
 
     #[test]

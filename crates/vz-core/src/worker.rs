@@ -19,6 +19,8 @@ pub struct OfficeJob {
     pub readback: bool,
     #[serde(default)]
     pub sanitized_input: bool,
+    #[serde(default)]
+    pub chart_sources: crate::office::ChartSources,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Request {

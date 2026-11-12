@@ -118,6 +118,7 @@ pub(crate) struct Budget {
     pub(crate) office_warnings: Vec<String>,
     pub(crate) edit_bindings: BTreeMap<String, vz_core::office::Edit>,
     pub(crate) from_origin: BTreeSet<String>,
+    pub(crate) chart_sources: BTreeMap<String, vz_core::office::ChartSources>,
     pub(crate) cancel: Option<tokio_util::sync::CancellationToken>,
     pub(crate) started: Option<std::time::Instant>,
     current_part: String,
@@ -283,6 +284,9 @@ fn transform(
     match extension(name)? {
         "docx" | "xlsx" | "pptx" => {
             let (bytes, report) = office_worker(name, input, budget, false)?;
+            budget
+                .chart_sources
+                .insert(name.into(), report.chart_sources.clone());
             budget.zip_entries += report.source_parts;
             ensure!(
                 budget.zip_entries <= 100_000,
@@ -980,6 +984,7 @@ pub(crate) fn office_worker(
                 edits,
                 readback,
                 sanitized_input: budget.from_origin.contains(name),
+                chart_sources: budget.chart_sources.get(name).cloned().unwrap_or_default(),
             }),
         };
         let worker = vz_core::worker::executable()?;

@@ -259,7 +259,7 @@ fn definition(
     }
     Ok(())
 }
-fn location(parent: &str, n: &Node, index: usize) -> String {
+pub(super) fn location(parent: &str, n: &Node, index: usize) -> String {
     format!("{parent}/{{{}}}{}[{index}]", n.ns, n.local)
 }
 fn refs(n: &Node, out: &mut BTreeSet<String>) {
@@ -603,6 +603,11 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
             );
             n.local = "v".into();
             n.attrs.clear();
+            n.source_cell = points[0]
+                .children
+                .iter()
+                .find(|c| c.local == "v")
+                .and_then(|c| c.source_cell.clone());
             n.text = points[0].string();
             n.children.clear();
         } else {
@@ -633,13 +638,16 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
         && n.children.len() == 1
         && n.children[0].local == "v"
     {
-        let value = n.children.remove(0).text;
+        let prior = n.children.remove(0);
+        let source_cell = prior.source_cell;
+        let value = prior.text;
         let leaf = |ns: &str, local: &str, text: String, children: Vec<Node>| Node {
             ns: ns.into(),
             local: local.into(),
             text,
             children,
             attrs: BTreeMap::new(),
+            source_cell: None,
             ignorable: Default::default(),
         };
         n.children = vec![leaf(
@@ -662,6 +670,7 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
                 ),
             ],
         )];
+        n.children[0].children[2].children[0].children[0].source_cell = source_cell;
     }
     Ok(())
 }
@@ -684,6 +693,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
             "VBA/ActiveX/OLE/signature refused at {part}"
         );
     }
+    let sheets = super::chart_sources::sheets(parts)?;
     let mut trees = BTreeMap::new();
     let mut deleted = BTreeMap::<String, BTreeSet<String>>::new();
     for (part, bytes) in parts.iter() {
@@ -696,6 +706,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         refs(&n, &mut before);
         resolve_alternates(&mut n, part, report)?;
         if n.ns == C {
+            super::chart_sources::annotate(&mut n, part, &sheets, &mut report.chart_sources)?;
             filtered_series(&mut n, part, report)?;
             filtered(&mut n, part, report)?;
             chart(&mut n, part, report)?;
@@ -840,6 +851,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
             inspect_formulas(&n, &part, report)?;
         }
         cleanse(&mut n, &part, report)?;
+        super::chart_sources::collect(&n, &part, &mut report.chart_sources);
         parts.insert(part, serialize(&n)?);
     }
     Ok(())
@@ -853,17 +865,6 @@ pub(super) fn paired_edits(
     let mut result = edits.clone();
     if edits.is_empty() {
         return Ok(result);
-    }
-    if edits
-        .keys()
-        .any(|k| k.starts_with("xl/") && k.contains("/cell/"))
-    {
-        if let Some((part, _)) = trees
-            .iter()
-            .find(|(_, n)| n.ns == C && n.local == "chartSpace")
-        {
-            bail!("XLSX cell edit cannot prove chart cache-to-source mapping in static reviewed generation at {part}/{{{C}}}chart[1]; exclude this charted workbook or re-ingest edited source");
-        }
     }
     fn paths(
         n: &Node,

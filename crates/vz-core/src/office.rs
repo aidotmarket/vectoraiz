@@ -8,6 +8,7 @@ use std::{
 };
 
 mod chart_allowlist;
+mod chart_sources;
 mod diagram_allowlist;
 mod graphics;
 mod layout_allowlist;
@@ -31,6 +32,8 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_VALUES: usize = 5_000_000;
 pub const MAX_PARTS: usize = 10_000;
+pub use chart_sources::ChartSources;
+
 pub const ALLOWLIST_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -62,6 +65,9 @@ pub struct Report {
     pub expanded_bytes: u64,
     pub parts: usize,
     pub source_parts: usize,
+    /// Private staging evidence; never serialize into a delivered package.
+    #[serde(default)]
+    pub chart_sources: ChartSources,
 }
 impl Report {
     fn remove(&mut self, location: &str, reason: &str, value: String) {
@@ -111,6 +117,8 @@ struct Node {
     children: Vec<Node>,
     text: String,
     ignorable: std::sync::Arc<BTreeSet<String>>,
+    // Transient source annotation, deliberately omitted by the XML serializer.
+    source_cell: Option<Box<(String, String)>>,
 }
 impl Node {
     fn shape_id(&self) -> Option<&str> {
@@ -217,6 +225,7 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     attrs: BTreeMap::new(),
                     children: vec![],
                     text: String::new(),
+                    source_cell: None,
                     ignorable: stack
                         .last()
                         .map(|n| n.ignorable.clone())
@@ -718,9 +727,10 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
         )
     } else if path.contains("/charts/") && path.ends_with(".xml") {
         (
-            if path.rsplit('/').next().unwrap_or("").starts_with("style") {
-                graphics::CS
-            } else if path.rsplit('/').next().unwrap_or("").starts_with("colors") {
+            if ["style", "colors"]
+                .iter()
+                .any(|prefix| path.rsplit('/').next().unwrap_or("").starts_with(prefix))
+            {
                 graphics::CS
             } else {
                 graphics::C
@@ -1063,6 +1073,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                     attrs: c.attrs.clone(),
                     children: properties.clone(),
                     text: c.text.clone(),
+                    source_cell: c.source_cell.clone(),
                     ignorable: c.ignorable.clone(),
                 };
                 run.children.push(child.clone());
@@ -1079,7 +1090,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     for mut c in old {
         if c.ns == W && c.local == "sdt" {
             ensure!(
-                !field.is_some_and(|f| !f.0),
+                field.is_none_or(|f| f.0),
                 "content control in Word field instruction region at {part}"
             );
             ensure!(
@@ -1643,6 +1654,7 @@ fn walk(
         attrs: n.attrs.clone(),
         children: Vec::with_capacity(n.children.len()),
         text: n.text.clone(),
+        source_cell: n.source_cell.clone(),
         ignorable: n.ignorable.clone(),
     };
     if n.ns == W && words("vanish webHidden", &n.local) {
@@ -1770,7 +1782,9 @@ fn walk(
                     || (n.ns == S && n.local == "v")
                     || (n.ns == graphics::C
                         && n.local == "v"
-                        && (location.contains("}strLit[") || location.contains("}tx["))),
+                        && (location.contains("}strLit[")
+                            || location.contains("}tx[")
+                            || (location.contains("}numLit[") && plain_number(&edit.value)))),
                 "Office text node cannot be edited at {at}"
             );
             ensure!(
@@ -2207,6 +2221,7 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
                 attrs: BTreeMap::new(),
                 children: strings,
                 text: String::new(),
+                source_cell: None,
                 ignorable: Default::default(),
             })?)?,
         );
@@ -2410,6 +2425,16 @@ fn validate_graph(parts: &BTreeMap<String, Vec<u8>>, ext: &str) -> Result<()> {
 /// Value-only edits of a hash-verified, previously sanitized generation. Node
 /// structure and binary media stay fixed. This grants no review authority.
 pub fn edit(name: &str, input: &[u8], edits: &BTreeMap<String, Edit>) -> Result<(Vec<u8>, Report)> {
+    edit_with_chart_sources(name, input, edits, &ChartSources::default())
+}
+
+/// Apply generation-bound private source mappings to the reviewed static package.
+pub fn edit_with_chart_sources(
+    name: &str,
+    input: &[u8],
+    edits: &BTreeMap<String, Edit>,
+    sources: &ChartSources,
+) -> Result<(Vec<u8>, Report)> {
     inspect(name, input)?;
     let (parts, _) = read_package(input)?;
     let trees = parts
@@ -2417,7 +2442,8 @@ pub fn edit(name: &str, input: &[u8], edits: &BTreeMap<String, Edit>) -> Result<
         .filter(|(p, _)| !p.contains("/media/"))
         .map(|(p, b)| Ok((p.clone(), parse(b, p)?)))
         .collect::<Result<BTreeMap<_, _>>>()?;
-    let expanded_edits = graphics::paired_edits(&trees, edits)?;
+    let expanded_edits = sources.expand(&trees, edits)?;
+    let expanded_edits = graphics::paired_edits(&trees, &expanded_edits)?;
     let edits = &expanded_edits;
     let mut applied = BTreeSet::new();
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -2440,7 +2466,8 @@ pub fn edit(name: &str, input: &[u8], edits: &BTreeMap<String, Edit>) -> Result<
     }
     ensure!(applied.len() == edits.len(), "Office edit target missing");
     let output = zip.finish()?.into_inner();
-    let report = inspect(name, &output)?;
+    let mut report = inspect(name, &output)?;
+    report.chart_sources = sources.clone();
     for (location, edit) in edits {
         ensure!(
             report
@@ -2465,17 +2492,6 @@ fn rebuild_inner(
     let mut trees = BTreeMap::new();
     let mut binaries = BTreeMap::new();
     graphics::prepare(&mut parts, &mut report)?;
-    if edits
-        .keys()
-        .any(|key| key.starts_with("xl/") && key.contains("/cell/"))
-    {
-        if let Some(part) = parts
-            .keys()
-            .find(|p| p.contains("/charts/") && p.ends_with(".xml"))
-        {
-            bail!("XLSX cell edit cannot prove chart cache-to-source mapping at {part}/{{{}}}chart[1]; re-ingest the locally edited source or exclude",graphics::C);
-        }
-    }
     let ct = parse(
         parts
             .get("[Content_Types].xml")
@@ -2857,6 +2873,18 @@ fn rebuild_inner(
             ))
         })
         .collect::<Result<_>>()?;
+    report.chart_sources.rename(&rename);
+    let expanded_edits = if edits.is_empty() {
+        edits.clone()
+    } else {
+        let canonical_trees = trees
+            .iter()
+            .map(|(p, n)| (rename.get(p).unwrap_or(p).clone(), n.clone()))
+            .collect();
+        let expanded = report.chart_sources.expand(&canonical_trees, edits)?;
+        graphics::paired_edits(&canonical_trees, &expanded)?
+    };
+    let edits = &expanded_edits;
     let mut rewritten = BTreeMap::new();
     let mut applied = BTreeSet::new();
     for (part, mut root) in trees {
@@ -2885,6 +2913,7 @@ fn rebuild_inner(
         attrs: BTreeMap::new(),
         children: vec![],
         text: String::new(),
+        source_cell: None,
         ignorable: Default::default(),
     };
     for (part, bytes) in &rewritten {
@@ -2904,6 +2933,7 @@ fn rebuild_inner(
             ]),
             children: vec![],
             text: String::new(),
+            source_cell: None,
             ignorable: Default::default(),
         });
     }
