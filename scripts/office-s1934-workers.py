@@ -85,6 +85,14 @@ def execute(argv, target, label, data=None, readiness=False, inherited=()):
         size = struct.unpack('<I', output[:4])[0]
         if size == len(output) - 4 and size <= 32*1024*1024:
             result['response'] = json.loads(output[4:])
+    result['bootstrap'] = []
+    for line in (target / (label + '.stderr')).read_text(errors='replace').splitlines():
+        try:
+            entry = json.loads(line)
+            if 'baseline_mapped_bytes' in entry or 'writable_baseline_virtual_bytes' in entry:
+                result['bootstrap'].append(entry)
+        except ValueError:
+            pass
     result['profile_sha256'] = common.digest(Path(argv[1]))
     return result
 
@@ -128,12 +136,15 @@ def main(args):
         def argv(mode, *extra):
             return [binary, sb, mode, *([] if role == 'ocr' else [args.pdfium.resolve()]), *extra]
         memory = {}
-        for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty'):
+        for kind in (() if args.section == 'confinement' else ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty')):
             row = execute(argv('memory', kind, scratch / ('allocation-' + kind)), target, 'memory-' + kind)
             probe = row.get('probe', {})
             explicit = probe.get('rc') == -1 and (probe.get('errno') == (1 if kind == 'raise' else 12) or probe.get('mach_error') == 3)
             # N3: small allocations succeed; cumulative crossing must be refused.
-            row['kernel_refusal'] = bool(explicit and not row['deadline_kill'] and row['exit_code'] == 0)
+            setup = next((b for b in row['bootstrap'] if 'baseline_mapped_bytes' in b), {})
+            setup_ok = (setup.get('set_rc') == 0 and setup.get('requested_limit') == setup.get('soft') == setup.get('hard')
+                        and setup.get('requested_limit', 0) == setup.get('baseline_mapped_bytes', 0) + 1536*1024*1024)
+            row['kernel_refusal'] = bool(setup_ok and explicit and not row['deadline_kill'] and row['exit_code'] == 0)
             if kind in ('anonymous', 'many-small', 'malloc', 'mach') and not probe.get('cumulative_new_bytes', 0):
                 row['kernel_refusal'] = False
                 row['failure'] = 'no below-budget positive allocations proven'
@@ -141,6 +152,9 @@ def main(args):
                 row['status'] = 'FAIL'
             memory[kind] = row
         results['memory'][role] = memory
+        if args.section == 'memory':
+            (root / 'workers-memory-partial.json').write_text(json.dumps(results, indent=2))
+            continue
         probes = ['snapshot', 'scratch_create', 'host_read', 'host_stat', 'host_list', 'host_write',
                   'host_create', 'host_rename', 'host_unlink', 'snapshot_write', 'child_exec', 'child_fork',
                   'open_url', 'dns', 'mach_broker', 'mach_open_url', 'xpc_broker', 'unix_connect',
@@ -202,11 +216,12 @@ def main(args):
                                 'ocr-' + extension + '-' + str(page['page']), bytes(page['png']), readiness='stderr')
                 results['controls'][role][extension] = row
         (root / 'workers-partial.json').write_text(json.dumps(results, indent=2))
-    (root / 'workers.json').write_text(json.dumps(results, indent=2))
+    (root / ('workers-' + args.section + '.json')).write_text(json.dumps(results, indent=2))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     for key in ('evidence', 'target', 'inventory', 'pdfium'):
         parser.add_argument('--' + key, type=Path, required=True)
+    parser.add_argument('--section', choices=('memory', 'confinement', 'all'), default='all')
     main(parser.parse_args())

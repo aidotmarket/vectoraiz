@@ -35,6 +35,18 @@ Refresh: no-op 0.0000 ms; 180 adds + 180 updates + 180 deletes (540/54,099 = 0.9
 
 Missing/failing: 32/50 extraction matching is not human relevance; held-out human A1 queries absent; combined spool plus Lance/FTS preparation exceeds 60 s; agreed topped-up mixed corpus absent; cold means first-open, no OS cache flush; RSS endpoints do not prove peaks/promotion bound; supplemental sampled trace starts at PQ; synthetic Refresh lacks source-hash/extraction accounting and concurrent 25-way search; recipe-change, repeated promotion/retirement, crash/recovery, answer/indexing/refusal maximum not qualified; Lance random training row IDs not exposed; Windows NOT RUN.
 
+## 2 memory
+
+**FAIL**
+
+ingest: 7/8 probes demonstrate explicit kernel refusal with successful baseline-relative limit setup/readback; reserved-dirty is a failure.
+render: 7/8 probes demonstrate explicit kernel refusal with successful baseline-relative limit setup/readback; reserved-dirty is a failure.
+ocr: 7/8 probes demonstrate explicit kernel refusal with successful baseline-relative limit setup/readback; reserved-dirty is a failure.
+
+Each process records mapped baseline, baseline + 1.5 GiB requested limit, and soft/hard readback. No RSS sampler runs. Below-budget allocations may succeed; cumulative/burst refusal is the N3 criterion. Full kernel errors, cumulative allocations and writable-baseline figures are private.
+
+Missing/failing: RLIMIT_AS bounds new mappings only; reserved-dirty probe attempts 2 GiB writable baseline reservation against 1.5 GiB role budget; no hard resident/commit bound established; Windows NOT RUN.
+
 ## Validation and remaining obligations
 
 fmt: PASS; clippy: PASS; tests: PASS. Full logs retained privately.
