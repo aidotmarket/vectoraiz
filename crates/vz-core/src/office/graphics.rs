@@ -229,9 +229,16 @@ fn definition(
     if n.ns == DGM && n.local == "shape" && n.attr_ns(R, "blip") == Some("") {
         n.attrs.remove(&(R.into(), "blip".into()));
     }
-    for v in n.attrs.values_mut() {
-        if let Some(new) = urns.get(v) {
-            *v = new.clone();
+    for ((_, key), value) in &mut n.attrs {
+        if n.ns == DGM && words("uniqueId loTypeId qsTypeId csTypeId presId", key) {
+            if let Some(new) = urns.get(value) {
+                report.remove(
+                    &format!("{part}/@{key}"),
+                    "neutralized SmartArt definition identifier/reference",
+                    value.clone(),
+                );
+                *value = new.clone();
+            }
         }
     }
     Ok(())
@@ -860,5 +867,53 @@ pub(super) fn validate_models(trees: &BTreeMap<String, Node>) -> Result<()> {
         report.removals.is_empty(),
         "undrawn SmartArt point survived readback"
     );
+    Ok(())
+}
+
+pub(super) fn validate_links(trees: &BTreeMap<String, Node>) -> Result<()> {
+    fn check(n: &Node, part: &str, trees: &BTreeMap<String, Node>) -> Result<()> {
+        let links: Vec<_> = if n.ns == C && n.local == "chart" && n.attr_ns(R, "id").is_some() {
+            vec![("id", "chart", C, "chartSpace")]
+        } else if n.ns == DGM && n.local == "relIds" {
+            vec![
+                ("dm", "diagramData", DGM, "dataModel"),
+                ("lo", "diagramLayout", DGM, "layoutDef"),
+                ("qs", "diagramQuickStyle", DGM, "styleDef"),
+                ("cs", "diagramColors", DGM, "colorsDef"),
+            ]
+        } else {
+            vec![]
+        };
+        for (key, kind, ns, local) in links {
+            let id = n
+                .attr_ns(R, key)
+                .with_context(|| format!("missing graphics relationship at {part}/@{key}"))?;
+            let rel = trees
+                .get(&relpath(part)?)
+                .and_then(|rs| rs.children.iter().find(|r| r.attr("Id") == Some(id)))
+                .with_context(|| format!("missing graphics relationship at {part}/{id}"))?;
+            ensure!(
+                rel.attr("Type") == Some(&format!("{R}/{kind}"))
+                    && rel.attr("TargetMode") != Some("External"),
+                "mismatched graphics relationship at {part}/{id}"
+            );
+            let target = resolve(part, rel.attr("Target").context("graphics target absent")?)?;
+            ensure!(
+                trees
+                    .get(&target)
+                    .is_some_and(|root| root.ns == ns && root.local == local),
+                "mismatched graphics target at {part}/{id}"
+            );
+        }
+        for c in &n.children {
+            check(c, part, trees)?;
+        }
+        Ok(())
+    }
+    for (part, n) in trees {
+        if !part.ends_with(".rels") {
+            check(n, part, trees)?;
+        }
+    }
     Ok(())
 }

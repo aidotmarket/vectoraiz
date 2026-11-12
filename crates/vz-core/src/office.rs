@@ -1478,6 +1478,18 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
     Ok(())
 }
 fn child_allowed(parent: &Node, child: &Node) -> bool {
+    if let Some(children) = chart_allowlist::children(&parent.ns, &parent.local) {
+        let prefix = if child.ns == graphics::C {
+            "c"
+        } else if child.ns == graphics::CS {
+            "cs"
+        } else if child.ns == A {
+            "a"
+        } else {
+            return false;
+        };
+        return words(children, &format!("{prefix}:{}", child.local));
+    }
     let allowed=match(parent.ns.as_str(),parent.local.as_str()){
         (CT,"Types")=>Some((CT,"Default Override")),(REL,"Relationships")=>Some((REL,"Relationship")),
         (W,"document")=>Some((W,"body")),(W,"body")=>Some((W,"p tbl sectPr bookmarkStart bookmarkEnd")),
@@ -2364,6 +2376,7 @@ fn validate_graph(parts: &BTreeMap<String, Vec<u8>>, ext: &str) -> Result<()> {
         root_target.as_deref() == Some(main),
         "missing/mismatched readback Office root"
     );
+    graphics::validate_links(&trees)?;
     graphics::validate_models(&trees)?;
     for (part, n) in &trees {
         validate_references(n, part, ids.get(part))?;

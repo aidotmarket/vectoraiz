@@ -16,3 +16,5 @@ upstream paths, SHA256, Application and AppVersion (15/16) from docProps/app.xml
 The pinned POI revision and included Apache-2.0 licence/NOTICE above cover these.
 All are tested pristine before separately planting metadata/binding/trash markers.
 AppVersion is provenance evidence, not installed Office/Document Inspector proof.
+
+S1934 adds the unmodified chart and SmartArt originals recorded in s1934-provenance.json. Apache POI files use Apache-2.0 (LICENSE/NOTICE here). boxWhisker.xlsx is an unmodified Microsoft Excel 16.0300-saved chartEx regression workbook from LibreOffice/core at the recorded immutable revision, distributed separately under MPL-2.0 (LIBREOFFICE-COPYING.MPL). Its editable OOXML source is included in full and linked upstream. No fixture is compiled into the application. Source URLs, Application/AppVersion and SHA256 values are recorded for each file. Installed Office rendering is not qualified by these bytes.

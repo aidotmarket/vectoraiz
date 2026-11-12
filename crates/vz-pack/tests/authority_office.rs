@@ -1718,17 +1718,17 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
         let source = std::fs::read(root.join(name)).unwrap();
         assert_eq!(sha256(&source), file["sha256"].as_str().unwrap());
         let result = office::rebuild(name, &source, &BTreeMap::new());
-        if name == "chartex.docx" || name == "stress024.xlsx" {
+        if matches!(name, "chartex.docx" | "boxWhisker.xlsx" | "stress024.xlsx") {
             let error = result.err().unwrap().to_string();
             assert!(
-                error.contains(if name == "chartex.docx" {
+                error.contains(if name == "chartex.docx" || name == "boxWhisker.xlsx" {
                     "Office 2016 chartEx is unsupported"
                 } else {
                     "chart plots hidden rows or columns"
                 }),
                 "{name}: {error}"
             );
-            if name == "chartex.docx" {
+            if name == "chartex.docx" || name == "boxWhisker.xlsx" {
                 assert!(error.contains("}Choice["), "{error}");
             }
             continue;
@@ -1789,6 +1789,80 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
                     .count(),
                 2
             );
+        }
+    }
+}
+
+#[test]
+fn office_filtered_chart_points_cellrange_and_external_workbook_are_removed() {
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml=String::from_utf8(p[path].clone()).unwrap()
+        .replace("<c:chartSpace ","<c:chartSpace xmlns:c16=\"http://schemas.microsoft.com/office/drawing/2014/chart\" ")
+        .replace("<c:ptCount val=\"1\"/>","<c:ptCount val=\"2\"/>")
+        .replace("</c:strCache></c:strRef></c:cat>","<c:pt idx=\"1\"><c:v>Visible category</c:v></c:pt></c:strCache></c:strRef></c:cat>")
+        .replace("</c:numCache>","<c:pt idx=\"1\"><c:v>43</c:v></c:pt></c:numCache>")
+        .replace("</c:ser>","<c:extLst><c:ext uri=\"filter\"><c16:filteredLitCache><c16:numCache><c:pt idx=\"0\"><c:v>42</c:v></c:pt></c16:numCache></c16:filteredLitCache></c:ext></c:extLst></c:ser>")
+        .replace("</c:chartSpace>",&format!(r#"<c:externalData xmlns:r="{R}" r:id="source"/><c:printSettings><c:headerFooter>SECRET PRINT HEADER</c:headerFooter></c:printSettings><c:protection/><c:txPr xmlns:a="{A}"><a:p><a:fld type="CELLRANGE"><a:t>[CELLRANGE]</a:t></a:fld></a:p></c:txPr></c:chartSpace>"#));
+    p.insert(path.into(), xml.into_bytes());
+    p.insert("word/charts/_rels/chart1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="source" Type="{R}/package" Target="https://example.invalid/source.xlsx" TargetMode="External"/><Relationship Id="theme" Type="{R}/themeOverride" Target="../theme/themeOverride.xml"/></Relationships>"#).into_bytes());
+    add(
+        &mut p,
+        "word/theme/themeOverride.xml",
+        "application/vnd.openxmlformats-officedocument.themeOverride+xml",
+        &format!(r#"<a:themeOverride xmlns:a="{A}"/>"#),
+    );
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("Visible category"));
+    assert!(report.text().contains("43"));
+    assert!(report.text().contains("Chart series marker"));
+    for marker in [
+        "Category marker",
+        "[CELLRANGE]",
+        "SECRET PRINT HEADER",
+        "example.invalid",
+    ] {
+        assert!(
+            !members(&bytes)
+                .values()
+                .any(|v| String::from_utf8_lossy(v).contains(marker)),
+            "{marker}"
+        );
+    }
+    assert!(report.warnings.iter().any(|w| w.contains("CELLRANGE")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("themeOverride may change chart colours")));
+}
+#[test]
+fn office_chart_numeric_edit_refuses_and_string_edit_survives_readback() {
+    let (bytes, report) = rebuild("docx", &chart_fixture("docx", "<c:plotVisOnly/>"));
+    for (old, replacement, allowed) in [
+        ("42", "99", false),
+        ("Category marker", "Edited category", true),
+    ] {
+        let node = report
+            .inventory
+            .iter()
+            .find(|v| v.location.ends_with("/text") && v.value.as_deref() == Some(old))
+            .unwrap();
+        let edits = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: sha256(old.as_bytes()),
+                value: replacement.into(),
+            },
+        )]);
+        let result = office::edit("document.docx", &bytes, &edits);
+        if allowed {
+            assert!(result.unwrap().1.text().contains(replacement));
+        } else {
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot be edited"));
         }
     }
 }
