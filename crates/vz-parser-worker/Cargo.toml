@@ -9,6 +9,16 @@ publish.workspace = true
 vz-core.workspace = true
 serde_json.workspace = true
 pdfium-render = { version = "=0.8.35", default-features = false, features = ["pdfium_7350", "image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+anyhow = "1"
+
+[features]
+office-feasibility = ["vz-core/office-feasibility"]
+
+[[bin]]
+name = "vz-office-worker"
+path = "src/office.rs"
+required-features = ["office-feasibility"]
 
 [dev-dependencies]
 tempfile = "3"
