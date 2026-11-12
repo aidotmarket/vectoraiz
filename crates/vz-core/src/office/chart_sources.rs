@@ -363,6 +363,13 @@ impl ChartSources {
                     "conflicting chart/cache edits at {}",
                     point.target
                 );
+                if let Some(requested) = result.get(&point.target) {
+                    ensure!(
+                        requested.expected_sha256 == crate::pipeline::sha256(value.as_bytes()),
+                        "Office prior-value mismatch at {}",
+                        point.target
+                    );
+                }
                 result.insert(
                     point.target.clone(),
                     Edit {

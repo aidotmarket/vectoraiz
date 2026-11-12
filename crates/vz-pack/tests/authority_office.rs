@@ -1936,6 +1936,33 @@ fn office_charted_cell_edit_propagates_private_mappings_across_generations() {
                 value: value.into(),
             },
         )]);
+        let cache = report
+            .inventory
+            .iter()
+            .find(|v| {
+                v.location.starts_with("xl/charts/")
+                    && v.location.ends_with("/text")
+                    && v.value.as_deref() == Some(previous.as_str())
+            })
+            .unwrap();
+        let mut stale = edits.clone();
+        stale.insert(
+            cache.location.clone(),
+            Edit {
+                expected_sha256: sha256(b"stale chart prior"),
+                value: value.into(),
+            },
+        );
+        assert!(office::edit_with_chart_sources(
+            "document.xlsx",
+            &bytes,
+            &stale,
+            &report.chart_sources
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("prior-value mismatch"));
         let (edited, readback) =
             office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
                 .unwrap();
