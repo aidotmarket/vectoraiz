@@ -8,6 +8,7 @@ use std::{
 };
 
 mod chart_allowlist;
+mod diagram_allowlist;
 mod graphics;
 mod layout_allowlist;
 mod style_allowlist;
@@ -420,6 +421,9 @@ fn words(s: &str, k: &str) -> bool {
 // Word-qualified) attributes. This deliberately refuses unimplemented layout
 // constructs; a namespace match by itself never permits retention.
 fn rule(ns: &str, el: &str) -> Option<&'static str> {
+    if let Some(attrs) = diagram_allowlist::rule(ns, el) {
+        return Some(attrs);
+    }
     if let Some(attrs) = chart_allowlist::rule(ns, el) {
         return Some(attrs);
     }
@@ -433,6 +437,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
     Some(match (ns,el) {
         (XDR,"graphicFrame"|"nvGraphicFramePr"|"cNvGraphicFramePr"|"xfrm")=>"macro",
         (S,"chartsheet")=>"",
+
         (W,"rStyle"|"tblStyleColBandSize"|"tblStyleRowBandSize")=>"val",
         (W,"separator"|"continuationSeparator")=>"",
         (P,"notesStyle")=>"",(P,"nvPr")=>"isPhoto userDrawn",
@@ -537,7 +542,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (A,"theme"|"clrScheme"|"fontScheme"|"fmtScheme")=>"name",
         (A,"dk1"|"lt1"|"dk2"|"lt2"|"accent1"|"accent2"|"accent3"|"accent4"|"accent5"|"accent6"|"hlink"|"folHlink"|"majorFont"|"minorFont")=>"",
         (A,"srgbClr"|"schemeClr"|"lumMod"|"lumOff"|"alpha"|"tint"|"shade")=>"val",(A,"sysClr")=>"val lastClr",
-        (A,"off"|"chOff")=>"x y",(A,"ext"|"chExt")=>"cx cy",(A,"xfrm")=>"rot flipH flipV",
+        (A,"off"|"chOff")=>"x y",(A,"ext")=>"cx cy uri",(A,"chExt")=>"cx cy",(A,"xfrm")=>"rot flipH flipV",
         (A,"prstGeom")=>"prst",(A,"avLst")=>"",(A,"gd")=>"name fmla",
         (A,"bodyPr")=>"rot spcFirstLastPara vertOverflow horzOverflow vert wrap lIns tIns rIns bIns numCol spcCol rtlCol fromWord anchor anchorCtr forceAA compatLnSpc upright",
         (A,"rPr"|"defRPr"|"endParaRPr")=>"kumimoji lang altLang sz b i u strike kern cap spc normalizeH baseline noProof dirty err smtClean smtId bmk",
@@ -689,6 +694,27 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
         (W, "ftr")
     } else if path == "xl/workbook.xml" {
         (S, "workbook")
+    } else if path.contains("/diagrams/") && path.ends_with(".xml") {
+        (
+            if path.rsplit('/').next()?.starts_with("drawing") {
+                graphics::DSP
+            } else {
+                graphics::DGM
+            },
+            if path.rsplit('/').next()?.starts_with("drawing") {
+                "drawing"
+            } else if path.rsplit('/').next()?.starts_with("data") {
+                "dataModel"
+            } else if path.rsplit('/').next()?.starts_with("layout") {
+                "layoutDef"
+            } else if path.rsplit('/').next()?.starts_with("quickStyle") {
+                "styleDef"
+            } else if path.rsplit('/').next()?.starts_with("colors") {
+                "colorsDef"
+            } else {
+                return None;
+            },
+        )
     } else if path.contains("/charts/") && path.ends_with(".xml") {
         (
             if path.rsplit('/').next().unwrap_or("").starts_with("style") {
@@ -1142,7 +1168,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             }
             *seen |= !c.string().is_empty();
         }
-        if n.ignorable.contains(&c.ns) && c.ns != P14 && c.ns != X14 {
+        if n.ignorable.contains(&c.ns) && c.ns != P14 && c.ns != X14 && c.ns != graphics::DSP {
             report.remove(
                 part,
                 "removed schema-ignorable content",
@@ -1230,8 +1256,10 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             // Only explicitly implemented extension children may survive.
             let original = String::from_utf8(serialize(&c)?)?;
             for ext in &mut c.children {
+                let ext_uri = ext.attr("uri").unwrap_or("").to_owned();
                 ext.children.retain(|x| {
-                    (x.ns == P14 && x.local == "sectionLst")
+                    (x.ns == graphics::DSP && x.local == "dataModelExt" && ext_uri == graphics::DSP)
+                        || (x.ns == P14 && x.local == "sectionLst")
                         || (x.ns == X14
                             && words("dataValidations conditionalFormattings", &x.local))
                 });
@@ -1301,13 +1329,28 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     Ok(())
 }
 fn validate_node(n: &Node, part: &str) -> Result<()> {
+    if n.ns == A && n.local == "ext" && n.attr("uri").is_some() {
+        ensure!(
+            n.attr("uri") == Some(graphics::DSP)
+                && n.children.len() == 1
+                && n.children[0].ns == graphics::DSP
+                && n.children[0].local == "dataModelExt",
+            "unsupported SmartArt extension at {part}"
+        );
+    }
     if n.ns == A && n.local == "graphicData" {
         let uri = n
             .attr("uri")
             .context("drawing graphic data has no supported type URI")?;
         ensure!(
             n.children.len() == 1
-                && ((uri == PIC && n.children[0].ns == PIC && n.children[0].local == "pic")
+                && ((uri == graphics::C
+                    && n.children[0].ns == graphics::C
+                    && n.children[0].local == "chart")
+                    || (uri == graphics::DGM
+                        && n.children[0].ns == graphics::DGM
+                        && n.children[0].local == "relIds")
+                    || (uri == PIC && n.children[0].ns == PIC && n.children[0].local == "pic")
                     || (uri == "http://schemas.openxmlformats.org/drawingml/2006/table"
                         && n.children[0].ns == A
                         && n.children[0].local == "tbl")),
@@ -1347,7 +1390,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
         n.ns,
         n.local
     );
-    if words("t v", &n.local) {
+    if words("t v", &n.local) && n.ns != graphics::DGM {
         ensure!(
             n.children.is_empty(),
             "mixed/structured text node refused at {part}"
@@ -1380,7 +1423,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
         let permitted = if ns == XML {
             k == "space" && n.local == "t"
         } else if ns == R {
-            words("id embed link",k)&&words("hyperlink headerReference footerReference sheet tablePart drawing sldId sldMasterId sldLayoutId notesMasterId handoutMasterId hlinkClick hlinkHover blip chart", &n.local)
+            words("id embed link dm lo qs cs",k)&&words("hyperlink headerReference footerReference sheet tablePart drawing sldId sldMasterId sldLayoutId notesMasterId handoutMasterId hlinkClick hlinkHover blip chart relIds", &n.local)
         } else {
             (if n.ns == W { ns == W } else { ns.is_empty() }) && (words(allowed, k) || layout)
         };
@@ -1493,6 +1536,9 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
                 el,
             );
     }
+    if part.contains("/diagrams/") {
+        return [graphics::DGM, graphics::DSP, A].contains(&ns);
+    }
     if part.contains("/charts/") {
         return [graphics::C, graphics::CS, A].contains(&ns);
     }
@@ -1500,7 +1546,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns == S;
     }
     if part.starts_with("word/") {
-        return [W, A, WP, PIC, graphics::C].contains(&ns);
+        return [W, A, WP, PIC, graphics::C, graphics::DGM].contains(&ns);
     }
     if part == "xl/workbook.xml" {
         return ns == S
@@ -1526,13 +1572,13 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns==S&&words("table autoFilter filterColumn filters filter customFilters customFilter top10 dynamicFilter colorFilter iconFilter dateGroupItem sortState sortCondition tableColumns tableColumn tableStyleInfo extLst ext",el);
     }
     if part.starts_with("xl/drawings/") {
-        return [XDR, A, PIC, graphics::C].contains(&ns);
+        return [XDR, A, PIC, graphics::C, graphics::DGM].contains(&ns);
     }
     if part == "ppt/presentation.xml" {
         return (ns==P&&words("presentation sldIdLst sldId sldSz notesSz sldMasterIdLst sldMasterId notesMasterIdLst notesMasterId handoutMasterIdLst handoutMasterId defaultTextStyle extLst ext",el))||ns==P14||ns==A;
     }
     if part.starts_with("ppt/") {
-        return ns == P || ns == A || ns == graphics::C;
+        return ns == P || ns == A || ns == graphics::C || ns == graphics::DGM;
     }
     false
 }
@@ -1545,7 +1591,7 @@ fn content_attr(n: &Node, k: &str) -> bool {
         && ((n.ns == S && words("sheet table tableColumn", &n.local))
             || (n.ns == P && words("cSld cNvPr", &n.local))
             || (n.ns == P14 && n.local == "section")
-            || ([WP, PIC, XDR].contains(&n.ns.as_str()) && words("docPr cNvPr", &n.local))))
+            || ([WP, PIC, XDR, graphics::DSP].contains(&n.ns.as_str()) && words("docPr cNvPr", &n.local))))
         || (n.ns == REL && k == "Target" && n.attr("TargetMode") == Some("External"))
 }
 fn walk(
@@ -2053,6 +2099,19 @@ fn expected_type(path: &str, root: &Node, ext: &str) -> Result<&'static str> {
         (P, "handoutMaster") => {
             "application/vnd.openxmlformats-officedocument.presentationml.handoutMaster+xml"
         }
+        (graphics::DGM, "dataModel") => {
+            "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml"
+        }
+        (graphics::DGM, "layoutDef") => {
+            "application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml"
+        }
+        (graphics::DGM, "styleDef") => {
+            "application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml"
+        }
+        (graphics::DGM, "colorsDef") => {
+            "application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml"
+        }
+        (graphics::DSP, "drawing") => "application/vnd.ms-office.drawingml.diagramDrawing+xml",
         (graphics::C, "chartSpace") => {
             "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
         }
@@ -2302,6 +2361,7 @@ fn validate_graph(parts: &BTreeMap<String, Vec<u8>>, ext: &str) -> Result<()> {
         root_target.as_deref() == Some(main),
         "missing/mismatched readback Office root"
     );
+    graphics::validate_models(&trees)?;
     for (part, n) in &trees {
         validate_references(n, part, ids.get(part))?;
     }
@@ -2312,6 +2372,13 @@ fn validate_graph(parts: &BTreeMap<String, Vec<u8>>, ext: &str) -> Result<()> {
 pub fn edit(name: &str, input: &[u8], edits: &BTreeMap<String, Edit>) -> Result<(Vec<u8>, Report)> {
     inspect(name, input)?;
     let (parts, _) = read_package(input)?;
+    let trees = parts
+        .iter()
+        .filter(|(p, _)| !p.contains("/media/"))
+        .map(|(p, b)| Ok((p.clone(), parse(b, p)?)))
+        .collect::<Result<BTreeMap<_, _>>>()?;
+    let expanded_edits = graphics::paired_edits(&trees, edits)?;
+    let edits = &expanded_edits;
     let mut applied = BTreeSet::new();
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (part, bytes) in parts {
@@ -2358,6 +2425,17 @@ fn rebuild_inner(
     let mut trees = BTreeMap::new();
     let mut binaries = BTreeMap::new();
     graphics::prepare(&mut parts, &mut report)?;
+    if edits
+        .keys()
+        .any(|key| key.starts_with("xl/") && key.contains("/cell/"))
+    {
+        if let Some(part) = parts
+            .keys()
+            .find(|p| p.contains("/charts/") && p.ends_with(".xml"))
+        {
+            bail!("XLSX cell edit cannot prove chart cache-to-source mapping at {part}/{{{}}}chart[1]; re-ingest the locally edited source or exclude",graphics::C);
+        }
+    }
     let ct = parse(
         parts
             .get("[Content_Types].xml")
@@ -2524,13 +2602,17 @@ fn rebuild_inner(
                 || part.starts_with("ppt/handoutMasters/")
                 || part.contains("/theme/")
                 || part.contains("/charts/")
+                || part.contains("/diagrams/")
                 || part.starts_with("xl/chartsheets/"))
         {
             serial += 1;
             let (_, file) = part.rsplit_once('/').context("part path")?;
             let dir = if part.contains("/media/") {
                 format!("{}/media", part.split('/').next().context("media root")?)
-            } else if part.contains("/charts/") || part.starts_with("xl/chartsheets/") {
+            } else if part.contains("/charts/")
+                || part.contains("/diagrams/")
+                || part.starts_with("xl/chartsheets/")
+            {
                 part.rsplit_once('/').unwrap().0.to_owned()
             } else if part.contains("/theme/") {
                 format!("{}/theme", part.split('/').next().context("theme root")?)
@@ -2555,7 +2637,10 @@ fn rebuild_inner(
                 .to_owned()
             };
             let suffix = file.rsplit('.').next().context("part suffix")?;
-            let stem = if part.contains("/charts/") && file.starts_with("style") {
+            let stem = if part.contains("/diagrams/") {
+                file.trim_end_matches(".xml")
+                    .trim_end_matches(|c: char| c.is_ascii_digit())
+            } else if part.contains("/charts/") && file.starts_with("style") {
                 "style"
             } else if part.contains("/charts/") && file.starts_with("colors") {
                 "colors"
@@ -2613,6 +2698,7 @@ fn rebuild_inner(
                 .to_owned();
             ensure!(
                 (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || ty == "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
                     || ["http://schemas.microsoft.com/office/2011/relationships/chartStyle", "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"].contains(&ty.as_str())
                     || (ty == "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
                         && resolve(&own, &target)? == "word/stylesWithEffects.xml"
@@ -2664,7 +2750,7 @@ fn rebuild_inner(
                     present.contains(&resolved),
                     "dangling relationship at {part}/{id}: {resolved}"
                 );
-                ensure!(words("officeDocument styles stylesWithEffects settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink chart chartsheet chartStyle chartColorStyle",kind),"unsupported content dependency at {part}/{id}");
+                ensure!(words("officeDocument styles stylesWithEffects settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink chart chartsheet chartStyle chartColorStyle diagramData diagramLayout diagramQuickStyle diagramColors diagramDrawing",kind),"unsupported content dependency at {part}/{id}");
                 if part == "_rels/.rels" && kind == "officeDocument" {
                     ensure!(
                         office_root.replace(resolved.clone()).is_none(),

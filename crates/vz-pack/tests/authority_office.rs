@@ -1510,3 +1510,110 @@ fn office_chart_visibility_and_multilevel_refusals() {
         "{err}"
     );
 }
+
+const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+const DSP: &str = "http://schemas.microsoft.com/office/drawing/2008/diagram";
+fn smartart_fixture(empty: bool) -> BTreeMap<String, Vec<u8>> {
+    let mut p = fixture("pptx");
+    add(
+        &mut p,
+        "ppt/diagrams/data1.xml",
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml",
+        &format!(
+            r#"<dgm:dataModel xmlns:dgm="{DGM}" xmlns:a="{A}" xmlns:dsp="{DSP}"><dgm:ptLst><dgm:pt modelId="visible"><dgm:t><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="pres" type="pres"/><dgm:pt modelId="hidden"><dgm:t><a:p><a:r><a:t>Undrawn secret marker</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="cxn1" type="presOf" srcId="visible" destId="pres"/></dgm:cxnLst><dgm:extLst><a:ext uri="{DSP}"><dsp:dataModelExt relId="cache"/></a:ext></dgm:extLst></dgm:dataModel>"#
+        ),
+    );
+    let shape = if empty {
+        String::new()
+    } else {
+        format!(
+            r#"<dsp:sp modelId="pres"><dsp:txBody><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dsp:txBody></dsp:sp>"#
+        )
+    };
+    add(
+        &mut p,
+        "ppt/diagrams/drawing1.xml",
+        "application/vnd.ms-office.drawingml.diagramDrawing+xml",
+        &format!(
+            r#"<dsp:drawing xmlns:dsp="{DSP}" xmlns:a="{A}"><dsp:spTree>{shape}</dsp:spTree></dsp:drawing>"#
+        ),
+    );
+    p.insert("ppt/diagrams/_rels/data1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/></Relationships>"#).into_bytes());
+    p
+}
+#[test]
+fn office_smartart_hidden_points_and_paired_edits() {
+    let (bytes, report) = rebuild("pptx", &smartart_fixture(false));
+    assert!(!report.text().contains("Undrawn secret marker"));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("undrawn SmartArt")));
+    let location = report
+        .inventory
+        .iter()
+        .find(|v| {
+            v.location.contains("/data-")
+                && v.location.ends_with("/text")
+                && v.value.as_deref() == Some("Visible SmartArt marker")
+        })
+        .unwrap()
+        .location
+        .clone();
+    let edits = BTreeMap::from([(
+        location,
+        Edit {
+            expected_sha256: sha256(b"Visible SmartArt marker"),
+            value: "Edited twin".into(),
+        },
+    )]);
+    let (edited, readback) = office::edit("document.pptx", &bytes, &edits).unwrap();
+    assert_eq!(
+        readback
+            .inventory
+            .iter()
+            .filter(|v| v.location.ends_with("/text") && v.value.as_deref() == Some("Edited twin"))
+            .count(),
+        2
+    );
+    assert!(!members(&edited)
+        .values()
+        .any(|b| String::from_utf8_lossy(b).contains("Visible SmartArt marker")));
+    let err = office::rebuild(
+        "document.pptx",
+        &archive(&smartart_fixture(true)),
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(
+        err.contains("SmartArt drawing cache missing; layout rendering unsupported"),
+        "{err}"
+    );
+}
+#[test]
+fn office_charted_cell_edit_refuses_without_source_mapping() {
+    let (bytes, report) = rebuild("xlsx", &chart_fixture("xlsx", "<c:plotVisOnly/>"));
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edit = Edit {
+        expected_sha256: sha256(node.value.as_ref().unwrap().as_bytes()),
+        value: "Edited cell".into(),
+    };
+    let err = office::edit(
+        "document.xlsx",
+        &bytes,
+        &BTreeMap::from([(node.location.clone(), edit)]),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(
+        err.contains("chart cache-to-source mapping") && err.contains("xl/charts/"),
+        "{err}"
+    );
+}

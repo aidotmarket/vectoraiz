@@ -69,6 +69,21 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
+    // Reuse the package walk when its complete relationship graph is supported.
+    // This includes chart numeric/string caches, SmartArt twins and secondary
+    // text, giving ingest exactly the content used for reviewed readback.
+    // Incomplete legacy packages retain the tolerant format-specific reader.
+    if matches!(ext.as_str(), "docx" | "xlsx" | "pptx") {
+        validate_zip(path)?;
+        let bytes = std::fs::read(path)?;
+        let name = format!("document.{ext}");
+        if let Ok(report) = crate::office::inspect(&name, &bytes) {
+            return Ok(vec![page(1, report.text())]);
+        }
+        if let Ok((_, report)) = crate::office::rebuild(&name, &bytes, &Default::default()) {
+            return Ok(vec![page(1, report.text())]);
+        }
+    }
     match ext.as_str() {
         "txt" | "md" | "markdown" => Ok(vec![page(1, std::fs::read_to_string(path)?)]),
         "html" | "htm" => {

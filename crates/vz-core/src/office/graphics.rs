@@ -2,6 +2,240 @@
 use super::*;
 pub(super) const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
 pub(super) const CS: &str = "http://schemas.microsoft.com/office/drawing/2012/chartStyle";
+pub(super) const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+pub(super) const DSP: &str = "http://schemas.microsoft.com/office/drawing/2008/diagram";
+fn visit<'a>(n: &'a Node, ns: &str, local: &str, out: &mut Vec<&'a Node>) {
+    if n.ns == ns && n.local == local {
+        out.push(n);
+    }
+    for c in &n.children {
+        visit(c, ns, local, out);
+    }
+}
+fn text(n: &Node) -> String {
+    let mut nodes = Vec::new();
+    visit(n, A, "t", &mut nodes);
+    nodes
+        .iter()
+        .map(|n| n.text.as_str())
+        .collect::<Vec<_>>()
+        .join("")
+}
+fn relpath(part: &str) -> Result<String> {
+    let (dir, file) = part.rsplit_once('/').context("graphics owner path")?;
+    Ok(format!("{dir}/_rels/{file}.rels"))
+}
+/// dataModelExt is found in the data model but commonly names a relationship
+/// belonging to its host slide; support either owner only when unambiguous.
+fn drawing_for(
+    data: &str,
+    root: &Node,
+    trees: &BTreeMap<String, Node>,
+    rels: &BTreeMap<String, Node>,
+) -> Result<String> {
+    let mut exts = Vec::new();
+    visit(root, DSP, "dataModelExt", &mut exts);
+    ensure!(
+        exts.len() == 1,
+        "SmartArt drawing cache missing; layout rendering unsupported at {data}"
+    );
+    let id = exts[0]
+        .attr("relId")
+        .context("SmartArt drawing relationship missing")?;
+    let mut owners = BTreeSet::from([data.to_owned()]);
+    for (rp, n) in rels {
+        let own = owner(rp)?;
+        for r in &n.children {
+            if r.attr("TargetMode") != Some("External")
+                && r.attr("Type").is_some_and(|t| t.ends_with("/diagramData"))
+                && resolve(&own, r.attr("Target").context("diagram target missing")?)? == data
+            {
+                owners.insert(own.clone());
+            }
+        }
+    }
+    let mut targets = BTreeSet::new();
+    for own in owners {
+        if let Some(rs) = rels.get(&relpath(&own)?) {
+            for r in &rs.children {
+                if r.attr("Id") == Some(id)
+                    && r.attr("TargetMode") != Some("External")
+                    && r.attr("Type")
+                        == Some(
+                            "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing",
+                        )
+                {
+                    targets.insert(resolve(
+                        &own,
+                        r.attr("Target").context("diagram target absent")?,
+                    )?);
+                }
+            }
+        }
+    }
+    ensure!(
+        targets.len() == 1,
+        "SmartArt drawing cache missing; layout rendering unsupported at {data}"
+    );
+    let target = targets.into_iter().next().unwrap();
+    ensure!(
+        trees
+            .get(&target)
+            .is_some_and(|n| n.ns == DSP && n.local == "drawing"),
+        "SmartArt drawing cache missing; layout rendering unsupported at {data}"
+    );
+    Ok(target)
+}
+fn diagram_models(
+    trees: &mut BTreeMap<String, Node>,
+    rels: &BTreeMap<String, Node>,
+    report: &mut Report,
+) -> Result<()> {
+    let data: Vec<_> = trees
+        .iter()
+        .filter(|(_, n)| n.ns == DGM && n.local == "dataModel")
+        .map(|(p, _)| p.clone())
+        .collect();
+    for part in data {
+        let root = &trees[&part];
+        let target = drawing_for(&part, root, trees, rels)?;
+        let mut shapes = Vec::new();
+        visit(&trees[&target], DSP, "sp", &mut shapes);
+        ensure!(
+            !shapes.is_empty(),
+            "SmartArt drawing cache missing; layout rendering unsupported at {part}"
+        );
+        let mut cache = BTreeMap::new();
+        for shape in shapes {
+            let id = shape
+                .attr("modelId")
+                .context("SmartArt shape lacks modelId")?;
+            ensure!(
+                cache.insert(id.to_owned(), text(shape)).is_none(),
+                "ambiguous SmartArt drawing shape at {target}/{id}"
+            );
+        }
+        let mut connections = Vec::new();
+        visit(root, DGM, "cxn", &mut connections);
+        let mut points = Vec::new();
+        visit(root, DGM, "pt", &mut points);
+        let mut ids = BTreeSet::new();
+        for p in &points {
+            ensure!(
+                ids.insert(
+                    p.attr("modelId")
+                        .context("SmartArt point missing modelId")?
+                ),
+                "duplicate SmartArt modelId at {part}"
+            );
+        }
+        let mut hidden = BTreeSet::new();
+        for point in points {
+            let value = text(point);
+            if value.is_empty() {
+                continue;
+            }
+            let id = point.attr("modelId").unwrap();
+            let mapped: Vec<_> = connections
+                .iter()
+                .filter(|c| {
+                    c.attr("type") == Some("presOf")
+                        && c.attr("srcId") == Some(id)
+                        && c.attr("destId")
+                            .is_some_and(|dest| cache.contains_key(dest))
+                })
+                .collect();
+            if mapped.is_empty() {
+                hidden.insert(id.to_owned());
+                continue;
+            }
+            for cxn in mapped {
+                let dest = cxn
+                    .attr("destId")
+                    .context("SmartArt presOf lacks destination")?;
+                ensure!(
+                    ids.contains(dest),
+                    "SmartArt presOf destination absent at {part}/{id}"
+                );
+                let twin = cache.get(dest).with_context(|| {
+                    format!("SmartArt point-to-cache mapping cannot be proved at {part}/{id}")
+                })?;
+                ensure!(
+                    twin.is_empty() || value == *twin,
+                    "inconsistent SmartArt model/cache text at {part}/{id}"
+                );
+            }
+        }
+        fn prune(
+            n: &mut Node,
+            hidden: &BTreeSet<String>,
+            at: &str,
+            report: &mut Report,
+        ) -> Result<()> {
+            let mut children = Vec::new();
+            for mut c in std::mem::take(&mut n.children) {
+                if c.ns == DGM
+                    && ((c.local == "pt"
+                        && c.attr("modelId").is_some_and(|id| hidden.contains(id)))
+                        || (c.local == "cxn"
+                            && ["srcId", "destId", "parTransId", "sibTransId"]
+                                .iter()
+                                .any(|k| c.attr(k).is_some_and(|id| hidden.contains(id)))))
+                {
+                    report.remove(
+                        &format!("{at}/{}", c.attr("modelId").unwrap_or("?")),
+                        "removed undrawn SmartArt data-model content and connections",
+                        String::from_utf8(serialize(&c)?)?,
+                    );
+                    continue;
+                }
+                ensure!(
+                    !c.attrs
+                        .iter()
+                        .any(|((_, k), v)| k == "presAssocID" && hidden.contains(v)),
+                    "hidden SmartArt removal breaks display semantics at {at}"
+                );
+                prune(&mut c, hidden, at, report)?;
+                children.push(c);
+            }
+            n.children = children;
+            Ok(())
+        }
+        prune(trees.get_mut(&part).unwrap(), &hidden, &part, report)?;
+        report.warnings.push(format!("{part}: SmartArt data-model and cached drawing text retained; review all text and alt text"));
+    }
+    Ok(())
+}
+fn definition(
+    n: &mut Node,
+    part: &str,
+    urns: &BTreeMap<String, String>,
+    report: &mut Report,
+) -> Result<()> {
+    let mut children = Vec::new();
+    for mut c in std::mem::take(&mut n.children) {
+        if c.ns == DGM && words("title desc catLst sampData styleData clrData", &c.local) {
+            report.remove(
+                part,
+                "removed SmartArt definition free text",
+                String::from_utf8(serialize(&c)?)?,
+            );
+            continue;
+        }
+        definition(&mut c, part, urns, report)?;
+        children.push(c);
+    }
+    n.children = children;
+    if n.ns == DGM && n.local == "shape" && n.attr_ns(R, "blip") == Some("") {
+        n.attrs.remove(&(R.into(), "blip".into()));
+    }
+    for v in n.attrs.values_mut() {
+        if let Some(new) = urns.get(v) {
+            *v = new.clone();
+        }
+    }
+    Ok(())
+}
 fn location(parent: &str, n: &Node, index: usize) -> String {
     format!("{parent}/{{{}}}{}[{index}]", n.ns, n.local)
 }
@@ -26,6 +260,11 @@ fn chartex(n: &Node, at: &str) -> Result<()> {
     Ok(())
 }
 fn supported(n: &Node, part: &str) -> bool {
+    if n.local == "absPath"
+        && n.ns == "http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"
+    {
+        return true;
+    }
     let mut trial = n.clone();
     let mut ignored = Report::default();
     cleanse(&mut trial, part, &mut ignored).is_ok() && validate_node(&trial, part).is_ok()
@@ -207,6 +446,12 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
 /// Resolve visible branches before applying binary/embedding refusal. Only parts
 /// reached solely through deleted dependencies may be collected.
 pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report) -> Result<()> {
+    for (part, bytes) in parts
+        .iter()
+        .filter(|(p, _)| p.ends_with(".xml") && !p.contains("/charts/") && !removable(p))
+    {
+        chartex(&parse(bytes, part)?, part)?;
+    }
     let mut trees = BTreeMap::new();
     let mut deleted = BTreeMap::<String, BTreeSet<String>>::new();
     for (part, bytes) in parts.iter() {
@@ -312,6 +557,19 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
             }
         }
     }
+    diagram_models(&mut trees, &rels, report)?;
+    let urns: BTreeMap<_, _> = trees
+        .values()
+        .filter(|n| n.ns == DGM && words("layoutDef styleDef colorsDef", &n.local))
+        .filter_map(|n| n.attr("uniqueId"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .enumerate()
+        .map(|(i, s)| (s.to_owned(), format!("urn:vectoraiz:diagram:{i}")))
+        .collect();
+    for (part, n) in &mut trees {
+        definition(n, part, &urns, report)?;
+    }
     // Pruned declarations cannot survive into the generic dangling-type check.
     if let Some(ct) = trees.get_mut("[Content_Types].xml") {
         ct.children.retain(|n| {
@@ -321,8 +579,133 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         });
     }
     for (part, mut n) in trees.into_iter().chain(rels) {
+        if n.ns==S && n.local=="worksheet" {inspect_formulas(&n,&part,report)?;}
         cleanse(&mut n, &part, report)?;
         parts.insert(part, serialize(&n)?);
     }
+    Ok(())
+}
+
+/// Expand an edit into both representations using the same selectors as walk.
+pub(super) fn paired_edits(
+    trees: &BTreeMap<String, Node>,
+    edits: &BTreeMap<String, Edit>,
+) -> Result<BTreeMap<String, Edit>> {
+    let mut result = edits.clone();
+    if edits.is_empty() {
+        return Ok(result);
+    }
+    if edits
+        .keys()
+        .any(|k| k.starts_with("xl/") && k.contains("/cell/"))
+    {
+        if let Some((part, _)) = trees
+            .iter()
+            .find(|(_, n)| n.ns == C && n.local == "chartSpace")
+        {
+            bail!("XLSX cell edit cannot prove chart cache-to-source mapping in static reviewed generation at {part}/{{{C}}}chart[1]; exclude this charted workbook or re-ingest edited source");
+        }
+    }
+    fn paths(
+        n: &Node,
+        at: &str,
+        out: &mut BTreeMap<(String, String), Vec<(String, String)>>,
+        current: Option<(String, String)>,
+    ) {
+        let current = if n.ns == DGM && n.local == "pt" {
+            n.attr("modelId").map(|id| (DGM.to_owned(), id.to_owned()))
+        } else if n.ns == DSP && n.local == "sp" {
+            n.attr("modelId").map(|id| (DSP.to_owned(), id.to_owned()))
+        } else {
+            current
+        };
+        if n.ns == A && n.local == "t" {
+            if let Some(key) = &current {
+                out.entry(key.clone())
+                    .or_default()
+                    .push((format!("{at}/text"), n.text.clone()));
+            }
+        }
+        let mut counts = BTreeMap::new();
+        for c in &n.children {
+            let i = counts.entry((&c.ns, &c.local)).or_insert(0);
+            *i += 1;
+            paths(c, &location(at, c, *i), out, current.clone());
+        }
+    }
+    let rels = trees
+        .iter()
+        .filter(|(p, _)| p.ends_with(".rels"))
+        .map(|(p, n)| (p.clone(), n.clone()))
+        .collect();
+    for (part, data) in trees
+        .iter()
+        .filter(|(_, n)| n.ns == DGM && n.local == "dataModel")
+    {
+        let target = drawing_for(part, data, trees, &rels)?;
+        let mut nodes = BTreeMap::new();
+        paths(data, part, &mut nodes, None);
+        paths(&trees[&target], &target, &mut nodes, None);
+        let mut connections = Vec::new();
+        visit(data, DGM, "cxn", &mut connections);
+        for cxn in connections
+            .iter()
+            .filter(|n| n.attr("type") == Some("presOf"))
+        {
+            let model = nodes.get(&(DGM.to_owned(), cxn.attr("srcId").unwrap_or("").to_owned()));
+            let drawing = nodes.get(&(DSP.to_owned(), cxn.attr("destId").unwrap_or("").to_owned()));
+            if let (Some(model), Some(drawing)) = (model, drawing) {
+                let touched = model
+                    .iter()
+                    .chain(drawing)
+                    .any(|(at, _)| edits.contains_key(at));
+                if !touched {
+                    continue;
+                }
+                ensure!(
+                    model.len() == drawing.len()
+                        && model.iter().zip(drawing).all(|(a, b)| a.1 == b.1),
+                    "SmartArt paired edit cannot prove run mapping at {part}"
+                );
+                for (a, b) in model.iter().zip(drawing) {
+                    if let Some(edit) = edits.get(&a.0).or_else(|| edits.get(&b.0)) {
+                        for (at, prior) in [a, b] {
+                            ensure!(
+                                crate::pipeline::sha256(prior.as_bytes()) == edit.expected_sha256,
+                                "SmartArt prior-value mismatch at {at}"
+                            );
+                            ensure!(
+                                result.get(at).is_none_or(|e| e.value == edit.value),
+                                "conflicting SmartArt twin edit at {at}"
+                            );
+                            result.insert(at.clone(), edit.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+/// Independent model/cache proof; readback must never discover removable points.
+pub(super) fn validate_models(trees: &BTreeMap<String, Node>) -> Result<()> {
+    if !trees
+        .values()
+        .any(|n| n.ns == DGM && n.local == "dataModel")
+    {
+        return Ok(());
+    }
+    let rels = trees
+        .iter()
+        .filter(|(p, _)| p.ends_with(".rels"))
+        .map(|(p, n)| (p.clone(), n.clone()))
+        .collect();
+    let mut staged = trees.clone();
+    let mut report = Report::default();
+    diagram_models(&mut staged, &rels, &mut report)?;
+    ensure!(
+        report.removals.is_empty(),
+        "undrawn SmartArt point survived readback"
+    );
     Ok(())
 }
