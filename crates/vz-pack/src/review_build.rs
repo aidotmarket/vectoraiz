@@ -49,7 +49,8 @@ pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
                     position + 1,
                     doc.kind
                 ),
-                supported: ["txt", "md", "markdown"].contains(&doc.kind.as_str()),
+                supported: ["txt", "md", "markdown", "docx", "xlsx", "pptx"]
+                    .contains(&doc.kind.as_str()),
                 format: doc.kind,
             })
         })
@@ -96,8 +97,14 @@ fn build(
     query: &str,
     changes: &Changes,
 ) -> Result<CurrentReview> {
+    let origin = changes
+        .origin
+        .as_ref()
+        .map(|current| pack.edit_origin(current))
+        .transpose();
     pack.begin_rebuild()?;
     changes.validate()?;
+    let origin = origin?;
     let binding = pack.capture(source)?;
     let index = pack.index_path();
     let recipe: vz_core::engine::Recipe =
@@ -114,7 +121,43 @@ fn build(
         let mut originals = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let mut mapping = BTreeMap::new();
         let mut document_ids = BTreeMap::new();
+        let mut office_document_ids = BTreeMap::new();
         let mut budget = Budget::default();
+        let has_office = indexed
+            .iter()
+            .any(|d| ["docx", "xlsx", "pptx"].contains(&d.kind.as_str()));
+        if has_office {
+            budget.enable_office();
+            budget.cancel = Some(pack.cancellation_token());
+        }
+        for (key, value) in &changes.edits {
+            if key.contains(".docx!") || key.contains(".xlsx!") || key.contains(".pptx!") {
+                let (review, private) = origin
+                    .as_ref()
+                    .context("Office edits require the originating review generation/hash")?;
+                let previous = review
+                    .metadata_inventory
+                    .iter()
+                    .find(|entry| &entry.location == key)
+                    .context("Office edit selector absent from originating generation")?;
+                let old = previous
+                    .value
+                    .as_ref()
+                    .context("Office edit target has no prior value")?;
+                ensure!(
+                    private["office_nodes"][key]["prior_sha256"].as_str()
+                        == Some(sha256(old.as_bytes()).as_str()),
+                    "Office stable node binding absent or mismatched"
+                );
+                budget.edit_bindings.insert(
+                    key.clone(),
+                    vz_core::office::Edit {
+                        expected_sha256: sha256(old.as_bytes()),
+                        value: value.clone(),
+                    },
+                );
+            }
+        }
         // Refuse edits which a handler cannot apply; never accept a cosmetic
         // preview change while silently delivering the previous value.
         for key in changes.edits.keys() {
@@ -127,9 +170,17 @@ fn build(
                     && key.ends_with("/name"))
                 || (key.starts_with("documents.parquet/id/") && key.ends_with("/column/2"))
                 || (key.starts_with("chunks.parquet/id/") && key.ends_with("/column/4"));
+            let allowed = allowed || budget.edit_bindings.contains_key(key);
             ensure!(allowed, "edit location has no proven rebuild handler");
         }
         let source = source.canonicalize()?;
+        let origin_removals = origin
+            .as_ref()
+            .and_then(|(_, private)| private.get("office_removals"))
+            .map(|records| serde_json::from_value::<Vec<vz_core::office::Removal>>(records.clone()))
+            .transpose()?
+            .unwrap_or_default();
+        let mut carried_legacy_office_removals = false;
         for (position, mut doc) in indexed.into_iter().enumerate() {
             pack.check_policy()?;
             let relative = Path::new(&doc.path)
@@ -141,10 +192,10 @@ fn build(
             if changes.exclusions.contains(&relative) {
                 continue;
             }
-            // Current proven original parsers preserve all UTF-8 text. Office,
-            // PDF and HTML must be excluded or edited/re-ingested as text.
+            // Only originals with a staged rewrite and readback handler qualify.
+            // PDF and HTML still require explicit seller exclusion.
             ensure!(
-                ["txt", "md", "markdown"].contains(&doc.kind.as_str()),
+                ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str()),
                 "original format has no proven rewrite handler; exclude or re-ingest as text"
             );
             let name = format!("document-{:04}.{}", position + 1, doc.kind);
@@ -154,30 +205,155 @@ fn build(
             }
             let mut bytes = Vec::new();
             std::fs::File::open(&doc.path)?
-                .take(64 * 1024 * 1024 + 1)
+                .take(if has_office {
+                    512 * 1024 * 1024 + 1
+                } else {
+                    64 * 1024 * 1024 + 1
+                })
                 .read_to_end(&mut bytes)?;
             ensure!(
-                bytes.len() <= 64 * 1024 * 1024 && sha256(&bytes) == doc.sha256,
+                bytes.len()
+                    <= if has_office {
+                        512 * 1024 * 1024
+                    } else {
+                        64 * 1024 * 1024
+                    }
+                    && sha256(&bytes) == doc.sha256,
                 "source changed since indexing"
             );
-            let bytes = sanitize::rewrite(&location, &bytes, changes, &mut mapping, &mut budget)?;
-            mapping.insert(relative, location);
-            let text = std::str::from_utf8(&bytes)?;
+            let office = ["docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
             // A stable per-pack pseudonym preserves identity-bound edits without
             // exposing a path digest or linking independent packs to one index.
             let mut identity = Hmac::<Sha256>::new_from_slice(&identity_key)?;
             identity.update(doc.doc_id.as_bytes());
             let public_id = format!("{:x}", identity.finalize().into_bytes());
+            if office {
+                office_document_ids.insert(location.clone(), public_id.clone());
+            }
+            let derived_title = format!("documents.parquet/id/{public_id}/column/2");
+            if office
+                && (changes.edits.contains_key(&derived_title)
+                    || changes
+                        .edits
+                        .keys()
+                        .any(|key| key.starts_with(&format!("chunks.parquet/id/{public_id}-"))))
+            {
+                let (review, private) = origin
+                    .as_ref()
+                    .context("derived Office edits require the originating generation/hash")?;
+                ensure!(
+                    private["document_ids"][&doc.doc_id].as_str() == Some(public_id.as_str()),
+                    "derived Office edit document identity mismatch"
+                );
+                for key in changes.edits.keys().filter(|key| {
+                    **key == derived_title
+                        || key.starts_with(&format!("chunks.parquet/id/{public_id}-"))
+                }) {
+                    ensure!(
+                        review.metadata_inventory.iter().any(|e| &e.location == key),
+                        "derived Office edit absent from originating generation"
+                    );
+                }
+            }
+            if office
+                && budget
+                    .edit_bindings
+                    .keys()
+                    .any(|key| key.starts_with(&format!("{location}!")))
+            {
+                let (_, private) = origin.as_ref().context("Office edit origin missing")?;
+                ensure!(
+                    private["document_ids"][&doc.doc_id].as_str() == Some(public_id.as_str())
+                        && private["mapping"][&relative].as_str() == Some(location.as_str()),
+                    "Office document identity mismatch"
+                );
+                for key in budget
+                    .edit_bindings
+                    .keys()
+                    .filter(|key| key.starts_with(&format!("{location}!")))
+                {
+                    ensure!(
+                        private["office_nodes"][key]["document_id"].as_str()
+                            == Some(public_id.as_str()),
+                        "Office stable node document mismatch"
+                    );
+                    let selector = &key[location.len() + 1..];
+                    let mut identity = Hmac::<Sha256>::new_from_slice(&identity_key)?;
+                    identity.update(b"office-node-v1\0");
+                    identity.update(public_id.as_bytes());
+                    identity.update(selector.as_bytes());
+                    let node_id = format!("{:x}", identity.finalize().into_bytes());
+                    ensure!(
+                        private["office_nodes"][key]["selector"].as_str() == Some(selector)
+                            && private["office_nodes"][key]["node_id"].as_str()
+                                == Some(node_id.as_str()),
+                        "Office stable node identity mismatch"
+                    );
+                }
+            }
+            if office
+                && origin.as_ref().is_some_and(|(_, private)| {
+                    private["mapping"][&relative].as_str() == Some(location.as_str())
+                })
+            {
+                bytes = pack.origin_original(
+                    changes
+                        .origin
+                        .as_ref()
+                        .context("Office edit origin missing")?,
+                    &name,
+                )?;
+                if let Some(sources) = origin
+                    .as_ref()
+                    .and_then(|(_, private)| private.get("office_chart_sources"))
+                    .and_then(|m| m.get(&location))
+                {
+                    budget
+                        .chart_sources
+                        .insert(location.clone(), serde_json::from_value(sources.clone())?);
+                }
+                budget.from_origin.insert(location.clone());
+                budget.removals.extend(
+                    origin_removals
+                        .iter()
+                        .filter(|r| {
+                            r.location.starts_with(&format!("{location}!"))
+                                || (!carried_legacy_office_removals && !r.location.contains('!'))
+                        })
+                        .cloned(),
+                );
+                carried_legacy_office_removals = true;
+            }
+            let bytes = sanitize::rewrite(&location, &bytes, changes, &mut mapping, &mut budget)?;
+            mapping.insert(relative.clone(), location.clone());
+            let text = if office {
+                let (_, report) = sanitize::office_worker(&location, &bytes, &mut budget, true)?;
+                report.text()
+            } else {
+                std::str::from_utf8(&bytes)?.to_owned()
+            };
             document_ids.insert(doc.doc_id.clone(), public_id.clone());
             doc.doc_id = public_id;
             doc.chunks = chunk(
                 &doc.doc_id,
                 &[Page {
                     page: 1,
-                    text: text.into(),
+                    text,
                     needs_ocr: false,
                 }],
             );
+            if office {
+                for chunk in &doc.chunks {
+                    let heading = format!("chunks.parquet/id/{}/column/4", chunk.chunk_id);
+                    if changes.edits.contains_key(&heading) {
+                        let (review, _) = origin
+                            .as_ref()
+                            .context("Office heading edit lacks generation binding")?;
+                        let text = format!("chunks.parquet/id/{}/column/2", chunk.chunk_id);
+                        ensure!(review.metadata_inventory.iter().any(|entry|entry.location==text&&entry.value.as_deref()==Some(chunk.text.as_str())),"Office chunk identity changed after rechunking; review again before editing headings");
+                    }
+                }
+            }
             ensure!(
                 !doc.chunks.is_empty(),
                 "edited document has no text; exclude it instead"
@@ -190,7 +366,11 @@ fn build(
             doc.bytes = bytes.len() as u64;
             doc.pages = 1;
             doc.path = name.clone();
-            originals.start_file(name, zip::write::SimpleFileOptions::default())?;
+            originals.start_file(
+                name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )?;
             originals.write_all(&bytes)?;
             docs.push(doc);
         }
@@ -280,6 +460,12 @@ fn build(
         crate::verify(&work)?;
         let mut inventory = Vec::new();
         let mut read_budget = Budget::default();
+        if has_office {
+            read_budget.enable_office();
+            read_budget.cancel = Some(pack.cancellation_token());
+            read_budget.started = budget.started;
+            read_budget.worker_time = budget.worker_time.clone();
+        }
         for entry in walkdir::WalkDir::new(&work).sort_by_file_name() {
             let entry = entry?;
             if entry.file_type().is_file() {
@@ -307,11 +493,36 @@ fn build(
                 "edit did not reach delivered readback"
             );
         }
-        let warnings = inventory
+        let mut warnings: Vec<String> = inventory
             .iter()
             .filter(|e| e.warning)
             .map(|e| format!("{}: {}", e.location, e.kind))
             .collect();
+        warnings.extend(
+            budget
+                .removals
+                .iter()
+                .map(|r| format!("{}: {}", r.location, r.reason)),
+        );
+        warnings.extend(budget.office_warnings.iter().cloned());
+        warnings.sort();
+        warnings.dedup();
+        let mut office_nodes = BTreeMap::new();
+        for entry in &inventory {
+            if let Some((document, doc_id)) = office_document_ids
+                .iter()
+                .find(|(location, _)| entry.location.starts_with(&format!("{location}!")))
+            {
+                if let Some(value) = &entry.value {
+                    let node = &entry.location[document.len() + 1..];
+                    let mut identity = Hmac::<Sha256>::new_from_slice(&identity_key)?;
+                    identity.update(b"office-node-v1\0");
+                    identity.update(doc_id.as_bytes());
+                    identity.update(node.as_bytes());
+                    office_nodes.insert(entry.location.clone(),json!({"document_id":doc_id,"node_id":format!("{:x}",identity.finalize().into_bytes()),"selector":node,"prior_sha256":sha256(value.as_bytes())}));
+                }
+            }
+        }
         let review = ListingReview {
             schema_version: ReviewVersion::V1,
             pack_id,
@@ -330,7 +541,7 @@ fn build(
             binding,
             review,
             &work,
-            json!({"mapping":mapping,"document_ids":document_ids,"identity_terms":changes.identity_terms}),
+            json!({"mapping":mapping,"document_ids":document_ids,"identity_terms":changes.identity_terms,"office_removals":budget.removals,"office_chart_sources":budget.chart_sources,"office_origin":changes.origin,"office_nodes":office_nodes,"office_allowlist_version":vz_core::office::ALLOWLIST_VERSION}),
         )
     })();
     // The UUID-owned private scratch is never a seller destination.
@@ -747,6 +958,291 @@ mod tests {
         )
         .is_err());
         assert!(guard.check_accepted(&next).is_err());
+    }
+
+    #[test]
+    fn chart_source_bindings_survive_private_review_generations() {
+        let f = Fixture::new();
+        let marker = "private-S1934-charted-cell-marker";
+        let original = include_bytes!("../tests/fixtures/office-public/57362.xlsx");
+        let mut input = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+        let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..input.len() {
+            let mut part = input.by_index(i).unwrap();
+            let name = part.name().to_owned();
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            if name.ends_with(".xml") {
+                bytes = String::from_utf8(bytes)
+                    .unwrap()
+                    .replace("Column1", marker)
+                    .into_bytes();
+            }
+            output
+                .start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        let bytes = output.finish().unwrap().into_inner();
+        let path = f.root.join("source/chart.xlsx");
+        std::fs::write(&path, &bytes).unwrap();
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "charted-source".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: sha256(&bytes),
+            bytes: bytes.len() as u64,
+            pages: 1,
+            kind: "xlsx".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let generation = Uuid::new_v4().to_string();
+        let directory = index.join("generations").join(&generation);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("document.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
+        state.commit(&doc, "fixture", &generation).unwrap();
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &index).unwrap();
+        let mut changes = Fixture::changes();
+        let source = f.root.join("source");
+        let mut current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        for round in 0..2 {
+            let review = guard.inspect(&current).unwrap();
+            let node = review
+                .metadata_inventory
+                .iter()
+                .find(|e| {
+                    e.location.contains(".xlsx!")
+                        && e.location.contains("/cell/A1/")
+                        && e.location.ends_with("/text")
+                })
+                .unwrap();
+            let value = format!("Reviewed chart category {round}");
+            changes.origin = Some(current.clone());
+            changes.edits = BTreeMap::from([(node.location.clone(), value.clone())]);
+            let next = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+            let (review, private) = guard.edit_origin(&next).unwrap();
+            let key = node
+                .location
+                .split('!')
+                .take(2)
+                .collect::<Vec<_>>()
+                .join("!");
+            assert!(!private["office_chart_sources"][&key]["points"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                review
+                    .metadata_inventory
+                    .iter()
+                    .filter(|e| e.location.contains(".xlsx!")
+                        && e.location.ends_with("/text")
+                        && e.value.as_deref() == Some(value.as_str()))
+                    .count(),
+                3
+            );
+            assert!(review
+                .metadata_inventory
+                .iter()
+                .filter_map(|e| e.value.as_ref())
+                .all(|v| !v.contains(marker)));
+            let delivered = guard
+                .origin_original(&next, key.split('!').nth(1).unwrap())
+                .unwrap();
+            assert!(!delivered
+                .windows(marker.len())
+                .any(|b| b == marker.as_bytes()));
+            let mut archive = zip::ZipArchive::new(Cursor::new(delivered)).unwrap();
+            for i in 0..archive.len() {
+                let mut bytes = Vec::new();
+                archive
+                    .by_index(i)
+                    .unwrap()
+                    .read_to_end(&mut bytes)
+                    .unwrap();
+                assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+            }
+            current = next;
+        }
+        assert_eq!(sha256(&std::fs::read(path).unwrap()), doc.sha256);
+    }
+
+    #[test]
+    fn office_removals_stay_linear_across_edit_generations() {
+        let f = Fixture::new();
+        let source = f.root.join("source");
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        for i in 0..3 {
+            let original = include_bytes!("../../../spike/fixtures/documents/library.docx");
+            let mut input = zip::ZipArchive::new(Cursor::new(original)).unwrap();
+            let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for j in 0..input.len() {
+                let mut part = input.by_index(j).unwrap();
+                let name = part.name().to_owned();
+                let mut bytes = Vec::new();
+                part.read_to_end(&mut bytes).unwrap();
+                if name == "word/document.xml" {
+                    bytes = String::from_utf8(bytes)
+                        .unwrap()
+                        .replace("<w:body>", "<w:body w:rsidR=\"planted-removal-1927\">")
+                        .into_bytes();
+                }
+                output
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                output.write_all(&bytes).unwrap();
+            }
+            let bytes = output.finish().unwrap().into_inner();
+            let path = source.join(format!("office-{i}.docx"));
+            std::fs::write(&path, &bytes).unwrap();
+            let doc = vz_core::pipeline::Document {
+                doc_id: format!("office-{i}"),
+                path: path.to_str().unwrap().into(),
+                sha256: sha256(&bytes),
+                bytes: bytes.len() as u64,
+                pages: 1,
+                kind: "docx".into(),
+                needs_ocr_pages: vec![],
+                chunks: vec![],
+            };
+            let generation = Uuid::new_v4().to_string();
+            let directory = index.join("generations").join(&generation);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join("document.json"),
+                serde_json::to_vec(&doc).unwrap(),
+            )
+            .unwrap();
+            state.commit(&doc, "fixture", &generation).unwrap();
+        }
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &index).unwrap();
+        let mut changes = Fixture::changes();
+        let mut current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        for round in 0..4 {
+            let (_, private) = guard.edit_origin(&current).unwrap();
+            let records = private["office_removals"].as_array().unwrap();
+            assert_eq!(records.len(), 3, "round {round}");
+            assert!(records.iter().all(|r| r["location"]
+                .as_str()
+                .unwrap()
+                .starts_with("originals-0001.zip!document-")));
+            let review = guard.inspect(&current).unwrap();
+            let node = review
+                .metadata_inventory
+                .iter()
+                .find(|e| e.kind == "Office text" && e.value.is_some())
+                .unwrap();
+            for record in records {
+                let warning = format!(
+                    "{}: {}",
+                    record["location"].as_str().unwrap(),
+                    record["reason"].as_str().unwrap()
+                );
+                assert_eq!(review.warnings.iter().filter(|w| **w == warning).count(), 1);
+            }
+            if round < 3 {
+                changes.origin = Some(current.clone());
+                changes.edits.insert(
+                    node.location.clone(),
+                    format!("Edited Office text round {round}"),
+                );
+                current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn office_edit_exclusion_rechunk_and_generation_binding() {
+        let f = Fixture::new();
+        let bytes = include_bytes!("../../../spike/fixtures/documents/library.docx");
+        let path = f.root.join("source/z-office.docx");
+        std::fs::write(&path, bytes).unwrap();
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "office-stable-source".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: sha256(bytes),
+            bytes: bytes.len() as u64,
+            pages: 1,
+            kind: "docx".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let generation = Uuid::new_v4().to_string();
+        let directory = index.join("generations").join(&generation);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("document.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
+        state.commit(&doc, "fixture", &generation).unwrap();
+        drop(state);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &index).unwrap();
+        let source = f.root.join("source");
+        let mut changes = Fixture::changes();
+        let first = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        let review = guard.inspect(&first).unwrap();
+        let nodes: Vec<_> = review
+            .metadata_inventory
+            .iter()
+            .filter(|entry| entry.kind == "Office text" && entry.value.is_some())
+            .collect();
+        assert_eq!(nodes.len(), 2);
+        changes.origin = Some(first.clone());
+        changes.exclusions.insert("client-original.md".into());
+        changes
+            .edits
+            .insert(nodes[0].location.clone(), "Reviewed Office title".into());
+        changes.edits.insert(
+            nodes[1].location.clone(),
+            "Reviewed changed Office body. ".repeat(500),
+        );
+        let second = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        let second_review = guard.inspect(&second).unwrap();
+        for (location, value) in &changes.edits {
+            assert!(second_review
+                .metadata_inventory
+                .iter()
+                .any(|e| &e.location == location && e.value.as_ref() == Some(value)));
+        }
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|t| t.contains("Reviewed changed Office body")));
+        assert!(guard.accept(&first).is_err());
+        assert!(guard.accept(&second).is_ok());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        // The old generation cannot authorize another mutation, even if the
+        // location and expected text happen to match a current node.
+        assert!(build(&guard, &source, id, &f.engine, "query", &changes).is_err());
+        changes.origin = Some(second);
+        std::fs::write(&path, b"observed source swap").unwrap();
+        assert!(build(&guard, &source, id, &f.engine, "query", &changes).is_err());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(
+            build(&guard, &source, id, &f.engine, "query", &changes).is_err(),
+            "restoring bytes cannot revive a revoked Office edit origin"
+        );
     }
 
     #[test]

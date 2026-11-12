@@ -1,0 +1,15 @@
+{
+  "files": [
+    {
+      "file": "date-categories.pptx",
+      "source": "https://github.com/LibreOffice/core/blob/bb7bf7d968dc35d06b68375129dc389d881e3ba8/chart2/qa/extras/chart2dump/data/date-categories.pptx",
+      "revision": "bb7bf7d968dc35d06b68375129dc389d881e3ba8",
+      "licence": "MPL-2.0",
+      "licence_file": "LIBREOFFICE-COPYING.MPL",
+      "application": "Microsoft Office PowerPoint",
+      "app_version": "16.0000",
+      "sha256": "e63fa7a88c472650f40abb2b21ce68cd9824c0fff3c47b5f45077456497178cb",
+      "purpose": "Real Microsoft-saved chart with chart-owned external oleObject workbook link"
+    }
+  ]
+}

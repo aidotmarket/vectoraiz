@@ -46,3 +46,36 @@ not establish a need to replace PDFium or calamine, and makes no claim that the
 remaining formats are implemented. Further corpus work must assess DOCX style
 fidelity and HTML structure, scanned-PDF quality and languages, malformed
 containers, oversized pages, and Windows OCR after Store packaging.
+
+Office listing preparation (S1927) uses a separate default-deny OOXML rebuild
+and readback; ordinary ingestion does not certify an original for delivery.
+Excel delivery is a values-only cached snapshot, including removal of expression
+thresholds regardless of their declared conditional-format type. PPTX ingestion
+uses presentation relationship order, with numeric part order only for packages
+missing presentation metadata.
+
+The current listing subset explicitly refuses charts, SmartArt and EMF/WMF/SVG,
+other unsupported media, active content, invalid package graphs and fields without
+safe displayed results. These are visible file refusals requiring an explicit
+seller exclusion or a supported local resave. No chart cache or SmartArt fidelity
+claim is made. Seller preview remains disabled pending C1/C5 qualification,
+including installed Office and Document Inspector checks.
+
+The public regression fixtures under `crates/vz-pack/tests/fixtures/office-public`
+include unmodified Office 15/16 files with pinned upstream hashes and licence.
+For a larger offline corpus, use `scripts/office-public-corpus.py` with the pinned
+Apache POI source archive and an external output directory, then run
+`cargo run -p vz-core --example office-corpus -- CORPUS EXTERNAL_DETAILS_JSON`.
+The selector checks Application and AppVersion >=15. POI also contains deliberately
+malformed regression cases; the metadata is save provenance evidence, not proof
+that each fixture was untouched after that save. Keep first-refusal results and
+negative cases when reporting coverage. Generated openpyxl/python-docx corpora
+provide regression evidence only, not independent Microsoft-saved coverage.
+
+The version 3 layout subset is selected from pinned Open XML SDK schema data.
+`scripts/office-layout-allowlist.py DATA_SCHEMAS | rustfmt --emit stdout` reproduces
+`crates/vz-core/src/office/layout_allowlist.rs`. It admits only selected layout
+families and typed boolean/numeric/enum attributes, rejects ambiguous schema
+rules, and retains the per-part restrictions. Font names and AutoFilter text use
+separate explicit inventory rules; unknown text, identifiers and targets still
+refuse. The source revision and MIT licence are retained beside the module.

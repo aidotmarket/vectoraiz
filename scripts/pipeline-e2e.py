@@ -11,11 +11,13 @@ import signal
 import subprocess
 import sys
 import tempfile
+from office_fixtures import write_pptx
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
 RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
-CLI = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
+TARGET = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
+CLI = TARGET / 'debug' / ('vectoraiz-cli.exe' if os.name == 'nt' else 'vectoraiz-cli')
 # Preview is enabled only for this acceptance build, never by environment or
 # user preference. Restore the default-off CLI even when the journey fails.
 subprocess.run([*RTK, "cargo", "build", "-p", "vz-cli", "-p", "vz-parser-worker", "--features", "vz-cli/listing-preview-harness"], cwd=ROOT, check=True)
@@ -31,10 +33,13 @@ try:
                 print(result.stdout)
                 raise RuntimeError(f'CLI {args[0]} failed: {result.returncode}')
             return json.loads(result.stdout)
-        indexed = cli('index', 'spike/fixtures/documents')
-        assert indexed['completed'] == 20 and indexed['failed'] == 0, indexed
-        unchanged = cli('index', 'spike/fixtures/documents')
-        assert unchanged['skipped'] == 20, unchanged
+        journey_source = Path(temp) / "journey-documents"
+        shutil.copytree(ROOT / "spike/fixtures/documents", journey_source)
+        write_pptx(journey_source / "office-notes.pptx")
+        indexed = cli('index', str(journey_source))
+        assert indexed['completed'] == 21 and indexed['failed'] == 0, indexed
+        unchanged = cli('index', str(journey_source))
+        assert unchanged['skipped'] == 21, unchanged
         query = 'What is the orbital archive retention policy?'
         hits = cli('search', query)
         assert hits and 'thirty days' in hits[0]['chunk']['text'], hits[:1]
@@ -44,10 +49,10 @@ try:
         assert 'thirty days' in body.lower(), body
         numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
         assert numbers and numbers == [c['number'] for c in answer['citations']], answer
-        def reviewed_pack(output):
-            source = ROOT / "spike/fixtures/documents"
+        def office_reviewed_journey(output):
+            source = journey_source
             changes = Path(temp) / "changes.json"
-            changes.write_text(json.dumps({"edits": {"documents.parquet/column/2/name": "reviewed_title", "documents.parquet/column/5/name": "reviewed_language"}, "exclusions": [p.name for p in source.iterdir() if p.suffix not in (".txt", ".md", ".markdown")], "identity_terms": ["private-fixture-identity"]}))
+            changes.write_text(json.dumps({"edits": {"documents.parquet/column/2/name": "reviewed_title", "documents.parquet/column/5/name": "reviewed_language"}, "exclusions": [p.name for p in source.iterdir() if p.suffix not in (".txt", ".md", ".markdown", ".docx", ".xlsx", ".pptx")], "identity_terms": ["private-fixture-identity"]}))
             reference = cli("preview", "--store", str(Path(temp) / "reviews"), "--source", str(source), "--changes", str(changes), "--query", query)
             reference_path = Path(temp) / "reference.json"
             reference_path.write_text(json.dumps(reference))
@@ -56,6 +61,22 @@ try:
             review = cli("review", "--store", reference["store"], "--current", str(current_path))
             assert review["metadata_inventory"] and review["accepted_review_hash"] is None
             assert any(e["value"] is None for e in review["metadata_inventory"])
+            # Each format takes the actual reviewed edit/rebuild path before
+            # the shared folder, live SFTP and MinIO transfer assertions below.
+            office_edits = {}
+            for ext in ("docx", "xlsx", "pptx"):
+                entry = next(e for e in review["metadata_inventory"] if f".{ext}!" in e["location"] and e["kind"] == "Office text" and e["value"])
+                office_edits[entry["location"]] = f"Reviewed {ext} Office content"
+            requested = json.loads(changes.read_text())
+            requested["origin"] = reference["current"]
+            requested["edits"].update(office_edits)
+            changes.write_text(json.dumps(requested))
+            reference = cli("preview", "--store", reference["store"], "--source", str(source), "--pack-id", reference["current"]["pack_id"], "--changes", str(changes), "--query", query)
+            reference_path.write_text(json.dumps(reference))
+            current_path.write_text(json.dumps(reference["current"]))
+            review = cli("review", "--store", reference["store"], "--current", str(current_path))
+            for location, value in office_edits.items():
+                assert any(e["location"] == location and e["value"] == value for e in review["metadata_inventory"])
             accepted = cli("review", "--store", reference["store"], "--current", str(current_path), "--accept")
             assert accepted["accepted_review_hash"] == reference["current"]["review_hash"]
             manifest = cli("--review-reference", str(reference_path), "pack", str(output), "--query", query)
@@ -120,7 +141,7 @@ try:
                 else: os.killpg(server.pid, signal.SIGTERM)
                 server.wait(timeout=15)
             return manifest, reference_path
-        manifest, reference_path = reviewed_pack(pack)
+        manifest, reference_path = office_reviewed_journey(pack)
         # object_pairs_hook runs bottom-up, including objects nested inside arrays.
         def sorted_object(pairs):
             keys = [key for key, _ in pairs]
@@ -185,8 +206,8 @@ try:
         (legacy / 'recipe.json').write_bytes(old_bytes)
         explicit_state = state
         state = library
-        rebuilt = cli('index', 'spike/fixtures/documents')
-        assert rebuilt['completed'] == 20 and rebuilt['failed'] == 0, rebuilt
+        rebuilt = cli('index', str(journey_source))
+        assert rebuilt['completed'] == 21 and rebuilt['failed'] == 0, rebuilt
         pointer_bytes = (library / 'active-index.json').read_bytes()
         pointer = json.loads(pointer_bytes)
         active = library / pointer['dir']
@@ -195,8 +216,8 @@ try:
         assert pointer == {'dir': f'indexes/{recipe_id}', 'recipe_id': recipe_id}, pointer
         assert cli('search', query), 'search after migration'
         assert cli('ask', query)['citations'], 'Ask after migration'
-        assert reviewed_pack(Path(temp) / 'migrated-pack')[0]['embedding_recipe'] == recipe
-        assert cli('index', 'spike/fixtures/documents')['skipped'] == 20
+        assert office_reviewed_journey(Path(temp) / 'migrated-pack')[0]['embedding_recipe'] == recipe
+        assert cli('index', str(journey_source))['skipped'] == 21
         assert (library / 'active-index.json').read_bytes() == pointer_bytes
         assert (legacy / 'recipe.json').read_bytes() == old_bytes
         # Gate 3: exercise real indexer failures, publication and retry, rather
@@ -268,7 +289,7 @@ try:
         # A matching legacy recipe is adopted without re-embedding or a new directory.
         state = Path(temp) / 'matching-legacy-library'
         shutil.copytree(explicit_state, state / 'phase0-index')
-        assert cli('index', 'spike/fixtures/documents')['skipped'] == 20
+        assert cli('index', str(journey_source))['skipped'] == 21
         assert json.loads((state / 'active-index.json').read_text())['dir'] == 'phase0-index'
         assert not (state / 'indexes').exists()
         assert cli('search', query)

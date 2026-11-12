@@ -1,0 +1,84 @@
+{
+  "source": "https://github.com/dotnet/Open-XML-SDK/blob/431ab05cf160248cc3885a4a766026d4f8243792/data/schemas/schemas_openxmlformats_org_drawingml_2006_chart.json",
+  "licence": "MIT",
+  "source_sha256": "cc504f44275968b6c33386a2a21e34a112cac06865392f5a74483b2e80ed7c61",
+  "Types": [
+    {
+      "Name": "c:CT_Tx/c:tx",
+      "ClassName": "ChartText",
+      "Summary": "Defines the ChartText Class.",
+      "CompositeType": "OneChoice",
+      "BaseClass": "OpenXmlCompositeElement",
+      "Children": [
+        {
+          "Name": "c:CT_StrRef/c:strRef",
+          "PropertyName": "StringReference",
+          "PropertyComments": "String Reference"
+        },
+        {
+          "Name": "a:CT_TextBody/c:rich",
+          "PropertyName": "RichText",
+          "PropertyComments": "Rich Text"
+        },
+        {
+          "Name": "c:CT_StrData/c:strLit",
+          "PropertyName": "StringLiteral",
+          "PropertyComments": "String Literal"
+        }
+      ],
+      "Particle": {
+        "Kind": "Sequence",
+        "Items": [
+          {
+            "Kind": "Choice",
+            "Items": [
+              {
+                "Name": "c:CT_StrRef/c:strRef"
+              },
+              {
+                "Name": "a:CT_TextBody/c:rich"
+              },
+              {
+                "Name": "c:CT_StrData/c:strLit"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "Name": "c:CT_SerTx/c:tx",
+      "ClassName": "SeriesText",
+      "Summary": "Series Text.",
+      "CompositeType": "OneChoice",
+      "BaseClass": "OpenXmlCompositeElement",
+      "Children": [
+        {
+          "Name": "c:CT_StrRef/c:strRef",
+          "PropertyName": "StringReference"
+        },
+        {
+          "Name": "c:ST_Xstring/c:v",
+          "PropertyName": "NumericValue"
+        }
+      ],
+      "Particle": {
+        "Kind": "Sequence",
+        "Items": [
+          {
+            "Kind": "Choice",
+            "Items": [
+              {
+                "Name": "c:CT_StrRef/c:strRef"
+              },
+              {
+                "Name": "c:ST_Xstring/c:v"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "licence_file": "OPENXML-SDK-LICENSE"
+}

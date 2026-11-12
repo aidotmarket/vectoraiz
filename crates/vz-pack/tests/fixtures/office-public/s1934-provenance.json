@@ -1,0 +1,98 @@
+{
+  "repository": "https://github.com/apache/poi",
+  "revision": "77df76b9c990cadbb3c8ae72f05a03fa06194c7a",
+  "licence": "Apache-2.0",
+  "files": [
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/61745.docx",
+      "sha256": "ec54badce04b9fc3c4c327e31fbbd06c1bb556056df9cf04760db75c8913f8a2",
+      "application": "Microsoft Office Word",
+      "app_version": "15.0000",
+      "format": "docx",
+      "file": "61745.docx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/61745.docx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/56557.xlsx",
+      "sha256": "1660ad90dfb9e81d4b3fb6bf35d8a24d9515fdbe7abcfebaa909da08f1c01f2d",
+      "application": "Microsoft Excel",
+      "app_version": "15.0300",
+      "format": "xlsx",
+      "file": "56557.xlsx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/56557.xlsx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/57362.xlsx",
+      "sha256": "9f06f767e5b665965e892e3213e8c529ad42b2b12d2cccf9594eb3ffe945a86e",
+      "application": "Microsoft Excel",
+      "app_version": "15.0300",
+      "format": "xlsx",
+      "file": "57362.xlsx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/57362.xlsx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/bar-chart.pptx",
+      "sha256": "79e1d218bfb2903e8dc8425a6b1997d9c1976f5a5f025bada85b0c47b5777969",
+      "application": "Microsoft Macintosh PowerPoint",
+      "app_version": "15.0033",
+      "format": "pptx",
+      "file": "bar-chart.pptx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/bar-chart.pptx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/chart-picture-bg.pptx",
+      "sha256": "97bad7041fa5f23408eea513cd85bf7fed47a8ba218d8791a59be14cb53fdaa5",
+      "application": "Microsoft Office PowerPoint",
+      "app_version": "16.0000",
+      "format": "pptx",
+      "file": "chart-picture-bg.pptx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/chart-picture-bg.pptx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/smartart-rotated-text.pptx",
+      "sha256": "a357985aec81b0bfa8a71138bbe94c9b3f6e00dee110c0da34302e22253de260",
+      "application": "Microsoft Macintosh PowerPoint",
+      "app_version": "16.0000",
+      "format": "pptx",
+      "file": "smartart-rotated-text.pptx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/smartart-rotated-text.pptx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/chartex.docx",
+      "sha256": "5d7f0ca9aa26d0244eedbc8ff862f08910689ec3848a036c622b17d56a290b57",
+      "application": "Microsoft Office Word",
+      "app_version": "16.0000",
+      "format": "docx",
+      "file": "chartex.docx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/chartex.docx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/integration/stress024.xlsx",
+      "sha256": "1426b310329954a89df61a05668d25911c4b0e438974cb99e2a08818eb25b3a4",
+      "application": "Microsoft Excel",
+      "app_version": "15.0300",
+      "format": "xlsx",
+      "file": "stress024.xlsx",
+      "source": "https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/integration/stress024.xlsx",
+      "licence": "Apache-2.0"
+    },
+    {
+      "file": "boxWhisker.xlsx",
+      "format": "xlsx",
+      "source": "https://github.com/LibreOffice/core/blob/116fa523e13379147315ad2ab73455b2ce392b5d/chart2/qa/extras/data/xlsx/boxWhisker.xlsx",
+      "revision": "116fa523e13379147315ad2ab73455b2ce392b5d",
+      "licence": "MPL-2.0",
+      "licence_file": "LIBREOFFICE-COPYING.MPL",
+      "application": "Microsoft Excel",
+      "app_version": "16.0300",
+      "sha256": "7c725dda9da6f571ea58824f603bf6eff7bc6c49d122ac4322cc0d6129fa7f92"
+    }
+  ]
+}

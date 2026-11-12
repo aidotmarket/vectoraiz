@@ -139,7 +139,15 @@ pub async fn index(
                 .is_some_and(|e| {
                     matches!(
                         e.to_ascii_lowercase().as_str(),
-                        "pdf" | "docx" | "xlsx" | "txt" | "md" | "markdown" | "html" | "htm"
+                        "pdf"
+                            | "docx"
+                            | "xlsx"
+                            | "pptx"
+                            | "txt"
+                            | "md"
+                            | "markdown"
+                            | "html"
+                            | "htm"
                     )
                 })
         {
@@ -187,6 +195,7 @@ pub async fn index(
                 &worker::executable()?,
                 &worker::Request {
                     path: path.clone(),
+                    office: None,
                     pdfium: if path
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
@@ -196,7 +205,17 @@ pub async fn index(
                         None
                     },
                 },
-                Duration::from_secs(60),
+                Duration::from_secs(
+                    if path.extension().is_some_and(|ext| {
+                        ["docx", "xlsx", "pptx"]
+                            .iter()
+                            .any(|kind| ext.eq_ignore_ascii_case(kind))
+                    }) {
+                        120
+                    } else {
+                        60
+                    },
+                ),
             )?;
             if crate::pipeline::file_sha256(&path)
                 .map_err(|e| crate::failures::source_io(e.into()))?
@@ -428,6 +447,62 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn listing_refused_office_original_still_indexes_and_is_searchable() {
+        use std::io::{Cursor, Read, Write};
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = tempfile::tempdir().unwrap();
+        let input = include_bytes!("../../vz-pack/tests/fixtures/office-public/SampleDoc.docx");
+        let mut archive = zip::ZipArchive::new(Cursor::new(input)).unwrap();
+        let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for i in 0..archive.len() {
+            let mut part = archive.by_index(i).unwrap();
+            let mut bytes = Vec::new();
+            part.read_to_end(&mut bytes).unwrap();
+            output
+                .start_file(part.name(), zip::write::SimpleFileOptions::default())
+                .unwrap();
+            output.write_all(&bytes).unwrap();
+        }
+        output
+            .start_file(
+                "word/charts/chart1.xml",
+                zip::write::SimpleFileOptions::default(),
+            )
+            .unwrap();
+        output.write_all(b"<unsupported-chart/>").unwrap();
+        let bytes = output.finish().unwrap().into_inner();
+        assert!(crate::office::rebuild("document.docx", &bytes, &Default::default()).is_err());
+        std::fs::write(source.path().join("document.docx"), bytes).unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let mut state = State::open(index.path()).unwrap();
+        let engines = Engines::load_embedding(
+            &root.join(".assets"),
+            &root.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let result = super::index(
+            &mut state,
+            source.path(),
+            &engines,
+            &root.join(".assets"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.completed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.infrastructure_failed, 0);
+        let documents = state.documents().unwrap();
+        assert_eq!(documents.len(), 1);
+        let query = &documents[0].chunks[0].text;
+        let vector = engines.vector(query, true).unwrap();
+        let hits = state.search(query, &vector, 3).await.unwrap();
+        assert!(hits
+            .iter()
+            .any(|hit| hit.chunk.doc_id == documents[0].doc_id));
+    }
     #[tokio::test]
     async fn unchanged_skip_reads_only_matching_document() {
         let root = tempfile::tempdir().unwrap();

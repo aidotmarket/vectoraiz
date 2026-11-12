@@ -33,7 +33,7 @@ with socket.socket() as sock:
 endpoint = f'http://127.0.0.1:{port}'
 server = ROOT / ('.tools/minio.exe' if os.name == 'nt' else '.tools/minio')
 cli = ROOT / ('target/debug/vectoraiz-cli.exe' if os.name == 'nt' else 'target/debug/vectoraiz-cli')
-with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.get('KD_BRIDGE_JOB_EVIDENCE', data)) / 'minio-test.log').open('w') as log:
+with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.get('KD_BRIDGE_JOB_EVIDENCE', data)) / f'minio-test-{os.getpid()}-{time.time_ns()}.log').open('x') as log:
     child = subprocess.Popen([*RTK, str(server), 'server', data, '--address', f'127.0.0.1:{port}', '--console-address', '127.0.0.1:0'], env=env, stdout=log, stderr=subprocess.STDOUT, start_new_session=os.name != "nt")
     try:
         deadline = time.monotonic() + 60
@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory(prefix='vz-minio-') as data, (Path(os.environ.g
             try:
                 urllib.request.urlopen(endpoint + '/minio/health/ready', timeout=1).close(); break
             except OSError:
-                if time.monotonic() > deadline or child.poll() is not None: raise RuntimeError('MinIO failed to start; see minio-test.log')
+                if time.monotonic() > deadline or child.poll() is not None: raise RuntimeError(f'MinIO failed to start; see {log.name}')
                 time.sleep(.2)
         s3 = boto3.client('s3', endpoint_url=endpoint, aws_access_key_id=env['AWS_ACCESS_KEY_ID'], aws_secret_access_key=env['AWS_SECRET_ACCESS_KEY'], region_name='us-east-1', config=Config(s3={'addressing_style': 'path'}))
         s3.create_bucket(Bucket='phase0-pack')

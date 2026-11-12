@@ -1,0 +1,49 @@
+{
+  "repository": "https://github.com/apache/poi",
+  "revision": "77df76b9c990cadbb3c8ae72f05a03fa06194c7a",
+  "licence": "Apache-2.0",
+  "files": [
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/Bug64561.docx",
+      "sha256": "ae2ce22d39377301bf17145d6ce0812f6cf33ab9639edb7b06bc1f5254bd9824",
+      "application": "Microsoft Office Word",
+      "app_version": "16.0000",
+      "format": "docx"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/tika-3816.docx",
+      "sha256": "ab5b32d15d2fd14c633452cc5a8b1cd27cd65038cd208a11ede29d6f8fe24259",
+      "application": "Microsoft Office Word",
+      "app_version": "16.0000",
+      "format": "docx"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/1_NoIden.xlsx",
+      "sha256": "87c8aa12cc031a54be9e2a3b1d6aec37b095eaafbb874218ad829528f13d286e",
+      "application": "Microsoft Excel",
+      "app_version": "15.0300",
+      "format": "xlsx"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/Excel_file_with_trash_item.xlsx",
+      "sha256": "e9c4515c22be30487a9ce3c081e74cf58b5143aa42b6dc07e891aa261066fa98",
+      "application": "Microsoft Excel",
+      "app_version": "16.0300",
+      "format": "xlsx"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/text-highlight.pptx",
+      "sha256": "e048faad93f2e271294b4b4bf2228a95c038d9efbfdee43528d5ef8732049012",
+      "application": "Microsoft Office PowerPoint",
+      "app_version": "16.0000",
+      "format": "pptx"
+    },
+    {
+      "upstream": "poi-77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/63200.pptx",
+      "sha256": "9729b1032278541ffa549b86a51336fd6063c309f3fc25ba68af376d03a92e69",
+      "application": "Microsoft Macintosh PowerPoint",
+      "app_version": "16.0000",
+      "format": "pptx"
+    }
+  ]
+}

@@ -1,0 +1,2658 @@
+//! Constructed OOXML adversarial fixtures plus public Office-saved originals.
+//! Installed Microsoft 365/Document Inspector remains a manual qualification gate.
+use std::{
+    collections::BTreeMap,
+    io::{Cursor, Read, Write},
+};
+use vz_core::{
+    office::{self, Edit},
+    pipeline::sha256,
+};
+
+const REL: &str = "http://schemas.openxmlformats.org/package/2006/relationships";
+const R: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+const CT: &str = "http://schemas.openxmlformats.org/package/2006/content-types";
+const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
+const S: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+const P: &str = "http://schemas.openxmlformats.org/presentationml/2006/main";
+const A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+fn archive(parts: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (k, v) in parts {
+        z.start_file(
+            k,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+        z.write_all(v).unwrap();
+    }
+    z.finish().unwrap().into_inner()
+}
+fn members(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut z = zip::ZipArchive::new(Cursor::new(bytes)).unwrap();
+    (0..z.len())
+        .map(|i| {
+            let mut p = z.by_index(i).unwrap();
+            let mut b = vec![];
+            p.read_to_end(&mut b).unwrap();
+            (p.name().into(), b)
+        })
+        .collect()
+}
+fn fixture(ext: &str) -> BTreeMap<String, Vec<u8>> {
+    let(main,ty,body)=match ext{
+        "docx"=>("word/document.xml","wordprocessingml.document",format!("<w:document xmlns:w=\"{W}\"><w:body><w:p><w:r><w:t>Project ORION retained body</w:t></w:r></w:p></w:body></w:document>")),
+        "xlsx"=>("xl/workbook.xml","spreadsheetml.sheet",format!("<s:workbook xmlns:s=\"{S}\" xmlns:r=\"{R}\"><s:sheets><s:sheet name=\"Project ORION\" sheetId=\"1\" state=\"veryHidden\" r:id=\"s1\"/></s:sheets></s:workbook>")),
+        _=>("ppt/presentation.xml","presentationml.presentation",format!("<p:presentation xmlns:p=\"{P}\" xmlns:r=\"{R}\"><p:sldIdLst><p:sldId id=\"256\" r:id=\"s1\"/></p:sldIdLst></p:presentation>")),
+    };
+    let mut parts=BTreeMap::from([
+        ("[Content_Types].xml".into(),format!("<Types xmlns=\"{CT}\"><Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/><Override PartName=\"/{main}\" ContentType=\"application/vnd.openxmlformats-officedocument.{ty}.main+xml\"/></Types>").into_bytes()),
+        ("_rels/.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"root\" Type=\"{R}/officeDocument\" Target=\"{main}\"/></Relationships>").into_bytes()),
+        (main.into(),body.into_bytes()),
+    ]);
+    if ext == "xlsx" {
+        add(&mut parts,"xl/worksheets/identity-sheet.xml","application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",&format!("<s:worksheet xmlns:s=\"{S}\"><s:sheetData><s:row r=\"1\" hidden=\"1\"><s:c r=\"A1\" t=\"inlineStr\"><s:is><s:t>Project ORION retained body</s:t></s:is></s:c></s:row></s:sheetData></s:worksheet>"));
+        parts.insert("xl/_rels/workbook.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"s1\" Type=\"{R}/worksheet\" Target=\"worksheets/identity-sheet.xml\"/></Relationships>").into_bytes());
+    }
+    if ext == "pptx" {
+        add(&mut parts,"ppt/slides/slide1.xml","application/vnd.openxmlformats-officedocument.presentationml.slide+xml",&format!("<p:sld xmlns:p=\"{P}\" xmlns:a=\"{A}\" show=\"0\"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:cNvPr id=\"1\" name=\"Project ORION shape\" descr=\"Project ORION alt text\" hidden=\"1\"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Project ORION retained body</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"));
+        parts.insert("ppt/_rels/presentation.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"s1\" Type=\"{R}/slide\" Target=\"slides/slide1.xml\"/></Relationships>").into_bytes());
+    }
+    parts
+}
+fn add(parts: &mut BTreeMap<String, Vec<u8>>, path: &str, ty: &str, body: &str) {
+    parts.insert(path.into(), body.as_bytes().to_vec());
+    let ct = String::from_utf8(parts["[Content_Types].xml"].clone()).unwrap();
+    parts.insert(
+        "[Content_Types].xml".into(),
+        ct.replace(
+            "</Types>",
+            &format!("<Override PartName=\"/{path}\" ContentType=\"{ty}\"/></Types>"),
+        )
+        .into_bytes(),
+    );
+}
+fn rebuild(ext: &str, p: &BTreeMap<String, Vec<u8>>) -> (Vec<u8>, office::Report) {
+    office::rebuild(&format!("document.{ext}"), &archive(p), &BTreeMap::new()).unwrap()
+}
+#[test]
+fn office_benign_roundtrip() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let p = fixture(ext);
+        let source = archive(&p);
+        let digest = sha256(&source);
+        let (bytes, r) = rebuild(ext, &p);
+        let reopened = office::inspect(&format!("document.{ext}"), &bytes).unwrap();
+        assert_eq!(r.inventory, reopened.inventory);
+        assert_eq!(r.text(), reopened.text());
+        assert!(r.text().contains("Project ORION retained body"));
+        assert_eq!(sha256(&source), digest);
+        assert!(!members(&bytes).keys().any(|p| p.contains("identity-sheet")));
+    }
+}
+#[test]
+fn office_metadata() {
+    let markers = [
+        "planted-user-S1927",
+        "C:/planted-user-S1927/private/path",
+        "aaaaaaaa-bbbb-cccc-dddd-123456789abc",
+    ];
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        add(
+            &mut p,
+            "docProps/core.xml",
+            "application/vnd.openxmlformats-package.core-properties+xml",
+            &format!("<private>{}</private>", markers.join("|")),
+        );
+        add(
+            &mut p,
+            "customXml/item1.xml",
+            "application/xml",
+            &format!("<private>{}</private>", markers.join("|")),
+        );
+        add(
+            &mut p,
+            "docMetadata/LabelInfo.xml",
+            "application/xml",
+            &format!("<private>{}</private>", markers.join("|")),
+        );
+        let carriers: &[&str] = match ext {
+            "docx" => &[
+                "docProps/app.xml",
+                "docProps/custom.xml",
+                "docProps/thumbnail.png",
+                "word/comments.xml",
+                "word/people.xml",
+                "word/printerSettings/printer1.bin",
+                "word/glossary/document.xml",
+            ],
+            "xlsx" => &[
+                "docProps/app.xml",
+                "docProps/custom.xml",
+                "docProps/thumbnail.png",
+                "xl/comments1.xml",
+                "xl/threadedComments/threadedComment1.xml",
+                "xl/persons/person.xml",
+                "xl/printerSettings/printer1.bin",
+                "xl/revisions/revisionLog.xml",
+                "xl/webextensions/webextension1.xml",
+            ],
+            _ => &[
+                "docProps/app.xml",
+                "docProps/custom.xml",
+                "docProps/thumbnail.png",
+                "ppt/comments/comment1.xml",
+                "ppt/commentAuthors.xml",
+                "ppt/printerSettings/printer1.bin",
+                "ppt/tags/tag1.xml",
+                "ppt/revisionInfo.xml",
+                "ppt/changesInfos/changes1.xml",
+            ],
+        };
+        for carrier in carriers {
+            add(
+                &mut p,
+                carrier,
+                "application/xml",
+                &format!("<private>{}</private>", markers.join("|")),
+            );
+        }
+        if ext == "docx" {
+            let source = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+            let revisions=format!("<w:ins w:author=\"{}\" w:date=\"2026-11-11T00:00:00Z\"><w:r><w:t>Accepted current insertion</w:t></w:r></w:ins><w:del w:author=\"{}\"><w:r><w:delText>{}</w:delText></w:r></w:del><w:commentRangeStart w:id=\"1\"/><w:commentRangeEnd w:id=\"1\"/>",markers[0],markers[0],markers[1]);
+            p.insert(
+                "word/document.xml".into(),
+                source
+                    .replace("</w:p>", &format!("{revisions}</w:p>"))
+                    .into_bytes(),
+            );
+        }
+        let rels = String::from_utf8(p["_rels/.rels"].clone()).unwrap();
+        p.insert("_rels/.rels".into(), rels.replace("</Relationships>", &format!("<Relationship Id=\"properties\" Type=\"{REL}/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>")).into_bytes());
+        let (bytes, r) = rebuild(ext, &p);
+        assert!(r.removals.iter().any(|x| x.value.contains(markers[0])));
+        for marker in markers {
+            assert!(!bytes.windows(marker.len()).any(|v| v == marker.as_bytes()));
+            for (k, v) in members(&bytes) {
+                assert!(!k.contains(marker));
+                assert!(!v.windows(marker.len()).any(|v| v == marker.as_bytes()));
+            }
+            assert!(!serde_json::to_string(&r.inventory)
+                .unwrap()
+                .contains(marker));
+        }
+        assert!(r.inventory.iter().any(|v| v.value.is_none()));
+    }
+}
+#[test]
+fn office_hidden() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        if ext == "docx" {
+            let b = String::from_utf8(p["word/document.xml"].clone())
+                .unwrap()
+                .replace("<w:r>", "<w:r><w:rPr><w:vanish/></w:rPr>");
+            p.insert("word/document.xml".into(), b.into_bytes());
+        }
+        let (_, r) = rebuild(ext, &p);
+        assert!(r
+            .inventory
+            .iter()
+            .any(|v| v.value.as_deref().is_some_and(|s| s.contains("ORION"))));
+        assert!(r.inventory.iter().filter(|v| v.content).all(|v| v.warning));
+        assert!(r.inventory.iter().any(|v| v.location.contains(match ext {
+            "docx" => "vanish",
+            "xlsx" => "state",
+            _ => "hidden",
+        })));
+    }
+}
+#[test]
+fn office_formulas_cached_errors_and_uncached() {
+    let mut p = fixture("xlsx");
+    let path = "xl/worksheets/identity-sheet.xml";
+    let original = String::from_utf8(p[path].clone()).unwrap();
+    let formula = "<s:c r=\"B7\" t=\"e\"><s:f>NA()</s:f><s:v>#N/A</s:v></s:c>";
+    p.insert(
+        path.into(),
+        original
+            .replace("</s:row>", &format!("{formula}</s:row>"))
+            .into_bytes(),
+    );
+    let (bytes, r) = rebuild("xlsx", &p);
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("#N/A") && v.warning));
+    assert!(r.removals.iter().any(|r| r.value.contains("NA()")));
+    assert!(!String::from_utf8_lossy(&bytes).contains("NA()"));
+    assert!(!r.inventory.iter().any(|v| v.location.contains("}f[")));
+    p.insert(
+        path.into(),
+        original
+            .replace("</s:row>", "<s:c r=\"B7\"><s:f>1+1</s:f></s:c></s:row>")
+            .into_bytes(),
+    );
+    let e = office::rebuild("x.xlsx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("uncached formula"));
+}
+#[test]
+fn office_shared_and_array_formula_removal_records() {
+    let mut p = fixture("xlsx");
+    p.insert("xl/worksheets/identity-sheet.xml".into(),format!("<s:worksheet xmlns:s=\"{S}\"><s:sheetData><s:row r=\"1\"><s:c r=\"A1\"><s:f t=\"shared\" si=\"0\" ref=\"A1:A2\">$B1+1</s:f><s:v>3</s:v></s:c><s:c r=\"C1\"><s:f t=\"array\" ref=\"C1:D1\">ROW(C1:D1)</s:f><s:v>1</s:v></s:c><s:c r=\"D1\"><s:v>1</s:v></s:c></s:row><s:row r=\"2\"><s:c r=\"A2\"><s:f t=\"shared\" si=\"0\"/><s:v>4</s:v></s:c></s:row></s:sheetData></s:worksheet>").into_bytes());
+    let (bytes, r) = rebuild("xlsx", &p);
+    assert!(r
+        .removals
+        .iter()
+        .any(|v| v.location.contains("A2/formula") && v.value == "$B2+1"));
+    assert!(r
+        .removals
+        .iter()
+        .any(|v| v.location.contains("D1/formula") && v.value == "ROW(C1:D1)"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("ROW("));
+}
+#[test]
+fn office_field_instructions() {
+    let mut p = fixture("docx");
+    let source = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    let field="<w:r><w:fldChar w:fldCharType=\"begin\"/></w:r><w:r><w:instrText>DDEAUTO planted-secret</w:instrText></w:r><w:r><w:fldChar w:fldCharType=\"separate\"/></w:r><w:r><w:t>Safe displayed result</w:t></w:r><w:r><w:fldChar w:fldCharType=\"end\"/></w:r>";
+    p.insert(
+        "word/document.xml".into(),
+        source
+            .replace("</w:p>", &format!("{field}</w:p>"))
+            .into_bytes(),
+    );
+    let (bytes, r) = rebuild("docx", &p);
+    assert!(r.text().contains("Safe displayed result"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("planted-secret"));
+    assert!(r
+        .removals
+        .iter()
+        .any(|r| r.value.contains("planted-secret")));
+}
+#[test]
+fn office_edit_binding() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let p = fixture(ext);
+        let input = archive(&p);
+        let (_, r) = rebuild(ext, &p);
+        let node = r
+            .inventory
+            .iter()
+            .find(|v| {
+                v.kind == "Office text" && v.value.as_deref() == Some("Project ORION retained body")
+            })
+            .unwrap();
+        let edits = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: sha256(node.value.as_ref().unwrap().as_bytes()),
+                value: "Reviewed replacement body".into(),
+            },
+        )]);
+        let (bytes, r) = office::rebuild(&format!("x.{ext}"), &input, &edits).unwrap();
+        let reopened = office::inspect(&format!("x.{ext}"), &bytes).unwrap();
+        assert!(reopened.text().contains("Reviewed replacement body"));
+        assert_eq!(r.text(), reopened.text());
+        for v in &reopened.inventory {
+            if v.content {
+                assert!(r.text().contains(v.value.as_deref().unwrap_or("")));
+            }
+        }
+        let stale = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: "0".repeat(64),
+                value: "Wrong target".into(),
+            },
+        )]);
+        assert!(office::rebuild(&format!("x.{ext}"), &input, &stale).is_err());
+    }
+}
+#[test]
+fn office_chunk_parity() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        if ext == "docx" {
+            let xml = String::from_utf8(p["word/document.xml"].clone())
+                .unwrap()
+                .replace(
+                    "<w:p>",
+                    "<w:p><w:pPr><w:pStyle w:val=\"Heading1\"/></w:pPr>",
+                );
+            p.insert("word/document.xml".into(), xml.into_bytes());
+        }
+        let (_, report) = rebuild(ext, &p);
+        let text = report.text();
+        let chunks = vz_core::pipeline::chunk(
+            "stable-doc",
+            &[vz_core::pipeline::Page {
+                page: 1,
+                text: text.clone(),
+                needs_ocr: false,
+            }],
+        );
+        let content = chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for v in report.inventory.iter().filter(|v| v.content) {
+            assert!(content.contains(v.value.as_deref().unwrap_or("")));
+        }
+        for c in &chunks {
+            assert!(text
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .contains(&c.text));
+        }
+        if ext == "docx" {
+            assert!(chunks
+                .iter()
+                .any(|c| c.heading_path.iter().any(|h| h.contains("ORION"))));
+        }
+    }
+}
+#[test]
+fn office_identity_locations() {
+    use vz_pack::sanitize::{rebuild_artifact, Changes};
+    for ext in ["docx", "xlsx", "pptx"] {
+        let input = archive(&fixture(ext));
+        let changes = Changes {
+            identity_terms: vec!["ORION".into(), "private-term-only-S1927".into()],
+            ..Default::default()
+        };
+        let result = rebuild_artifact(&format!("x.{ext}"), &input, &changes).unwrap();
+        assert!(result.inventory.iter().any(|e| e
+            .value
+            .as_deref()
+            .is_some_and(|v| v.contains("ORION"))
+            && e.warning
+            && e.location.contains(&format!(".{ext}!"))));
+        assert!(!String::from_utf8_lossy(&result.bytes).contains("private-term-only-S1927"));
+    }
+    assert!(vz_pack::sanitize::check_identifier("ORION-public-bucket", &["ORION".into()]).is_err());
+}
+#[test]
+fn office_refusals() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        p.insert(
+            "word/vbaProject.bin".into(),
+            b"disguised active payload".to_vec(),
+        );
+        assert!(office::rebuild(&format!("x.{ext}"), &archive(&p), &BTreeMap::new()).is_err());
+        for path in ["../escape.xml", "WORD/document.xml", "escaped%2Exml"] {
+            let mut p = fixture(ext);
+            p.insert(path.into(), b"<x/>".to_vec());
+            assert!(office::rebuild(&format!("x.{ext}"), &archive(&p), &BTreeMap::new()).is_err());
+        }
+        for variant in ["docm", "xlsm", "pptm", "doc", "xls", "ppt", "pdf", "html"] {
+            assert!(office::rebuild(
+                &format!("x.{variant}"),
+                &archive(&fixture(ext)),
+                &BTreeMap::new()
+            )
+            .is_err());
+        }
+        let mut p = fixture(ext);
+        let k = p
+            .keys()
+            .find(|k| k.ends_with(".xml") && k.as_str() != "[Content_Types].xml")
+            .unwrap()
+            .clone();
+        p.insert(
+            k,
+            b"<!DOCTYPE x [<!ENTITY secret SYSTEM 'file:///private'>]><x>&secret;</x>".to_vec(),
+        );
+        assert!(office::rebuild(&format!("x.{ext}"), &archive(&p), &BTreeMap::new()).is_err());
+    }
+}
+#[test]
+fn office_container_limits_in_rewrite_and_readback() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let source = archive(&fixture(ext));
+        let mut encrypted = source.clone();
+        encrypted[6] |= 1;
+        let central = encrypted
+            .windows(4)
+            .position(|b| b == b"PK\x01\x02")
+            .unwrap();
+        encrypted[central + 8] |= 1;
+        assert!(office::rebuild(&format!("x.{ext}"), &encrypted, &BTreeMap::new()).is_err());
+        assert!(office::inspect(&format!("x.{ext}"), &encrypted).is_err());
+        let mut too_large = source.clone();
+        let central = too_large
+            .windows(4)
+            .position(|b| b == b"PK\x01\x02")
+            .unwrap();
+        too_large[central + 24..central + 28]
+            .copy_from_slice(&((office::MAX_BYTES + 1) as u32).to_le_bytes());
+        assert!(
+            office::rebuild(&format!("x.{ext}"), &too_large, &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("OFFICE_DOCUMENT_BYTES_EXCEEDED")
+        );
+        assert!(office::inspect(&format!("x.{ext}"), &too_large).is_err());
+        let mut p = fixture(ext);
+        let main = match ext {
+            "docx" => "word/document.xml",
+            "xlsx" => "xl/workbook.xml",
+            _ => "ppt/presentation.xml",
+        };
+        p.insert(main.to_uppercase(), p[main].clone());
+        assert!(
+            office::rebuild(&format!("x.{ext}"), &archive(&p), &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("duplicate")
+        );
+    }
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for i in 0..=office::MAX_PARTS {
+        zip.start_file(
+            format!("part{i}.xml"),
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+    }
+    let bytes = zip.finish().unwrap().into_inner();
+    assert!(office::rebuild("x.docx", &bytes, &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("OFFICE_PART_LIMIT_EXCEEDED"));
+    assert!(office::inspect("x.docx", &bytes)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("OFFICE_PART_LIMIT_EXCEEDED"));
+}
+#[test]
+fn office_external_links_and_template() {
+    let mut p = fixture("docx");
+    add(&mut p,"word/settings.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",&format!("<w:settings xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:attachedTemplate r:id=\"template\"/><w:docVars><w:docVar w:name=\"private-variable\" w:val=\"private-template-user\"/></w:docVars></w:settings>"));
+    p.insert("word/_rels/settings.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"template\" Type=\"{R}/attachedTemplate\" Target=\"file:///private/template\" TargetMode=\"External\"/></Relationships>").into_bytes());
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"template\" Type=\"{R}/attachedTemplate\" Target=\"file:///private/template\" TargetMode=\"External\"/></Relationships>").into_bytes());
+    let (bytes, r) = rebuild("docx", &p);
+    assert!(!String::from_utf8_lossy(&bytes).contains("file:///private/template"));
+    assert!(r
+        .removals
+        .iter()
+        .any(|v| v.value.contains("file:///private/template")));
+    let source=String::from_utf8(p["word/document.xml"].clone()).unwrap().replace("<w:document ","<w:document xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" ");
+    p.insert("word/document.xml".into(),source.replace("</w:p>","<w:hyperlink r:id=\"web\"><w:r><w:t>Retained link label</w:t></w:r></w:hyperlink></w:p>").into_bytes());
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"web\" Type=\"{R}/hyperlink\" Target=\"HTTPS://example.test/ORION\" TargetMode=\"External\"/></Relationships>").into_bytes());
+    let (_, r) = rebuild("docx", &p);
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("HTTPS://example.test/ORION") && v.warning));
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"web\" Type=\"{R}/hyperlink\" Target=\"file:///removed/private-user\" TargetMode=\"External\"/></Relationships>").into_bytes());
+    let (bytes, r) = rebuild("docx", &p);
+    assert!(r.text().contains("Retained link label"));
+    assert!(!String::from_utf8_lossy(&bytes).contains("file:///removed/private-user"));
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"image\" Type=\"{R}/image\" Target=\"https://example.test/image.png\" TargetMode=\"External\"/></Relationships>").into_bytes());
+    assert!(office::rebuild("x.docx", &archive(&p), &BTreeMap::new()).is_err());
+}
+#[test]
+fn office_values_only_x14_rules() {
+    let mut p = fixture("xlsx");
+    let path = "xl/worksheets/identity-sheet.xml";
+    let source = String::from_utf8(p[path].clone()).unwrap();
+    let rules="<s:extLst><s:ext uri=\"{CCE6A557-97BC-4B89-ADB6-D9C93CAAB3DF}\"><x14:dataValidations count=\"2\"><x14:dataValidation type=\"custom\"><x14:formula1><xm:f>private_x14_validation()</xm:f></x14:formula1><xm:sqref>B7</xm:sqref></x14:dataValidation><x14:dataValidation type=\"none\" prompt=\"Retained prompt ORION\"><xm:sqref>C7</xm:sqref></x14:dataValidation></x14:dataValidations></s:ext><s:ext uri=\"{78C0D931-6437-407D-A8EE-F0AAD7539E65}\"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule type=\"expression\" priority=\"1\"><xm:f>private_x14_conditional()</xm:f></x14:cfRule><xm:sqref>B7</xm:sqref></x14:conditionalFormatting></x14:conditionalFormattings></s:ext></s:extLst>";
+    let source=source.replace("<s:worksheet ", "<s:worksheet xmlns:x14=\"http://schemas.microsoft.com/office/spreadsheetml/2009/9/main\" xmlns:xm=\"http://schemas.microsoft.com/office/excel/2006/main\" ");
+    p.insert(
+        path.into(),
+        source
+            .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
+            .into_bytes(),
+    );
+    let (bytes, r) = rebuild("xlsx", &p);
+    for value in ["private_x14_validation()", "private_x14_conditional()"] {
+        assert!(!String::from_utf8_lossy(&bytes).contains(value));
+        assert!(r.removals.iter().any(|v| v.value.contains(value)));
+    }
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("Retained prompt ORION")));
+}
+
+#[test]
+fn office_pivot_cache() {
+    let mut p = fixture("xlsx");
+    add(
+        &mut p,
+        "xl/pivotCache/pivotCacheDefinition1.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml",
+        "<cacheSource>private-pivot-user</cacheSource>",
+    );
+    let path = "xl/worksheets/identity-sheet.xml";
+    let source = String::from_utf8(p[path].clone()).unwrap();
+    let rules="<s:dataValidations count=\"1\"><s:dataValidation type=\"custom\" sqref=\"B7\"><s:formula1>private_validation_formula()</s:formula1></s:dataValidation></s:dataValidations><s:conditionalFormatting sqref=\"B7\"><s:cfRule type=\"expression\" priority=\"1\"><s:formula>private_conditional_formula()</s:formula></s:cfRule></s:conditionalFormatting>";
+    p.insert(
+        path.into(),
+        source
+            .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
+            .into_bytes(),
+    );
+    let workbook=String::from_utf8(p["xl/workbook.xml"].clone()).unwrap().replace("</s:workbook>","<s:definedNames><s:definedName name=\"private_name\">private_defined_formula()</s:definedName></s:definedNames></s:workbook>");
+    p.insert("xl/workbook.xml".into(), workbook.into_bytes());
+    let (bytes, r) = rebuild("xlsx", &p);
+    for term in [
+        "private-pivot-user",
+        "private_validation_formula",
+        "private_conditional_formula",
+        "private_defined_formula",
+    ] {
+        assert!(!String::from_utf8_lossy(&bytes).contains(term));
+        assert!(r.removals.iter().any(|v| v.value.contains(term)));
+    }
+    assert!(!r.warnings.is_empty());
+}
+
+#[test]
+fn office_shared_strings_are_cell_local_after_rebuild() {
+    let mut p = fixture("xlsx");
+    add(&mut p,"xl/sharedStrings.xml","application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",&format!("<s:sst xmlns:s=\"{S}\" count=\"2\" uniqueCount=\"2\"><s:si><s:t>Shared identity</s:t></s:si><s:si><s:t>orphan-private-user</s:t></s:si></s:sst>"));
+    p.insert("xl/worksheets/identity-sheet.xml".into(),format!("<s:worksheet xmlns:s=\"{S}\"><s:sheetData><s:row r=\"1\"><s:c r=\"A1\" t=\"s\"><s:v>0</s:v></s:c><s:c r=\"B1\" t=\"s\"><s:v>0</s:v></s:c></s:row></s:sheetData></s:worksheet>").into_bytes());
+    let (bytes, r) = rebuild("xlsx", &p);
+    assert!(!String::from_utf8_lossy(&bytes).contains("orphan-private-user"));
+    let node = r
+        .inventory
+        .iter()
+        .find(|v| {
+            v.kind == "Office text"
+                && v.location.contains("/cell/A1/")
+                && v.value.as_deref() == Some("Shared identity")
+        })
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(b"Shared identity"),
+            value: "Only first cell".into(),
+        },
+    )]);
+    let (_, edited) = office::edit("x.xlsx", &bytes, &edits).unwrap();
+    assert!(
+        edited
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("/cell/B1/")
+                && v.value.as_deref() == Some("Shared identity"))
+    );
+    assert!(
+        edited
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("/cell/A1/")
+                && v.value.as_deref() == Some("Only first cell"))
+    );
+}
+
+#[test]
+fn office_notes_are_in_inventory_and_chunks() {
+    let mut p = fixture("pptx");
+    add(&mut p,"ppt/notesSlides/notesSlide1.xml","application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml",&format!("<p:notes xmlns:p=\"{P}\" xmlns:a=\"{A}\"><p:cSld><p:spTree><p:sp><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Hidden speaker note ORION</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:notes>"));
+    p.insert("ppt/slides/_rels/slide1.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"notes\" Type=\"{R}/notesSlide\" Target=\"../notesSlides/notesSlide1.xml\"/></Relationships>").into_bytes());
+    let (bytes, r) = rebuild("pptx", &p);
+    assert!(r.text().contains("Hidden speaker note ORION"));
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.location.contains("notesSlides/")
+            && v.value.as_deref() == Some("Hidden speaker note ORION")));
+    office::inspect("x.pptx", &bytes).unwrap();
+}
+
+#[test]
+fn office_identity_named_media_part() {
+    // Decode a one-pixel PNG, attach source metadata/trailing private bytes,
+    // then verify neutral path and intact image relationship after rebuilding.
+    let png: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6,
+        0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0,
+        1, 122, 94, 171, 63, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        let prefix = match ext {
+            "docx" => "word",
+            "xlsx" => "xl",
+            _ => "ppt",
+        };
+        let media_path = format!("{prefix}/media/planted-user-S1927/identity.png");
+        let mut image = png.to_vec();
+        image.extend_from_slice(b"planted-user-S1927 trailing private data");
+        add(&mut p, &media_path, "image/png", "");
+        p.insert(media_path.clone(), image);
+        let main = match ext {
+            "docx" => "document.xml",
+            "xlsx" => "workbook.xml",
+            _ => "presentation.xml",
+        };
+        let rp = format!("{prefix}/_rels/{main}.rels");
+        let mut xml = p
+            .get(&rp)
+            .map(|v| String::from_utf8(v.clone()).unwrap())
+            .unwrap_or_else(|| format!("<Relationships xmlns=\"{REL}\"></Relationships>"));
+        xml=xml.replace("</Relationships>",&format!("<Relationship Id=\"media\" Type=\"{R}/image\" Target=\"media/planted-user-S1927/identity.png\"/></Relationships>"));
+        p.insert(rp, xml.into_bytes());
+        let (bytes, r) = rebuild(ext, &p);
+        assert!(!String::from_utf8_lossy(&bytes).contains("planted-user-S1927"));
+        assert!(r
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("/media/part-")));
+        assert!(r.warnings.iter().any(|v| v.contains("visual review")));
+    }
+}
+#[test]
+fn office_malformed_chart_deck_specific_refusal() {
+    let mut p = fixture("pptx");
+    add(
+        &mut p,
+        "ppt/charts/chart1.xml",
+        "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+        "<chart><cached>Varied chart points 1.25 3.5 7.75</cached></chart>",
+    );
+    let error = office::rebuild("chart-deck.pptx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("unsupported/Strict/mismatched root at ppt/charts/chart1.xml"),
+        "{error}"
+    );
+}
+
+#[test]
+fn office_xml_roundtrip_and_attribute_dos_bound() {
+    let mut p = fixture("docx");
+    let xml = String::from_utf8(p["word/document.xml"].clone())
+        .unwrap()
+        .replace("Project ORION retained body", "Fish &amp; chips &#x1F600;");
+    p.insert("word/document.xml".into(), xml.into_bytes());
+    let (_, r) = rebuild("docx", &p);
+    assert!(r.text().contains("Fish & chips 😀"));
+    let attrs = (0..129)
+        .map(|i| format!(" attr{i}=\"x\""))
+        .collect::<String>();
+    p.insert(
+        "word/document.xml".into(),
+        format!("<w:document xmlns:w=\"{W}\"{attrs}><w:body/></w:document>").into_bytes(),
+    );
+    let err = office::rebuild("x.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("OFFICE_XML_ATTRIBUTE_LIMIT_EXCEEDED"), "{err}");
+}
+
+#[test]
+#[ignore = "million-cell supervised capacity run; invoke explicitly after building vz-parser-worker"]
+fn office_capacity() {
+    let mut p = fixture("xlsx");
+    let mut sheet = format!("<s:worksheet xmlns:s=\"{S}\"><s:sheetData>");
+    for row in 1..=50_000u64 {
+        sheet.push_str(&format!("<s:row r=\"{row}\">"));
+        for col in 0..20u64 {
+            let letter = (b'A' + col as u8) as char;
+            // Varied, non-repeating numeric values: do not accidentally make
+            // the capacity fixture a >100:1 compression-ratio refusal.
+            let value = row
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(col.wrapping_mul(1442695040888963407));
+            sheet.push_str(&format!(
+                "<s:c r=\"{letter}{row}\" t=\"n\"><s:v>{value}</s:v></s:c>"
+            ));
+        }
+        sheet.push_str("</s:row>");
+    }
+    sheet.push_str("</s:sheetData></s:worksheet>");
+    p.insert(
+        "xl/worksheets/identity-sheet.xml".into(),
+        sheet.into_bytes(),
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let input = temp.path().join("capacity.xlsx");
+    std::fs::write(&input, archive(&p)).unwrap();
+    drop(p);
+    let request = vz_core::worker::Request {
+        path: input,
+        pdfium: None,
+        office: Some(vz_core::worker::OfficeJob {
+            name: "office_capacity.xlsx".into(),
+            output: temp.path().into(),
+            edits: BTreeMap::new(),
+            readback: false,
+            sanitized_input: false,
+            chart_sources: Default::default(),
+        }),
+    };
+    let result = vz_core::worker::run(
+        &vz_core::worker::executable().unwrap(),
+        &request,
+        std::time::Duration::from_secs(120),
+    );
+    match result {
+        Ok(_) => assert!(temp.path().join("output.bin").is_file()),
+        Err(e) => {
+            let message = format!("{e:#}");
+            assert!(
+                message.contains("OFFICE_MEMORY_LIMIT_EXCEEDED")
+                    || message.contains("OFFICE_INVENTORY_LIMIT_EXCEEDED")
+                    || message.contains("worker timeout"),
+                "{message}"
+            );
+            eprintln!("office_capacity specific refusal: {message}");
+            assert!(!temp.path().join("output.bin").exists());
+        }
+    }
+}
+
+#[test]
+fn office_standard_font_theme_settings_and_tables() {
+    let colors = [
+        "dk1", "lt1", "dk2", "lt2", "accent1", "accent2", "accent3", "accent4", "accent5",
+        "accent6", "hlink", "folHlink",
+    ];
+    let palette = colors
+        .iter()
+        .map(|name| format!("<a:{name}><a:srgbClr val=\"336699\"/></a:{name}>"))
+        .collect::<String>();
+    let fill = "<a:solidFill><a:schemeClr val=\"phClr\"/></a:solidFill>";
+    let gradient="<a:gradFill rotWithShape=\"1\"><a:gsLst><a:gs pos=\"0\"><a:schemeClr val=\"phClr\"><a:satMod val=\"105000\"/><a:lumMod val=\"110000\"/></a:schemeClr></a:gs><a:gs pos=\"100000\"><a:srgbClr val=\"FFFFFF\"/></a:gs></a:gsLst><a:lin ang=\"5400000\" scaled=\"0\"/></a:gradFill>";
+    let line=format!("<a:ln w=\"9525\" cap=\"flat\" cmpd=\"sng\" algn=\"ctr\">{fill}<a:prstDash val=\"solid\"/><a:miter lim=\"800000\"/></a:ln>");
+    let effect="<a:effectStyle><a:effectLst><a:outerShdw blurRad=\"40000\" dist=\"20000\" dir=\"5400000\" rotWithShape=\"0\"><a:srgbClr val=\"000000\"><a:alpha val=\"38000\"/></a:srgbClr></a:outerShdw></a:effectLst></a:effectStyle>";
+    let fonts=["majorFont","minorFont"].iter().map(|font|format!("<a:{font}><a:latin typeface=\"Calibri\"/><a:ea typeface=\"\"/><a:cs typeface=\"\"/><a:font script=\"Arab\" typeface=\"Arial\"/></a:{font}>")).collect::<String>();
+    let theme=format!("<a:theme xmlns:a=\"{A}\" name=\"Office\"><a:themeElements><a:clrScheme name=\"Office\">{palette}</a:clrScheme><a:fontScheme name=\"Office\">{fonts}</a:fontScheme><a:fmtScheme name=\"Office\"><a:fillStyleLst>{fill}{gradient}{fill}</a:fillStyleLst><a:lnStyleLst>{}</a:lnStyleLst><a:effectStyleLst>{}</a:effectStyleLst><a:bgFillStyleLst>{fill}{gradient}{fill}</a:bgFillStyleLst></a:fmtScheme></a:themeElements><a:objectDefaults/><a:extraClrSchemeLst/></a:theme>",line.repeat(3),effect.repeat(3));
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut p = fixture(ext);
+        let prefix = match ext {
+            "docx" => "word",
+            "xlsx" => "xl",
+            _ => "ppt",
+        };
+        add(
+            &mut p,
+            &format!("{prefix}/theme/theme1.xml"),
+            "application/vnd.openxmlformats-officedocument.theme+xml",
+            &theme,
+        );
+        if ext == "docx" {
+            add(&mut p,"word/fontTable.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml",&format!("<w:fonts xmlns:w=\"{W}\"><w:font w:name=\"Calibri\"><w:panose1 w:val=\"020F0502020204030204\"/><w:charset w:val=\"00\"/><w:family w:val=\"swiss\"/><w:pitch w:val=\"variable\"/><w:sig w:usb0=\"E0002AFF\" w:usb1=\"C0007843\" w:usb2=\"00000009\" w:usb3=\"00000000\" w:csb0=\"000001FF\" w:csb1=\"00000000\"/></w:font></w:fonts>"));
+            add(&mut p,"word/settings.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",&format!("<w:settings xmlns:w=\"{W}\" xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"><w:zoom w:percent=\"100\"/><w:proofState w:spelling=\"clean\" w:grammar=\"clean\"/><w:defaultTabStop w:val=\"720\"/><w:compat><w:compatSetting w:name=\"compatibilityMode\" w:uri=\"http://schemas.microsoft.com/office/word\" w:val=\"15\"/></w:compat><m:mathPr><m:mathFont m:val=\"Cambria Math\"/></m:mathPr><w:themeFontLang w:val=\"en-US\"/><w:decimalSymbol w:val=\".\"/><w:listSeparator w:val=\",\"/></w:settings>"));
+            add(&mut p,"word/styles.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",&format!("<w:styles xmlns:w=\"{W}\"><w:latentStyles w:defLockedState=\"0\" w:defUIPriority=\"99\" w:defSemiHidden=\"1\" w:defUnhideWhenUsed=\"1\" w:defQFormat=\"0\" w:count=\"1\"><w:lsdException w:name=\"Normal\" w:uiPriority=\"0\" w:qFormat=\"1\"/></w:latentStyles><w:style w:type=\"paragraph\" w:styleId=\"Normal\"><w:name w:val=\"Normal\"/><w:qFormat/><w:pPr><w:tabs><w:tab w:val=\"left\" w:pos=\"720\"/></w:tabs></w:pPr></w:style></w:styles>"));
+        } else if ext == "xlsx" {
+            let xml=String::from_utf8(p["xl/workbook.xml"].clone()).unwrap().replace("<s:sheets>","<s:fileVersion appName=\"xl\" lastEdited=\"7\" lowestEdited=\"7\" rupBuild=\"1234\"/><s:sheets>");
+            p.insert("xl/workbook.xml".into(), xml.into_bytes());
+        } else {
+            add(&mut p,"ppt/tableStyles.xml","application/vnd.openxmlformats-officedocument.presentationml.tableStyles+xml",&format!("<a:tblStyleLst xmlns:a=\"{A}\" def=\"{{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}}\"/>"));
+            add(&mut p,"ppt/presProps.xml","application/vnd.openxmlformats-officedocument.presentationml.presProps+xml",&format!("<p:presentationPr xmlns:p=\"{P}\"><p:showPr loop=\"0\"><p:present/><p:sldAll/></p:showPr></p:presentationPr>"));
+            add(
+                &mut p,
+                "ppt/viewProps.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.viewProps+xml",
+                "<editor>private-editor-state</editor>",
+            );
+            let graphic="<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=\"2\" name=\"Table\"/><p:cNvGraphicFramePr/><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"1000000\" cy=\"1000000\"/></p:xfrm><a:graphic><a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/table\"><a:tbl><a:tblPr firstRow=\"1\" bandRow=\"1\"><a:tableStyleId>{5C22544A-7EE6-4342-B048-85BDC9FD1C3A}</a:tableStyleId></a:tblPr><a:tblGrid><a:gridCol w=\"1000000\"/></a:tblGrid><a:tr h=\"400000\"><a:tc><a:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Office table text ORION</a:t></a:r></a:p></a:txBody><a:tcPr/></a:tc></a:tr></a:tbl></a:graphicData></a:graphic></p:graphicFrame>".to_owned();
+            let slide = String::from_utf8(p["ppt/slides/slide1.xml"].clone())
+                .unwrap()
+                .replace("</p:spTree>", &format!("{graphic}</p:spTree>"));
+            p.insert("ppt/slides/slide1.xml".into(), slide.into_bytes());
+        }
+        let (bytes, report) = rebuild(ext, &p);
+        assert!(report
+            .inventory
+            .iter()
+            .any(|v| v.value.as_deref() == Some("Calibri")));
+        assert!(!String::from_utf8_lossy(&bytes).contains("private-editor-state"));
+        if ext == "pptx" {
+            assert!(report.text().contains("Office table text ORION"));
+        }
+        let bad = theme.replace("<a:gradFill ", "<a:gradFill privatePath=\"forbidden\" ");
+        p.insert(format!("{prefix}/theme/theme1.xml"), bad.into_bytes());
+        assert!(office::rebuild(&format!("x.{ext}"), &archive(&p), &BTreeMap::new()).is_err());
+    }
+}
+
+#[test]
+fn office_neutral_sheet_directories_rewrite_relationships() {
+    let mut p = fixture("xlsx");
+    let old = "xl/worksheets/identity-sheet.xml";
+    let renamed = "xl/worksheets/planted-user-S1927/private-sheet.xml";
+    let data = p.remove(old).unwrap();
+    p.insert(renamed.into(), data);
+    let types = String::from_utf8(p["[Content_Types].xml"].clone())
+        .unwrap()
+        .replace(old, renamed);
+    p.insert("[Content_Types].xml".into(), types.into_bytes());
+    let rels = String::from_utf8(p["xl/_rels/workbook.xml.rels"].clone())
+        .unwrap()
+        .replace(
+            "worksheets/identity-sheet.xml",
+            "worksheets/planted-user-S1927/private-sheet.xml",
+        );
+    p.insert("xl/_rels/workbook.xml.rels".into(), rels.into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(!String::from_utf8_lossy(&bytes).contains("planted-user-S1927"));
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.location.starts_with("xl/worksheets/part-")));
+}
+
+#[test]
+fn office_standard_word_rendering_settings_refuse_active_neighbors() {
+    let mut p = fixture("docx");
+    let settings = format!(
+        r#"<w:settings xmlns:w="{W}"><w:hideSpellingErrors/><w:stylePaneFormatFilter w:val="3F01"/><w:doNotAutoCompressPictures/><w:compat><w:useFELayout/><w:doNotUseHTMLParagraphAutoSpacing w:val="1"/><w:useWord2002TableStyleRules/></w:compat><w:footnotePr><w:numFmt w:val="decimal"/><w:footnote w:id="-1"/></w:footnotePr></w:settings>"#
+    );
+    add(
+        &mut p,
+        "word/settings.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml",
+        &settings,
+    );
+    let styles = format!(
+        r#"<w:styles xmlns:w="{W}"><w:style w:type="table" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/></w:tblCellMar><w:tblLook w:val="04A0" w:firstRow="1" w:noVBand="1"/></w:tblPr><w:tblStylePr w:type="firstRow"><w:rPr><w:b/></w:rPr></w:tblStylePr></w:style></w:styles>"#
+    );
+    add(
+        &mut p,
+        "word/styles.xml",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml",
+        &styles,
+    );
+    // top/bottom are context-dependent table margins, not paragraph borders.
+    let (bytes, report) = rebuild("docx", &p);
+    assert_eq!(
+        report.inventory,
+        office::inspect("x.docx", &bytes).unwrap().inventory
+    );
+    for payload in [
+        "<w:mailMerge/>",
+        "<w:updateFields w:val=\"1\"/>",
+        "<w:saveThroughXslt/>",
+        "<w:unknownEditorSetting/>",
+        "<w:useFELayout w:privatePath=\"secret\"/>",
+    ] {
+        p.insert(
+            "word/settings.xml".into(),
+            settings
+                .replace("</w:settings>", &format!("{payload}</w:settings>"))
+                .into_bytes(),
+        );
+        let error = office::rebuild("x.docx", &archive(&p), &BTreeMap::new())
+            .err()
+            .expect("active setting must refuse");
+        assert!(format!("{error:#}").contains("word/settings.xml"));
+    }
+}
+
+#[test]
+fn formula_cfvo_rules_removed_with_private_evidence() {
+    for (ty, expression) in [
+        ("formula", "SUM(A1:A5)+1927"),
+        ("num", "SUM(A1:A5)+1927"),
+        ("percent", "Secret!$C$9"),
+        ("percentile", "SUM(A1:A5)+1927"),
+        ("min", "SUM(A1:A5)+1927"),
+        ("max", "SUM(A1:A5)+1927"),
+    ] {
+        let mut p = fixture("xlsx");
+        let path = "xl/worksheets/identity-sheet.xml";
+        let sheet = String::from_utf8(p[path].clone()).unwrap();
+        let rules = "<s:conditionalFormatting sqref=\"A1:A5\"><s:cfRule type=\"colorScale\" priority=\"1\"><s:colorScale><s:cfvo type=\"formula\" val=\"SUM(A1:A5)+1927\"/><s:cfvo type=\"max\"/></s:colorScale></s:cfRule><s:cfRule type=\"dataBar\" priority=\"2\"><s:dataBar><s:cfvo type=\"min\"/><s:cfvo type=\"max\"/></s:dataBar></s:cfRule></s:conditionalFormatting>";
+        let rules = rules
+            .replace("type=\"formula\"", &format!("type=\"{ty}\""))
+            .replace("SUM(A1:A5)+1927", expression);
+        p.insert(
+            path.into(),
+            sheet
+                .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
+                .into_bytes(),
+        );
+        let (bytes, report) = rebuild("xlsx", &p);
+        assert!(report.removals.iter().any(|r| r.value.contains(expression)));
+        for part in members(&bytes).values() {
+            assert!(!String::from_utf8_lossy(part).contains(expression));
+        }
+        let reopened = office::inspect("document.xlsx", &bytes).unwrap();
+        assert_eq!(report.inventory, reopened.inventory);
+        assert!(members(&bytes)
+            .values()
+            .any(|b| String::from_utf8_lossy(b).contains("dataBar")));
+        // Inject into canonical delivered bytes so another source-only carrier
+        // cannot cause a false-positive readback refusal.
+        let mut tampered = members(&bytes);
+        let (_, xml) = tampered
+            .iter_mut()
+            .find(|(name, _)| name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+            .unwrap();
+        let text = String::from_utf8(xml.clone()).unwrap();
+        let close = text.rfind("</").unwrap();
+        let injected = rules.replace(
+            "<s:conditionalFormatting",
+            &format!("<s:conditionalFormatting xmlns:s=\"{S}\""),
+        );
+        *xml = format!("{}{injected}{}", &text[..close], &text[close..]).into_bytes();
+        let error = office::inspect("document.xlsx", &archive(&tampered))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("formula survived"), "{error:#}");
+    }
+}
+
+#[test]
+fn connected_excel_carriers_and_alternate_content_removed() {
+    let mut p = fixture("xlsx");
+    let workbook = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    let alternate = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:x15=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/main\" xmlns:x15ac=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac\"><mc:Choice Requires=\"x15\"><x15ac:absPath url=\"C:/planted-1927/private\"/></mc:Choice></mc:AlternateContent>";
+    p.insert(
+        "xl/workbook.xml".into(),
+        workbook
+            .replace("</s:workbook>", &format!("{alternate}</s:workbook>"))
+            .into_bytes(),
+    );
+    let path = "xl/worksheets/identity-sheet.xml";
+    let sheet = String::from_utf8(p[path].clone()).unwrap();
+    p.insert(path.into(),sheet.replace("<s:worksheet ",&format!("<s:worksheet xmlns:r=\"{R}\" ")).replace("</s:worksheet>","<s:pageSetup r:id=\"printer\" orientation=\"landscape\"/><s:legacyDrawing r:id=\"notes\"/></s:worksheet>").into_bytes());
+    add(
+        &mut p,
+        "xl/printerSettings/printer1.bin",
+        "application/octet-stream",
+        "planted-1927-printer",
+    );
+    add(
+        &mut p,
+        "xl/comments1.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml",
+        "<comments>planted-1927-comment</comments>",
+    );
+    add(&mut p,"xl/drawings/vmlDrawing1.vml","application/vnd.openxmlformats-officedocument.vmlDrawing","<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><v:shape id=\"planted-1927\"><x:ClientData ObjectType=\"Note\"/></v:shape></xml>");
+    p.insert("xl/worksheets/_rels/identity-sheet.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"printer\" Type=\"{R}/printerSettings\" Target=\"../printerSettings/printer1.bin\"/><Relationship Id=\"notes\" Type=\"{R}/vmlDrawing\" Target=\"../drawings/vmlDrawing1.vml\"/><Relationship Id=\"comments\" Type=\"{R}/comments\" Target=\"../comments1.xml\"/></Relationships>").into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("planted-1927")));
+    for b in members(&bytes).values() {
+        assert!(!String::from_utf8_lossy(b).contains("planted-1927"));
+    }
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.xlsx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn unsupported_alternate_content_without_fallback_refuses() {
+    let mut p = fixture("xlsx");
+    let xml = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    let block = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:unsupported\"><mc:Choice Requires=\"future\"><future:private>planted-1927</future:private></mc:Choice></mc:AlternateContent>";
+    p.insert(
+        "xl/workbook.xml".into(),
+        xml.replace("</s:workbook>", &format!("{block}</s:workbook>"))
+            .into_bytes(),
+    );
+    let err = office::rebuild("document.xlsx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("no supported AlternateContent branch; visible content would be lost"),
+        "{err}"
+    );
+}
+
+#[test]
+fn embedded_font_bindings_removed() {
+    let mut p = fixture("docx");
+    add(&mut p,"word/fontTable.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", &format!("<w:fonts xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:font w:name=\"Calibri\"><w:embedRegular r:id=\"font\" w:fontKey=\"planted-1927-key\"/></w:font></w:fonts>"));
+    add(
+        &mut p,
+        "word/fonts/font1.odttf",
+        "application/vnd.openxmlformats-officedocument.obfuscatedFont",
+        "planted-1927-font",
+    );
+    p.insert("word/_rels/fontTable.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"font\" Type=\"{R}/font\" Target=\"fonts/font1.odttf\"/></Relationships>").into_bytes());
+    let (bytes, _) = rebuild("docx", &p);
+    for b in members(&bytes).values() {
+        assert!(!String::from_utf8_lossy(b).contains("planted-1927"));
+    }
+}
+
+#[test]
+fn unmodified_office_saved_public_fixtures_and_planted_properties() {
+    for (ext, input) in [
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/SampleDoc.docx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/WithVariousData.xlsx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/SampleShow.pptx").as_slice(),
+        ),
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/Bug64561.docx").as_slice(),
+        ),
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/tika-3816.docx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/1_NoIden.xlsx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/Excel_file_with_trash_item.xlsx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/text-highlight.pptx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/63200.pptx").as_slice(),
+        ),
+    ] {
+        let digest = sha256(input);
+        let (output, report) =
+            office::rebuild(&format!("document.{ext}"), input, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            report.inventory,
+            office::inspect(&format!("document.{ext}"), &output)
+                .unwrap()
+                .inventory
+        );
+        assert!(!report.text().is_empty());
+        assert_eq!(sha256(input), digest);
+        let mut planted = members(input);
+        let marker = "planted-public-fixture-S1927-tenant-1927";
+        let properties = String::from_utf8(planted["docProps/core.xml"].clone()).unwrap();
+        // Use an existing, realistically connected removal-only property part.
+        let at = properties.rfind("</").unwrap();
+        let properties = format!(
+            "{}<private>{marker}</private>{}",
+            &properties[..at],
+            &properties[at..]
+        );
+        planted.insert("docProps/core.xml".into(), properties.into_bytes());
+        add(
+            &mut planted,
+            "[trash]/planted.dat",
+            "application/octet-stream",
+            marker,
+        );
+        add(
+            &mut planted,
+            "customXML/planted.xml",
+            "application/xml",
+            &format!("<private>{marker}</private>"),
+        );
+        if ext == "docx" {
+            let xml = String::from_utf8(planted["word/document.xml"].clone()).unwrap();
+            if xml.contains("<w:sdtPr>") {
+                planted.insert("word/document.xml".into(), xml.replace("<w:sdtPr>", &format!("<w:sdtPr><w:dataBinding w:storeItemID=\"{marker}\" w:xpath=\"{marker}\"/>" )).into_bytes());
+            }
+        }
+        if ext == "xlsx" {
+            let xml = String::from_utf8(planted["xl/workbook.xml"].clone()).unwrap();
+            planted.insert(
+                "xl/workbook.xml".into(),
+                xml.replace("url=\"", &format!("url=\"{marker}/"))
+                    .into_bytes(),
+            );
+        }
+        let (bytes, report) = rebuild(ext, &planted);
+        assert!(report.removals.iter().any(|r| r.value.contains(marker)));
+        assert!(!bytes.windows(marker.len()).any(|w| w == marker.as_bytes()));
+        for (path, member) in members(&bytes) {
+            assert!(!path.contains(marker));
+            assert!(!member.windows(marker.len()).any(|w| w == marker.as_bytes()));
+        }
+    }
+}
+
+#[test]
+fn exact_duplicate_zip_members_refuse() {
+    let mut p = fixture("docx");
+    p.insert("word/documenz.xml".into(), p["word/document.xml"].clone());
+    let mut bytes = archive(&p);
+    let name = b"word/documenz.xml";
+    for i in 0..=bytes.len() - name.len() {
+        if &bytes[i..i + name.len()] == name {
+            bytes[i..i + name.len()].copy_from_slice(b"word/document.xml");
+        }
+    }
+    let error = office::rebuild("document.docx", &bytes, &BTreeMap::new())
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("duplicate Office ZIP member"),
+        "{error:#}"
+    );
+    assert!(office::inspect("document.docx", &bytes).is_err());
+}
+
+#[test]
+fn attribute_whitespace_roundtrips_and_structural_strings_stay_out_of_chunks() {
+    let mut p = fixture("pptx");
+    let slide = String::from_utf8(p["ppt/slides/slide1.xml"].clone()).unwrap();
+    p.insert(
+        "ppt/slides/slide1.xml".into(),
+        slide
+            .replace(
+                "Project ORION alt text",
+                "one&#10;two&#13;three&#9;four &amp; five",
+            )
+            .into_bytes(),
+    );
+    add(&mut p,"ppt/theme/theme1.xml","application/vnd.openxmlformats-officedocument.theme+xml", &format!("<a:theme xmlns:a=\"{A}\" name=\"STRUCTURAL-THEME-1927\"><a:themeElements><a:fontScheme name=\"STRUCTURAL-SCHEME-1927\"><a:majorFont><a:latin typeface=\"STRUCTURAL-FONT-1927\"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"));
+    let (bytes, r) = rebuild("pptx", &p);
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("one\ntwo\rthree\tfour & five")));
+    assert!(!r.text().contains("STRUCTURAL-"));
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("STRUCTURAL-FONT-1927")));
+    let reopened = office::inspect("document.pptx", &bytes).unwrap();
+    assert_eq!(r.inventory, reopened.inventory);
+    assert!(members(&bytes)
+        .values()
+        .any(|v| String::from_utf8_lossy(v).contains("one&#10;two&#13;three&#9;four &amp; five")));
+}
+
+#[test]
+fn office_saved_files_with_listing_refused_parts_still_ingest() {
+    let temp = tempfile::tempdir().unwrap();
+    for (ext, input, chart) in [
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/SampleDoc.docx").as_slice(),
+            "word/charts/chart1.xml",
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/WithVariousData.xlsx").as_slice(),
+            "xl/charts/chart1.xml",
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/SampleShow.pptx").as_slice(),
+            "ppt/charts/chart1.xml",
+        ),
+    ] {
+        let mut p = members(input);
+        add(
+            &mut p,
+            chart,
+            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+            "<unsupported-chart/>",
+        );
+        let bytes = archive(&p);
+        assert!(office::rebuild(&format!("document.{ext}"), &bytes, &BTreeMap::new()).is_err());
+        let path = temp.path().join(format!("document.{ext}"));
+        std::fs::write(&path, bytes).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        assert!(pages.iter().any(|p| !p.text.trim().is_empty()), "{ext}");
+    }
+}
+
+#[test]
+fn duplicate_shape_ids_use_distinct_positional_edit_bindings() {
+    let mut p = fixture("pptx");
+    let path = "ppt/slides/slide1.xml";
+    let slide = String::from_utf8(p[path].clone()).unwrap();
+    let start = slide.find("<p:sp>").unwrap();
+    let end = slide.find("</p:sp>").unwrap() + "</p:sp>".len();
+    let second = slide[start..end].replace("retained body", "second body");
+    p.insert(
+        path.into(),
+        slide
+            .replace("</p:spTree>", &format!("{second}</p:spTree>"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("pptx", &p);
+    let target = report
+        .inventory
+        .iter()
+        .find(|v| {
+            v.kind == "Office text" && v.value.as_deref() == Some("Project ORION second body")
+        })
+        .unwrap();
+    let edits = BTreeMap::from([(
+        target.location.clone(),
+        Edit {
+            expected_sha256: sha256(target.value.as_ref().unwrap().as_bytes()),
+            value: "Edited second shape".into(),
+        },
+    )]);
+    let (_, edited) = office::edit("document.pptx", &bytes, &edits).unwrap();
+    assert!(edited.text().contains("Project ORION retained body"));
+    assert!(edited.text().contains("Edited second shape"));
+    let locations: std::collections::BTreeSet<_> =
+        report.inventory.iter().map(|v| &v.location).collect();
+    assert_eq!(locations.len(), report.inventory.len());
+}
+
+#[test]
+fn word_effect_styles_and_proofing_markup_are_supported() {
+    let mut p = fixture("docx");
+    let body = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    p.insert(
+        "word/document.xml".into(),
+        body.replace(
+            "<w:r>",
+            "<w:proofErr w:type=\"spellStart\"/><w:r><w:rPr><w:rStyle w:val=\"Emphasis\"/></w:rPr>",
+        )
+        .into_bytes(),
+    );
+    add(&mut p,"word/stylesWithEffects.xml","application/vnd.ms-word.stylesWithEffects+xml", &format!("<w:styles xmlns:w=\"{W}\"><w:style w:type=\"table\" w:styleId=\"Grid\"><w:tblPr><w:tblStyleColBandSize w:val=\"1\"/><w:tblStyleRowBandSize w:val=\"1\"/></w:tblPr></w:style></w:styles>"));
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"effects\" Type=\"http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects\" Target=\"stylesWithEffects.xml\"/></Relationships>").into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("retained body"));
+    assert!(!members(&bytes)
+        .values()
+        .any(|b| String::from_utf8_lossy(b).contains("proofErr")));
+    assert!(members(&bytes).contains_key("word/stylesWithEffects.xml"));
+}
+
+#[test]
+fn office_trash_case_insensitive_data_stores_and_content_controls() {
+    let mut p = fixture("docx");
+    add(
+        &mut p,
+        "[trash]/0000.dat",
+        "application/octet-stream",
+        "planted-1927-trash",
+    );
+    add(
+        &mut p,
+        "customXML/item4.xml",
+        "application/xml",
+        "<private>planted-1927-store</private>",
+    );
+    p.insert("word/_rels/document.xml.rels".into(), format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"store\" Type=\"{R}/customXml\" Target=\"../customXML/item4.xml\"/></Relationships>").into_bytes());
+    let xml = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    let control = "<w:sdt><w:sdtPr><w:alias w:val=\"planted-1927-alias\"/><w:dataBinding w:storeItemID=\"planted-1927-guid\" w:xpath=\"private/path\"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Displayed control text</w:t></w:r></w:p></w:sdtContent></w:sdt>";
+    p.insert(
+        "word/document.xml".into(),
+        xml.replace("<w:body>", &format!("<w:body>{control}"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("Displayed control text"));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.reason.contains("content control")));
+    assert!(members(&bytes)
+        .iter()
+        .all(|(name, b)| !name.contains("customXML")
+            && !name.contains("[trash]")
+            && !String::from_utf8_lossy(b).contains("planted-1927")));
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.docx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn schema_layout_attributes_and_symbol_font_are_inventoried() {
+    let mut p = fixture("docx");
+    let xml = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    let table = "<w:tbl><w:tblPr><w:tblLayout w:type=\"fixed\"/></w:tblPr><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>";
+    p.insert(
+        "word/document.xml".into(),
+        xml.replace("<w:body>", &format!("<w:body>{table}"))
+            .into_bytes(),
+    );
+    let (bytes, _) = rebuild("docx", &p);
+    office::inspect("document.docx", &bytes).unwrap();
+    let mut p = fixture("pptx");
+    let part = "ppt/slides/slide1.xml";
+    let xml = String::from_utf8(p[part].clone()).unwrap();
+    let xml = xml.replace("<p:txBody>", "<p:spPr bwMode=\"auto\"/><p:txBody>");
+    // Add a retained symbol font in an existing drawing run.
+    p.insert(
+        part.into(),
+        xml.replace("<a:t>", "<a:rPr><a:sym typeface=\"Symbol\"/></a:rPr><a:t>")
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("pptx", &p);
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("Symbol")));
+    office::inspect("document.pptx", &bytes).unwrap();
+    // A layout attribute is never an arbitrary string carrier.
+    let mut bad = members(&bytes);
+    for b in bad.values_mut() {
+        if let Ok(xml) = std::str::from_utf8(b) {
+            *b = xml
+                .replace("bwMode=\"auto\"", "bwMode=\"planted-private\"")
+                .into_bytes();
+        }
+    }
+    assert!(office::inspect("document.pptx", &archive(&bad)).is_err());
+}
+
+#[test]
+fn excel_recovery_is_removed_and_filter_values_are_content() {
+    let mut p = fixture("xlsx");
+    let xml = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    p.insert(
+        "xl/workbook.xml".into(),
+        xml.replace(
+            "</s:workbook>",
+            "<s:fileRecoveryPr autoRecover=\"1\"/></s:workbook>",
+        )
+        .into_bytes(),
+    );
+    let part = "xl/worksheets/identity-sheet.xml";
+    let xml = String::from_utf8(p[part].clone()).unwrap();
+    p.insert(part.into(), xml.replace("</s:worksheet>", "<s:autoFilter ref=\"A1:A5\"><s:filterColumn colId=\"0\" hiddenButton=\"0\"><s:filters><s:filter val=\"Private customer filter\"/></s:filters></s:filterColumn></s:autoFilter></s:worksheet>").into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("fileRecoveryPr")));
+    assert!(report.text().contains("Private customer filter"));
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.xlsx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn footer_field_boundaries_in_one_run_preserve_result_and_refuse_missing_result() {
+    for complete in [true, false] {
+        let mut p = fixture("docx");
+        let field = if complete {
+            "<w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>FILENAME planted-1927-path</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>Displayed footer</w:t><w:fldChar w:fldCharType=\"end\"/></w:r>"
+        } else {
+            "<w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText></w:r>"
+        };
+        add(
+            &mut p,
+            "word/footer1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+            &format!("<w:ftr xmlns:w=\"{W}\"><w:p>{field}</w:p></w:ftr>"),
+        );
+        // Rebuild requires no orphan retained parts.
+        p.insert("word/_rels/document.xml.rels".into(), format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"footer\" Type=\"{R}/footer\" Target=\"footer1.xml\"/></Relationships>").into_bytes());
+        let result = office::rebuild("document.docx", &archive(&p), &BTreeMap::new());
+        if complete {
+            let (bytes, report) = result.unwrap();
+            assert!(report.text().contains("Displayed footer"));
+            assert!(members(&bytes)
+                .values()
+                .all(|b| !String::from_utf8_lossy(b).contains("planted-1927")));
+            office::inspect("document.docx", &bytes).unwrap();
+        } else {
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("safe displayed result"));
+        }
+    }
+}
+
+const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+fn chart_fixture(ext: &str, visibility: &str) -> BTreeMap<String, Vec<u8>> {
+    let mut p = fixture(ext);
+    let prefix = match ext {
+        "docx" => "word",
+        "xlsx" => "xl",
+        _ => "ppt",
+    };
+    add(
+        &mut p,
+        &format!("{prefix}/charts/chart1.xml"),
+        "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+        &format!(
+            r#"<c:chartSpace xmlns:c="{C}"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Chart series marker</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$2</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Category marker</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!$B$2</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>42</c:v></c:pt></c:numCache></c:numRef></c:val><c:dLbls><c:dLbl><c:idx val="0"/><c:delete val="1"/></c:dLbl></c:dLbls></c:ser></c:barChart></c:plotArea><c:legend><c:legendEntry><c:idx val="0"/><c:delete val="1"/></c:legendEntry></c:legend>{visibility}</c:chart></c:chartSpace>"#
+        ),
+    );
+    p
+}
+#[test]
+fn office_static_charts_preserve_caches_and_deleted_label_formatting() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        for visibility in [
+            r#"<c:plotVisOnly val="true"/>"#,
+            r#"<c:plotVisOnly val="1"/>"#,
+            "<c:plotVisOnly/>",
+        ] {
+            let (bytes, report) = rebuild(ext, &chart_fixture(ext, visibility));
+            assert!(report.text().contains("Category marker"));
+            assert!(report.text().contains("42"));
+            let expanded = members(&bytes);
+            let chart = expanded
+                .iter()
+                .find(|(p, _)| p.contains("/charts/"))
+                .unwrap()
+                .1;
+            let xml = String::from_utf8_lossy(chart);
+            assert!(!xml.contains("}f") && !xml.contains(":f>"));
+            assert!(xml.contains(":delete"));
+            assert_eq!(
+                report.inventory,
+                office::inspect(&format!("document.{ext}"), &bytes)
+                    .unwrap()
+                    .inventory
+            );
+        }
+    }
+}
+#[test]
+fn office_chart_visibility_and_multilevel_refusals() {
+    for (setting, reason) in [
+        (
+            r#"<c:plotVisOnly val="false"/>"#,
+            "chart plots hidden rows or columns",
+        ),
+        (
+            r#"<c:plotVisOnly val="0"/>"#,
+            "chart plots hidden rows or columns",
+        ),
+        ("", "chart visibility setting missing"),
+    ] {
+        let err = office::rebuild(
+            "document.docx",
+            &archive(&chart_fixture("docx", setting)),
+            &BTreeMap::new(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains(reason), "{err}");
+    }
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let chart = p.get_mut("word/charts/chart1.xml").unwrap();
+    *chart = String::from_utf8(chart.clone())
+        .unwrap()
+        .replace("strRef", "multiLvlStrRef")
+        .into_bytes();
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("multi-level chart categories not supported"),
+        "{err}"
+    );
+}
+
+const DGM: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
+const DSP: &str = "http://schemas.microsoft.com/office/drawing/2008/diagram";
+fn smartart_fixture(empty: bool) -> BTreeMap<String, Vec<u8>> {
+    let mut p = fixture("pptx");
+    add(
+        &mut p,
+        "ppt/diagrams/data1.xml",
+        "application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml",
+        &format!(
+            r#"<dgm:dataModel xmlns:dgm="{DGM}" xmlns:a="{A}" xmlns:dsp="{DSP}"><dgm:ptLst><dgm:pt modelId="visible"><dgm:t><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dgm:t></dgm:pt><dgm:pt modelId="pres" type="pres"/><dgm:pt modelId="hidden"><dgm:t><a:p><a:r><a:t>Undrawn secret marker</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dgm:cxnLst><dgm:cxn modelId="cxn1" type="presOf" srcId="visible" destId="pres"/></dgm:cxnLst><dgm:extLst><a:ext uri="{DSP}"><dsp:dataModelExt relId="cache"/></a:ext></dgm:extLst></dgm:dataModel>"#
+        ),
+    );
+    let shape = if empty {
+        String::new()
+    } else {
+        r#"<dsp:sp modelId="pres"><dsp:txBody><a:p><a:r><a:t>Visible SmartArt marker</a:t></a:r></a:p></dsp:txBody></dsp:sp>"#.to_owned()
+    };
+    add(
+        &mut p,
+        "ppt/diagrams/drawing1.xml",
+        "application/vnd.ms-office.drawingml.diagramDrawing+xml",
+        &format!(
+            r#"<dsp:drawing xmlns:dsp="{DSP}" xmlns:a="{A}"><dsp:spTree>{shape}</dsp:spTree></dsp:drawing>"#
+        ),
+    );
+    p.insert("ppt/diagrams/_rels/data1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/></Relationships>"#).into_bytes());
+    p
+}
+#[test]
+fn office_smartart_hidden_points_and_paired_edits() {
+    let (bytes, report) = rebuild("pptx", &smartart_fixture(false));
+    assert!(!report.text().contains("Undrawn secret marker"));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("undrawn SmartArt")));
+    let location = report
+        .inventory
+        .iter()
+        .find(|v| {
+            v.location.contains("/data-")
+                && v.location.ends_with("/text")
+                && v.value.as_deref() == Some("Visible SmartArt marker")
+        })
+        .unwrap()
+        .location
+        .clone();
+    let edits = BTreeMap::from([(
+        location,
+        Edit {
+            expected_sha256: sha256(b"Visible SmartArt marker"),
+            value: "Edited twin".into(),
+        },
+    )]);
+    let (edited, readback) = office::edit("document.pptx", &bytes, &edits).unwrap();
+    assert_eq!(
+        readback
+            .inventory
+            .iter()
+            .filter(|v| v.location.ends_with("/text") && v.value.as_deref() == Some("Edited twin"))
+            .count(),
+        2
+    );
+    assert!(!members(&edited)
+        .values()
+        .any(|b| String::from_utf8_lossy(b).contains("Visible SmartArt marker")));
+    let err = office::rebuild(
+        "document.pptx",
+        &archive(&smartart_fixture(true)),
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(
+        err.contains("SmartArt drawing cache missing; layout rendering unsupported"),
+        "{err}"
+    );
+}
+#[test]
+fn office_charted_cell_edit_refuses_without_source_mapping() {
+    // A legacy generation without private mappings must fail closed.
+    let marker = "planted-charted-cell-S1934-private-marker";
+    let mut parts = chart_fixture("xlsx", "<c:plotVisOnly/>");
+    for part in ["xl/worksheets/identity-sheet.xml", "xl/charts/chart1.xml"] {
+        let xml = String::from_utf8(parts[part].clone()).unwrap();
+        parts.insert(
+            part.into(),
+            xml.replace("Project ORION retained body", marker)
+                .replace("Chart series marker", marker)
+                .into_bytes(),
+        );
+    }
+    let source = archive(&parts);
+    let (bytes, report) = rebuild("xlsx", &parts);
+    assert!(report.text().contains(marker));
+    assert!(
+        members(&bytes)
+            .values()
+            .filter(|b| String::from_utf8_lossy(b).contains(marker))
+            .count()
+            >= 2
+    );
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edit = Edit {
+        expected_sha256: sha256(node.value.as_ref().unwrap().as_bytes()),
+        value: "Edited cell".into(),
+    };
+    let edits = BTreeMap::from([(node.location.clone(), edit)]);
+    for (result, part) in [
+        (
+            office::edit("document.xlsx", &bytes, &edits),
+            "xl/charts/part-000001.xml",
+        ),
+        (
+            office::rebuild("document.xlsx", &source, &edits),
+            "xl/charts/part-000001.xml",
+        ),
+    ] {
+        let err = result
+            .err()
+            .expect("charted cell edit must refuse without private mapping")
+            .to_string();
+        assert!(
+            err.contains("chart cache-to-source mapping")
+                && err.contains(&format!("{part}/{{{C}}}chart[1]")),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn office_chart_alternate_fallback_orphans_and_shared_media() {
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    let mut host = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:a="{A}" xmlns:c="{C}" xmlns:r="{R}" xmlns:mc="{mc}" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><mc:AlternateContent><mc:Choice Requires="c"><w:drawing><a:graphic><a:graphicData uri="{C}"><c:chart r:id="chart"/></a:graphicData></a:graphic></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape r:id="fallback"/></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p></w:body></w:document>"#
+    );
+    p.insert("word/document.xml".into(), host.as_bytes().to_vec());
+    add(
+        &mut p,
+        "word/media/fallback.wmf",
+        "image/x-wmf",
+        "unsupported fallback bytes",
+    );
+    p.insert("word/_rels/document.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="charts/chart1.xml"/><Relationship Id="fallback" Type="{R}/image" Target="media/fallback.wmf"/></Relationships>"#).into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(!members(&bytes).keys().any(|p| p.ends_with(".wmf")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("AlternateContent")));
+    host = host.replace(
+        "</w:body>",
+        r#"<w:p><w:r><w:drawing><a:blip r:embed="fallback"/></w:drawing></w:r></w:p></w:body>"#,
+    );
+    p.insert("word/document.xml".into(), host.into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("unsupported Office media format"), "{err}");
+}
+#[test]
+fn office_chartex_choice_precedes_both_fallback_types_and_missing_branch_refuses() {
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    for ext in ["docx", "xlsx"] {
+        let mut p = fixture(ext);
+        let main = if ext == "docx" {
+            "word/document.xml"
+        } else {
+            "xl/workbook.xml"
+        };
+        let xml = String::from_utf8(p[main].clone()).unwrap();
+        let boundary = if ext == "docx" {
+            "</w:body>"
+        } else {
+            "</s:workbook>"
+        };
+        let ac = format!(
+            r#"<mc:AlternateContent xmlns:mc="{mc}" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><mc:Choice Requires="cx"><cx:chart/></mc:Choice><mc:Fallback><placeholder>Picture or Excel placeholder</placeholder></mc:Fallback></mc:AlternateContent>{boundary}"#
+        );
+        p.insert(main.into(), xml.replace(boundary, &ac).into_bytes());
+        let err = office::rebuild(&format!("document.{ext}"), &archive(&p), &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("Office 2016 chartEx is unsupported") && err.contains("}Choice["),
+            "{err}"
+        );
+    }
+    let mut p = fixture("docx");
+    let xml=String::from_utf8(p["word/document.xml"].clone()).unwrap().replace("</w:body>",&format!(r#"<mc:AlternateContent xmlns:mc="{mc}" xmlns:bad="urn:unsupported"><mc:Choice Requires="bad"><bad:picture/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:body>"#));
+    p.insert("word/document.xml".into(), xml.into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("no supported AlternateContent branch; visible content would be lost"),
+        "{err}"
+    );
+}
+#[test]
+fn office_content_control_inside_field_instruction_never_surfaces() {
+    let mut p = fixture("docx");
+    p.insert("word/document.xml".into(),format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:t>INSTRUCTION SECRET</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Displayed value</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#).into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("content control in Word field instruction region"),
+        "{err}"
+    );
+}
+
+#[test]
+fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/office-public");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("s1934-provenance.json")).unwrap())
+            .unwrap();
+    let mut graphics_values = 0;
+    let mut displayed_diagrams = 0;
+    for file in manifest["files"].as_array().unwrap() {
+        let name = file["file"].as_str().unwrap();
+        let source = std::fs::read(root.join(name)).unwrap();
+        assert_eq!(sha256(&source), file["sha256"].as_str().unwrap());
+        let result = office::rebuild(name, &source, &BTreeMap::new());
+        if matches!(name, "chartex.docx" | "boxWhisker.xlsx" | "stress024.xlsx") {
+            let error = result.err().unwrap().to_string();
+            assert!(
+                error.contains(if name == "chartex.docx" || name == "boxWhisker.xlsx" {
+                    "Office 2016 chartEx is unsupported"
+                } else {
+                    "chart plots hidden rows or columns"
+                }),
+                "{name}: {error}"
+            );
+            if name == "chartex.docx" || name == "boxWhisker.xlsx" {
+                assert!(error.contains("}Choice["), "{error}");
+            }
+            continue;
+        }
+        let (bytes, report) = result.unwrap_or_else(|e| panic!("{name}: {e}"));
+        let independent = office::inspect(name, &bytes).unwrap();
+        assert_eq!(report.inventory, independent.inventory);
+        assert!(!members(&bytes).keys().any(|p| p.contains("/embeddings/")));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        let ingested = pages
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let graphics_entries: Vec<_> = report
+            .inventory
+            .iter()
+            .filter(|v| {
+                (v.location.ends_with("/text") || v.location.ends_with("/@displayed-text"))
+                    && (v.location.contains("/charts/") || v.location.contains("/diagrams/"))
+                    && v.content
+                    && v.value.as_ref().is_some_and(|s| !s.is_empty())
+            })
+            .collect();
+        for entry in graphics_entries {
+            graphics_values += 1;
+            if entry.location.ends_with("/@displayed-text") {
+                displayed_diagrams += usize::from(entry.location.contains("/diagrams/"));
+            }
+            if let Some(value) = &entry.value {
+                assert!(
+                    ingested.contains(value),
+                    "{name}: missing graphics value {value:?}"
+                );
+            }
+        }
+        if name == "smartart-rotated-text.pptx" {
+            // Exercise ordinary ingest of both the pristine committed Office
+            // file and its rebuilt output, on the slide's actual page.
+            let original_path = dir.path().join("original.pptx");
+            std::fs::write(&original_path, &source).unwrap();
+            let original_pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path: original_path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            for (label, slide_pages) in [("original", &original_pages), ("rebuilt", &pages)] {
+                assert_eq!(slide_pages.len(), 1, "{label}");
+                assert_eq!(slide_pages[0].page, 1, "{label}");
+                for value in ["abc", "def", "ghi", "jkl"] {
+                    assert!(
+                        slide_pages[0].text.contains(value),
+                        "{label}: slide 1 missing {value}"
+                    );
+                }
+            }
+            assert_eq!(
+                report
+                    .inventory
+                    .iter()
+                    .filter(|v| v.location.ends_with("/text") && v.value.as_deref() == Some("jkl"))
+                    .count(),
+                2
+            );
+            let node = report
+                .inventory
+                .iter()
+                .find(|v| {
+                    v.location.contains("/data-")
+                        && v.location.ends_with("/text")
+                        && v.value.as_deref() == Some("jkl")
+                })
+                .unwrap();
+            let edits = BTreeMap::from([(
+                node.location.clone(),
+                Edit {
+                    expected_sha256: sha256(b"jkl"),
+                    value: "Edited child text".into(),
+                },
+            )]);
+            let (_, after) = office::edit(name, &bytes, &edits).unwrap();
+            assert_eq!(
+                after
+                    .inventory
+                    .iter()
+                    .filter(|v| v.location.ends_with("/text")
+                        && v.value.as_deref() == Some("Edited child text"))
+                    .count(),
+                2
+            );
+        }
+    }
+    assert!(graphics_values > 0, "no graphics text checked");
+    assert!(displayed_diagrams > 0, "no SmartArt text checked");
+}
+
+#[test]
+fn office_smartart_ingest_resolves_cache_from_host_or_data_only_when_internal() {
+    let source = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/office-public/smartart-rotated-text.pptx"),
+    )
+    .unwrap();
+    let drawing_type = "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing";
+    let host_rels = "ppt/slides/_rels/slide1.xml.rels";
+    let drawing_rel = format!(
+        r#"<Relationship Id="rId6" Type="{drawing_type}" Target="../diagrams/drawing1.xml"/>"#
+    );
+    for owner in ["host", "data"] {
+        for mode in ["internal", "external", "wrong-type"] {
+            let mut parts = members(&source);
+            // Remove model text so these assertions can only pass through
+            // the drawing cache, independently of data-model extraction.
+            let mut model = String::from_utf8(parts["ppt/diagrams/data1.xml"].clone()).unwrap();
+            for value in ["abc", "def", "ghi", "jkl"] {
+                model = model.replace(&format!(">{value}<"), "><");
+            }
+            parts.insert("ppt/diagrams/data1.xml".into(), model.into_bytes());
+            let mut rels = String::from_utf8(parts[host_rels].clone()).unwrap();
+            assert!(rels.contains(&drawing_rel));
+            rels = rels.replace(&drawing_rel, "");
+            let mut rel = drawing_rel.clone();
+            if mode == "external" {
+                rel = rel.replace("/>", r#" TargetMode="External"/>"#);
+            } else if mode == "wrong-type" {
+                rel = rel.replace(drawing_type, &format!("{R}/chart"));
+            }
+            if owner == "host" {
+                rels = rels.replace("</Relationships>", &format!("{rel}</Relationships>"));
+            } else {
+                parts.insert(
+                    "ppt/diagrams/_rels/data1.xml.rels".into(),
+                    format!(r#"<Relationships xmlns="{REL}">{rel}</Relationships>"#).into_bytes(),
+                );
+            }
+            parts.insert(host_rels.into(), rels.into_bytes());
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("cache.pptx");
+            std::fs::write(&path, archive(&parts)).unwrap();
+            let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(pages.len(), 1);
+            assert_eq!(pages[0].page, 1);
+            for value in ["abc", "def", "ghi", "jkl"] {
+                assert_eq!(
+                    pages[0].text.contains(value),
+                    mode == "internal",
+                    "{owner} {mode}: {value}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn office_chart_cellrange_and_external_workbook_are_removed() {
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml=String::from_utf8(p[path].clone()).unwrap()
+        .replace("<c:chartSpace ","<c:chartSpace xmlns:c16=\"http://schemas.microsoft.com/office/drawing/2014/chart\" ")
+        .replace("<c:ptCount val=\"1\"/>","<c:ptCount val=\"2\"/>")
+        .replace("</c:strCache></c:strRef></c:cat>","<c:pt idx=\"1\"><c:v>Visible category</c:v></c:pt></c:strCache></c:strRef></c:cat>")
+        .replace("</c:numCache>","<c:pt idx=\"1\"><c:v>43</c:v></c:pt></c:numCache>")
+        .replace("</c:chartSpace>",&format!(r#"<c:externalData xmlns:r="{R}" r:id="source"/><c:printSettings><c:headerFooter>SECRET PRINT HEADER</c:headerFooter></c:printSettings><c:protection/><c:txPr xmlns:a="{A}"><a:p><a:fld type="CELLRANGE"><a:t>[CELLRANGE]</a:t></a:fld></a:p></c:txPr></c:chartSpace>"#));
+    p.insert(path.into(), xml.into_bytes());
+    p.insert("word/charts/_rels/chart1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="source" Type="{R}/package" Target="https://example.invalid/source.xlsx" TargetMode="External"/><Relationship Id="theme" Type="{R}/themeOverride" Target="../theme/themeOverride.xml"/></Relationships>"#).into_bytes());
+    add(
+        &mut p,
+        "word/theme/themeOverride.xml",
+        "application/vnd.openxmlformats-officedocument.themeOverride+xml",
+        &format!(r#"<a:themeOverride xmlns:a="{A}"/>"#),
+    );
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("Visible category"));
+    assert!(report.text().contains("43"));
+    assert!(report.text().contains("Chart series marker"));
+    assert!(report.text().contains("Category marker"));
+    for marker in ["[CELLRANGE]", "SECRET PRINT HEADER", "example.invalid"] {
+        assert!(
+            !members(&bytes)
+                .values()
+                .any(|v| String::from_utf8_lossy(v).contains(marker)),
+            "{marker}"
+        );
+    }
+    assert!(report.warnings.iter().any(|w| w.contains("CELLRANGE")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("themeOverride may change chart colours")));
+}
+#[test]
+fn office_chart_numeric_edit_refuses_and_string_edit_survives_readback() {
+    let (bytes, report) = rebuild("docx", &chart_fixture("docx", "<c:plotVisOnly/>"));
+    for (old, replacement, allowed) in [
+        ("42", "99", false),
+        ("Category marker", "Edited category", true),
+    ] {
+        let node = report
+            .inventory
+            .iter()
+            .find(|v| v.location.ends_with("/text") && v.value.as_deref() == Some(old))
+            .unwrap();
+        let edits = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: sha256(old.as_bytes()),
+                value: replacement.into(),
+            },
+        )]);
+        let result = office::edit("document.docx", &bytes, &edits);
+        if allowed {
+            assert!(result.unwrap().1.text().contains(replacement));
+        } else {
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("numeric chart cache point"));
+        }
+    }
+}
+
+#[test]
+fn office_charted_cell_edit_propagates_private_mappings_across_generations() {
+    let marker = "S1934-planted-charted-cell-private-marker";
+    let mut parts = chart_fixture("xlsx", "<c:plotVisOnly/>");
+    let sheet = String::from_utf8(parts["xl/worksheets/identity-sheet.xml"].clone()).unwrap();
+    parts.insert(
+        "xl/worksheets/identity-sheet.xml".into(),
+        sheet
+            .replace("Project ORION retained body", marker)
+            .replace(
+                "</s:sheetData>",
+                "<s:row r=\"2\"><s:c r=\"B2\"><s:v>42</s:v></s:c></s:row></s:sheetData>",
+            )
+            .into_bytes(),
+    );
+    let chart = String::from_utf8(parts["xl/charts/chart1.xml"].clone())
+        .unwrap()
+        .replace("Sheet1!$A$2", "'Project ORION'!$A$1")
+        .replace("Sheet1!", "'Project ORION'!")
+        .replace("Chart series marker", marker)
+        .replace("Category marker", marker);
+    let chart = chart.replace("<c:plotArea>", &format!("<c:title><c:tx><c:strRef><c:f>'Project ORION'!$A$1</c:f><c:strCache><c:ptCount val=\"1\"/><c:pt idx=\"0\"><c:v>{marker}</c:v></c:pt></c:strCache></c:strRef></c:tx></c:title><c:plotArea>"));
+    parts.insert("xl/charts/chart1.xml".into(), chart.into_bytes());
+    let original = archive(&parts);
+    let (mut bytes, mut report) =
+        office::rebuild("document.xlsx", &original, &BTreeMap::new()).unwrap();
+    assert!(report.chart_sources.unmappable.is_empty());
+    assert_eq!(report.chart_sources.points.len(), 4);
+    let mut previous = marker.to_owned();
+    for value in ["Reviewed charted cell", "Second reviewed cell"] {
+        let node = report
+            .inventory
+            .iter()
+            .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+            .unwrap();
+        let edits = BTreeMap::from([(
+            node.location.clone(),
+            Edit {
+                expected_sha256: sha256(previous.as_bytes()),
+                value: value.into(),
+            },
+        )]);
+        let cache = report
+            .inventory
+            .iter()
+            .find(|v| {
+                v.location.starts_with("xl/charts/")
+                    && v.location.ends_with("/text")
+                    && v.value.as_deref() == Some(previous.as_str())
+            })
+            .unwrap();
+        let mut stale = edits.clone();
+        stale.insert(
+            cache.location.clone(),
+            Edit {
+                expected_sha256: sha256(b"stale chart prior"),
+                value: value.into(),
+            },
+        );
+        assert!(office::edit_with_chart_sources(
+            "document.xlsx",
+            &bytes,
+            &stale,
+            &report.chart_sources
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("prior-value mismatch"));
+        let (edited, readback) =
+            office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+                .unwrap();
+        assert_eq!(
+            readback
+                .inventory
+                .iter()
+                .filter(|v| v.value.as_deref() == Some(value) && v.location.ends_with("/text"))
+                .count(),
+            4
+        );
+        for forbidden in [marker, previous.as_str()] {
+            assert!(!edited
+                .windows(forbidden.len())
+                .any(|b| b == forbidden.as_bytes()));
+            assert!(members(&edited).values().all(|b| !b
+                .windows(forbidden.len())
+                .any(|v| v == forbidden.as_bytes())));
+            assert!(!readback.text().contains(forbidden));
+        }
+        office::inspect("document.xlsx", &edited).unwrap();
+        if previous == marker {
+            let (direct, _) = office::rebuild("document.xlsx", &original, &edits).unwrap();
+            assert_eq!(direct, edited);
+        }
+        bytes = edited;
+        report = readback;
+        previous = value.into();
+    }
+    // Numeric cell values can update numeric caches without allowing direct
+    // text edits on numeric cache points.
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/B2/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(b"42"),
+            value: "81".into(),
+        },
+    )]);
+    let (_, numeric) =
+        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+            .unwrap();
+    assert!(numeric
+        .inventory
+        .iter()
+        .any(|v| v.location.contains("}numLit[") && v.value.as_deref() == Some("81")));
+    let bad = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(b"42"),
+            value: "text cannot be numeric".into(),
+        },
+    )]);
+    assert!(
+        office::edit_with_chart_sources("document.xlsx", &bytes, &bad, &report.chart_sources)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("numeric chart cache point")
+    );
+    // Any unmappable formula blocks cell edits throughout the workbook, even
+    // when the edited cell is unrelated to that chart.
+    let chart = String::from_utf8(parts["xl/charts/chart1.xml"].clone()).unwrap();
+    parts.insert(
+        "xl/charts/chart1.xml".into(),
+        chart
+            .replace("'Project ORION'!$B$2", "DefinedChartName")
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("xlsx", &parts);
+    assert!(!report.chart_sources.unmappable.is_empty());
+    let node = report
+        .inventory
+        .iter()
+        .find(|v| v.location.contains("/cell/A1/") && v.location.ends_with("/text"))
+        .unwrap();
+    let edits = BTreeMap::from([(
+        node.location.clone(),
+        Edit {
+            expected_sha256: sha256(marker.as_bytes()),
+            value: "Edited".into(),
+        },
+    )]);
+    let err =
+        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
+            .err()
+            .unwrap()
+            .to_string();
+    assert!(
+        err.contains("cache-to-source mapping")
+            && err.contains(&format!("xl/charts/part-000001.xml/{{{C}}}chart[1]")),
+        "{err}"
+    );
+}
+
+#[test]
+fn office_filtered_extensions_refuse_without_cache_or_legend_surgery() {
+    for (year, element) in [
+        (2012, "filteredBarSeries"),
+        (2012, "filteredCategoryTitle"),
+        (2012, "filteredSeriesTitle"),
+        (2014, "filteredLitCache"),
+        (2014, "categoryFilterExceptions"),
+    ] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let xml = String::from_utf8(p[path].clone()).unwrap().replace("</c:ser>", &format!(r#"<c:extLst><c:ext uri="adversarial-filter"><x:{element} xmlns:x="http://schemas.microsoft.com/office/drawing/{year}/chart"/></c:ext></c:extLst></c:ser>"#));
+        p.insert(path.into(), xml.into_bytes());
+        let source = archive(&p);
+        let before = sha256(&source);
+        let error = office::rebuild("document.docx", &source, &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("chart has filtered (hidden) series or categories; remove the filter in Excel or exclude"), "{error}");
+        assert!(error.contains(path) && error.contains(element));
+        assert_eq!(sha256(&source), before);
+    }
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml = String::from_utf8(p[path].clone()).unwrap().replace(
+        "<c:legendEntry><c:idx val=\"0\"/>",
+        "<c:legendEntry><c:idx val=\"17\"/>",
+    );
+    p.insert(path.into(), xml.into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(
+        report.text().contains("Chart series marker")
+            && report.text().contains("Category marker")
+            && report.text().contains("42")
+    );
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.location.contains("}legendEntry[")
+            && v.location.ends_with("/@{}val")
+            && v.value.as_deref() == Some("17")));
+    office::inspect("document.docx", &bytes).unwrap();
+}
+
+#[test]
+fn office_real_smartart_part_names_are_neutral() {
+    let source = include_bytes!("fixtures/office-public/smartart-rotated-text.pptx");
+    let original = members(source);
+    let marker = "PrivateCustomer";
+    let mut rename: BTreeMap<_, _> = original
+        .keys()
+        .filter(|p| p.contains("/diagrams/") && p.ends_with(".xml"))
+        .map(|p| {
+            let file = p
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .replace(".xml", &format!("-{marker}.xml"));
+            (p.clone(), format!("ppt/{marker}/diagrams/{file}"))
+        })
+        .collect();
+    for (old, new) in rename.clone() {
+        let (old_dir, old_file) = old.rsplit_once('/').unwrap();
+        let (new_dir, new_file) = new.rsplit_once('/').unwrap();
+        let old_rels = format!("{old_dir}/_rels/{old_file}.rels");
+        if original.contains_key(&old_rels) {
+            rename.insert(old_rels, format!("{new_dir}/_rels/{new_file}.rels"));
+        }
+    }
+    let mut marked = BTreeMap::new();
+    for (name, bytes) in original {
+        let new_name = rename.get(&name).cloned().unwrap_or_else(|| name.clone());
+        let mut bytes = bytes;
+        if name.ends_with(".xml") || name.ends_with(".rels") {
+            let mut xml = String::from_utf8(bytes).unwrap();
+            for (old, new) in &rename {
+                xml = xml.replace(old, new);
+                let old_file = old.rsplit('/').next().unwrap();
+                xml = xml.replace(&format!("../diagrams/{old_file}"), &format!("/{new}"));
+                xml = xml.replace(
+                    &format!("Target=\"{old_file}\""),
+                    &format!("Target=\"/{new}\""),
+                );
+            }
+            bytes = xml.into_bytes();
+        }
+        marked.insert(new_name, bytes);
+    }
+    assert!(marked.keys().any(|n| n.contains(marker)));
+    let (bytes, _) = rebuild("pptx", &marked);
+    assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+    for (name, bytes) in members(&bytes) {
+        assert!(!name.contains(marker));
+        assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
+    }
+}
+
+// Independent oracle: unmodified CT_Tx and CT_SerTx definitions from the pinned
+// SDK, not the generated product allowlist. Check QName and choice cardinality.
+fn sdk_chart_text_valid(bytes: &[u8]) -> bool {
+    use quick_xml::{events::Event, name::ResolveResult, NsReader};
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/office-public/chart-text-sdk-schema.json"
+    ))
+    .unwrap();
+    let mut reader = NsReader::from_reader(bytes);
+    let mut stack: Vec<(String, String, usize)> = Vec::new();
+    loop {
+        match reader.read_event().unwrap() {
+            event @ (Event::Start(_) | Event::Empty(_)) => {
+                let empty = matches!(event, Event::Empty(_));
+                let e = match event {
+                    Event::Start(e) | Event::Empty(e) => e,
+                    _ => unreachable!(),
+                };
+                let (ns, local) = reader.resolve_element(e.name());
+                let ns = match ns {
+                    ResolveResult::Bound(n) => String::from_utf8_lossy(n.as_ref()).into_owned(),
+                    _ => String::new(),
+                };
+                let local = String::from_utf8_lossy(local.as_ref()).into_owned();
+                if stack.last().is_some_and(|n| n.0 == C && n.1 == "tx") {
+                    let series = stack.len() > 1
+                        && stack[stack.len() - 2].0 == C
+                        && stack[stack.len() - 2].1 == "ser";
+                    let class = if series { "SeriesText" } else { "ChartText" };
+                    let ty = schema["Types"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t["ClassName"] == class)
+                        .unwrap();
+                    if ns != C
+                        || !ty["Children"].as_array().unwrap().iter().any(|c| {
+                            c["Name"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with(&format!("/c:{local}"))
+                        })
+                    {
+                        return false;
+                    }
+                    stack.last_mut().unwrap().2 += 1;
+                }
+                if !empty {
+                    stack.push((ns, local, 0));
+                }
+            }
+            Event::End(_) => {
+                let (ns, local, count) = stack.pop().unwrap();
+                if ns == C && local == "tx" && count != 1 {
+                    return false;
+                }
+            }
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    true
+}
+#[test]
+fn office_cached_chart_labels_obey_sdk_text_choices() {
+    let reference = |value: &str| {
+        format!(
+            r#"<c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>{value}</c:v></c:pt></c:strCache></c:strRef></c:tx>"#
+        )
+    };
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml = String::from_utf8(p[path].clone()).unwrap()
+        .replace("<c:delete val=\"1\"/></c:dLbl>", &format!("{}</c:dLbl>", reference("Data label")))
+        .replace("</c:ser>", &format!("<c:trendline><c:trendlineType val=\"linear\"/><c:trendlineLbl>{}</c:trendlineLbl></c:trendline></c:ser>", reference("Trendline label")))
+        .replace("<c:plotArea>", &format!("<c:title>{}</c:title><c:plotArea>", reference("Chart title")))
+        .replace("</c:plotArea>", &format!("<c:valAx><c:dispUnits><c:dispUnitsLbl>{}</c:dispUnitsLbl></c:dispUnits></c:valAx></c:plotArea>", reference("Display units label")));
+    p.insert(path.into(), xml.into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    for text in [
+        "Data label",
+        "Trendline label",
+        "Chart title",
+        "Display units label",
+        "Chart series marker",
+    ] {
+        assert!(report.text().contains(text), "{text}");
+    }
+    let mut rebuilt = members(&bytes);
+    let chart = rebuilt
+        .keys()
+        .find(|p| p.contains("/charts/") && p.ends_with(".xml"))
+        .unwrap()
+        .clone();
+    assert!(sdk_chart_text_valid(&rebuilt[&chart]));
+    // Make a non-series CT_Tx invalid while preserving the valid series c:v.
+    let xml = String::from_utf8(rebuilt[&chart].clone()).unwrap();
+    let start = xml.find(":strLit>").unwrap();
+    let open = xml[..start].rfind('<').unwrap();
+    let prefix = &xml[open + 1..start];
+    let end = xml[start..].find(":strLit>").unwrap() + start;
+    let end = xml[end + 1..].find(":strLit>").unwrap() + end + 1 + ":strLit>".len();
+    let bad = format!(
+        "{}<{prefix}:v>Invalid label</{prefix}:v>{}",
+        &xml[..open],
+        &xml[end..]
+    );
+    assert!(!sdk_chart_text_valid(bad.as_bytes()));
+    rebuilt.insert(chart, bad.into_bytes());
+    assert!(office::inspect("document.docx", &archive(&rebuilt))
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("unsupported child v in tx"));
+}
+
+#[test]
+fn office_ingest_keeps_host_pages_and_order_with_graphics() {
+    for ext in ["pptx", "xlsx"] {
+        let mut p = chart_fixture(ext, "<c:plotVisOnly/>");
+        let chart_path = if ext == "pptx" {
+            "ppt/charts/chart1.xml"
+        } else {
+            "xl/charts/chart1.xml"
+        };
+        let chart = String::from_utf8(p[chart_path].clone()).unwrap().replace(
+            "<c:plotArea>",
+            &format!(r#"<c:title><c:tx><c:rich xmlns:a="{A}"><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Rich chart title</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea>"#),
+        );
+        p.insert(chart_path.into(), chart.into_bytes());
+        if ext == "pptx" {
+            let host = String::from_utf8(p["ppt/slides/slide1.xml"].clone()).unwrap();
+            add(
+                &mut p,
+                "ppt/slides/slide2.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+                &host.replace("Project ORION retained body", "Second slide"),
+            );
+            let chart = format!(
+                r#"<p:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" xmlns:r="{R}" r:id="chart"/></a:graphicData></a:graphic></p:graphicFrame>"#
+            );
+            p.insert(
+                "ppt/slides/slide1.xml".into(),
+                host.replace("</p:spTree>", &format!("{chart}</p:spTree>"))
+                    .into_bytes(),
+            );
+            p.insert("ppt/slides/_rels/slide1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes());
+            let xml = String::from_utf8(p["ppt/presentation.xml"].clone())
+                .unwrap()
+                .replace(
+                    "<p:sldIdLst>",
+                    "<p:sldIdLst><p:sldId id=\"257\" r:id=\"s2\"/>",
+                );
+            p.insert("ppt/presentation.xml".into(), xml.into_bytes());
+            let xml = String::from_utf8(p["ppt/_rels/presentation.xml.rels"].clone()).unwrap().replace("</Relationships>", &format!(r#"<Relationship Id="s2" Type="{R}/slide" Target="slides/slide2.xml"/></Relationships>"#));
+            p.insert("ppt/_rels/presentation.xml.rels".into(), xml.into_bytes());
+        } else {
+            let host = String::from_utf8(p["xl/worksheets/identity-sheet.xml"].clone()).unwrap();
+            add(
+                &mut p,
+                "xl/worksheets/sheet2.xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+                &host.replace("Project ORION retained body", "Second sheet"),
+            );
+            p.insert(
+                "xl/worksheets/identity-sheet.xml".into(),
+                host.replace(
+                    "</s:worksheet>",
+                    &format!(r#"<s:drawing xmlns:r="{R}" r:id="drawing"/></s:worksheet>"#),
+                )
+                .into_bytes(),
+            );
+            p.insert("xl/worksheets/_rels/identity-sheet.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="drawing" Type="{R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).into_bytes());
+            let xdr = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+            add(
+                &mut p,
+                "xl/drawings/drawing1.xml",
+                "application/vnd.openxmlformats-officedocument.drawing+xml",
+                &format!(
+                    r#"<xdr:wsDr xmlns:xdr="{xdr}" xmlns:a="{A}" xmlns:c="{C}" xmlns:r="{R}"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart r:id="chart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>"#
+                ),
+            );
+            p.insert("xl/drawings/_rels/drawing1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes());
+            let xml = String::from_utf8(p["xl/workbook.xml"].clone())
+                .unwrap()
+                .replace(
+                    "<s:sheets>",
+                    "<s:sheets><s:sheet name=\"Second\" sheetId=\"2\" r:id=\"s2\"/>",
+                );
+            p.insert("xl/workbook.xml".into(), xml.into_bytes());
+            let xml = String::from_utf8(p["xl/_rels/workbook.xml.rels"].clone()).unwrap().replace("</Relationships>", &format!(r#"<Relationship Id="s2" Type="{R}/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#));
+            p.insert("xl/_rels/workbook.xml.rels".into(), xml.into_bytes());
+        }
+        let original = archive(&p);
+        let (sanitized, report) = rebuild(ext, &p);
+        assert!(report
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("/charts/")
+                && v.location.ends_with("/@displayed-text")
+                && v.content
+                && v.value.as_deref() == Some("Rich chart title")));
+        for bytes in [original, sanitized] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("document.{ext}"));
+            std::fs::write(&path, bytes).unwrap();
+            let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(pages.len(), 2, "{ext}");
+            assert_eq!((pages[0].page, pages[1].page), (1, 2));
+            assert!(pages[0].text.contains("Second"), "{ext}: {}", pages[0].text);
+            assert!(!pages[0].text.contains("Chart series marker"));
+            assert!(!pages[0].text.contains("Rich chart title"));
+            assert!(pages[1].text.contains("Rich chart title"));
+            assert!(
+                pages[1].text.contains("Chart series marker"),
+                "{ext}: {}",
+                pages[1].text
+            );
+            assert!(pages[1].text.contains("Category marker"));
+            assert!(pages[1].text.contains("42"));
+            if ext == "xlsx" {
+                assert!(pages[1].text.starts_with("# Project ORION\n"));
+            }
+        }
+    }
+}
+
+#[test]
+fn office_real_linked_chart_is_static_and_unrelated_ole_refuses() {
+    let source = include_bytes!("fixtures/office-public/date-categories.pptx");
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/office-public/s1934-fold1-provenance.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        sha256(source),
+        manifest["files"][0]["sha256"].as_str().unwrap()
+    );
+    let original = members(source);
+    let rel = String::from_utf8(original["ppt/charts/_rels/chart1.xml.rels"].clone()).unwrap();
+    assert!(rel.contains(&format!("{R}/oleObject")) && rel.contains("TargetMode=\"External\""));
+    let (bytes, report) = office::rebuild("document.pptx", source, &BTreeMap::new()).unwrap();
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.pptx", &bytes).unwrap().inventory
+    );
+    let text = report.text();
+    // Every original cached chart value survives as static displayed data.
+    let mut reader = quick_xml::NsReader::from_reader(original["ppt/charts/chart1.xml"].as_slice());
+    let mut in_value = false;
+    loop {
+        match reader.read_event().unwrap() {
+            quick_xml::events::Event::Start(e) => {
+                let (ns, local) = reader.resolve_element(e.name());
+                in_value = local.as_ref() == b"v"
+                    && matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.as_ref() == C.as_bytes());
+            }
+            quick_xml::events::Event::Text(t) if in_value => assert!(text.contains(
+                quick_xml::escape::unescape(&t.decode().unwrap())
+                    .unwrap()
+                    .as_ref()
+            )),
+            quick_xml::events::Event::End(_) => in_value = false,
+            quick_xml::events::Event::Eof => break,
+            _ => (),
+        }
+    }
+    for bytes in members(&bytes).values() {
+        let xml = String::from_utf8_lossy(bytes);
+        assert!(
+            !xml.contains("externalData")
+                && !xml.contains("/oleObject")
+                && !xml.contains("d.docs.live.net")
+        );
+    }
+    // A deleted chart dependency is insufficient proof: only externalData may
+    // authorize an external oleObject; userShapes and internal OLE still refuse.
+    for (element, external) in [("userShapes", true), ("externalData", false)] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let chart = String::from_utf8(p["word/charts/chart1.xml"].clone())
+            .unwrap()
+            .replace(
+                "</c:chartSpace>",
+                &format!(r#"<c:{element} xmlns:r="{R}" r:id="source"/></c:chartSpace>"#),
+            );
+        p.insert("word/charts/chart1.xml".into(), chart.into_bytes());
+        let mode = if external {
+            " TargetMode=\"External\""
+        } else {
+            ""
+        };
+        p.insert("word/charts/_rels/chart1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="source" Type="{R}/oleObject" Target="https://example.invalid/book.xlsx"{mode}/></Relationships>"#).into_bytes());
+        let error = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("unrelated OLE/active/embedded content"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn office_chart_separators_retain_exact_text_and_inventory() {
+    for separator in [", ", "; ", " ", "\n", ""] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let xml = String::from_utf8(p[path].clone()).unwrap().replace(
+            "</c:dLbl>",
+            &format!("<c:separator>{separator}</c:separator></c:dLbl>"),
+        );
+        p.insert(path.into(), xml.into_bytes());
+        let (bytes, report) = rebuild("docx", &p);
+        let entry = report
+            .inventory
+            .iter()
+            .find(|v| v.location.contains("}separator[") && v.location.ends_with("/text"))
+            .unwrap();
+        assert_eq!(entry.value.as_deref(), Some(separator));
+        assert!(entry.content);
+        assert_eq!(
+            report.inventory,
+            office::inspect("document.docx", &bytes).unwrap().inventory
+        );
+    }
+}
+
+#[test]
+fn office_zero_point_chart_caches_are_present_not_missing() {
+    for title_empty in [false, true] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let mut xml = String::from_utf8(p[path].clone()).unwrap();
+        for (point, value) in [("Category marker", ""), ("42", "")] {
+            let before = format!(r#"<c:ptCount val="1"/><c:pt idx="0"><c:v>{point}</c:v></c:pt>"#);
+            xml = xml.replace(&before, &format!(r#"<c:ptCount val="0"/>{value}"#));
+        }
+        if title_empty {
+            xml = xml.replace(
+                r#"<c:ptCount val="1"/><c:pt idx="0"><c:v>Chart series marker</c:v></c:pt>"#,
+                r#"<c:ptCount val="0"/>"#,
+            );
+        }
+        p.insert(path.into(), xml.into_bytes());
+        let (bytes, report) = rebuild("docx", &p);
+        assert!(!report.text().contains("Category marker"));
+        assert!(!report.text().contains("42"));
+        assert_eq!(
+            report.inventory,
+            office::inspect("document.docx", &bytes).unwrap().inventory
+        );
+        assert!(report
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("}ptCount[") && v.value.as_deref() == Some("0")));
+        // Empty without an explicit zero count still lacks a usable cache.
+        let mut bad = p.clone();
+        let xml = String::from_utf8(bad[path].clone())
+            .unwrap()
+            .replace(r#"<c:ptCount val="0"/>"#, "");
+        bad.insert(path.into(), xml.into_bytes());
+        assert!(
+            office::rebuild("document.docx", &archive(&bad), &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("chart cache missing")
+        );
+    }
+}
+
+#[test]
+fn office_removed_binary_dependencies_record_digest_and_length() {
+    let source = include_bytes!("fixtures/office-public/bar-chart.pptx");
+    let original = members(source);
+    let (path, workbook) = original
+        .iter()
+        .find(|(p, _)| p.contains("/embeddings/") && p.ends_with(".xlsx"))
+        .unwrap();
+    let (_, report) = office::rebuild("document.pptx", source, &BTreeMap::new()).unwrap();
+    let removal = report
+        .removals
+        .iter()
+        .find(|r| &r.location == path && r.reason == "removed orphaned graphics dependency")
+        .unwrap();
+    assert_eq!(
+        removal.value,
+        format!("sha256={} bytes={}", sha256(workbook), workbook.len())
+    );
+}

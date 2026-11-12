@@ -37,6 +37,10 @@ pub struct Changes {
     pub exclusions: BTreeSet<String>,
     #[serde(default)]
     pub identity_terms: Vec<String>,
+    /// Required for Office or derived Office edits. This identifies the private
+    /// immutable generation whose document/node values the seller reviewed.
+    #[serde(default)]
+    pub origin: Option<crate::review_store::CurrentReview>,
 }
 
 impl Changes {
@@ -108,17 +112,57 @@ pub fn rebuild_artifact(name: &str, input: &[u8], changes: &Changes) -> Result<A
 pub(crate) struct Budget {
     bytes: usize,
     entries: usize,
+    office: bool,
+    zip_entries: usize,
+    pub(crate) removals: Vec<vz_core::office::Removal>,
+    pub(crate) office_warnings: Vec<String>,
+    pub(crate) edit_bindings: BTreeMap<String, vz_core::office::Edit>,
+    pub(crate) from_origin: BTreeSet<String>,
+    pub(crate) chart_sources: BTreeMap<String, vz_core::office::ChartSources>,
+    pub(crate) cancel: Option<tokio_util::sync::CancellationToken>,
+    pub(crate) started: Option<std::time::Instant>,
+    current_part: String,
+    pub(crate) worker_time: BTreeMap<String, std::time::Duration>,
 }
 impl Budget {
+    pub(crate) fn enable_office(&mut self) {
+        self.office = true;
+        self.started.get_or_insert_with(std::time::Instant::now);
+    }
+    fn max_bytes(&self) -> usize {
+        if self.office {
+            2 * 1024 * 1024 * 1024
+        } else {
+            MAX_BYTES
+        }
+    }
     fn charge(&mut self, bytes: usize) -> Result<()> {
         self.bytes = self
             .bytes
             .checked_add(bytes)
             .context("expanded size overflow")?;
         self.entries += 1;
+        if self.office {
+            ensure!(
+                self.bytes <= self.max_bytes(),
+                "OFFICE_PACK_EXPANDED_BYTES_LIMIT_EXCEEDED at {}: {} / {} bytes",
+                self.current_part,
+                self.bytes,
+                self.max_bytes()
+            );
+            ensure!(
+                self.entries <= 20_000_000,
+                "OFFICE_PACK_INVENTORY_LIMIT_EXCEEDED at {}: {} / 20000000 entries",
+                self.current_part,
+                self.entries
+            );
+        }
         ensure!(
-            self.bytes <= MAX_BYTES && self.entries <= MAX_ENTRIES,
-            "inspection limit exceeded"
+            self.bytes <= self.max_bytes()
+                && self.entries <= if self.office { 20_000_000 } else { MAX_ENTRIES },
+            "inspection limit exceeded: {} bytes / {} entries",
+            self.bytes,
+            self.entries
         );
         Ok(())
     }
@@ -150,6 +194,7 @@ fn entry(
     changes: &Changes,
     budget: &mut Budget,
 ) -> Result<()> {
+    budget.current_part = location.into();
     budget.charge(location.len() + value.as_ref().map_or(0, String::len))?;
     let lower = value.as_deref().unwrap_or_default().to_lowercase();
     let category = format!("{kind} {location}").to_lowercase();
@@ -202,7 +247,8 @@ fn extension(name: &str) -> Result<&str> {
         .context("format has no proven handler")?
         .1;
     ensure!(
-        ["txt", "md", "markdown", "py", "json", "zip", "parquet"].contains(&ext),
+        ["txt", "md", "markdown", "py", "json", "zip", "parquet", "docx", "xlsx", "pptx"]
+            .contains(&ext),
         "format has no proven handler"
     );
     Ok(ext)
@@ -217,6 +263,7 @@ pub(crate) fn rewrite(
     mapping: &mut BTreeMap<String, String>,
     budget: &mut Budget,
 ) -> Result<Vec<u8>> {
+    budget.current_part = name.into();
     transform(name, input, changes, mapping, budget, 0)
 }
 
@@ -228,19 +275,78 @@ fn transform(
     budget: &mut Budget,
     depth: usize,
 ) -> Result<Vec<u8>> {
+    budget.current_part = name.into();
+    if ["docx", "xlsx", "pptx"].contains(&extension(name)?) {
+        budget.enable_office();
+    }
     ensure!(depth <= MAX_DEPTH, "container depth limit");
     budget.charge(input.len())?;
     match extension(name)? {
+        "docx" | "xlsx" | "pptx" => {
+            let (bytes, report) = office_worker(name, input, budget, false)?;
+            budget
+                .chart_sources
+                .insert(name.into(), report.chart_sources.clone());
+            budget.zip_entries += report.source_parts;
+            ensure!(
+                budget.zip_entries <= 100_000,
+                "OFFICE_PACK_ZIP_ENTRIES_LIMIT_EXCEEDED at {name}: {} / 100000 entries",
+                budget.zip_entries
+            );
+            budget.charge(report.expanded_bytes as usize)?;
+            let removal_warnings: BTreeSet<_> = report
+                .removals
+                .iter()
+                .map(|r| format!("{}: {}", r.location, r.reason))
+                .collect();
+            budget.office_warnings.extend(
+                report
+                    .warnings
+                    .into_iter()
+                    .filter(|w| {
+                        !removal_warnings.contains(w)
+                            || ["chart", "SmartArt", "AlternateContent", "CELLRANGE"]
+                                .iter()
+                                .any(|kind| w.contains(kind))
+                    })
+                    .map(|w| format!("{name}!{w}")),
+            );
+            budget
+                .removals
+                .extend(report.removals.into_iter().map(|mut r| {
+                    r.location = format!("{name}!{}", r.location);
+                    r
+                }));
+            Ok(bytes)
+        }
         "zip" => {
             let mut archive = zip::ZipArchive::new(Cursor::new(input))?;
-            ensure!(archive.len() <= MAX_ENTRIES, "ZIP entry limit");
+            for i in 0..archive.len() {
+                let part = archive.by_index(i)?;
+                if [".docx", ".xlsx", ".pptx"]
+                    .iter()
+                    .any(|suffix| part.name().ends_with(suffix))
+                {
+                    budget.enable_office();
+                }
+            }
+            budget.zip_entries += archive.len();
+            ensure!(
+                budget.zip_entries <= if budget.office { 100_000 } else { MAX_ENTRIES },
+                "ZIP entry limit: {}",
+                budget.zip_entries
+            );
             let mut seen = BTreeSet::new();
             let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
             for i in 0..archive.len() {
                 let mut part = archive.by_index(i)?; // encrypted entries refuse without a password
                 let original = part.name().trim_end_matches('/');
                 safe_path(original)?;
-                ensure!(seen.insert(original.to_owned()), "duplicate ZIP path");
+                ensure!(!original.contains('%'), "escaped ZIP paths are unsupported");
+                ensure!(
+                    seen.insert(original.to_lowercase()),
+                    "duplicate/case-colliding ZIP path"
+                );
                 let mode = part.unix_mode().unwrap_or(0) & 0o170000;
                 ensure!(
                     mode == 0 || mode == 0o100000 || (mode == 0o040000 && part.is_dir()),
@@ -253,15 +359,27 @@ fn transform(
                 if changes.exclusions.contains(&location) {
                     continue;
                 }
-                ensure!(part.size() <= MAX_BYTES as u64, "ZIP expanded byte limit");
+                ensure!(
+                    part.size() <= budget.max_bytes() as u64,
+                    "ZIP expanded byte limit"
+                );
+                ensure!(
+                    part.size() <= part.compressed_size().saturating_mul(100),
+                    "ZIP expansion ratio exceeds 100:1 at {location}"
+                );
+                let declared = part.size();
                 let ext = extension(original)?;
                 let neutral = format!("document-{:06}.{ext}", i + 1);
                 mapping.insert(location.clone(), format!("{name}!{neutral}"));
                 let mut bytes = Vec::new();
                 part.by_ref()
-                    .take(MAX_BYTES as u64 + 1)
+                    .take(budget.max_bytes() as u64 + 1)
                     .read_to_end(&mut bytes)?;
-                ensure!(bytes.len() <= MAX_BYTES, "ZIP expanded byte limit");
+                ensure!(bytes.len() <= budget.max_bytes(), "ZIP expanded byte limit");
+                ensure!(
+                    bytes.len() as u64 == declared,
+                    "ZIP declared/actual size mismatch at {location}"
+                );
                 // Edits address neutral delivered locations, never source names.
                 let bytes = transform(
                     &format!("{name}!{neutral}"),
@@ -271,7 +389,11 @@ fn transform(
                     budget,
                     depth + 1,
                 )?;
-                output.start_file(neutral, zip::write::SimpleFileOptions::default())?;
+                output.start_file(
+                    neutral,
+                    zip::write::SimpleFileOptions::default()
+                        .compression_method(zip::CompressionMethod::Stored),
+                )?;
                 output.write_all(&bytes)?;
             }
             Ok(output.finish()?.into_inner())
@@ -530,6 +652,22 @@ fn inspect_at(
     budget: &mut Budget,
     depth: usize,
 ) -> Result<()> {
+    budget.current_part = name.into();
+    if ["docx", "xlsx", "pptx"].contains(&extension(name)?) {
+        budget.enable_office();
+    }
+    if extension(name)? == "zip" {
+        let mut archive = zip::ZipArchive::new(Cursor::new(input))?;
+        for i in 0..archive.len() {
+            let part = archive.by_index(i)?;
+            if [".docx", ".xlsx", ".pptx"]
+                .iter()
+                .any(|ext| part.name().ends_with(ext))
+            {
+                budget.enable_office();
+            }
+        }
+    }
     ensure!(depth <= MAX_DEPTH, "container depth limit");
     check_identifier(name, &changes.identity_terms)?;
     budget.charge(input.len())?;
@@ -542,8 +680,61 @@ fn inspect_at(
         budget,
     )?;
     match extension(name)? {
+        "docx" | "xlsx" | "pptx" => {
+            let (_, report) = office_worker(name, input, budget, true)?;
+            budget.zip_entries += report.parts;
+            ensure!(
+                budget.zip_entries <= 100_000,
+                "OFFICE_PACK_ZIP_ENTRIES_LIMIT_EXCEEDED at {name}: {} / 100000 entries",
+                budget.zip_entries
+            );
+            budget.charge(report.expanded_bytes as usize)?;
+            for v in report.inventory {
+                let location = format!("{name}!{}", v.location);
+                entry(out, &location, &v.kind, v.value, changes, budget)?;
+                if v.warning {
+                    out.last_mut().context("missing Office entry")?.warning = true;
+                }
+            }
+            // Decode and join only XML text runs. Formatting attributes between
+            // two runs must not hide a term; mark its contributing locations.
+            let mut joined = String::new();
+            let mut spans = Vec::new();
+            for (index, e) in out.iter().enumerate().filter(|(_, e)| {
+                e.location.starts_with(&format!("{name}!")) && e.kind == "Office text"
+            }) {
+                let start = joined.len();
+                joined.push_str(&e.value.as_deref().unwrap_or_default().to_lowercase());
+                spans.push((index, start, joined.len()));
+            }
+            for term in changes.identity_terms.iter().map(String::as_str).chain([
+                "confidential",
+                "project",
+                "client",
+            ]) {
+                let term = term.trim().to_lowercase();
+                if term.is_empty() {
+                    continue;
+                }
+                for (start, _) in joined.match_indices(&term) {
+                    let end = start + term.len();
+                    for (index, left, right) in &spans {
+                        if *left < end && *right > start {
+                            out[*index].warning = true;
+                        }
+                    }
+                }
+            }
+        }
         "zip" => {
             let mut zip = zip::ZipArchive::new(Cursor::new(input))?;
+            budget.zip_entries += zip.len();
+            ensure!(
+                budget.zip_entries <= if budget.office { 100_000 } else { MAX_ENTRIES },
+                "ZIP readback entry limit at {name}: {}",
+                budget.zip_entries
+            );
+            let mut seen = BTreeSet::new();
             entry(
                 out,
                 &format!("{name}/count"),
@@ -556,14 +747,32 @@ fn inspect_at(
                 let mut part = zip.by_index(i)?;
                 safe_path(part.name())?;
                 ensure!(
-                    !part.is_dir() && part.size() <= MAX_BYTES as u64,
+                    !part.name().contains('%') && seen.insert(part.name().to_lowercase()),
+                    "escaped/duplicate/case-colliding rebuilt ZIP path"
+                );
+                let mode = part.unix_mode().unwrap_or(0) & 0o170000;
+                ensure!(
+                    mode == 0 || mode == 0o100000,
+                    "rebuilt ZIP link/special entry forbidden"
+                );
+                ensure!(
+                    !part.is_dir() && part.size() <= budget.max_bytes() as u64,
                     "invalid rebuilt ZIP entry"
                 );
                 let location = format!("{name}!{}", part.name());
+                let declared = part.size();
+                ensure!(
+                    declared <= part.compressed_size().saturating_mul(100),
+                    "ZIP readback expansion ratio exceeds 100:1 at {location}"
+                );
                 let mut bytes = Vec::new();
                 part.by_ref()
-                    .take(MAX_BYTES as u64 + 1)
+                    .take(budget.max_bytes() as u64 + 1)
                     .read_to_end(&mut bytes)?;
+                ensure!(
+                    bytes.len() as u64 == declared,
+                    "ZIP readback declared/actual size mismatch at {location}"
+                );
                 inspect_at(&location, &bytes, changes, out, budget, depth + 1)?;
             }
         }
@@ -727,6 +936,101 @@ fn inspect_json(
     Ok(())
 }
 
+pub(crate) fn office_worker(
+    name: &str,
+    input: &[u8],
+    budget: &mut Budget,
+    readback: bool,
+) -> Result<(Vec<u8>, vz_core::office::Report)> {
+    use crate::review_store::{private_directory, private_file};
+    use std::time::{Duration, Instant};
+    let started = budget.started.unwrap_or_else(Instant::now);
+    let remaining = Duration::from_secs(300).saturating_sub(started.elapsed());
+    let prior = budget.worker_time.get(name).copied().unwrap_or_default();
+    let document_remaining = Duration::from_secs(120).saturating_sub(prior);
+    ensure!(
+        !document_remaining.is_zero(),
+        "OFFICE_DOCUMENT_DEADLINE_EXCEEDED at {name}: 120 seconds"
+    );
+    let document_start = Instant::now();
+    ensure!(
+        !remaining.is_zero(),
+        "OFFICE_PACK_DEADLINE_EXCEEDED at {name}: 300 seconds"
+    );
+    let root = std::env::temp_dir()
+        .canonicalize()?
+        .join(format!("vz-office-{}", uuid::Uuid::new_v4()));
+    private_directory(&root)?;
+    let result = (|| {
+        let source = root.join("input.bin");
+        let mut file = private_file(&source)?;
+        file.write_all(input)?;
+        drop(file);
+        let prefix = format!("{name}!");
+        let edits = budget
+            .edit_bindings
+            .iter()
+            .filter_map(|(k, v)| {
+                k.strip_prefix(&prefix)
+                    .map(|key| (key.to_owned(), v.clone()))
+            })
+            .collect();
+        let request = vz_core::worker::Request {
+            path: source,
+            pdfium: None,
+            office: Some(vz_core::worker::OfficeJob {
+                name: name.into(),
+                output: root.clone(),
+                edits,
+                readback,
+                sanitized_input: budget.from_origin.contains(name),
+                chart_sources: budget.chart_sources.get(name).cloned().unwrap_or_default(),
+            }),
+        };
+        let worker = vz_core::worker::executable()?;
+        vz_core::worker::run_cancellable(
+            &worker,
+            &request,
+            remaining.min(document_remaining),
+            || {
+                ensure!(
+                    started.elapsed() < Duration::from_secs(300),
+                    "OFFICE_PACK_DEADLINE_EXCEEDED at {name}: 300 seconds"
+                );
+                ensure!(
+                    document_start.elapsed() < document_remaining,
+                    "OFFICE_DOCUMENT_DEADLINE_EXCEEDED at {name}: 120 seconds"
+                );
+                ensure!(
+                    !budget.cancel.as_ref().is_some_and(|c| c.is_cancelled()),
+                    "listing cancelled during Office worker"
+                );
+                Ok(())
+            },
+        )?;
+        let report: vz_core::office::Report =
+            serde_json::from_slice(&std::fs::read(root.join("report.json"))?)?;
+        ensure!(
+            report.allowlist_version == vz_core::office::ALLOWLIST_VERSION,
+            "OFFICE_WORKER_VERSION_MISMATCH at {name}"
+        );
+        let bytes = if readback {
+            Vec::new()
+        } else {
+            std::fs::read(root.join("output.bin"))?
+        };
+        Ok((bytes, report))
+    })();
+    let cleanup = std::fs::remove_dir_all(&root);
+    budget
+        .worker_time
+        .insert(name.into(), prior + document_start.elapsed());
+    if result.is_ok() {
+        cleanup?;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -886,6 +1190,7 @@ mod tests {
         let mut budget = Budget {
             bytes: MAX_BYTES,
             entries: 0,
+            ..Budget::default()
         };
         assert!(rewrite(
             "x.txt",

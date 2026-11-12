@@ -12,6 +12,8 @@ const failure = (cause: unknown) => typeof cause === "object" && cause !== null 
 function editable(entry: Entry, protectedColumns: string[] | undefined) {
   const key = entry.location;
   return entry.value !== null && ((entry.kind === "text" && (key === "README.md" || key === "examples/query.py" || key.startsWith("originals-0001.zip!document-")))
+    || ((entry.kind === "Office text" || entry.kind === "Office typed value") && key.endsWith("/text") && !key.includes("}numLit[") && !key.includes("}numCache["))
+    || (entry.kind === "Office attribute" && ["name", "displayName", "descr", "title", "tooltip", "errorTitle", "error", "promptTitle", "prompt", "text"].some(attribute => key.endsWith(`/@{}${attribute}`)))
     || key === "examples/query.json/query"
     || ((key.startsWith("documents.parquet/column/") || key.startsWith("chunks.parquet/column/")) && key.endsWith("/name") && protectedColumns !== undefined && !protectedColumns.includes(entry.value))
     || (key.startsWith("documents.parquet/id/") && key.endsWith("/column/2"))
@@ -61,7 +63,7 @@ export function ListingReview() {
     setBusy(true); setError(""); setConfirmed(false); setMessage("");
     try {
       await invalidation.current;
-      const result = await invoke<Built>("listing_rebuild", {packId: sources.pack_id, changes: {edits, exclusions: excluded, identity_terms: terms.split(/\r?\n/).map(term => term.trim()).filter(Boolean)}});
+      const result = await invoke<Built>("listing_rebuild", {packId: sources.pack_id, changes: {edits, exclusions: excluded, identity_terms: terms.split(/\r?\n/).map(term => term.trim()).filter(Boolean), origin: built?.current ?? null}});
       if (!alive.current || version !== mutation.current) return;
       setBuilt(result); setDirty(false); setPage(0); setSearch(""); setMessage("Preview rebuilt from delivered bytes. Review the full inventory before accepting.");
     } catch (cause) { if (alive.current) {setDirty(true); setError(failure(cause));} }

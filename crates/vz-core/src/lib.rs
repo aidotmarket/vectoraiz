@@ -90,3 +90,5 @@ pub mod verification;
 
 pub mod cloud_gate;
 pub mod credentials;
+
+pub mod office;

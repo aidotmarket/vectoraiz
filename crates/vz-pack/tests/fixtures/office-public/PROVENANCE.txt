@@ -1,0 +1,20 @@
+Unmodified Microsoft Office-saved Apache POI test fixtures.
+Upstream repository: https://github.com/apache/poi
+Upstream revision: 77df76b9c990cadbb3c8ae72f05a03fa06194c7a
+Licence: Apache-2.0 (upstream legal/LICENSE and legal/NOTICE included).
+These demonstrate Office-saved OOXML, not installed Microsoft 365 qualification.
+
+SampleDoc.docx: https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/document/SampleDoc.docx
+SHA256: ea2c517bd7be4628887eb97f630334b93b894f4522d2c0adae263e602d76df92
+WithVariousData.xlsx: https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/spreadsheet/WithVariousData.xlsx
+SHA256: 1440a832bb810c09687d3498b841782964b0b697e9242428fed1072ab22d078a
+SampleShow.pptx: https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/test-data/slideshow/SampleShow.pptx
+SHA256: bfb4b2f07c9233afd2f32aa5781d849d0c7d225bf03721a10becf487b481d828
+
+Round 2 adds six unmodified Office 2013+ fixtures. office-2013-plus.json records
+upstream paths, SHA256, Application and AppVersion (15/16) from docProps/app.xml.
+The pinned POI revision and included Apache-2.0 licence/NOTICE above cover these.
+All are tested pristine before separately planting metadata/binding/trash markers.
+AppVersion is provenance evidence, not installed Office/Document Inspector proof.
+
+S1934 adds the unmodified chart and SmartArt originals recorded in s1934-provenance.json. Apache POI files use Apache-2.0 (LICENSE/NOTICE here). boxWhisker.xlsx is an unmodified Microsoft Excel 16.0300-saved chartEx regression workbook from LibreOffice/core at the recorded immutable revision, distributed separately under MPL-2.0 (LIBREOFFICE-COPYING.MPL). Its editable OOXML source is included in full and linked upstream. No fixture is compiled into the application. Source URLs, Application/AppVersion and SHA256 values are recorded for each file. Installed Office rendering is not qualified by these bytes.
