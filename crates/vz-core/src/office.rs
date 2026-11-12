@@ -1060,7 +1060,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     }
     n.children = resolved;
 
-    if !(n.ns == graphics::C && n.local == "separator") && !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
+    if !(words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",&n.local) || (n.ns == graphics::C && n.local == "separator")) && n.text.trim().is_empty() { n.text.clear(); }
     let mut old = Vec::new();
     for c in std::mem::take(&mut n.children) {
         if c.ns == W
@@ -2702,7 +2702,12 @@ fn rebuild_inner(
                 };
                 format!(
                     "{}/{family}",
-                    part.split('/').next().context("graphics root")?
+                    match ext {
+                        "docx" => "word",
+                        "xlsx" => "xl",
+                        "pptx" => "ppt",
+                        _ => bail!("unsupported graphics package"),
+                    }
                 )
             } else if part.contains("/theme/") {
                 format!("{}/theme", part.split('/').next().context("theme root")?)

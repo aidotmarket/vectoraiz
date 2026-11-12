@@ -2116,25 +2116,40 @@ fn office_real_smartart_part_names_are_neutral() {
     let source = include_bytes!("fixtures/office-public/smartart-rotated-text.pptx");
     let original = members(source);
     let marker = "PrivateCustomer";
-    let rename: BTreeMap<_, _> = original
+    let mut rename: BTreeMap<_, _> = original
         .keys()
         .filter(|p| p.contains("/diagrams/") && p.ends_with(".xml"))
-        .map(|p| (p.clone(), p.replace(".xml", &format!("-{marker}.xml"))))
+        .map(|p| {
+            let file = p
+                .rsplit('/')
+                .next()
+                .unwrap()
+                .replace(".xml", &format!("-{marker}.xml"));
+            (p.clone(), format!("ppt/{marker}/diagrams/{file}"))
+        })
         .collect();
+    for (old, new) in rename.clone() {
+        let (old_dir, old_file) = old.rsplit_once('/').unwrap();
+        let (new_dir, new_file) = new.rsplit_once('/').unwrap();
+        let old_rels = format!("{old_dir}/_rels/{old_file}.rels");
+        if original.contains_key(&old_rels) {
+            rename.insert(old_rels, format!("{new_dir}/_rels/{new_file}.rels"));
+        }
+    }
     let mut marked = BTreeMap::new();
     for (name, bytes) in original {
-        let mut new_name = rename.get(&name).cloned().unwrap_or_else(|| name.clone());
+        let new_name = rename.get(&name).cloned().unwrap_or_else(|| name.clone());
         let mut bytes = bytes;
         if name.ends_with(".xml") || name.ends_with(".rels") {
             let mut xml = String::from_utf8(bytes).unwrap();
             for (old, new) in &rename {
                 xml = xml.replace(old, new);
                 let old_file = old.rsplit('/').next().unwrap();
-                let new_file = new.rsplit('/').next().unwrap();
-                xml = xml.replace(old_file, new_file);
-                if name.ends_with(&format!("{old_file}.rels")) {
-                    new_name = name.replace(old_file, new_file);
-                }
+                xml = xml.replace(&format!("../diagrams/{old_file}"), &format!("/{new}"));
+                xml = xml.replace(
+                    &format!("Target=\"{old_file}\""),
+                    &format!("Target=\"/{new}\""),
+                );
             }
             bytes = xml.into_bytes();
         }
@@ -2224,13 +2239,15 @@ fn office_cached_chart_labels_obey_sdk_text_choices() {
     let xml = String::from_utf8(p[path].clone()).unwrap()
         .replace("<c:delete val=\"1\"/></c:dLbl>", &format!("{}</c:dLbl>", reference("Data label")))
         .replace("</c:ser>", &format!("<c:trendline><c:trendlineType val=\"linear\"/><c:trendlineLbl>{}</c:trendlineLbl></c:trendline></c:ser>", reference("Trendline label")))
-        .replace("<c:plotArea>", &format!("<c:title>{}</c:title><c:plotArea>", reference("Chart title")));
+        .replace("<c:plotArea>", &format!("<c:title>{}</c:title><c:plotArea>", reference("Chart title")))
+        .replace("</c:plotArea>", &format!("<c:valAx><c:dispUnits><c:dispUnitsLbl>{}</c:dispUnitsLbl></c:dispUnits></c:valAx></c:plotArea>", reference("Display units label")));
     p.insert(path.into(), xml.into_bytes());
     let (bytes, report) = rebuild("docx", &p);
     for text in [
         "Data label",
         "Trendline label",
         "Chart title",
+        "Display units label",
         "Chart series marker",
     ] {
         assert!(report.text().contains(text), "{text}");
