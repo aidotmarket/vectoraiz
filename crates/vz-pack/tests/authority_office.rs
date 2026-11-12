@@ -1424,3 +1424,89 @@ fn footer_field_boundaries_in_one_run_preserve_result_and_refuse_missing_result(
         }
     }
 }
+
+const C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
+fn chart_fixture(ext: &str, visibility: &str) -> BTreeMap<String, Vec<u8>> {
+    let mut p = fixture(ext);
+    let prefix = match ext {
+        "docx" => "word",
+        "xlsx" => "xl",
+        _ => "ppt",
+    };
+    add(
+        &mut p,
+        &format!("{prefix}/charts/chart1.xml"),
+        "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+        &format!(
+            r#"<c:chartSpace xmlns:c="{C}"><c:chart><c:plotArea><c:barChart><c:ser><c:idx val="0"/><c:order val="0"/><c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Chart series marker</c:v></c:pt></c:strCache></c:strRef></c:tx><c:cat><c:strRef><c:f>Sheet1!$A$2</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Category marker</c:v></c:pt></c:strCache></c:strRef></c:cat><c:val><c:numRef><c:f>Sheet1!$B$2</c:f><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="1"/><c:pt idx="0"><c:v>42</c:v></c:pt></c:numCache></c:numRef></c:val><c:dLbls><c:dLbl><c:idx val="0"/><c:delete val="1"/></c:dLbl></c:dLbls></c:ser></c:barChart></c:plotArea><c:legend><c:legendEntry><c:idx val="0"/><c:delete val="1"/></c:legendEntry></c:legend>{visibility}</c:chart></c:chartSpace>"#
+        ),
+    );
+    p
+}
+#[test]
+fn office_static_charts_preserve_caches_and_deleted_label_formatting() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        for visibility in [
+            r#"<c:plotVisOnly val="true"/>"#,
+            r#"<c:plotVisOnly val="1"/>"#,
+            "<c:plotVisOnly/>",
+        ] {
+            let (bytes, report) = rebuild(ext, &chart_fixture(ext, visibility));
+            assert!(report.text().contains("Category marker"));
+            assert!(report.text().contains("42"));
+            let expanded = members(&bytes);
+            let chart = expanded
+                .iter()
+                .find(|(p, _)| p.contains("/charts/"))
+                .unwrap()
+                .1;
+            let xml = String::from_utf8_lossy(chart);
+            assert!(!xml.contains("}f") && !xml.contains(":f>"));
+            assert!(xml.contains(":delete"));
+            assert_eq!(
+                report.inventory,
+                office::inspect(&format!("document.{ext}"), &bytes)
+                    .unwrap()
+                    .inventory
+            );
+        }
+    }
+}
+#[test]
+fn office_chart_visibility_and_multilevel_refusals() {
+    for (setting, reason) in [
+        (
+            r#"<c:plotVisOnly val="false"/>"#,
+            "chart plots hidden rows or columns",
+        ),
+        (
+            r#"<c:plotVisOnly val="0"/>"#,
+            "chart plots hidden rows or columns",
+        ),
+        ("", "chart visibility setting missing"),
+    ] {
+        let err = office::rebuild(
+            "document.docx",
+            &archive(&chart_fixture("docx", setting)),
+            &BTreeMap::new(),
+        )
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(err.contains(reason), "{err}");
+    }
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let chart = p.get_mut("word/charts/chart1.xml").unwrap();
+    *chart = String::from_utf8(chart.clone())
+        .unwrap()
+        .replace("strRef", "multiLvlStrRef")
+        .into_bytes();
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("multi-level chart categories not supported"),
+        "{err}"
+    );
+}

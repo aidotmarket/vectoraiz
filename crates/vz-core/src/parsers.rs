@@ -186,72 +186,80 @@ fn pptx_slide_order(zip: &mut zip::ZipArchive<File>) -> Result<Vec<String>> {
     {
         return Ok(names);
     }
-    let mut xml = String::new();
-    zip.by_name("ppt/_rels/presentation.xml.rels")?
-        .take(MAX_PART)
-        .read_to_string(&mut xml)?;
-    let mut reader = quick_xml::NsReader::from_str(&xml);
-    let mut rels = BTreeMap::new();
-    loop {
-        match reader.read_event()? {
-            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
-                let attrs = e
-                    .attributes()
-                    .map(|a| {
-                        let a = a?;
-                        Ok((
-                            String::from_utf8(a.key.as_ref().to_vec())?,
-                            a.decode_and_unescape_value(reader.decoder())?.into_owned(),
-                        ))
-                    })
-                    .collect::<Result<BTreeMap<_, _>>>()?;
-                if attrs.get("Type").is_some_and(|t| t.ends_with("/slide"))
-                    && attrs.get("TargetMode").is_none_or(|m| m != "External")
-                {
-                    if let (Some(id), Some(target)) = (attrs.get("Id"), attrs.get("Target")) {
-                        let name = crate::office::resolve("ppt/presentation.xml", target)?;
-                        if names.contains(&name) {
-                            rels.insert(id.clone(), name);
+    let resolved = (|| -> Result<Vec<String>> {
+        let mut xml = String::new();
+        zip.by_name("ppt/_rels/presentation.xml.rels")?
+            .take(MAX_PART)
+            .read_to_string(&mut xml)?;
+        let mut reader = quick_xml::NsReader::from_str(&xml);
+        let mut rels = BTreeMap::new();
+        loop {
+            match reader.read_event()? {
+                Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
+                    let attrs = e
+                        .attributes()
+                        .map(|a| {
+                            let a = a?;
+                            Ok((
+                                String::from_utf8(a.key.as_ref().to_vec())?,
+                                a.decode_and_unescape_value(reader.decoder())?.into_owned(),
+                            ))
+                        })
+                        .collect::<Result<BTreeMap<_, _>>>()?;
+                    if attrs.get("Type").is_some_and(|t| t.ends_with("/slide"))
+                        && attrs.get("TargetMode").is_none_or(|m| m != "External")
+                    {
+                        if let (Some(id), Some(target)) = (attrs.get("Id"), attrs.get("Target")) {
+                            let name = crate::office::resolve("ppt/presentation.xml", target)?;
+                            if names.contains(&name) {
+                                rels.insert(id.clone(), name);
+                            }
                         }
                     }
                 }
+                Event::Eof => break,
+                _ => (),
             }
-            Event::Eof => break,
-            _ => (),
         }
-    }
-    xml.clear();
-    zip.by_name("ppt/presentation.xml")?
-        .take(MAX_PART)
-        .read_to_string(&mut xml)?;
-    let mut reader = quick_xml::NsReader::from_str(&xml);
-    let mut ordered = Vec::new();
-    let mut in_list = false;
-    loop {
-        match reader.read_event()? {
-            Event::Start(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = true,
-            Event::End(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = false,
-            Event::Start(e) | Event::Empty(e) if in_list && e.local_name().as_ref() == b"sldId" => {
-                for a in e.attributes() {
-                    let a = a?;
-                    let (ns, local) = reader.resolve_attribute(a.key);
-                    if local.as_ref() == b"id"
-                        && matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.as_ref() == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships")
-                    {
-                        let id = a.decode_and_unescape_value(reader.decoder())?;
-                        ordered.push(
-                            rels.get(id.as_ref())
-                                .context("presentation slide relationship missing")?
-                                .clone(),
-                        );
+        xml.clear();
+        zip.by_name("ppt/presentation.xml")?
+            .take(MAX_PART)
+            .read_to_string(&mut xml)?;
+        let mut reader = quick_xml::NsReader::from_str(&xml);
+        let mut ordered = Vec::new();
+        let mut in_list = false;
+        loop {
+            match reader.read_event()? {
+                Event::Start(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = true,
+                Event::End(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = false,
+                Event::Start(e) | Event::Empty(e)
+                    if in_list && e.local_name().as_ref() == b"sldId" =>
+                {
+                    for a in e.attributes() {
+                        let a = a?;
+                        let (ns, local) = reader.resolve_attribute(a.key);
+                        if local.as_ref() == b"id"
+                            && matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.as_ref() == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+                        {
+                            let id = a.decode_and_unescape_value(reader.decoder())?;
+                            ordered.push(
+                                rels.get(id.as_ref())
+                                    .context("presentation slide relationship missing")?
+                                    .clone(),
+                            );
+                        }
                     }
                 }
+                Event::Eof => break,
+                _ => (),
             }
-            Event::Eof => break,
-            _ => (),
         }
-    }
-    Ok(ordered)
+        Ok(ordered)
+    })();
+    Ok(resolved
+        .ok()
+        .filter(|list| !list.is_empty())
+        .unwrap_or(names))
 }
 fn pdf(request: &Request) -> Result<Vec<Page>> {
     use pdfium_render::prelude::*;

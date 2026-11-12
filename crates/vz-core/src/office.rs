@@ -7,6 +7,8 @@ use std::{
     io::{Cursor, Read, Write},
 };
 
+mod chart_allowlist;
+mod graphics;
 mod layout_allowlist;
 mod style_allowlist;
 
@@ -28,7 +30,7 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_VALUES: usize = 5_000_000;
 pub const MAX_PARTS: usize = 10_000;
-pub const ALLOWLIST_VERSION: u32 = 3;
+pub const ALLOWLIST_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Value {
@@ -418,6 +420,9 @@ fn words(s: &str, k: &str) -> bool {
 // Word-qualified) attributes. This deliberately refuses unimplemented layout
 // constructs; a namespace match by itself never permits retention.
 fn rule(ns: &str, el: &str) -> Option<&'static str> {
+    if let Some(attrs) = chart_allowlist::rule(ns, el) {
+        return Some(attrs);
+    }
     if ns==X14 && words("dataValidations dataValidation conditionalFormatting cfRule colorScale dataBar iconSet cfvo",el) {return rule(S,el);}
     if ns == X14 && words("conditionalFormattings formula1 formula2", el) {
         return Some("");
@@ -426,6 +431,8 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         return Some("");
     }
     Some(match (ns,el) {
+        (XDR,"graphicFrame"|"nvGraphicFramePr"|"cNvGraphicFramePr"|"xfrm")=>"macro",
+        (S,"chartsheet")=>"",
         (W,"rStyle"|"tblStyleColBandSize"|"tblStyleRowBandSize")=>"val",
         (W,"separator"|"continuationSeparator")=>"",
         (P,"notesStyle")=>"",(P,"nvPr")=>"isPhoto userDrawn",
@@ -682,6 +689,25 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
         (W, "ftr")
     } else if path == "xl/workbook.xml" {
         (S, "workbook")
+    } else if path.contains("/charts/") && path.ends_with(".xml") {
+        (
+            if path.rsplit('/').next().unwrap_or("").starts_with("style") {
+                graphics::CS
+            } else if path.rsplit('/').next().unwrap_or("").starts_with("colors") {
+                graphics::CS
+            } else {
+                graphics::C
+            },
+            if path.rsplit('/').next().unwrap_or("").starts_with("style") {
+                "chartStyle"
+            } else if path.rsplit('/').next().unwrap_or("").starts_with("colors") {
+                "colorStyle"
+            } else {
+                "chartSpace"
+            },
+        )
+    } else if path.starts_with("xl/chartsheets/") && path.ends_with(".xml") {
+        (S, "chartsheet")
     } else if path.starts_with("xl/worksheets/") && path.ends_with(".xml") {
         (S, "worksheet")
     } else if path == "xl/sharedStrings.xml" {
@@ -985,7 +1011,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     }
     n.children = resolved;
 
-    if !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
+    if !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
     let mut old = Vec::new();
     for c in std::mem::take(&mut n.children) {
         if c.ns == W
@@ -1025,6 +1051,10 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     let mut field: Option<(bool, bool)> = None;
     for mut c in old {
         if c.ns == W && c.local == "sdt" {
+            ensure!(
+                !field.is_some_and(|f| !f.0),
+                "content control in Word field instruction region at {part}"
+            );
             ensure!(
                 c.children
                     .iter()
@@ -1350,7 +1380,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
         let permitted = if ns == XML {
             k == "space" && n.local == "t"
         } else if ns == R {
-            words("id embed link",k)&&words("hyperlink headerReference footerReference sheet tablePart drawing sldId sldMasterId sldLayoutId notesMasterId handoutMasterId hlinkClick hlinkHover blip", &n.local)
+            words("id embed link",k)&&words("hyperlink headerReference footerReference sheet tablePart drawing sldId sldMasterId sldLayoutId notesMasterId handoutMasterId hlinkClick hlinkHover blip chart", &n.local)
         } else {
             (if n.ns == W { ns == W } else { ns.is_empty() }) && (words(allowed, k) || layout)
         };
@@ -1363,7 +1393,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
     ensure!(
         n.text.trim().is_empty()
             || words(
-                "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId",
+                "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",
                 &n.local
             ),
         "unexpected XML text at {part}/{}",
@@ -1463,8 +1493,14 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
                 el,
             );
     }
+    if part.contains("/charts/") {
+        return [graphics::C, graphics::CS, A].contains(&ns);
+    }
+    if part.starts_with("xl/chartsheets/") {
+        return ns == S;
+    }
     if part.starts_with("word/") {
-        return [W, A, WP, PIC].contains(&ns);
+        return [W, A, WP, PIC, graphics::C].contains(&ns);
     }
     if part == "xl/workbook.xml" {
         return ns == S
@@ -1490,13 +1526,13 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns==S&&words("table autoFilter filterColumn filters filter customFilters customFilter top10 dynamicFilter colorFilter iconFilter dateGroupItem sortState sortCondition tableColumns tableColumn tableStyleInfo extLst ext",el);
     }
     if part.starts_with("xl/drawings/") {
-        return [XDR, A, PIC].contains(&ns);
+        return [XDR, A, PIC, graphics::C].contains(&ns);
     }
     if part == "ppt/presentation.xml" {
         return (ns==P&&words("presentation sldIdLst sldId sldSz notesSz sldMasterIdLst sldMasterId notesMasterIdLst notesMasterId handoutMasterIdLst handoutMasterId defaultTextStyle extLst ext",el))||ns==P14||ns==A;
     }
     if part.starts_with("ppt/") {
-        return ns == P || ns == A;
+        return ns == P || ns == A || ns == graphics::C;
     }
     false
 }
@@ -1648,7 +1684,11 @@ fn walk(
         let at = format!("{location}/text");
         if let Some(edit) = edits.get(&at) {
             ensure!(
-                n.local == "t" || (n.ns == S && n.local == "v"),
+                n.local == "t"
+                    || (n.ns == S && n.local == "v")
+                    || (n.ns == graphics::C
+                        && n.local == "v"
+                        && (location.contains("}strLit[") || location.contains("}tx["))),
                 "Office text node cannot be edited at {at}"
             );
             ensure!(
@@ -1660,7 +1700,9 @@ fn walk(
         }
         report.add(
             at,
-            if n.local == "v" {
+            if n.ns == graphics::C && n.local == "v" {
+                "Office static chart cache; caches may be stale"
+            } else if n.local == "v" {
                 "Office typed value"
             } else {
                 "Office text"
@@ -2011,6 +2053,14 @@ fn expected_type(path: &str, root: &Node, ext: &str) -> Result<&'static str> {
         (P, "handoutMaster") => {
             "application/vnd.openxmlformats-officedocument.presentationml.handoutMaster+xml"
         }
+        (graphics::C, "chartSpace") => {
+            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml"
+        }
+        (graphics::CS, "chartStyle") => "application/vnd.ms-office.chartstyle+xml",
+        (graphics::CS, "colorStyle") => "application/vnd.ms-office.chartcolorstyle+xml",
+        (S, "chartsheet") => {
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml"
+        }
         (XDR, "wsDr") => "application/vnd.openxmlformats-officedocument.drawing+xml",
         (A, "theme") => "application/vnd.openxmlformats-officedocument.theme+xml",
         _ => bail!("unsupported/mismatched Office content type at {path}"),
@@ -2302,11 +2352,12 @@ fn rebuild_inner(
 ) -> Result<(Vec<u8>, Report)> {
     let ext = name.rsplit('.').next().unwrap_or("");
     ensure!(words("docx xlsx pptx", ext), "unsupported Office extension");
-    let (parts, expanded) = read_package(input)?;
+    let (mut parts, expanded) = read_package(input)?;
     let source_parts = parts.len();
     let mut report = Report::default();
     let mut trees = BTreeMap::new();
     let mut binaries = BTreeMap::new();
+    graphics::prepare(&mut parts, &mut report)?;
     let ct = parse(
         parts
             .get("[Content_Types].xml")
@@ -2471,12 +2522,16 @@ fn rebuild_inner(
                 || part.starts_with("ppt/notesSlides/")
                 || part.starts_with("ppt/notesMasters/")
                 || part.starts_with("ppt/handoutMasters/")
-                || part.contains("/theme/"))
+                || part.contains("/theme/")
+                || part.contains("/charts/")
+                || part.starts_with("xl/chartsheets/"))
         {
             serial += 1;
             let (_, file) = part.rsplit_once('/').context("part path")?;
             let dir = if part.contains("/media/") {
                 format!("{}/media", part.split('/').next().context("media root")?)
+            } else if part.contains("/charts/") || part.starts_with("xl/chartsheets/") {
+                part.rsplit_once('/').unwrap().0.to_owned()
             } else if part.contains("/theme/") {
                 format!("{}/theme", part.split('/').next().context("theme root")?)
             } else if part.starts_with("word/header") || part.starts_with("word/footer") {
@@ -2500,7 +2555,11 @@ fn rebuild_inner(
                 .to_owned()
             };
             let suffix = file.rsplit('.').next().context("part suffix")?;
-            let stem = if part.starts_with("word/header") {
+            let stem = if part.contains("/charts/") && file.starts_with("style") {
+                "style"
+            } else if part.contains("/charts/") && file.starts_with("colors") {
+                "colors"
+            } else if part.starts_with("word/header") {
                 "header"
             } else if part.starts_with("word/footer") {
                 "footer"
@@ -2554,6 +2613,7 @@ fn rebuild_inner(
                 .to_owned();
             ensure!(
                 (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || ["http://schemas.microsoft.com/office/2011/relationships/chartStyle", "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"].contains(&ty.as_str())
                     || (ty == "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
                         && resolve(&own, &target)? == "word/stylesWithEffects.xml"
                         && rel.attr("TargetMode") != Some("External"))
@@ -2604,7 +2664,7 @@ fn rebuild_inner(
                     present.contains(&resolved),
                     "dangling relationship at {part}/{id}: {resolved}"
                 );
-                ensure!(words("officeDocument styles stylesWithEffects settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink",kind),"unsupported content dependency at {part}/{id}");
+                ensure!(words("officeDocument styles stylesWithEffects settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink chart chartsheet chartStyle chartColorStyle",kind),"unsupported content dependency at {part}/{id}");
                 if part == "_rels/.rels" && kind == "officeDocument" {
                     ensure!(
                         office_root.replace(resolved.clone()).is_none(),
