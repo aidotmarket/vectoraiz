@@ -10,6 +10,15 @@ use std::{
 mod chart_allowlist;
 mod chart_sources;
 mod diagram_allowlist;
+mod ingest;
+pub(crate) fn ingest_graphics(zip: &mut zip::ZipArchive<std::fs::File>, host: &str) -> String {
+    ingest::graphics_text(zip, host)
+}
+pub(crate) fn ingest_sheet_parts(
+    zip: &mut zip::ZipArchive<std::fs::File>,
+) -> Result<BTreeMap<String, String>> {
+    ingest::sheet_parts(zip)
+}
 mod graphics;
 mod layout_allowlist;
 mod style_allowlist;
@@ -365,6 +374,9 @@ fn serialize(n: &Node) -> Result<Vec<u8>> {
         .map(|(i, s)| {
             let p = if s == XML {
                 "xml".into()
+            } else if s == R {
+                // Calamine recognizes the conventional relationship prefix.
+                "r".into()
             } else {
                 format!("n{i}")
             };

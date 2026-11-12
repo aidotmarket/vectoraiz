@@ -1773,14 +1773,23 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
             office: None,
         })
         .unwrap();
-        assert_eq!(
-            pages
-                .iter()
-                .map(|p| p.text.as_str())
-                .collect::<Vec<_>>()
-                .join("\n"),
-            report.text()
-        );
+        let ingested = pages
+            .iter()
+            .map(|p| p.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for entry in report.inventory.iter().filter(|v| {
+            v.location.ends_with("/text")
+                && (v.location.contains("/charts/") || v.location.contains("/diagrams/"))
+                && v.content
+        }) {
+            if let Some(value) = &entry.value {
+                assert!(
+                    ingested.contains(value),
+                    "{name}: missing graphics value {value:?}"
+                );
+            }
+        }
         if name == "smartart-rotated-text.pptx" {
             assert_eq!(
                 report
@@ -2260,4 +2269,101 @@ fn office_cached_chart_labels_obey_sdk_text_choices() {
         .unwrap()
         .to_string()
         .contains("unsupported child v in tx"));
+}
+
+#[test]
+fn office_ingest_keeps_host_pages_and_order_with_graphics() {
+    for ext in ["pptx", "xlsx"] {
+        let mut p = chart_fixture(ext, "<c:plotVisOnly/>");
+        if ext == "pptx" {
+            let host = String::from_utf8(p["ppt/slides/slide1.xml"].clone()).unwrap();
+            add(
+                &mut p,
+                "ppt/slides/slide2.xml",
+                "application/vnd.openxmlformats-officedocument.presentationml.slide+xml",
+                &host.replace("Project ORION retained body", "Second slide"),
+            );
+            let chart = format!(
+                r#"<p:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" xmlns:r="{R}" r:id="chart"/></a:graphicData></a:graphic></p:graphicFrame>"#
+            );
+            p.insert(
+                "ppt/slides/slide1.xml".into(),
+                host.replace("</p:spTree>", &format!("{chart}</p:spTree>"))
+                    .into_bytes(),
+            );
+            p.insert("ppt/slides/_rels/slide1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes());
+            let xml = String::from_utf8(p["ppt/presentation.xml"].clone())
+                .unwrap()
+                .replace(
+                    "<p:sldIdLst>",
+                    "<p:sldIdLst><p:sldId id=\"257\" r:id=\"s2\"/>",
+                );
+            p.insert("ppt/presentation.xml".into(), xml.into_bytes());
+            let xml = String::from_utf8(p["ppt/_rels/presentation.xml.rels"].clone()).unwrap().replace("</Relationships>", &format!(r#"<Relationship Id="s2" Type="{R}/slide" Target="slides/slide2.xml"/></Relationships>"#));
+            p.insert("ppt/_rels/presentation.xml.rels".into(), xml.into_bytes());
+        } else {
+            let host = String::from_utf8(p["xl/worksheets/identity-sheet.xml"].clone()).unwrap();
+            add(
+                &mut p,
+                "xl/worksheets/sheet2.xml",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",
+                &host.replace("Project ORION retained body", "Second sheet"),
+            );
+            p.insert(
+                "xl/worksheets/identity-sheet.xml".into(),
+                host.replace(
+                    "</s:worksheet>",
+                    &format!(r#"<s:drawing xmlns:r="{R}" r:id="drawing"/></s:worksheet>"#),
+                )
+                .into_bytes(),
+            );
+            p.insert("xl/worksheets/_rels/identity-sheet.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="drawing" Type="{R}/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#).into_bytes());
+            let xdr = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing";
+            add(
+                &mut p,
+                "xl/drawings/drawing1.xml",
+                "application/vnd.openxmlformats-officedocument.drawing+xml",
+                &format!(
+                    r#"<xdr:wsDr xmlns:xdr="{xdr}" xmlns:a="{A}" xmlns:c="{C}" xmlns:r="{R}"><xdr:absoluteAnchor><xdr:pos x="0" y="0"/><xdr:ext cx="1" cy="1"/><xdr:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart r:id="chart"/></a:graphicData></a:graphic></xdr:graphicFrame><xdr:clientData/></xdr:absoluteAnchor></xdr:wsDr>"#
+                ),
+            );
+            p.insert("xl/drawings/_rels/drawing1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes());
+            let xml = String::from_utf8(p["xl/workbook.xml"].clone())
+                .unwrap()
+                .replace(
+                    "<s:sheets>",
+                    "<s:sheets><s:sheet name=\"Second\" sheetId=\"2\" r:id=\"s2\"/>",
+                );
+            p.insert("xl/workbook.xml".into(), xml.into_bytes());
+            let xml = String::from_utf8(p["xl/_rels/workbook.xml.rels"].clone()).unwrap().replace("</Relationships>", &format!(r#"<Relationship Id="s2" Type="{R}/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#));
+            p.insert("xl/_rels/workbook.xml.rels".into(), xml.into_bytes());
+        }
+        let original = archive(&p);
+        let (sanitized, _) = rebuild(ext, &p);
+        for bytes in [original, sanitized] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("document.{ext}"));
+            std::fs::write(&path, bytes).unwrap();
+            let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+                path,
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(pages.len(), 2, "{ext}");
+            assert_eq!((pages[0].page, pages[1].page), (1, 2));
+            assert!(pages[0].text.contains("Second"), "{ext}: {}", pages[0].text);
+            assert!(!pages[0].text.contains("Chart series marker"));
+            assert!(
+                pages[1].text.contains("Chart series marker"),
+                "{ext}: {}",
+                pages[1].text
+            );
+            assert!(pages[1].text.contains("Category marker"));
+            assert!(pages[1].text.contains("42"));
+            if ext == "xlsx" {
+                assert!(pages[1].text.starts_with("# Project ORION\n"));
+            }
+        }
+    }
 }

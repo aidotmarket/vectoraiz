@@ -21,7 +21,7 @@ fn text(n: &Node) -> String {
         .collect::<Vec<_>>()
         .join("")
 }
-fn relpath(part: &str) -> Result<String> {
+pub(super) fn relpath(part: &str) -> Result<String> {
     let (dir, file) = part.rsplit_once('/').context("graphics owner path")?;
     Ok(format!("{dir}/_rels/{file}.rels"))
 }
@@ -299,7 +299,7 @@ fn supported(n: &Node, part: &str) -> bool {
     let mut ignored = Report::default();
     cleanse(&mut trial, part, &mut ignored).is_ok() && validate_node(&trial, part).is_ok()
 }
-fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
+pub(super) fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
     let mut children = Vec::new();
     for (i, mut c) in std::mem::take(&mut n.children).into_iter().enumerate() {
         let loc = location(at, &c, i + 1);
@@ -545,7 +545,7 @@ fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
     }
     Ok(())
 }
-fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bool) -> Result<()> {
+pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bool) -> Result<()> {
     if n.ns == C && n.local == "chartSpace" {
         report.warnings.push(format!(
             "{at}: retained static chart caches may be stale; review every cached string and value"

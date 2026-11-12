@@ -69,21 +69,6 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
         .and_then(|s| s.to_str())
         .unwrap_or("")
         .to_lowercase();
-    // Reuse the package walk when its complete relationship graph is supported.
-    // This includes chart numeric/string caches, SmartArt twins and secondary
-    // text, giving ingest exactly the content used for reviewed readback.
-    // Incomplete legacy packages retain the tolerant format-specific reader.
-    if matches!(ext.as_str(), "docx" | "xlsx" | "pptx") {
-        validate_zip(path)?;
-        let bytes = std::fs::read(path)?;
-        let name = format!("document.{ext}");
-        if let Ok(report) = crate::office::inspect(&name, &bytes) {
-            return Ok(vec![page(1, report.text())]);
-        }
-        if let Ok((_, report)) = crate::office::rebuild(&name, &bytes, &Default::default()) {
-            return Ok(vec![page(1, report.text())]);
-        }
-    }
     match ext.as_str() {
         "txt" | "md" | "markdown" => Ok(vec![page(1, std::fs::read_to_string(path)?)]),
         "html" | "htm" => {
@@ -127,10 +112,15 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
                     _ => (),
                 }
             }
+            text.push_str(&crate::office::ingest_graphics(
+                &mut zip,
+                "word/document.xml",
+            ));
             Ok(vec![page(1, text)])
         }
         "xlsx" => {
-            validate_zip(path)?;
+            let mut zip = validate_zip(path)?;
+            let parts = crate::office::ingest_sheet_parts(&mut zip).unwrap_or_default();
             let mut workbook = open_workbook_auto(path)?;
             let names = workbook.sheet_names().to_vec();
             let mut pages = Vec::new();
@@ -145,6 +135,9 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
                             .join(" | "),
                     );
                     text.push('\n');
+                }
+                if let Some(part) = parts.get(&name) {
+                    text.push_str(&crate::office::ingest_graphics(&mut zip, part));
                 }
                 pages.push(page(i as u32 + 1, text));
             }
@@ -172,6 +165,7 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
                         _ => (),
                     }
                 }
+                text.push_str(&crate::office::ingest_graphics(&mut zip, name));
                 pages.push(page(i as u32 + 1, text));
             }
             Ok(pages)
@@ -185,7 +179,7 @@ fn pptx_slide_order(zip: &mut zip::ZipArchive<File>) -> Result<Vec<String>> {
     use std::collections::BTreeMap;
     let mut names: Vec<_> = zip
         .file_names()
-        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .filter(|n| n.starts_with("ppt/slides/") && !n.contains("/_rels/") && n.ends_with(".xml"))
         .map(str::to_owned)
         .collect();
     names.sort_by_key(|n| {
