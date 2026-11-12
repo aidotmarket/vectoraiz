@@ -1746,8 +1746,11 @@ fn walk(
         }
         report.add(
             at,
-            if n.ns == graphics::C && n.local == "v" {
-                "Office static chart cache; caches may be stale"
+            if n.ns == graphics::C
+                && n.local == "v"
+                && (location.contains("}strLit[") || location.contains("}tx["))
+            {
+                "Office text"
             } else if n.local == "v" {
                 "Office typed value"
             } else {

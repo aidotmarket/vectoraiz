@@ -420,7 +420,7 @@ fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
                     (count - ids.range(..count).count() as u32).to_string(),
                 );
             }
-            if c.local != "extLst" {
+            if c.local != "extLst" && !(c.ns == C && c.local == "tx" && n.local == "ser") {
                 repair(&mut c, ids, at, report)?;
             }
             kept.push(c);
@@ -441,6 +441,11 @@ fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
     Ok(())
 }
 fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
+    if n.ns == C && n.local == "chartSpace" {
+        report.warnings.push(format!(
+            "{at}: retained static chart caches may be stale; review every cached string and value"
+        ));
+    }
     ensure!(
         !(n.ns == C && n.local == "multiLvlStrRef"),
         "multi-level chart categories not supported; flatten in Excel or exclude at {at}"

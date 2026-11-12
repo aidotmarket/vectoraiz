@@ -409,6 +409,69 @@ mod tests {
         }
     }
     #[test]
+    fn pptx_resolution_errors_and_empty_lists_fall_back_to_numeric_order() {
+        use std::io::Write;
+        let p = "http://schemas.openxmlformats.org/presentationml/2006/main";
+        let r = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let rel = "http://schemas.openxmlformats.org/package/2006/relationships";
+        for target in [Some("Slides/Slide2.xml"), Some("slides/%73lide2.xml"), None] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fallback.pptx");
+            let mut z = zip::ZipWriter::new(File::create(&path).unwrap());
+            let list = if target.is_some() {
+                r#"<p:sldId id="256" r:id="slide"/>"#
+            } else {
+                ""
+            };
+            let relation = target
+                .map(|target| {
+                    format!(r#"<Relationship Id="slide" Type="{r}/slide" Target="{target}"/>"#)
+                })
+                .unwrap_or_default();
+            for (name, body) in [
+                (
+                    "ppt/presentation.xml".to_owned(),
+                    format!(
+                        r#"<p:presentation xmlns:p="{p}" xmlns:r="{r}"><p:sldIdLst>{list}</p:sldIdLst></p:presentation>"#
+                    ),
+                ),
+                (
+                    "ppt/_rels/presentation.xml.rels".into(),
+                    format!(r#"<Relationships xmlns="{rel}">{relation}</Relationships>"#),
+                ),
+                (
+                    "ppt/slides/slide10.xml".into(),
+                    "<sld><p><t>Slide ten</t></p></sld>".into(),
+                ),
+                (
+                    "ppt/slides/slide2.xml".into(),
+                    "<sld><p><t>Slide two</t></p></sld>".into(),
+                ),
+            ] {
+                z.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                z.write_all(body.as_bytes()).unwrap();
+            }
+            z.finish().unwrap();
+            let pages = parse(&Request {
+                path: path.clone(),
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(
+                pages.iter().map(|p| p.text.trim()).collect::<Vec<_>>(),
+                vec!["Slide two", "Slide ten"]
+            );
+            assert!(crate::office::rebuild(
+                "fallback.pptx",
+                &std::fs::read(path).unwrap(),
+                &Default::default()
+            )
+            .is_err());
+        }
+    }
+    #[test]
     fn ordinary_ingest_does_not_require_listing_sanitizer() {
         use std::io::Write;
         let dir = tempfile::tempdir().unwrap();
