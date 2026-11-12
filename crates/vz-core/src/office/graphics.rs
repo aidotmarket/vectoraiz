@@ -661,6 +661,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
     let sheets = super::chart_sources::sheets(parts)?;
     let mut trees = BTreeMap::new();
     let mut deleted = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut external_data = BTreeMap::<String, BTreeSet<String>>::new();
     for (part, bytes) in parts.iter() {
         if !part.ends_with(".xml") || removable(part) {
             continue;
@@ -671,6 +672,15 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         refs(&n, &mut before);
         resolve_alternates(&mut n, part, report)?;
         if n.ns == C {
+            let mut links = Vec::new();
+            visit(&n, C, "externalData", &mut links);
+            external_data.insert(
+                part.clone(),
+                links
+                    .iter()
+                    .filter_map(|n| n.attr_ns(R, "id").map(str::to_owned))
+                    .collect(),
+            );
             super::chart_sources::annotate(&mut n, part, &sheets, &mut report.chart_sources)?;
             filtered_series(&mut n, part, report)?;
             filtered(&mut n, part, report)?;
@@ -700,7 +710,14 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                 || (trees.get(&own).is_some_and(|n| n.ns == C) && kind == "themeOverride");
             if drop {
                 ensure!(
-                    !words("oleObject control vbaProject", kind),
+                    !words("oleObject control vbaProject", kind)
+                        || (kind == "oleObject"
+                            && rel.attr("Type") == Some(&format!("{R}/oleObject"))
+                            && rel.attr("TargetMode") == Some("External")
+                            && trees.get(&own).is_some_and(|n| n.ns == C)
+                            && external_data.get(&own).is_some_and(|ids| rel
+                                .attr("Id")
+                                .is_some_and(|id| ids.contains(id)))),
                     "unrelated OLE/active/embedded content at {part}"
                 );
                 if kind == "package" {

@@ -2367,3 +2367,79 @@ fn office_ingest_keeps_host_pages_and_order_with_graphics() {
         }
     }
 }
+
+#[test]
+fn office_real_linked_chart_is_static_and_unrelated_ole_refuses() {
+    let source = include_bytes!("fixtures/office-public/date-categories.pptx");
+    let manifest: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/office-public/s1934-fold1-provenance.json"
+    ))
+    .unwrap();
+    assert_eq!(
+        sha256(source),
+        manifest["files"][0]["sha256"].as_str().unwrap()
+    );
+    let original = members(source);
+    let rel = String::from_utf8(original["ppt/charts/_rels/chart1.xml.rels"].clone()).unwrap();
+    assert!(rel.contains(&format!("{R}/oleObject")) && rel.contains("TargetMode=\"External\""));
+    let (bytes, report) = office::rebuild("document.pptx", source, &BTreeMap::new()).unwrap();
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.pptx", &bytes).unwrap().inventory
+    );
+    let text = report.text();
+    // Every original cached chart value survives as static displayed data.
+    let mut reader = quick_xml::NsReader::from_reader(original["ppt/charts/chart1.xml"].as_slice());
+    let mut in_value = false;
+    loop {
+        match reader.read_event().unwrap() {
+            quick_xml::events::Event::Start(e) => {
+                let (ns, local) = reader.resolve_element(e.name());
+                in_value = local.as_ref() == b"v"
+                    && matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.as_ref() == C.as_bytes());
+            }
+            quick_xml::events::Event::Text(t) if in_value => assert!(text.contains(
+                quick_xml::escape::unescape(&t.decode().unwrap())
+                    .unwrap()
+                    .as_ref()
+            )),
+            quick_xml::events::Event::End(_) => in_value = false,
+            quick_xml::events::Event::Eof => break,
+            _ => (),
+        }
+    }
+    for bytes in members(&bytes).values() {
+        let xml = String::from_utf8_lossy(bytes);
+        assert!(
+            !xml.contains("externalData")
+                && !xml.contains("/oleObject")
+                && !xml.contains("d.docs.live.net")
+        );
+    }
+    // A deleted chart dependency is insufficient proof: only externalData may
+    // authorize an external oleObject; userShapes and internal OLE still refuse.
+    for (element, external) in [("userShapes", true), ("externalData", false)] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let chart = String::from_utf8(p["word/charts/chart1.xml"].clone())
+            .unwrap()
+            .replace(
+                "</c:chartSpace>",
+                &format!(r#"<c:{element} xmlns:r="{R}" r:id="source"/></c:chartSpace>"#),
+            );
+        p.insert("word/charts/chart1.xml".into(), chart.into_bytes());
+        let mode = if external {
+            " TargetMode=\"External\""
+        } else {
+            ""
+        };
+        p.insert("word/charts/_rels/chart1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="source" Type="{R}/oleObject" Target="https://example.invalid/book.xlsx"{mode}/></Relationships>"#).into_bytes());
+        let error = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("unrelated OLE/active/embedded content"),
+            "{error}"
+        );
+    }
+}
