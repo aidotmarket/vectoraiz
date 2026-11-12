@@ -1,6 +1,7 @@
 /* Parent-launched S1934 OCR executable. No parser spawn or runtime compiler. */
 #import <Foundation/Foundation.h>
 #import <Vision/Vision.h>
+extern int vz_office_reserve_baseline(void);
 extern int vz_office_bootstrap(const char *);
 extern int vz_office_probe_main(int,char **);
 extern int vz_office_memory_probe(const char *,const char *);
@@ -14,6 +15,7 @@ int main(int argc,char **argv) {
         VNRecognizeTextRequest *request=[VNRecognizeTextRequest new];
         request.recognitionLevel=VNRequestTextRecognitionLevelAccurate;
         request.usesLanguageCorrection=YES;
+        if(!strcmp(argv[2],"memory") && argc==5 && !strcmp(argv[3],"reserved-dirty") && vz_office_reserve_baseline()) return 75;
         int status=vz_office_bootstrap(profile.UTF8String);
         if(status) return status;
         if(!strcmp(argv[2],"probe")) {if(argc!=7) return 64;return vz_office_probe_main(5,argv+2);}

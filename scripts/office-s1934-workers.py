@@ -44,7 +44,16 @@ def execute(argv, target, label, data=None, readiness=False, inherited=()):
         timed_out = False
         ready = None
         try:
-            if readiness:
+            if readiness == 'stderr':
+                deadline = time.monotonic()+10
+                while time.monotonic() < deadline and process.poll() is None:
+                    if b'"ready":true' in (target / (label + '.stderr')).read_bytes():
+                        ready = {'ready': True, 'channel': 'stderr'}
+                        break
+                    time.sleep(.01)
+                if not ready:
+                    raise ValueError('OCR exited before readiness')
+            elif readiness:
                 selector = selectors.DefaultSelector()
                 selector.register(process.stdout, selectors.EVENT_READ)
                 if not selector.select(10):
@@ -76,6 +85,7 @@ def execute(argv, target, label, data=None, readiness=False, inherited=()):
         size = struct.unpack('<I', output[:4])[0]
         if size == len(output) - 4 and size <= 32*1024*1024:
             result['response'] = json.loads(output[4:])
+    result['profile_sha256'] = common.digest(Path(argv[1]))
     return result
 
 
@@ -118,12 +128,17 @@ def main(args):
         def argv(mode, *extra):
             return [binary, sb, mode, *([] if role == 'ocr' else [args.pdfium.resolve()]), *extra]
         memory = {}
-        for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise'):
+        for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty'):
             row = execute(argv('memory', kind, scratch / ('allocation-' + kind)), target, 'memory-' + kind)
             probe = row.get('probe', {})
-            explicit = probe.get('rc') == -1 and (probe.get('errno') in (1, 12) or probe.get('mach_error') == 3)
+            explicit = probe.get('rc') == -1 and (probe.get('errno') == (1 if kind == 'raise' else 12) or probe.get('mach_error') == 3)
             # N3: small allocations succeed; cumulative crossing must be refused.
             row['kernel_refusal'] = bool(explicit and not row['deadline_kill'] and row['exit_code'] == 0)
+            if kind in ('anonymous', 'many-small', 'malloc', 'mach') and not probe.get('cumulative_new_bytes', 0):
+                row['kernel_refusal'] = False
+                row['failure'] = 'no below-budget positive allocations proven'
+            if kind == 'reserved-dirty':
+                row['status'] = 'FAIL'
             memory[kind] = row
         results['memory'][role] = memory
         probes = ['snapshot', 'scratch_create', 'host_read', 'host_stat', 'host_list', 'host_write',
@@ -143,6 +158,7 @@ def main(args):
             host = scratch / ('created-' + str(number)) if probe == 'scratch_create' else sentinel
             if probe == 'host_create':
                 host = root / ('forbidden-create-' + role)
+            sentinel.write_text('private host sentinel\n')
             with sentinel.open('rb') as inherited:
                 row = execute(argv('probe', probe, snapshot, host,
                                    str(inherited.fileno()) if probe == 'inherited_host_read' else '9'),
@@ -183,7 +199,7 @@ def main(args):
                             ocr_profile = root / 'ocr/profile.sb'
                             ocr_profile.write_text(profile(ocr, snapshot, args.pdfium.resolve(), ocr_scratch))
                             row['separate_ocr'] = execute([ocr, ocr_profile, 'ocr'], target,
-                                'ocr-' + extension + '-' + str(page['page']), bytes(page['png']))
+                                'ocr-' + extension + '-' + str(page['page']), bytes(page['png']), readiness='stderr')
                 results['controls'][role][extension] = row
         (root / 'workers-partial.json').write_text(json.dumps(results, indent=2))
     (root / 'workers.json').write_text(json.dumps(results, indent=2))

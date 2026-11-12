@@ -5,6 +5,7 @@ fn main() -> anyhow::Result<()> {
     use pdfium_render::prelude::*;
     use std::ffi::CString;
     unsafe extern "C" {
+        fn vz_office_reserve_baseline() -> i32;
         fn vz_office_bootstrap(profile: *const std::ffi::c_char) -> i32;
         fn vz_office_probe_main(argc: i32, argv: *mut *mut std::ffi::c_char) -> i32;
         fn vz_office_memory_probe(
@@ -20,6 +21,12 @@ fn main() -> anyhow::Result<()> {
     let profile = CString::new(std::fs::read_to_string(&args[1])?)?;
     // Load required runtime assets before baseline, without accepting input.
     let pdfium = Pdfium::new(Pdfium::bind_to_library(&args[3])?);
+    if args[2] == "memory" && args.get(4).is_some_and(|s| s == "reserved-dirty") {
+        ensure!(
+            unsafe { vz_office_reserve_baseline() } == 0,
+            "baseline reservation"
+        );
+    }
     let status = unsafe { vz_office_bootstrap(profile.as_ptr()) };
     ensure!(status == 0, "bootstrap refused: {status}");
     if args[2] == "probe" {

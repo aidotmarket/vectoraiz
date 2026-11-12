@@ -8,7 +8,23 @@
 #include "../../../tests/office/fixtures/hostile-worker.c"
 #undef main
 
+static volatile char *reserved_baseline=NULL;
+int vz_office_reserve_baseline(void) {
+    reserved_baseline=mmap(NULL,2ULL*1024*1024*1024,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
+    return reserved_baseline==MAP_FAILED ? -1:0;
+}
 int vz_office_bootstrap(const char *profile) {
+    mach_vm_address_t address=0; uint64_t writable=0;
+    while(1) {
+        mach_vm_size_t size=0;vm_region_basic_info_data_64_t region={0};
+        mach_msg_type_number_t count=VM_REGION_BASIC_INFO_COUNT_64;mach_port_t object=MACH_PORT_NULL;
+        kern_return_t kr=mach_vm_region(mach_task_self(),&address,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&region,&count,&object);
+        if(object!=MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),object);
+        if(kr!=KERN_SUCCESS || size==0) break;
+        if(region.protection&VM_PROT_WRITE) writable+=size;
+        if(address+size<address) break;address+=size;
+    }
+    fprintf(stderr,"{\"writable_baseline_virtual_bytes\":%llu,\"resident_budget_proven\":false}\n",writable);
     struct proc_taskinfo task = {0};
     if (proc_pidinfo(getpid(),PROC_PIDTASKINFO,0,&task,sizeof(task)) != sizeof(task)) return 70;
     uint64_t budget=1536ULL*1024*1024;
@@ -32,7 +48,13 @@ int vz_office_bootstrap(const char *profile) {
 int vz_office_memory_probe(const char *kind,const char *scratch) {
     const size_t budget=1536ULL*1024*1024, step=!strcmp(kind,"many-small") ? 65536 : 64*1024*1024;
     size_t total=0; int error=0, kernel=0, rc=-1;
-    if(!strcmp(kind,"raise")) {
+    if(!strcmp(kind,"reserved-dirty")) {
+        if(!reserved_baseline || reserved_baseline==MAP_FAILED) return 75;
+        for(size_t i=0;i<2ULL*1024*1024*1024;i+=4096) reserved_baseline[i]=1;
+        struct rusage usage={0};getrusage(RUSAGE_SELF,&usage);
+        fprintf(stdout,"{\"probe\":\"reserved-dirty\",\"rc\":0,\"dirtied_baseline_bytes\":2147483648,\"peak_rss_bytes\":%ld,\"resident_budget_exceeded\":true}\n",usage.ru_maxrss);
+        return 0;
+    } else if(!strcmp(kind,"raise")) {
         struct rlimit r;getrlimit(RLIMIT_AS,&r);r.rlim_cur+=budget;r.rlim_max+=budget;
         rc=setrlimit(RLIMIT_AS,&r);error=errno;
     } else if(!strcmp(kind,"burst")) {

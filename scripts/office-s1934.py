@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import time
 
@@ -26,11 +27,14 @@ def digest(path):
 def run(argv, evidence, label, env=None, timeout=7200):
     start = time.monotonic()
     with (evidence / (label + ".log")).open("wb") as log:
+        process = subprocess.Popen([RTK, "proxy", *map(str, argv)], cwd=ROOT,
+                                   env=env, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True)
         try:
-            code = subprocess.run([RTK, "proxy", *map(str, argv)], cwd=ROOT,
-                                  env=env, stdout=log, stderr=subprocess.STDOUT,
-                                  timeout=timeout, check=False).returncode
+            code = process.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
             code = 124
     row = {"argv": list(map(str, argv)), "exit_code": code,
            "elapsed_s": time.monotonic() - start, "log": label + ".log"}
