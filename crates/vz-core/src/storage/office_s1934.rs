@@ -287,6 +287,9 @@ impl Snapshot {
         )
     }
     pub async fn plan(&self, vector: &[f32]) -> Result<String> {
+        if self.candidate == Candidate::StreamedExact {
+            return Ok("bounded contiguous vector file; 1 MiB reader buffer; exact L2; ID ties; top40; SQLite PRIMARY KEY fetch".into());
+        }
         Ok(self.query(vector)?.explain_plan(true).await?)
     }
     pub async fn vector(&self, vector: &[f32]) -> Result<Vec<(String, f32)>> {
@@ -394,12 +397,14 @@ fn scan(path: &Path, vector: &[f32]) -> Result<Vec<(String, f32)>> {
             u32::from_le_bytes(word) as usize == vector.len(),
             "dimensions"
         );
-        let mut distance = 0.;
-        for q in vector {
-            file.read_exact(&mut word)?;
-            let d = f32::from_le_bytes(word) - q;
-            distance += d * d;
-        }
+        let mut values = vec![0.0f32; vector.len()];
+        // f32 storage is aligned; every bit pattern is valid. The private vector
+        // file is explicitly little endian; macOS arm64 is little endian.
+        let bytes = unsafe {
+            std::slice::from_raw_parts_mut(values.as_mut_ptr().cast::<u8>(), values.len() * 4)
+        };
+        file.read_exact(bytes)?;
+        let distance = l2(&values, vector);
         best.push((String::from_utf8(id)?, distance));
         best.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
         best.truncate(40);
@@ -407,3 +412,40 @@ fn scan(path: &Path, vector: &[f32]) -> Result<Vec<(String, f32)>> {
     Ok(best)
 }
 use std::io::BufRead;
+
+fn l2(values: &[f32], query: &[f32]) -> f32 {
+    #[cfg(target_os = "macos")]
+    {
+        #[link(name = "Accelerate", kind = "framework")]
+        unsafe extern "C" {
+            fn vDSP_distancesq(
+                a: *const f32,
+                ia: isize,
+                b: *const f32,
+                ib: isize,
+                result: *mut f32,
+                n: usize,
+            );
+        }
+        let mut result = 0.;
+        unsafe {
+            vDSP_distancesq(
+                values.as_ptr(),
+                1,
+                query.as_ptr(),
+                1,
+                &mut result,
+                values.len(),
+            );
+        }
+        result
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        values
+            .iter()
+            .zip(query)
+            .map(|(a, b)| (f32::from_le(*a) - b).powi(2))
+            .sum()
+    }
+}

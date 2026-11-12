@@ -128,3 +128,64 @@ fn s1934_candidate() -> Result<()> {
         Ok::<_,anyhow::Error>(())
     })
 }
+
+#[test]
+fn s1934_refresh() -> Result<()> {
+    use rusqlite::{params, Connection};
+    use vz_core::pipeline::Chunk;
+    let Some(root) = std::env::var_os("VZ_S1934_REFRESH") else {
+        return Ok(());
+    };
+    let root = Path::new(&root);
+    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async {
+        let engine = vz_core::engine::Engines::load_embedding(
+            Path::new(&std::env::var_os("VZ_OFFICE_ASSETS").context("assets")?),
+            Path::new(&std::env::var_os("VZ_OFFICE_PINS").context("pins")?),false)?;
+        let baseline = rss();
+        let old = Arc::new(Snapshot::open(&root.join("exact"), &root.join("lookup.sqlite"),Candidate::Exact,54099).await?);
+        let start = Instant::now();
+        let noop = old.clone();
+        let noop_ms = start.elapsed().as_secs_f64()*1000.;
+        assert!(Arc::ptr_eq(&old,&noop)); drop(noop);
+        let start = Instant::now();
+        for (source,destination) in [(root.join("exact"),root.join("refresh")),(root.join("lookup.sqlite"),root.join("refresh.sqlite"))] {
+            anyhow::ensure!(std::process::Command::new("rtk").args(["proxy","/bin/cp","-cR"]).arg(source).arg(destination).status()?.success(),"private CoW copy");
+        }
+        let clone_ms = start.elapsed().as_secs_f64()*1000.;
+        let mut db = Connection::open(root.join("refresh.sqlite"))?;
+        let mut changed:Vec<Chunk> = db.prepare("SELECT payload FROM chunks ORDER BY id LIMIT 360")?.query_map([],|r|r.get::<_,Vec<u8>>(0))?.map(|r|Ok(serde_json::from_slice(&r?)?)).collect::<Result<_>>()?;
+        let removed = changed.iter().map(|c|c.chunk_id.clone()).collect::<Vec<_>>();
+        let start = Instant::now();
+        let mut additions = Vec::new();
+        for (i,chunk) in changed.iter_mut().take(180).enumerate() {
+            chunk.text.push_str(" Revised office reference."); chunk.embedding=engine.vector(&chunk.text,false)?;
+            let mut addition=chunk.clone();addition.chunk_id=format!("refresh-add-{i:04}");addition.doc_id=format!("refresh-add-doc-{i:04}");additions.push(addition);
+        }
+        changed.truncate(180);changed.extend(additions);
+        let embedding_ms=start.elapsed().as_secs_f64()*1000.;
+        let start=Instant::now();
+        let next=Snapshot::open(&root.join("refresh"),&root.join("refresh.sqlite"),Candidate::Exact,54099).await?;
+        let tx=db.transaction()?;
+        for id in &removed {tx.execute("DELETE FROM chunks WHERE id=?1",[id])?;}
+        for chunk in &changed {tx.execute("INSERT INTO chunks(id,payload) VALUES(?1,?2)",params![chunk.chunk_id,serde_json::to_vec(chunk)?])?;}
+        tx.commit()?;drop(db);
+        let filter=format!("chunk_id IN ({})",removed.iter().map(|id|format!("'{}'",id.replace('\'',"''"))).collect::<Vec<_>>().join(","));
+        next.table.delete(&filter).await?;
+        let batch=vz_core::storage::chunks_batch(&changed)?;
+        let reader=arrow_array::RecordBatchIterator::new(vec![Ok(batch.clone())],batch.schema());
+        next.table.add(Box::new(reader)).execute().await?;
+        // N2: Exact has no vector index to update; optimize the selected
+        // path's FTS index and refresh the bounded contiguous representation.
+        next.table.optimize(lancedb::table::OptimizeAction::Index(Default::default())).await?;
+        harness::write_vectors(&root.join("refresh.sqlite"))?;
+        let update_ms=start.elapsed().as_secs_f64()*1000.;
+        let two_snapshot_rss=rss();
+        let vector=engine.vector("office reference",true)?;
+        let _=old.search("office reference",&vector,8).await?;
+        let _=next.search("office reference",&vector,8).await?;
+        let weak=Arc::downgrade(&old);let reader=old.clone();drop(old);
+        assert!(weak.upgrade().is_some());let start=Instant::now();drop(reader);assert!(weak.upgrade().is_none());
+        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"index_update_and_vector_file_ms":update_ms,"post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
+        Ok::<_,anyhow::Error>(())
+    })
+}
