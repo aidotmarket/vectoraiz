@@ -71,7 +71,10 @@ def search(args):
                CARGO_TARGET_DIR=str(args.target.resolve()), VZ_S1934_ROOT=str(evidence),
                VZ_OFFICE_ASSETS=str(old / "run-v2/models"),
                VZ_OFFICE_PINS=str(old / "run-v2/models/pins.json"))
-    cargo = [CARGO, "test", "-p", "vz-core", "--features", "office-feasibility",
+    cargo = [CARGO, "test",
+             "--config", "profile.test.package.lance-linalg.opt-level=3",
+             "--config", "profile.test.package.lance-index.opt-level=3",
+             "--config", "profile.test.package.lance.opt-level=3", "-p", "vz-core", "--features", "office-feasibility",
              "--test", "office_s1934"]
     if not (evidence / "preparation.json").exists():
         result = run([*cargo, "s1934_spool", "--", "--nocapture"], evidence, "prepare",
@@ -86,8 +89,11 @@ def search(args):
             if copied["exit_code"]:
                 raise RuntimeError(copied)
         result = run([*cargo, "s1934_candidate", "--", "--nocapture"], evidence, name,
-                     dict(env, VZ_S1934_CANDIDATE=name))
+                     dict(env, VZ_S1934_CANDIDATE=name), timeout=900)
         print(name, result["exit_code"], flush=True)
+    refresh = run([*cargo, "s1934_refresh", "--", "--nocapture"], evidence, "refresh",
+                  dict(env, VZ_S1934_REFRESH=str(evidence)), timeout=600)
+    print("refresh", refresh["exit_code"], flush=True)
     print("Comparison complete; no selected candidate qualifies until all exit rows pass.", flush=True)
 
 
