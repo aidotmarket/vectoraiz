@@ -43,7 +43,7 @@ pub const MAX_VALUES: usize = 5_000_000;
 pub const MAX_PARTS: usize = 10_000;
 pub use chart_sources::ChartSources;
 
-pub const ALLOWLIST_VERSION: u32 = 4;
+pub const ALLOWLIST_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Value {
