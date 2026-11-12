@@ -106,7 +106,7 @@ struct Node {
     attrs: BTreeMap<(String, String), String>,
     children: Vec<Node>,
     text: String,
-    ignorable: BTreeSet<String>,
+    ignorable: std::sync::Arc<BTreeSet<String>>,
 }
 impl Node {
     fn shape_id(&self) -> Option<&str> {
@@ -235,6 +235,22 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                         "duplicate expanded attribute at {part}"
                     );
                 }
+                if n.ns == MC && n.local == "Choice" {
+                    let requires = n
+                        .attr("Requires")
+                        .context("mc:Choice lacks Requires")?
+                        .to_owned();
+                    let mut namespaces = Vec::new();
+                    for prefix in requires.split_ascii_whitespace() {
+                        let qname = format!("{prefix}:_");
+                        let (ns, _) =
+                            reader.resolve_element(quick_xml::name::QName(qname.as_bytes()));
+                        namespaces.push(namespace(ns)?);
+                    }
+                    ensure!(!namespaces.is_empty(), "empty mc:Choice Requires at {part}");
+                    n.attrs
+                        .insert((String::new(), "Requires".into()), namespaces.join(" "));
+                }
                 if let Some(value) = n.attrs.get(&(MC.into(), "Ignorable".into())) {
                     for prefix in value.split_ascii_whitespace() {
                         let qname = format!("{prefix}:_");
@@ -245,7 +261,7 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                             ns.starts_with("http://schemas.microsoft.com/office/"),
                             "unsupported mc:Ignorable namespace at {part}"
                         );
-                        n.ignorable.insert(ns);
+                        std::sync::Arc::make_mut(&mut n.ignorable).insert(ns);
                     }
                 }
                 if matches!(ev, Event::Empty(_)) {
@@ -402,6 +418,19 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         return Some("");
     }
     Some(match (ns,el) {
+        (W,"rStyle")=>"val",
+        (W,"separator"|"continuationSeparator")=>"",
+        (P,"notesStyle")=>"",(P,"nvPr")=>"isPhoto userDrawn",
+        (P,"bg")=>"bwMode",(P,"bgPr")=>"shadeToTitle",(P,"bgRef")=>"idx",
+        (A,"spPr")=>"bwMode",
+        (A,"custGeom"|"gdLst"|"ahLst"|"cxnLst"|"pathLst"|"close")=>"",
+        (A,"ahXY")=>"gdRefX minX maxX gdRefY minY maxY",
+        (A,"ahPolar")=>"gdRefR minR maxR gdRefAng minAng maxAng",
+        (A,"cxn")=>"ang",(A,"pos"|"pt")=>"x y",
+        (A,"rect")=>"l t r b",(A,"moveTo"|"lnTo"|"cubicBezTo"|"quadBezTo")=>"",
+        (A,"arcTo")=>"wR hR stAng swAng",
+        (S,"dxf")=>"",(S,"pane")=>"xSplit ySplit topLeftCell activePane state",
+
         (W,"tab")=>"val leader pos",
         (W,"zoom")=>"val percent",
         (S,"extLst")=>"",(S,"ext")=>"uri",
@@ -475,7 +504,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (S,"cfvo")=>"type val gte",
         (P,"presentation")=>"serverZoom firstSlideNum showSpecialPls rtl removePersonalInfo compatMode strictFirstAndLastChars embedTrueTypeFonts saveSubsetFonts autoCompressPictures bookmarkIdSeed conformance",
         (P,"sld")=>"show showMasterSp showMasterPhAnim",(P,"cSld")=>"name",
-        (P,"sldIdLst"|"sldMasterIdLst"|"notesMasterIdLst"|"handoutMasterIdLst"|"spTree"|"nvGrpSpPr"|"cNvGrpSpPr"|"grpSpPr"|"sp"|"nvSpPr"|"nvPr"|"spPr"|"txBody"|"style"|"notes"|"notesMaster"|"handoutMaster"|"clrMapOvr"|"masterClrMapping"|"sldLayoutIdLst"|"txStyles"|"titleStyle"|"bodyStyle"|"otherStyle"|"defaultTextStyle")=>"",
+        (P,"sldIdLst"|"sldMasterIdLst"|"notesMasterIdLst"|"handoutMasterIdLst"|"spTree"|"nvGrpSpPr"|"cNvGrpSpPr"|"grpSpPr"|"sp"|"nvSpPr"|"spPr"|"txBody"|"style"|"notes"|"notesMaster"|"handoutMaster"|"clrMapOvr"|"masterClrMapping"|"sldLayoutIdLst"|"txStyles"|"titleStyle"|"bodyStyle"|"otherStyle"|"defaultTextStyle")=>"",
         (P,"sldId"|"sldMasterId"|"sldLayoutId")=>"id",(P,"notesMasterId"|"handoutMasterId")=>"",
         (P,"sldSz")=>"cx cy type",(P,"notesSz")=>"cx cy",
         (P,"sldLayout")=>"type preserve matchingName showMasterSp showMasterPhAnim userDrawn",(P,"sldMaster")=>"preserve",
@@ -492,7 +521,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (A,"pPr"|"lvl1pPr"|"lvl2pPr"|"lvl3pPr"|"lvl4pPr"|"lvl5pPr"|"lvl6pPr"|"lvl7pPr"|"lvl8pPr"|"lvl9pPr")=>"marL marR lvl indent algn defTabSz rtl eaLnBrk fontAlgn latinLnBrk hangingPunct",
         (A,"latin"|"ea"|"cs"|"font")=>"typeface panose pitchFamily charset script",
         (A,"spAutoFit"|"noAutofit"|"buNone")=>"",(A,"normAutofit")=>"fontScale lnSpcReduction",
-        (A,"buChar")=>"char",(A,"buFont")=>"typeface",(A,"buAutoNum")=>"type startAt",
+        (A,"buChar")=>"char",(A,"buFont")=>"typeface panose pitchFamily charset",(A,"buAutoNum")=>"type startAt",
         (A,"lnRef"|"fillRef"|"effectRef"|"fontRef")=>"idx",(A,"ln")=>"w cap cmpd algn",
         (A,"prstDash")=>"val",(A,"headEnd"|"tailEnd")=>"type w len",
         (A,"hlinkClick"|"hlinkHover")=>"tooltip tgtFrame history highlightClick endSnd",
@@ -607,6 +636,7 @@ fn removable(path: &str) -> bool {
         || path.ends_with("/revisionInfo.xml")
         || path.contains("/changesInfos/")
         || path.contains("/glossary/")
+        || (path.starts_with("xl/drawings/") && path.ends_with(".vml"))
         || path.contains("/fonts/")
         || path.contains("/ink/")
 }
@@ -670,11 +700,12 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 fn formula(n: &Node) -> bool {
-    (n.ns == S
-        && words(
-            "f formula formula1 formula2 calculatedColumnFormula totalsRowFormula",
-            &n.local,
-        ))
+    ([S, X14].contains(&n.ns.as_str()) && n.local == "cfvo" && n.attr("type") == Some("formula"))
+        || (n.ns == S
+            && words(
+                "f formula formula1 formula2 calculatedColumnFormula totalsRowFormula",
+                &n.local,
+            ))
         || (n.ns == "http://schemas.microsoft.com/office/excel/2006/main" && n.local == "f")
         || n.children.iter().any(formula)
 }
@@ -880,6 +911,51 @@ fn inspect_formulas(root: &Node, part: &str, report: &mut Report) -> Result<()> 
     Ok(())
 }
 fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
+    let mut resolved = Vec::new();
+    for mut c in std::mem::take(&mut n.children) {
+        if c.ns == MC && c.local == "AlternateContent" {
+            ensure!(
+                c.children
+                    .iter()
+                    .all(|b| b.ns == MC && words("Choice Fallback", &b.local)),
+                "invalid AlternateContent at {part}"
+            );
+            let supported = c.children.iter().position(|b| {
+                b.local == "Choice"
+                    && b.attr("Requires").is_some_and(|r| {
+                        r.split_ascii_whitespace().all(|ns| {
+                            [
+                                W,
+                                S,
+                                P,
+                                A,
+                                WP,
+                                PIC,
+                                XDR,
+                                X14,
+                                XM,
+                                P14,
+                                "http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac",
+                            ]
+                            .contains(&ns)
+                        })
+                    })
+            });
+            let selected = supported
+                .or_else(|| c.children.iter().position(|b| b.local == "Fallback"))
+                .context("AlternateContent has no supported branch or fallback")?;
+            report.remove(
+                part,
+                "resolved AlternateContent; removed alternate branches",
+                String::from_utf8(serialize(&c)?)?,
+            );
+            resolved.extend(std::mem::take(&mut c.children[selected].children));
+        } else {
+            resolved.push(c);
+        }
+    }
+    n.children = resolved;
+
     if !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
     let old = std::mem::take(&mut n.children);
     let mut children = Vec::new();
@@ -887,6 +963,26 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     // result runs; nested fields are refused rather than guessed.
     let mut field: Option<(bool, bool)> = None;
     for mut c in old {
+        if c.ns == A && c.local == "fld" {
+            ensure!(
+                c.children.iter().any(|x| x.ns == A && x.local == "t"),
+                "Drawing field lacks displayed result at {part}"
+            );
+            report.remove(
+                part,
+                "flattened Drawing field to displayed result",
+                String::from_utf8(serialize(&c)?)?,
+            );
+            ensure!(
+                c.children
+                    .iter()
+                    .all(|x| x.ns == A && words("rPr pPr t", &x.local)),
+                "unsupported Drawing field child at {part}"
+            );
+            c.children.retain(|x| x.local != "pPr");
+            c.local = "r".into();
+            c.attrs.clear();
+        }
         if c.ns == A && words("hlinkClick hlinkHover", &c.local) && c.attr("action").is_some() {
             report.remove(
                 part,
@@ -946,7 +1042,9 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
         );
         let drop=(n.ns==W&&n.local=="settings"&&c.ns=="http://schemas.openxmlformats.org/officeDocument/2006/math"&&c.local=="mathPr")||
             (c.ns==P&&words("clrMru printPr",&c.local))||
-            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc",&c.local))||
+            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc rsid proofErr shapeDefaults hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic",&c.local))||
+            (c.ns==S&&words("legacyDrawing legacyDrawingHF",&c.local))||
+            (c.ns=="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"&&c.local=="absPath")||
             (c.ns==S&&c.local=="fileVersion")||
             (c.ns==W&&words("del moveFrom commentRangeStart commentRangeEnd commentReference docVars rsids documentProtection writeProtection attachedTemplate trackRevisions altChunk glossaryDocument instrText",&c.local))||
             (c.ns==S&&words("calcPr calcChain fileSharing customWorkbookViews pivotCaches pivotTableParts phoneticPr rPh sheetProtection workbookProtection",&c.local))||
@@ -1114,7 +1212,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
             if [P, PIC, XDR].contains(&n.ns.as_str()) && n.local == "cNvPr" {
                 let id = n.attr("id").context("shape lacks stable id")?;
                 id.parse::<u32>().context("invalid shape id")?;
-                ensure!(ids.insert(id.to_owned()), "duplicate shape identity");
+                ids.insert(id.to_owned());
             }
             for c in &n.children {
                 shapes(c, ids)?;
@@ -1214,12 +1312,12 @@ fn child_allowed(parent: &Node, child: &Node) -> bool {
         (CT,"Types")=>Some((CT,"Default Override")),(REL,"Relationships")=>Some((REL,"Relationship")),
         (W,"document")=>Some((W,"body")),(W,"body")=>Some((W,"p tbl sectPr")),
         (W,"p")=>Some((W,"pPr r hyperlink bookmarkStart bookmarkEnd")),
-        (W,"r")=>Some((W,"rPr t tab br cr drawing lastRenderedPageBreak softHyphen noBreakHyphen footnoteReference endnoteReference")),
+        (W,"r")=>Some((W,"rPr t tab br cr drawing lastRenderedPageBreak softHyphen noBreakHyphen footnoteReference endnoteReference separator continuationSeparator")),
         (W,"hyperlink")=>Some((W,"r bookmarkStart bookmarkEnd")),
         (S,"workbook")=>Some((S,"workbookPr bookViews sheets definedNames")),
         (S,"sheets")=>Some((S,"sheet")),(S,"sheetData")=>Some((S,"row")),(S,"row")=>Some((S,"c")),(S,"c")=>Some((S,"v is")),(S,"is"|"si")=>Some((S,"t r")),
         (P,"presentation")=>Some((P,"sldMasterIdLst notesMasterIdLst handoutMasterIdLst sldIdLst sldSz notesSz defaultTextStyle extLst")),
-        (P,"sld"|"notes")=>Some((P,"cSld clrMapOvr extLst")),(P,"cSld")=>Some((P,"spTree extLst")),
+        (P,"sld"|"notes")=>Some((P,"cSld clrMapOvr extLst")),(P,"cSld")=>Some((P,"bg spTree extLst")),
         (P,"spTree")=>Some((P,"nvGrpSpPr grpSpPr sp pic grpSp graphicFrame")),
         (P,"sp")=>Some((P,"nvSpPr spPr style txBody extLst")),
         (A,"p")=>Some((A,"pPr r br endParaRPr")),(A,"r")=>Some((A,"rPr t")),
@@ -1307,8 +1405,15 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
 }
 
 fn content_attr(n: &Node, k: &str) -> bool {
-    (words("name displayName descr title tooltip display location errorTitle error promptTitle prompt text formatCode typeface char",k))||
-    (n.ns==REL&&k=="Target"&&n.attr("TargetMode")==Some("External"))
+    (words(
+        "displayName descr title tooltip display location errorTitle error promptTitle prompt text",
+        k,
+    )) || (k == "name"
+        && ((n.ns == S && words("sheet table tableColumn", &n.local))
+            || (n.ns == P && words("cSld cNvPr", &n.local))
+            || (n.ns == P14 && n.local == "section")
+            || ([WP, PIC, XDR].contains(&n.ns.as_str()) && words("docPr cNvPr", &n.local))))
+        || (n.ns == REL && k == "Target" && n.attr("TargetMode") == Some("External"))
 }
 fn walk(
     n: &Node,
@@ -1464,7 +1569,10 @@ fn walk(
                 "Office text"
             },
             Some(result.text.clone()),
-            ![
+            words(
+                "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter",
+                &n.local,
+            ) && ![
                 format!("{{{W}}}p["),
                 format!("{{{A}}}p["),
                 format!("{{{S}}}is["),
@@ -1480,7 +1588,7 @@ fn walk(
         let index = counts.entry((c.ns.clone(), c.local.clone())).or_default();
         *index += 1;
         let selector = if let Some(id) = c.shape_id() {
-            format!("shape/{id}")
+            format!("shape/{id}/{{{}}}{}[{}]", c.ns, c.local, index)
         } else if c.ns == S && c.local == "c" {
             let r = c.attr("r").context("cell lacks stable reference")?;
             ensure!(
@@ -1586,10 +1694,6 @@ fn filter_media(input: &[u8], name: &str) -> Result<(Vec<u8>, Vec<Removal>)> {
             ensure!(
                 kind.iter().all(u8::is_ascii_alphabetic),
                 "invalid PNG chunk type at {name}"
-            );
-            ensure!(
-                kind != b"iCCP",
-                "unsupported PNG ICC color profile at {name}; save with a supported sRGB profile"
             );
             if [
                 b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"sRGB", b"gAMA", b"cHRM", b"bKGD",
@@ -1827,7 +1931,7 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
                 attrs: BTreeMap::new(),
                 children: strings,
                 text: String::new(),
-                ignorable: BTreeSet::new(),
+                ignorable: Default::default(),
             })?)?,
         );
     }
@@ -2137,6 +2241,20 @@ fn rebuild_inner(
                 && !lower.starts_with("_xmlsignatures/"),
             "VBA/ActiveX/embedding/signature refused at {part}"
         );
+        if part.starts_with("xl/drawings/") && part.ends_with(".vml") {
+            let vml = parse(bytes, part)?;
+            fn notes_only(n: &Node) -> bool {
+                if n.local == "shape" && n.ns == "urn:schemas-microsoft-com:vml" {
+                    return n.children.iter().any(|c| {
+                        c.ns == "urn:schemas-microsoft-com:office:excel"
+                            && c.local == "ClientData"
+                            && c.attr("ObjectType") == Some("Note")
+                    });
+                }
+                !words("OLEObject control", &n.local) && n.children.iter().all(notes_only)
+            }
+            ensure!(notes_only(&vml), "non-comment VML dependency at {part}");
+        }
         if removable(part) || part == "xl/calcChain.xml" {
             report.remove(
                 part,
@@ -2301,7 +2419,14 @@ fn rebuild_inner(
                 .context("missing relationship type")?
                 .to_owned();
             ensure!(
-                ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'),
+                (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || (rel.attr("TargetMode") != Some("External")
+                        && [
+                            format!("{REL}/metadata/core-properties"),
+                            format!("{REL}/metadata/thumbnail")
+                        ]
+                        .contains(&ty)
+                        && removable(&resolve(&own, &target)?)),
                 "unsupported relationship type at {part}/{id}"
             );
             let kind = ty.rsplit('/').next().unwrap_or("");
@@ -2374,6 +2499,11 @@ fn rebuild_inner(
                 .iter()
                 .any(|((ns, _), v)| ns == R && ids.contains(v));
             if linked {
+                if c.ns == S && c.local == "pageSetup" {
+                    c.attrs.retain(|(ns, _), v| ns != R || !ids.contains(v));
+                    out.push(c);
+                    continue;
+                }
                 if words("hyperlink hlinkClick hlinkHover", &c.local) {
                     if c.local == "hyperlink" {
                         out.extend(c.children);
@@ -2432,7 +2562,7 @@ fn rebuild_inner(
         attrs: BTreeMap::new(),
         children: vec![],
         text: String::new(),
-        ignorable: BTreeSet::new(),
+        ignorable: Default::default(),
     };
     for (part, bytes) in &rewritten {
         let ty = if part.ends_with(".png") {
@@ -2451,7 +2581,7 @@ fn rebuild_inner(
             ]),
             children: vec![],
             text: String::new(),
-            ignorable: BTreeSet::new(),
+            ignorable: Default::default(),
         });
     }
     rewritten.insert("[Content_Types].xml".into(), serialize(&new_ct)?);

@@ -169,6 +169,8 @@ fn office_metadata() {
                     .into_bytes(),
             );
         }
+        let rels = String::from_utf8(p["_rels/.rels"].clone()).unwrap();
+        p.insert("_rels/.rels".into(), rels.replace("</Relationships>", &format!("<Relationship Id=\"properties\" Type=\"{REL}/metadata/core-properties\" Target=\"docProps/core.xml\"/></Relationships>")).into_bytes());
         let (bytes, r) = rebuild(ext, &p);
         assert!(r.removals.iter().any(|x| x.value.contains(markers[0])));
         for marker in markers {
@@ -894,5 +896,141 @@ fn office_standard_word_rendering_settings_refuse_active_neighbors() {
             .err()
             .expect("active setting must refuse");
         assert!(format!("{error:#}").contains("word/settings.xml"));
+    }
+}
+
+#[test]
+fn formula_cfvo_rules_removed_with_private_evidence() {
+    let mut p = fixture("xlsx");
+    let path = "xl/worksheets/identity-sheet.xml";
+    let sheet = String::from_utf8(p[path].clone()).unwrap();
+    let rules = "<s:conditionalFormatting sqref=\"A1:A5\"><s:cfRule type=\"colorScale\" priority=\"1\"><s:colorScale><s:cfvo type=\"formula\" val=\"SUM(A1:A5)+1927\"/><s:cfvo type=\"max\"/></s:colorScale></s:cfRule><s:cfRule type=\"dataBar\" priority=\"2\"><s:dataBar><s:cfvo type=\"min\"/><s:cfvo type=\"max\"/></s:dataBar></s:cfRule></s:conditionalFormatting>";
+    p.insert(
+        path.into(),
+        sheet
+            .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("SUM(A1:A5)+1927")));
+    for part in members(&bytes).values() {
+        assert!(!String::from_utf8_lossy(part).contains("SUM(A1:A5)+1927"));
+    }
+    let reopened = office::inspect("document.xlsx", &bytes).unwrap();
+    assert_eq!(report.inventory, reopened.inventory);
+    assert!(members(&bytes)
+        .values()
+        .any(|b| String::from_utf8_lossy(b).contains("dataBar")));
+    // Readback must independently reject a formula-valued threshold.
+    assert!(office::inspect("document.xlsx", &archive(&p)).is_err());
+}
+
+#[test]
+fn connected_excel_carriers_and_alternate_content_removed() {
+    let mut p = fixture("xlsx");
+    let workbook = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    let alternate = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:x15ac=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac\"><mc:Choice Requires=\"x15ac\"><x15ac:absPath url=\"C:/planted-1927/private\"/></mc:Choice><mc:Fallback/></mc:AlternateContent>";
+    p.insert(
+        "xl/workbook.xml".into(),
+        workbook
+            .replace("</s:workbook>", &format!("{alternate}</s:workbook>"))
+            .into_bytes(),
+    );
+    let path = "xl/worksheets/identity-sheet.xml";
+    let sheet = String::from_utf8(p[path].clone()).unwrap();
+    p.insert(path.into(),sheet.replace("<s:worksheet ",&format!("<s:worksheet xmlns:r=\"{R}\" ")).replace("</s:worksheet>","<s:pageSetup r:id=\"printer\" orientation=\"landscape\"/><s:legacyDrawing r:id=\"notes\"/></s:worksheet>").into_bytes());
+    add(
+        &mut p,
+        "xl/printerSettings/printer1.bin",
+        "application/octet-stream",
+        "planted-1927-printer",
+    );
+    add(
+        &mut p,
+        "xl/comments1.xml",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml",
+        "<comments>planted-1927-comment</comments>",
+    );
+    add(&mut p,"xl/drawings/vmlDrawing1.vml","application/vnd.openxmlformats-officedocument.vmlDrawing","<xml xmlns:v=\"urn:schemas-microsoft-com:vml\" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"><v:shape id=\"planted-1927\"><x:ClientData ObjectType=\"Note\"/></v:shape></xml>");
+    p.insert("xl/worksheets/_rels/identity-sheet.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"printer\" Type=\"{R}/printerSettings\" Target=\"../printerSettings/printer1.bin\"/><Relationship Id=\"notes\" Type=\"{R}/vmlDrawing\" Target=\"../drawings/vmlDrawing1.vml\"/><Relationship Id=\"comments\" Type=\"{R}/comments\" Target=\"../comments1.xml\"/></Relationships>").into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("planted-1927")));
+    for b in members(&bytes).values() {
+        assert!(!String::from_utf8_lossy(b).contains("planted-1927"));
+    }
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.xlsx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn embedded_font_bindings_removed() {
+    let mut p = fixture("docx");
+    add(&mut p,"word/fontTable.xml","application/vnd.openxmlformats-officedocument.wordprocessingml.fontTable+xml", &format!("<w:fonts xmlns:w=\"{W}\" xmlns:r=\"{R}\"><w:font w:name=\"Calibri\"><w:embedRegular r:id=\"font\" w:fontKey=\"planted-1927-key\"/></w:font></w:fonts>"));
+    add(
+        &mut p,
+        "word/fonts/font1.odttf",
+        "application/vnd.openxmlformats-officedocument.obfuscatedFont",
+        "planted-1927-font",
+    );
+    p.insert("word/_rels/fontTable.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"font\" Type=\"{R}/font\" Target=\"fonts/font1.odttf\"/></Relationships>").into_bytes());
+    let (bytes, _) = rebuild("docx", &p);
+    for b in members(&bytes).values() {
+        assert!(!String::from_utf8_lossy(b).contains("planted-1927"));
+    }
+}
+
+#[test]
+fn unmodified_office_saved_public_fixtures_and_planted_properties() {
+    for (ext, input) in [
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/SampleDoc.docx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/WithVariousData.xlsx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/SampleShow.pptx").as_slice(),
+        ),
+    ] {
+        let digest = sha256(input);
+        let (output, report) =
+            office::rebuild(&format!("document.{ext}"), input, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            report.inventory,
+            office::inspect(&format!("document.{ext}"), &output)
+                .unwrap()
+                .inventory
+        );
+        assert!(!report.text().is_empty());
+        assert_eq!(sha256(input), digest);
+        let mut planted = members(input);
+        let marker = "planted-public-fixture-S1927-tenant-1927";
+        let properties = String::from_utf8(planted["docProps/core.xml"].clone()).unwrap();
+        // Use an existing, realistically connected removal-only property part.
+        let at = properties.rfind("</").unwrap();
+        let properties = format!(
+            "{}<private>{marker}</private>{}",
+            &properties[..at],
+            &properties[at..]
+        );
+        planted.insert("docProps/core.xml".into(), properties.into_bytes());
+        let (bytes, report) = rebuild(ext, &planted);
+        assert!(report.removals.iter().any(|r| r.value.contains(marker)));
+        assert!(!bytes.windows(marker.len()).any(|w| w == marker.as_bytes()));
+        for (path, member) in members(&bytes) {
+            assert!(!path.contains(marker));
+            assert!(!member.windows(marker.len()).any(|w| w == marker.as_bytes()));
+        }
     }
 }
