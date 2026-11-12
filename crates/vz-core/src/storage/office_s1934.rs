@@ -324,7 +324,9 @@ impl Snapshot {
         vector: &[f32],
         limit: usize,
     ) -> Result<(Vec<Hit>, serde_json::Value, Vec<String>)> {
-        anyhow::ensure!(limit <= 10, "internal evaluation limit");
+        // Human document metrics deduplicate the full 40-vector + 40-FTS
+        // candidate pool before selecting documents. Browser calls stay at 8.
+        anyhow::ensure!(limit <= 80, "internal evaluation limit");
         let start = Instant::now();
         let semantic = self.vector(vector).await?;
         let vector_ms = start.elapsed().as_secs_f64() * 1000.;

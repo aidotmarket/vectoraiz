@@ -107,7 +107,8 @@ def prepare(root):
                 if scanned:
                     image = Image.new('RGB', (1200, 1600), 'white')
                     draw = ImageDraw.Draw(image)
-                    font = ImageFont.truetype('/System/Library/Fonts/PingFang.ttc', 24)
+                    font_path = Path('/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc')
+                    font = ImageFont.truetype(str(font_path), 24)
                     for line, p in enumerate((paragraphs[0], context, answer)):
                         draw.text((40, 80 + line*100), p, fill='black', font=font)
                     canvas.drawImage(ImageReader(image), 0, 0, width=595, height=795)
@@ -132,6 +133,8 @@ def prepare(root):
         'attribution': 'SciFact: Wadden et al., Fact or Fiction: Verifying Scientific Claims, EMNLP 2020; BEIR conversion: Thakur et al., BEIR, 2021.',
         'licenses': {'claims_annotations': 'CC-BY-4.0', 'abstract_database': 'ODC-By-1.0',
                      'BEIR_conversion': 'CC-BY-SA-4.0', 'office_drafts': 'CC0-1.0'},
+        'scan_font': {'path': str(Path('/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc')),
+                      'sha256': digest(Path('/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc'))},
         'office_counts': {'total': 60, 'queries': 60, 'per_format': 10, 'per_language': 12, 'scans': 2},
         'missing': ['two independent human judges for all 60 queries', 'blinded pooled exact/ANN/FTS grading 0/1/2',
                     'disagreement adjudication', 'frozen judged office qrels', 'supporting passages verified after extraction',
@@ -183,6 +186,9 @@ def score(root):
             'by_format': {fmt: {'offered': sum(r['format'] == fmt for r in selected),
                                'author_intended_doc_in_chunk_top10': sum(r['format'] == fmt and r['id'] in r['documents'] for r in selected)}
                           for fmt in ('pdf', 'docx', 'xlsx', 'txt', 'md', 'html')},
+            'by_language': {language: {'offered': sum(r['language'] == language for r in selected),
+                                      'author_intended_doc_in_chunk_top10': sum(r['language'] == language and r['id'] in r['documents'] for r in selected)}
+                            for language in ('en', 'de', 'fr', 'es', 'ja')},
             'qualification': 'UNJUDGED author-intent diagnostic; not recall/nDCG or A1 correctness',
         }
     (root / 'scores.json').write_text(json.dumps({'SciFact': scored, 'office': {'status': 'FAIL', 'reason': '60 unjudged drafts; no invented human qrels'},

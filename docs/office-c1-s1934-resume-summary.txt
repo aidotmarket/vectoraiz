@@ -1,0 +1,20 @@
+Office C1 S1934 resume 2: RETURN_TO_DESIGN; FAIL; no enabled distribution.
+Publication branch: build/office-web-c1-feasibility-s1927.
+Preserved harness edits were already committed in base 58a42f4; validated and extended.
+Search unchanged: FAIL; 1000 documents, 54099 chunks, 7747 pages; Exact selected diagnostically.
+Memory unchanged: FAIL; ingest/render/OCR each 7/8 refusal probes; no hard resident bound.
+Confinement unchanged: FAIL; each role 88/110 operation probes; OCR exit 67.
+HTTP/1.1 reused: 601.358s flood, 211276 attack offers; no rerun.
+HTTP/1.1 established 43800/43800; reconnect 0/7300; local sign-in 0/7300: FAIL.
+HTTP/2 fresh: 600.524s flood, 188793 attack offers.
+HTTP/2 established 21450/21450; reconnect 12/7150; local sign-in 0/7150: FAIL.
+Same-source bucket rejection follows the design; legitimate failures remain FAIL; both drains zero.
+Multi-source/routed unqualified: extra Mac loopback binds EADDRNOTAVAIL (49); required cases FAIL.
+Table kernel binds 0/1025; sign-in 0/1 and reconnect 0/1; model fills 1024 and rejects 3: FAIL.
+SciFact: pending scoring.
+Selected Exact scores pending.
+Office diagnostic only: 60 CC0 drafts/queries; six formats, five languages; extraction 58/60; scans discarded.
+Missing: two blinded judges, pooled Exact/ANN/FTS grades 0/1/2 with support, adjudication, frozen office qrels.
+Missing: verified passages/sources, scan extraction, complete content comparisons, 25-identity judged A1 <=5s.
+Windows NOT RUN; no corpus qualified; provider sign-in and routed/desktop trials NOT RUN.
+Manifest: /var/tmp/koskadeux/private-evidence/8588b12d5b30/manifest-v3.json; copy: /var/tmp/koskadeux/private-evidence/e706de79d202/manifest-v3b.json.

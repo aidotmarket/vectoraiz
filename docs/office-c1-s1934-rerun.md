@@ -33,7 +33,7 @@ Diagnostic selection: **Lance Exact**. Explicit exact choice at E3 scale: measur
 
 Refresh: no-op 0.0000 ms; 180 adds + 180 updates + 180 deletes (540/54,099 = 0.9982%); embedding 2542.89 ms; CoW clone 25.21 ms; FTS/table update 9308.23 ms; post-embedding preparation 9333.44 ms; aggregate incremental RSS endpoint 553.64 MiB. **Exact has no vector index to update (N2).**
 
-Missing/failing: 34–36/50 extraction matching is not human relevance; held-out human A1 queries absent; combined spool plus Lance/FTS preparation exceeds 60 s; agreed topped-up mixed corpus absent; cold means first-open, no OS cache flush; RSS endpoints do not prove peaks/promotion bound; supplemental sampled trace starts at PQ; synthetic Refresh lacks source-hash/extraction accounting and concurrent 25-way search; recipe-change, repeated promotion/retirement, crash/recovery, answer/indexing/refusal maximum not qualified; Lance random training row IDs not exposed; Windows NOT RUN.
+Missing/failing: 34–36/50 extraction matching is not human relevance; held-out human A1 queries absent; combined spool plus Lance/FTS preparation exceeds 60 s; agreed topped-up mixed corpus absent; cold means first-open, no OS cache flush; RSS endpoints do not prove peaks/promotion bound; supplemental sampled trace covers HNSW and Refresh only; synthetic Refresh lacks source-hash/extraction accounting and concurrent 25-way search; recipe-change, repeated promotion/retirement, crash/recovery, answer/indexing/refusal maximum not qualified; Lance random training row IDs not exposed; Windows NOT RUN.
 
 ## 2 memory
 
@@ -89,3 +89,19 @@ Missing/failing: only this macOS build; no hard resident-memory proof; inherited
 fmt: PASS; clippy: PASS; tests: PASS. Full logs retained privately.
 
 All omissions are failures. These trials do not close C0/source integration, native full-run cache exclusion, tenant consent/propagation/outages, installed power/network/browser/viewer/accessibility or IT trust/certificate obligations. No Council/review request or enabled distribution.
+## Resume 2 admission
+
+FAIL. HTTP/1.1 reuses the completed previous run; HTTP/2 is a fresh 600-second trial. Local admission responses are not A1 searches or provider sign-ins.
+
+| Protocol | Continuous flood seconds | Flood offers | Established success/offered | Reconnect success/offered | Local sign-in success/offered |
+|---|---:|---:|---:|---:|---:|
+| http-1.1 | 601.358 | 211276 | 43800/43800 | 0/7300 | 0/7300 |
+| h2 | 600.524 | 188793 | 21450/21450 | 12/7150 | 0/7150 |
+
+Both protocols drained to zero. HTTP/2 completed sign-in success requires no callback error; one raw start-only 200 with ConnectionResetError was audited out, preserving all raw samples. The single source shares the attacker bucket with legitimate reconnects/sign-ins, so rejection follows the per-source design. This remains FAIL. Extra loopback addresses return EADDRNOTAVAIL (49); multi-source and routed NAT/VPN/VDI cases remain unqualified and FAIL.
+
+Table exhaustion: 0/1,025 kernel addresses bound; 1,025 bind errors; source table stayed empty. Unknown-source sign-in and reconnect each 0/1 due to EADDRNOTAVAIL. Separate model: 1,024 counters filled, three arrivals rejected (overflow plus legitimate sign-in and reconnect); 2,048 same-/64 IPv6 addresses normalize to one key. Model results do not qualify kernel exhaustion.
+
+Missing: actual provider sign-in, established-session A1 searches, desktop continuity, fourth-session eviction/revocation/expiry, independent hostile deadline assertions and isolated TLS resource bounds. Windows NOT RUN.
+
+Resume manifest updated in place: `/var/tmp/koskadeux/private-evidence/8588b12d5b30/manifest-v3.json`; copy: `/var/tmp/koskadeux/private-evidence/e706de79d202/manifest-v3b.json`. Private evidence stays outside the checkout. RETURN_TO_DESIGN; no enabled distribution.

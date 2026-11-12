@@ -491,6 +491,7 @@ async def trial(root, protocol, seconds, certificate, key):
                 if status == 200:
                     # Local transaction round trip; provider time is NOT measured.
                     await client.close()
+                    status = None  # A successful start is not a completed callback.
                     client = Client(server, client_context, protocol)
                     await client.connect()
                     status, _, _ = await client.request('/auth/callback?state=' + state.decode(), headers.get('set-cookie', ''))
@@ -528,9 +529,9 @@ async def trial(root, protocol, seconds, certificate, key):
     summary = {}
     for kind in ('established', 'reconnect', 'sign_in'):
         selected = [r for r in results if r['kind'] == kind]
-        summary[kind] = {'offered': len(selected), 'success': sum(r['status'] == 200 and r['latency_ms'] <= 5000 for r in selected),
+        summary[kind] = {'offered': len(selected), 'success': sum(r['status'] == 200 and r['error'] is None and r['latency_ms'] <= 5000 for r in selected),
                          'max_ms': max(r['latency_ms'] for r in selected),
-                         'per_person': {str(p): {'offered': sum(r['person'] == p for r in selected), 'success': sum(r['person'] == p and r['status'] == 200 and r['latency_ms'] <= 5000 for r in selected)} for p in range(25)}}
+                         'per_person': {str(p): {'offered': sum(r['person'] == p for r in selected), 'success': sum(r['person'] == p and r['status'] == 200 and r['error'] is None and r['latency_ms'] <= 5000 for r in selected)} for p in range(25)}}
     result = {'protocol': protocol, 'duration_s': time.monotonic()-began, 'offered_rate_target_per_s': 400,
               'source_count': [1, len(multi_sources)], 'unavailable_source_bindings': unavailable_sources,
               'continuous_flood_s': flood_elapsed_s,
@@ -570,17 +571,22 @@ async def table_trial(context, client_context):
             raw.close()
     await asyncio.sleep(.1)
     before = len(server.registry.sources)
-    unknown = Client(server, client_context, 'http/1.1')
-    started = time.monotonic()
-    status, error = None, None
-    try:
-        await unknown.connect('127.99.99.99')
-        status, _, _ = await unknown.request('/auth/start')
-    except Exception as exc:
-        error = type(exc).__name__
-    finally:
-        await unknown.close()
-    unknown_elapsed_ms = (time.monotonic()-started)*1000
+    unknown_results = {}
+    for kind in ('sign_in', 'reconnect'):
+        token = server.registry.token('unknown-legitimate', 0) if kind == 'reconnect' else ''
+        unknown = Client(server, client_context, 'http/1.1', token)
+        started = time.monotonic()
+        status, error, error_number = None, None, None
+        try:
+            await unknown.connect('127.99.99.99')
+            status, _, _ = await unknown.request('/auth/start' if kind == 'sign_in' else '/')
+        except Exception as exc:
+            error, error_number = type(exc).__name__, getattr(exc, 'errno', None)
+        finally:
+            await unknown.close()
+        unknown_results[kind] = {'offered': 1, 'success': int(status == 200), 'status': status,
+                                 'error': error, 'errno': error_number,
+                                 'latency_ms': (time.monotonic()-started)*1000}
     await asyncio.sleep(6)
     accept.cancel()
     await asyncio.gather(accept, return_exceptions=True)
@@ -596,12 +602,16 @@ async def table_trial(context, client_context):
         model.entries.clear()
     model_full = len(model.sources)
     model_unknown = model.gate('10.99.99.99', now+11)
+    model_reconnect = model.gate('10.99.99.98', now+11)
     return {'status': 'FAIL', 'offered_kernel_source_addresses': offered, 'connect_errors': errors,
             'bound_kernel_sources': bound, 'error_codes': error_codes,
             'table_size': before, 'table_size_after': len(server.registry.sources),
-            'unknown_legitimate_signin': {'offered': 1, 'success': int(status == 200), 'status': status, 'error': error, 'latency_ms':unknown_elapsed_ms},
+            'unknown_legitimate_signin': unknown_results['sign_in'],
+            'unknown_legitimate_reconnect': unknown_results['reconnect'],
             'same_ipv6_64_unique_keys': ipv6, 'same_ipv6_64_model_addresses': 2048,
             'separate_model': {'table_size': model_full, 'unknown_rejected': model_unknown is None,
+                               'unknown_legitimate_signin': {'offered': 1, 'success': int(model_unknown is not None)},
+                               'unknown_legitimate_reconnect': {'offered': 1, 'success': int(model_reconnect is not None)},
                                'metrics': model.metrics, 'kernel_evidence': False},
             'metrics': server.registry.metrics,
             'kernel_exhaustion_qualified': before == 1024,
