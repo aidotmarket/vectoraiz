@@ -1830,7 +1830,7 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
 }
 
 #[test]
-fn office_filtered_chart_points_cellrange_and_external_workbook_are_removed() {
+fn office_chart_cellrange_and_external_workbook_are_removed() {
     let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
     let path = "word/charts/chart1.xml";
     let xml=String::from_utf8(p[path].clone()).unwrap()
@@ -1838,7 +1838,6 @@ fn office_filtered_chart_points_cellrange_and_external_workbook_are_removed() {
         .replace("<c:ptCount val=\"1\"/>","<c:ptCount val=\"2\"/>")
         .replace("</c:strCache></c:strRef></c:cat>","<c:pt idx=\"1\"><c:v>Visible category</c:v></c:pt></c:strCache></c:strRef></c:cat>")
         .replace("</c:numCache>","<c:pt idx=\"1\"><c:v>43</c:v></c:pt></c:numCache>")
-        .replace("</c:ser>","<c:extLst><c:ext uri=\"filter\"><c16:filteredLitCache><c16:numCache><c:pt idx=\"0\"><c:v>42</c:v></c:pt></c16:numCache></c16:filteredLitCache></c:ext></c:extLst></c:ser>")
         .replace("</c:chartSpace>",&format!(r#"<c:externalData xmlns:r="{R}" r:id="source"/><c:printSettings><c:headerFooter>SECRET PRINT HEADER</c:headerFooter></c:printSettings><c:protection/><c:txPr xmlns:a="{A}"><a:p><a:fld type="CELLRANGE"><a:t>[CELLRANGE]</a:t></a:fld></a:p></c:txPr></c:chartSpace>"#));
     p.insert(path.into(), xml.into_bytes());
     p.insert("word/charts/_rels/chart1.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="source" Type="{R}/package" Target="https://example.invalid/source.xlsx" TargetMode="External"/><Relationship Id="theme" Type="{R}/themeOverride" Target="../theme/themeOverride.xml"/></Relationships>"#).into_bytes());
@@ -1852,12 +1851,8 @@ fn office_filtered_chart_points_cellrange_and_external_workbook_are_removed() {
     assert!(report.text().contains("Visible category"));
     assert!(report.text().contains("43"));
     assert!(report.text().contains("Chart series marker"));
-    for marker in [
-        "Category marker",
-        "[CELLRANGE]",
-        "SECRET PRINT HEADER",
-        "example.invalid",
-    ] {
+    assert!(report.text().contains("Category marker"));
+    for marker in ["[CELLRANGE]", "SECRET PRINT HEADER", "example.invalid"] {
         assert!(
             !members(&bytes)
                 .values()
@@ -2072,51 +2067,48 @@ fn office_charted_cell_edit_propagates_private_mappings_across_generations() {
 }
 
 #[test]
-fn office_filtered_cache_mapping_keeps_original_source_indices() {
-    let marker = "S1934-visible-second-point-marker";
-    let mut p = chart_fixture("xlsx", "<c:plotVisOnly/>");
-    let path = "xl/charts/chart1.xml";
-    let xml=String::from_utf8(p[path].clone()).unwrap()
-        .replace("Sheet1!$A$1", "'Project ORION'!$A$1")
-        .replace("Sheet1!$A$2", "'Project ORION'!$A$1:$A$2")
-        .replace("Sheet1!$B$2", "'Project ORION'!$B$1:$B$2")
-        .replace("<c:chartSpace ","<c:chartSpace xmlns:c16=\"http://schemas.microsoft.com/office/drawing/2014/chart\" ")
-        .replace("<c:v>Category marker</c:v></c:pt></c:strCache>",&format!("<c:v>Category marker</c:v></c:pt><c:pt idx=\"1\"><c:v>{marker}</c:v></c:pt></c:strCache>"))
-        .replace("<c:cat><c:strRef><c:f>'Project ORION'!$A$1:$A$2</c:f><c:strCache><c:ptCount val=\"1\"/>","<c:cat><c:strRef><c:f>'Project ORION'!$A$1:$A$2</c:f><c:strCache><c:ptCount val=\"2\"/>")
-        .replace("<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"1\"/>","<c:numCache><c:formatCode>General</c:formatCode><c:ptCount val=\"2\"/>")
-        .replace("</c:numCache>","<c:pt idx=\"1\"><c:v>43</c:v></c:pt></c:numCache>")
-        .replace("</c:ser>","<c:extLst><c:ext uri=\"filter\"><c16:filteredLitCache><c16:numCache><c:pt idx=\"0\"><c:v>42</c:v></c:pt></c16:numCache></c16:filteredLitCache></c:ext></c:extLst></c:ser>");
+fn office_filtered_extensions_refuse_without_cache_or_legend_surgery() {
+    for (year, element) in [
+        (2012, "filteredBarSeries"),
+        (2012, "filteredCategoryTitle"),
+        (2012, "filteredSeriesTitle"),
+        (2014, "filteredLitCache"),
+        (2014, "categoryFilterExceptions"),
+    ] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let xml = String::from_utf8(p[path].clone()).unwrap().replace("</c:ser>", &format!(r#"<c:extLst><c:ext uri="adversarial-filter"><x:{element} xmlns:x="http://schemas.microsoft.com/office/drawing/{year}/chart"/></c:ext></c:extLst></c:ser>"#));
+        p.insert(path.into(), xml.into_bytes());
+        let source = archive(&p);
+        let before = sha256(&source);
+        let error = office::rebuild("document.docx", &source, &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("chart has filtered (hidden) series or categories; remove the filter in Excel or exclude"), "{error}");
+        assert!(error.contains(path) && error.contains(element));
+        assert_eq!(sha256(&source), before);
+    }
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml = String::from_utf8(p[path].clone()).unwrap().replace(
+        "<c:legendEntry><c:idx val=\"0\"/>",
+        "<c:legendEntry><c:idx val=\"17\"/>",
+    );
     p.insert(path.into(), xml.into_bytes());
-    let path = "xl/worksheets/identity-sheet.xml";
-    let xml=String::from_utf8(p[path].clone()).unwrap().replace("</s:sheetData>",&format!("<s:row r=\"2\"><s:c r=\"A2\" t=\"inlineStr\"><s:is><s:t>{marker}</s:t></s:is></s:c><s:c r=\"B2\"><s:v>43</s:v></s:c></s:row></s:sheetData>"));
-    p.insert(path.into(), xml.into_bytes());
-    let (bytes, report) = rebuild("xlsx", &p);
-    assert!(report.chart_sources.unmappable.is_empty());
-    let node = report
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(
+        report.text().contains("Chart series marker")
+            && report.text().contains("Category marker")
+            && report.text().contains("42")
+    );
+    assert!(report
         .inventory
         .iter()
-        .find(|v| v.location.contains("/cell/A2/") && v.location.ends_with("/text"))
-        .unwrap();
-    let edits = BTreeMap::from([(
-        node.location.clone(),
-        Edit {
-            expected_sha256: sha256(marker.as_bytes()),
-            value: "Edited surviving point".into(),
-        },
-    )]);
-    let (edited, report) =
-        office::edit_with_chart_sources("document.xlsx", &bytes, &edits, &report.chart_sources)
-            .unwrap();
-    assert_eq!(
-        report
-            .inventory
-            .iter()
-            .filter(|v| v.location.ends_with("/text")
-                && v.value.as_deref() == Some("Edited surviving point"))
-            .count(),
-        2
-    );
-    assert!(!edited.windows(marker.len()).any(|b| b == marker.as_bytes()));
+        .any(|v| v.location.contains("}legendEntry[")
+            && v.location.ends_with("/@{}val")
+            && v.value.as_deref() == Some("17")));
+    office::inspect("document.docx", &bytes).unwrap();
 }
 
 #[test]

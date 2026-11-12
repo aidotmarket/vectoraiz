@@ -381,172 +381,22 @@ pub(super) fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) ->
     n.children = children;
     Ok(())
 }
-fn filtered_series(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
-    fn gather(n: &Node, hidden: &mut BTreeSet<u32>) -> Result<()> {
-        if n.ns
-            .starts_with("http://schemas.microsoft.com/office/drawing/")
+fn refuse_filters(n: &Node, at: &str) -> Result<()> {
+    ensure!(
+        !(n.ns.starts_with("http://schemas.microsoft.com/office/drawing/")
             && n.ns.ends_with("/chart")
-            && n.local.starts_with("filtered")
-            && n.local.ends_with("Series")
-        {
-            let mut indices = Vec::new();
-            visit(n, C, "idx", &mut indices);
-            let idx = indices
-                .first()
-                .context("filtered chart series identity missing")?;
-            hidden.insert(
-                idx.attr("val")
-                    .context("filtered chart series index missing")?
-                    .parse()?,
-            );
-        }
-        for c in &n.children {
-            gather(c, hidden)?;
-        }
-        Ok(())
-    }
-    let mut hidden = BTreeSet::new();
-    gather(n, &mut hidden)?;
-    if hidden.is_empty() {
-        return Ok(());
-    }
-    fn prune(n: &mut Node, ids: &BTreeSet<u32>, at: &str, report: &mut Report) -> Result<()> {
-        let mut children = Vec::new();
-        for mut c in std::mem::take(&mut n.children) {
-            if c.ns == C && words("ser legendEntry", &c.local) {
-                let idx = c
-                    .children
-                    .iter_mut()
-                    .find(|c| c.ns == C && c.local == "idx")
-                    .context("chart series identity missing")?;
-                let index: u32 = idx
-                    .attr("val")
-                    .context("chart series index missing")?
-                    .parse()?;
-                if ids.contains(&index) {
-                    report.remove(
-                        at,
-                        "removed filtered chart series and associated legend entry",
-                        String::from_utf8(serialize(&c)?)?,
-                    );
-                    continue;
-                }
-                idx.attrs.insert(
-                    (String::new(), "val".into()),
-                    (index - ids.range(..index).count() as u32).to_string(),
-                );
-                if c.local == "ser" {
-                    if let Some(order) = c
-                        .children
-                        .iter_mut()
-                        .find(|c| c.ns == C && c.local == "order")
-                    {
-                        let old: u32 = order
-                            .attr("val")
-                            .context("chart series order missing")?
-                            .parse()?;
-                        order.attrs.insert(
-                            (String::new(), "val".into()),
-                            old.saturating_sub(ids.range(..old).count() as u32)
-                                .to_string(),
-                        );
-                    }
-                }
-            }
-            if c.local != "extLst" {
-                prune(&mut c, ids, at, report)?;
-            }
-            children.push(c);
-        }
-        n.children = children;
-        Ok(())
-    }
-    prune(n, &hidden, at, report)
-}
-fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
-    fn extension(n: &Node) -> bool {
-        n.ns.starts_with("http://schemas.microsoft.com/office/drawing/") && n.ns.ends_with("/chart")
-    }
-    fn hidden_points(n: &Node, active: bool, ids: &mut BTreeSet<u32>) -> Result<()> {
-        let active =
-            active || (extension(n) && words("filteredLitCache filteredCategoryTitle", &n.local));
-        if active && n.local == "pt" {
-            ids.insert(
-                n.attr("idx")
-                    .context("filtered chart point lacks index")?
-                    .parse()?,
-            );
-        }
-        for c in &n.children {
-            hidden_points(c, active, ids)?;
-        }
-        Ok(())
-    }
-    fn repair(n: &mut Node, ids: &BTreeSet<u32>, at: &str, report: &mut Report) -> Result<()> {
-        let mut kept = Vec::new();
-        for mut c in std::mem::take(&mut n.children) {
-            if c.ns == C && words("pt dPt dLbl", &c.local) {
-                let idx = if c.local == "pt" {
-                    c.attr("idx")
-                } else {
-                    c.children
-                        .iter()
-                        .find(|x| x.ns == C && x.local == "idx")
-                        .and_then(|x| x.attr("val"))
-                };
-                if let Some(idx) = idx {
-                    let index: u32 = idx.parse()?;
-                    if ids.contains(&index) {
-                        report.remove(
-                            at,
-                            "removed filtered chart point/label/formatting",
-                            String::from_utf8(serialize(&c)?)?,
-                        );
-                        continue;
-                    }
-                    let adjusted = index - ids.range(..index).count() as u32;
-                    if c.local == "pt" {
-                        c.attrs
-                            .insert((String::new(), "idx".into()), adjusted.to_string());
-                    } else if let Some(node) = c
-                        .children
-                        .iter_mut()
-                        .find(|x| x.ns == C && x.local == "idx")
-                    {
-                        node.attrs
-                            .insert((String::new(), "val".into()), adjusted.to_string());
-                    }
-                }
-            }
-            if c.ns == C && c.local == "ptCount" {
-                let count: u32 = c.attr("val").context("chart cache count absent")?.parse()?;
-                c.attrs.insert(
-                    (String::new(), "val".into()),
-                    (count - ids.range(..count).count() as u32).to_string(),
-                );
-            }
-            if c.local != "extLst" && !(c.ns == C && c.local == "tx" && n.local == "ser") {
-                repair(&mut c, ids, at, report)?;
-            }
-            kept.push(c);
-        }
-        n.children = kept;
-        Ok(())
-    }
-    if n.ns == C && n.local == "ser" {
-        let mut ids = BTreeSet::new();
-        hidden_points(n, false, &mut ids)?;
-        if !ids.is_empty() {
-            repair(n, &ids, at, report)?;
-        }
-    }
-    for (i, c) in n.children.iter_mut().enumerate() {
-        filtered(c, &format!("{at}/point-scope[{i}]"), report)?;
+            && (n.local.starts_with("filtered")
+                || words("categoryFilterExceptions categoryFilterException", &n.local))),
+        "chart has filtered (hidden) series or categories; remove the filter in Excel or exclude at {at}"
+    );
+    for (i, c) in n.children.iter().enumerate() {
+        refuse_filters(c, &location(at, c, i + 1))?;
     }
     Ok(())
 }
 pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bool) -> Result<()> {
     if n.ns == C && n.local == "chartSpace" {
+        refuse_filters(n, at)?;
         report.warnings.push(format!(
             "{at}: retained static chart caches may be stale; review every cached string and value"
         ));
@@ -670,6 +520,10 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         chartex(&n, part)?;
         let mut before = BTreeSet::new();
         refs(&n, &mut before);
+        if n.ns == C {
+            // Detect before any extension or alternate branch can be removed.
+            refuse_filters(&n, part)?;
+        }
         resolve_alternates(&mut n, part, report)?;
         if n.ns == C {
             let mut links = Vec::new();
@@ -682,8 +536,6 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                     .collect(),
             );
             super::chart_sources::annotate(&mut n, part, &sheets, &mut report.chart_sources)?;
-            filtered_series(&mut n, part, report)?;
-            filtered(&mut n, part, report)?;
             chart(&mut n, part, report, false)?;
         }
         let mut after = BTreeSet::new();
