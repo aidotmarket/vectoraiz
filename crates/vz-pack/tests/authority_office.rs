@@ -2147,3 +2147,117 @@ fn office_real_smartart_part_names_are_neutral() {
         assert!(!bytes.windows(marker.len()).any(|b| b == marker.as_bytes()));
     }
 }
+
+// Independent oracle: unmodified CT_Tx and CT_SerTx definitions from the pinned
+// SDK, not the generated product allowlist. Check QName and choice cardinality.
+fn sdk_chart_text_valid(bytes: &[u8]) -> bool {
+    use quick_xml::{events::Event, name::ResolveResult, NsReader};
+    let schema: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/office-public/chart-text-sdk-schema.json"
+    ))
+    .unwrap();
+    let mut reader = NsReader::from_reader(bytes);
+    let mut stack: Vec<(String, String, usize)> = Vec::new();
+    loop {
+        match reader.read_event().unwrap() {
+            event @ (Event::Start(_) | Event::Empty(_)) => {
+                let empty = matches!(event, Event::Empty(_));
+                let e = match event {
+                    Event::Start(e) | Event::Empty(e) => e,
+                    _ => unreachable!(),
+                };
+                let (ns, local) = reader.resolve_element(e.name());
+                let ns = match ns {
+                    ResolveResult::Bound(n) => String::from_utf8_lossy(n.as_ref()).into_owned(),
+                    _ => String::new(),
+                };
+                let local = String::from_utf8_lossy(local.as_ref()).into_owned();
+                if stack.last().is_some_and(|n| n.0 == C && n.1 == "tx") {
+                    let series = stack.len() > 1
+                        && stack[stack.len() - 2].0 == C
+                        && stack[stack.len() - 2].1 == "ser";
+                    let class = if series { "SeriesText" } else { "ChartText" };
+                    let ty = schema["Types"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|t| t["ClassName"] == class)
+                        .unwrap();
+                    if ns != C
+                        || !ty["Children"].as_array().unwrap().iter().any(|c| {
+                            c["Name"]
+                                .as_str()
+                                .unwrap()
+                                .ends_with(&format!("/c:{local}"))
+                        })
+                    {
+                        return false;
+                    }
+                    stack.last_mut().unwrap().2 += 1;
+                }
+                if !empty {
+                    stack.push((ns, local, 0));
+                }
+            }
+            Event::End(_) => {
+                let (ns, local, count) = stack.pop().unwrap();
+                if ns == C && local == "tx" && count != 1 {
+                    return false;
+                }
+            }
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    true
+}
+#[test]
+fn office_cached_chart_labels_obey_sdk_text_choices() {
+    let reference = |value: &str| {
+        format!(
+            r#"<c:tx><c:strRef><c:f>Sheet1!$A$1</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>{value}</c:v></c:pt></c:strCache></c:strRef></c:tx>"#
+        )
+    };
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let path = "word/charts/chart1.xml";
+    let xml = String::from_utf8(p[path].clone()).unwrap()
+        .replace("<c:delete val=\"1\"/></c:dLbl>", &format!("{}</c:dLbl>", reference("Data label")))
+        .replace("</c:ser>", &format!("<c:trendline><c:trendlineType val=\"linear\"/><c:trendlineLbl>{}</c:trendlineLbl></c:trendline></c:ser>", reference("Trendline label")))
+        .replace("<c:plotArea>", &format!("<c:title>{}</c:title><c:plotArea>", reference("Chart title")));
+    p.insert(path.into(), xml.into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    for text in [
+        "Data label",
+        "Trendline label",
+        "Chart title",
+        "Chart series marker",
+    ] {
+        assert!(report.text().contains(text), "{text}");
+    }
+    let mut rebuilt = members(&bytes);
+    let chart = rebuilt
+        .keys()
+        .find(|p| p.contains("/charts/") && p.ends_with(".xml"))
+        .unwrap()
+        .clone();
+    assert!(sdk_chart_text_valid(&rebuilt[&chart]));
+    // Make a non-series CT_Tx invalid while preserving the valid series c:v.
+    let xml = String::from_utf8(rebuilt[&chart].clone()).unwrap();
+    let start = xml.find(":strLit>").unwrap();
+    let open = xml[..start].rfind('<').unwrap();
+    let prefix = &xml[open + 1..start];
+    let end = xml[start..].find(":strLit>").unwrap() + start;
+    let end = xml[end + 1..].find(":strLit>").unwrap() + end + 1 + ":strLit>".len();
+    let bad = format!(
+        "{}<{prefix}:v>Invalid label</{prefix}:v>{}",
+        &xml[..open],
+        &xml[end..]
+    );
+    assert!(!sdk_chart_text_valid(bad.as_bytes()));
+    rebuilt.insert(chart, bad.into_bytes());
+    assert!(office::inspect("document.docx", &archive(&rebuilt))
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("unsupported child v in tx"));
+}

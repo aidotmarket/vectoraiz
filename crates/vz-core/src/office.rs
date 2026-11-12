@@ -1358,6 +1358,9 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     Ok(())
 }
 fn validate_node(n: &Node, part: &str) -> Result<()> {
+    validate_node_context(n, part, false)
+}
+fn validate_node_context(n: &Node, part: &str, series_tx: bool) -> Result<()> {
     if n.ns == graphics::DSP && n.local == "dataModelExt" {
         ensure!(
             root_for(part) == Some((graphics::DGM, "dataModel")),
@@ -1503,16 +1506,20 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
     }
     for c in &n.children {
         ensure!(
-            child_allowed(n, c),
+            child_allowed(n, c, series_tx),
             "unsupported child {} in {} at {part}",
             c.local,
             n.local
         );
-        validate_node(c, part)?;
+        validate_node_context(c, part, n.ns == graphics::C && n.local == "ser")?;
     }
     Ok(())
 }
-fn child_allowed(parent: &Node, child: &Node) -> bool {
+fn child_allowed(parent: &Node, child: &Node, series_tx: bool) -> bool {
+    if parent.ns == graphics::C && parent.local == "tx" {
+        return child.ns == graphics::C
+            && words(chart_allowlist::tx_children(series_tx), &child.local);
+    }
     if let Some(children) = chart_allowlist::children(&parent.ns, &parent.local) {
         let prefix = if child.ns == graphics::C {
             "c"

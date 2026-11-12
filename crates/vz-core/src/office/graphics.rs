@@ -545,7 +545,7 @@ fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
     }
     Ok(())
 }
-fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
+fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bool) -> Result<()> {
     if n.ns == C && n.local == "chartSpace" {
         report.warnings.push(format!(
             "{at}: retained static chart caches may be stale; review every cached string and value"
@@ -595,7 +595,7 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
             "converted chart reference to static cache; caches may be stale",
             String::from_utf8(serialize(n)?)?,
         );
-        if n.local == "strRef" && at.contains("}tx[") {
+        if n.local == "strRef" && series_text {
             let points: Vec<_> = cached.children.iter().filter(|c| c.local == "pt").collect();
             ensure!(
                 points.len() == 1,
@@ -628,50 +628,15 @@ fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
             report.remove(&loc,if c.local=="fld" {"removed CELLRANGE displayed data label"} else {"removed chart source/extension content; retained static display only"},String::from_utf8(serialize(&c)?)?);
             continue;
         }
-        chart(&mut c, &loc, report)?;
+        chart(
+            &mut c,
+            &loc,
+            report,
+            n.ns == C && (n.local == "ser" || (n.local == "tx" && series_text)),
+        )?;
         children.push(c);
     }
     n.children = children;
-    if n.ns == C
-        && n.local == "tx"
-        && at.contains("}title[")
-        && n.children.len() == 1
-        && n.children[0].local == "v"
-    {
-        let prior = n.children.remove(0);
-        let source_cell = prior.source_cell;
-        let value = prior.text;
-        let leaf = |ns: &str, local: &str, text: String, children: Vec<Node>| Node {
-            ns: ns.into(),
-            local: local.into(),
-            text,
-            children,
-            attrs: BTreeMap::new(),
-            source_cell: None,
-            ignorable: Default::default(),
-        };
-        n.children = vec![leaf(
-            C,
-            "rich",
-            String::new(),
-            vec![
-                leaf(A, "bodyPr", String::new(), vec![]),
-                leaf(A, "lstStyle", String::new(), vec![]),
-                leaf(
-                    A,
-                    "p",
-                    String::new(),
-                    vec![leaf(
-                        A,
-                        "r",
-                        String::new(),
-                        vec![leaf(A, "t", value, vec![])],
-                    )],
-                ),
-            ],
-        )];
-        n.children[0].children[2].children[0].children[0].source_cell = source_cell;
-    }
     Ok(())
 }
 /// Resolve visible branches before applying binary/embedding refusal. Only parts
@@ -709,7 +674,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
             super::chart_sources::annotate(&mut n, part, &sheets, &mut report.chart_sources)?;
             filtered_series(&mut n, part, report)?;
             filtered(&mut n, part, report)?;
-            chart(&mut n, part, report)?;
+            chart(&mut n, part, report, false)?;
         }
         let mut after = BTreeSet::new();
         refs(&n, &mut after);

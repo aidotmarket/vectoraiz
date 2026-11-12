@@ -495,7 +495,7 @@ pub(super) fn children(ns: &str, el: &str) -> Option<&'static str> {
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "trendline") => "c:backward c:dispEq c:dispRSqr c:extLst c:forward c:intercept c:name c:order c:period c:spPr c:trendlineLbl c:trendlineType",
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "trendlineLbl") => "c:extLst c:layout c:numFmt c:spPr c:tx c:txPr",
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "trendlineType") => "",
-        ("http://schemas.openxmlformats.org/drawingml/2006/chart", "tx") => "c:rich c:strLit c:strRef c:v",
+        ("http://schemas.openxmlformats.org/drawingml/2006/chart", "tx") => "c:rich c:strLit c:strRef",
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "txPr") => "a:bodyPr a:lstStyle a:p",
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "upBars") => "c:spPr",
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "upDownBars") => "c:downBars c:extLst c:gapWidth c:upBars",
@@ -516,4 +516,11 @@ pub(super) fn children(ns: &str, el: &str) -> Option<&'static str> {
         ("http://schemas.openxmlformats.org/drawingml/2006/chart", "yVal") => "c:numLit c:numRef",
         _ => return None,
     })
+}
+pub(super) fn tx_children(series: bool) -> &'static str {
+    if series {
+        "strRef v"
+    } else {
+        "strRef rich strLit"
+    }
 }
