@@ -137,12 +137,7 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
         }
         "pptx" => {
             let mut zip = validate_zip(path)?;
-            let mut names: Vec<_> = zip
-                .file_names()
-                .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
-                .map(str::to_owned)
-                .collect();
-            names.sort();
+            let names = pptx_slide_order(&mut zip)?;
             let mut pages = Vec::new();
             for (i, name) in names.iter().enumerate() {
                 let mut xml = String::new();
@@ -169,6 +164,94 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
         "pdf" => pdf(request),
         _ => bail!("unsupported format: {ext}"),
     }
+}
+/// Resolve presentation order; older incomplete packages fall back to numeric part suffixes.
+fn pptx_slide_order(zip: &mut zip::ZipArchive<File>) -> Result<Vec<String>> {
+    use std::collections::BTreeMap;
+    let mut names: Vec<_> = zip
+        .file_names()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .map(str::to_owned)
+        .collect();
+    names.sort_by_key(|n| {
+        n.strip_prefix("ppt/slides/slide")
+            .and_then(|n| n.strip_suffix(".xml"))
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(u32::MAX)
+    });
+    if !zip.file_names().any(|n| n == "ppt/presentation.xml")
+        || !zip
+            .file_names()
+            .any(|n| n == "ppt/_rels/presentation.xml.rels")
+    {
+        return Ok(names);
+    }
+    let mut xml = String::new();
+    zip.by_name("ppt/_rels/presentation.xml.rels")?
+        .take(MAX_PART)
+        .read_to_string(&mut xml)?;
+    let mut reader = quick_xml::NsReader::from_str(&xml);
+    let mut rels = BTreeMap::new();
+    loop {
+        match reader.read_event()? {
+            Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
+                let attrs = e
+                    .attributes()
+                    .map(|a| {
+                        let a = a?;
+                        Ok((
+                            String::from_utf8(a.key.as_ref().to_vec())?,
+                            a.decode_and_unescape_value(reader.decoder())?.into_owned(),
+                        ))
+                    })
+                    .collect::<Result<BTreeMap<_, _>>>()?;
+                if attrs.get("Type").is_some_and(|t| t.ends_with("/slide"))
+                    && attrs.get("TargetMode").is_none_or(|m| m != "External")
+                {
+                    if let (Some(id), Some(target)) = (attrs.get("Id"), attrs.get("Target")) {
+                        let name = crate::office::resolve("ppt/presentation.xml", target)?;
+                        if names.contains(&name) {
+                            rels.insert(id.clone(), name);
+                        }
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    xml.clear();
+    zip.by_name("ppt/presentation.xml")?
+        .take(MAX_PART)
+        .read_to_string(&mut xml)?;
+    let mut reader = quick_xml::NsReader::from_str(&xml);
+    let mut ordered = Vec::new();
+    let mut in_list = false;
+    loop {
+        match reader.read_event()? {
+            Event::Start(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = true,
+            Event::End(e) if e.local_name().as_ref() == b"sldIdLst" => in_list = false,
+            Event::Start(e) | Event::Empty(e) if in_list && e.local_name().as_ref() == b"sldId" => {
+                for a in e.attributes() {
+                    let a = a?;
+                    let (ns, local) = reader.resolve_attribute(a.key);
+                    if local.as_ref() == b"id"
+                        && matches!(ns, quick_xml::name::ResolveResult::Bound(n) if n.as_ref() == b"http://schemas.openxmlformats.org/officeDocument/2006/relationships")
+                    {
+                        let id = a.decode_and_unescape_value(reader.decoder())?;
+                        ordered.push(
+                            rels.get(id.as_ref())
+                                .context("presentation slide relationship missing")?
+                                .clone(),
+                        );
+                    }
+                }
+            }
+            Event::Eof => break,
+            _ => (),
+        }
+    }
+    Ok(ordered)
 }
 fn pdf(request: &Request) -> Result<Vec<Page>> {
     use pdfium_render::prelude::*;
@@ -247,6 +330,61 @@ impl crate::Ocr for AppleVision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn presentation_order_and_numeric_fallback() {
+        use std::io::Write;
+        for explicit in [false, true] {
+            let file = tempfile::NamedTempFile::with_suffix(".pptx").unwrap();
+            let mut zip = zip::ZipWriter::new(file.reopen().unwrap());
+            let opts = zip::write::SimpleFileOptions::default();
+            for n in 1..=12 {
+                zip.start_file(format!("ppt/slides/slide{n}.xml"), opts)
+                    .unwrap();
+                write!(zip, "<sld><p><t>Slide {n}</t></p></sld>").unwrap();
+            }
+            let expected: Vec<_> = if explicit {
+                (1..=12).rev().collect()
+            } else {
+                (1..=12).collect()
+            };
+            if explicit {
+                zip.start_file("ppt/presentation.xml", opts).unwrap();
+                write!(zip, "<p:presentation xmlns:p=\"http://schemas.openxmlformats.org/presentationml/2006/main\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><p:sldIdLst>").unwrap();
+                for n in &expected {
+                    write!(zip, "<p:sldId id=\"{}\" r:id=\"r{n}\"/>", n + 255).unwrap();
+                }
+                write!(zip, "</p:sldIdLst></p:presentation>").unwrap();
+                zip.start_file("ppt/_rels/presentation.xml.rels", opts)
+                    .unwrap();
+                write!(zip, "<Relationships>").unwrap();
+                for n in 1..=12 {
+                    write!(zip, "<Relationship Id=\"r{n}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"../ppt/slides/slide{n}.xml\"/>").unwrap();
+                }
+                write!(zip, "</Relationships>").unwrap();
+            }
+            zip.finish().unwrap();
+            let pages = parse(&Request {
+                path: file.path().to_owned(),
+                pdfium: None,
+                office: None,
+            })
+            .unwrap();
+            assert_eq!(pages.len(), 12);
+            for (i, (page, n)) in pages.iter().zip(&expected).enumerate() {
+                assert_eq!(page.page, i as u32 + 1);
+                assert_eq!(page.text.trim(), format!("Slide {n}"));
+            }
+            let mut archive = validate_zip(file.path()).unwrap();
+            let names = pptx_slide_order(&mut archive).unwrap();
+            assert_eq!(
+                names,
+                expected
+                    .iter()
+                    .map(|n| format!("ppt/slides/slide{n}.xml"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
     #[test]
     fn ordinary_ingest_does_not_require_listing_sanitizer() {
         use std::io::Write;

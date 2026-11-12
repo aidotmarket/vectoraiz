@@ -7,6 +7,7 @@ use std::{
     io::{Cursor, Read, Write},
 };
 
+mod layout_allowlist;
 mod style_allowlist;
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -27,7 +28,7 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_VALUES: usize = 5_000_000;
 pub const MAX_PARTS: usize = 10_000;
-pub const ALLOWLIST_VERSION: u32 = 2;
+pub const ALLOWLIST_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Value {
@@ -413,7 +414,7 @@ fn words(s: &str, k: &str) -> bool {
     s.split_ascii_whitespace().any(|x| x == k)
 }
 
-// Version 2: each entry is an element plus its permitted unqualified (or
+// Version 3: each entry is an element plus its permitted unqualified (or
 // Word-qualified) attributes. This deliberately refuses unimplemented layout
 // constructs; a namespace match by itself never permits retention.
 fn rule(ns: &str, el: &str) -> Option<&'static str> {
@@ -436,6 +437,14 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (A,"cxn")=>"ang",(A,"pos"|"pt")=>"x y",
         (A,"rect")=>"l t r b",(A,"moveTo"|"lnTo"|"cubicBezTo"|"quadBezTo")=>"",
         (A,"arcTo")=>"wR hR stAng swAng",
+        (S,"filterColumn")=>"colId hiddenButton showButton",
+        (S,"filters")=>"blank calendarType",(S,"filter")=>"val",
+        (S,"customFilters")=>"and",(S,"customFilter")=>"operator val",
+        (S,"top10")=>"top percent val filterVal",
+        (S,"dynamicFilter")=>"type val maxVal valIso maxValIso",
+        (S,"colorFilter")=>"dxfId cellColor",(S,"iconFilter")=>"iconSet iconId",
+        (S,"dateGroupItem")=>"year month day hour minute second dateTimeGrouping",
+        (A,"sym")=>"typeface panose pitchFamily charset",
         (S,"dxf")=>"",(S,"pane")=>"xSplit ySplit topLeftCell activePane state",
 
         (W,"tab")=>"val leader pos",
@@ -532,7 +541,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (A,"lnRef"|"fillRef"|"effectRef"|"fontRef")=>"idx",(A,"ln")=>"w cap cmpd algn",
         (A,"prstDash")=>"val",(A,"headEnd"|"tailEnd")=>"type w len",
         (A,"hlinkClick"|"hlinkHover")=>"tooltip tgtFrame history highlightClick endSnd",
-        _=>return style_allowlist::rule(ns,el),
+        _=>return style_allowlist::rule(ns,el).or_else(|| layout_allowlist::rule(ns,el)),
     })
 }
 
@@ -576,7 +585,7 @@ fn web_target(target: &str) -> bool {
             .get(..8)
             .is_some_and(|s| s.eq_ignore_ascii_case("https://"))
 }
-fn resolve(owner: &str, target: &str) -> Result<String> {
+pub(crate) fn resolve(owner: &str, target: &str) -> Result<String> {
     ensure!(
         !target.contains(['\\', ':', '\0', '?', '%']),
         "unsupported relationship URI"
@@ -627,7 +636,8 @@ fn removable(path: &str) -> bool {
         return true;
     }
     path.starts_with("docProps/")
-        || path.starts_with("customXml/")
+        || path.to_ascii_lowercase().starts_with("customxml/")
+        || path.to_ascii_lowercase().starts_with("[trash]/")
         || path.starts_with("docMetadata/")
         || path.contains("/comments")
         || path.contains("/threadedComments")
@@ -976,12 +986,71 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     n.children = resolved;
 
     if !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
-    let old = std::mem::take(&mut n.children);
+    let mut old = Vec::new();
+    for c in std::mem::take(&mut n.children) {
+        if c.ns == W
+            && c.local == "r"
+            && c.children
+                .iter()
+                .any(|x| x.ns == W && words("fldChar instrText", &x.local))
+        {
+            let properties: Vec<_> = c
+                .children
+                .iter()
+                .filter(|x| x.ns == W && x.local == "rPr")
+                .cloned()
+                .collect();
+            for child in &c.children {
+                if child.ns == W && child.local == "rPr" {
+                    continue;
+                }
+                let mut run = Node {
+                    ns: c.ns.clone(),
+                    local: c.local.clone(),
+                    attrs: c.attrs.clone(),
+                    children: properties.clone(),
+                    text: c.text.clone(),
+                    ignorable: c.ignorable.clone(),
+                };
+                run.children.push(child.clone());
+                old.push(run);
+            }
+        } else {
+            old.push(c);
+        }
+    }
     let mut children = Vec::new();
     // Field instruction spans must be flattened across sibling runs. Keep only
     // result runs; nested fields are refused rather than guessed.
     let mut field: Option<(bool, bool)> = None;
     for mut c in old {
+        if c.ns == W && c.local == "sdt" {
+            ensure!(
+                c.children
+                    .iter()
+                    .all(|x| x.ns == W && words("sdtPr sdtEndPr sdtContent", &x.local))
+                    && c.children
+                        .iter()
+                        .filter(|x| x.local == "sdtContent")
+                        .count()
+                        == 1,
+                "unsupported Word content control without unique displayed content at {part}"
+            );
+            report.remove(
+                part,
+                "flattened Word content control; removed properties and data-store binding",
+                String::from_utf8(serialize(&c)?)?,
+            );
+            let mut content = c.children.remove(
+                c.children
+                    .iter()
+                    .position(|x| x.local == "sdtContent")
+                    .unwrap(),
+            );
+            cleanse(&mut content, part, report)?;
+            children.extend(content.children);
+            continue;
+        }
         if c.ns == A && c.local == "fld" {
             ensure!(
                 c.children.iter().any(|x| x.ns == A && x.local == "t"),
@@ -1061,12 +1130,12 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
         );
         let drop=(n.ns==W&&n.local=="settings"&&c.ns=="http://schemas.openxmlformats.org/officeDocument/2006/math"&&c.local=="mathPr")||
             (c.ns==P&&words("clrMru printPr",&c.local))||
-            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc savePreviewPicture printerSettings rsid proofErr shapeDefaults hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic",&c.local))||
+            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc savePreviewPicture printerSettings rsid aliases numIdMacAtCleanup formsDesign proofErr shapeDefaults hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic",&c.local))||
             (c.ns==S&&words("legacyDrawing legacyDrawingHF",&c.local))||
             (c.ns=="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"&&c.local=="absPath")||
-            (c.ns==S&&c.local=="fileVersion")||
+            (c.ns==S&&words("fileVersion fileRecoveryPr",&c.local))||
             (c.ns==W&&words("del moveFrom commentRangeStart commentRangeEnd commentReference docVars rsids documentProtection writeProtection attachedTemplate trackRevisions altChunk glossaryDocument instrText",&c.local))||
-            (c.ns==S&&words("calcPr calcChain fileSharing customWorkbookViews pivotCaches pivotTableParts phoneticPr rPh sheetProtection workbookProtection",&c.local))||
+            (c.ns==S&&words("sheetCalcPr mruColors calcPr calcChain fileSharing customWorkbookViews pivotCaches pivotTableParts phoneticPr rPh sheetProtection workbookProtection",&c.local))||
             (c.ns==P&&words("custDataLst custData tags embeddedFontLst",&c.local));
         if drop {
             report.remove(
@@ -1179,12 +1248,13 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
         }
         children.push(c);
     }
-    ensure!(field.is_none(), "unterminated Word field at {part}");
+    ensure!(field.is_none(), "unterminated Word field at {part}: safe displayed result requires begin/separate/end boundaries; recalculate and save locally, or exclude");
     n.children = children;
     let attrs = std::mem::take(&mut n.attrs);
     for ((ns, k), v) in attrs {
         if n.ignorable.contains(&ns)
-            || (ns == W && k.starts_with("rsid"))
+            || (ns == W && (k.starts_with("rsid") || k == "displacedByCustomXml"))
+            || (n.ns == S && ns.is_empty() && k == "codeName")
             || ns == "http://schemas.openxmlformats.org/markup-compatibility/2006"
             || (ns == "http://schemas.microsoft.com/office/word/2010/wordml"
                 && words("paraId textId", &k))
@@ -1269,12 +1339,20 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
         )
     })?;
     for (ns, k) in n.attrs.keys() {
+        let layout = layout_allowlist::rule(&n.ns, &n.local).is_some_and(|attrs| words(attrs, k));
+        if layout {
+            ensure!(
+                layout_allowlist::valid(&n.ns, &n.local, k, &n.attrs[&(ns.clone(), k.clone())]),
+                "invalid layout attribute {k} on {} at {part}",
+                n.local
+            );
+        }
         let permitted = if ns == XML {
             k == "space" && n.local == "t"
         } else if ns == R {
             words("id embed link",k)&&words("hyperlink headerReference footerReference sheet tablePart drawing sldId sldMasterId sldLayoutId notesMasterId handoutMasterId hlinkClick hlinkHover blip", &n.local)
         } else {
-            (if n.ns == W { ns == W } else { ns.is_empty() }) && words(allowed, k)
+            (if n.ns == W { ns == W } else { ns.is_empty() }) && (words(allowed, k) || layout)
         };
         ensure!(
             permitted,
@@ -1329,7 +1407,7 @@ fn validate_node(n: &Node, part: &str) -> Result<()> {
 fn child_allowed(parent: &Node, child: &Node) -> bool {
     let allowed=match(parent.ns.as_str(),parent.local.as_str()){
         (CT,"Types")=>Some((CT,"Default Override")),(REL,"Relationships")=>Some((REL,"Relationship")),
-        (W,"document")=>Some((W,"body")),(W,"body")=>Some((W,"p tbl sectPr")),
+        (W,"document")=>Some((W,"body")),(W,"body")=>Some((W,"p tbl sectPr bookmarkStart bookmarkEnd")),
         (W,"p")=>Some((W,"pPr r hyperlink bookmarkStart bookmarkEnd")),
         (W,"r")=>Some((W,"rPr t tab br cr drawing lastRenderedPageBreak softHyphen noBreakHyphen footnoteReference endnoteReference separator continuationSeparator")),
         (W,"hyperlink")=>Some((W,"r bookmarkStart bookmarkEnd")),
@@ -1409,7 +1487,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns==S&&!words("workbook worksheet sheet sheets row c v t is si sst sheetData table tableColumns tableColumn",el);
     }
     if part.starts_with("xl/tables/") {
-        return ns==S&&words("table autoFilter filterColumn filters filter sortState sortCondition tableColumns tableColumn tableStyleInfo extLst ext",el);
+        return ns==S&&words("table autoFilter filterColumn filters filter customFilters customFilter top10 dynamicFilter colorFilter iconFilter dateGroupItem sortState sortCondition tableColumns tableColumn tableStyleInfo extLst ext",el);
     }
     if part.starts_with("xl/drawings/") {
         return [XDR, A, PIC].contains(&ns);
@@ -1424,7 +1502,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
 }
 
 fn content_attr(n: &Node, k: &str) -> bool {
-    (words(
+    (n.ns == S && words("filter customFilter", &n.local) && k == "val") || (words(
         "displayName descr title tooltip display location errorTitle error promptTitle prompt text",
         k,
     )) || (k == "name"

@@ -901,12 +901,21 @@ fn office_standard_word_rendering_settings_refuse_active_neighbors() {
 
 #[test]
 fn formula_cfvo_rules_removed_with_private_evidence() {
-    for ty in ["formula", "num", "percent", "percentile", "min", "max"] {
+    for (ty, expression) in [
+        ("formula", "SUM(A1:A5)+1927"),
+        ("num", "SUM(A1:A5)+1927"),
+        ("percent", "Secret!$C$9"),
+        ("percentile", "SUM(A1:A5)+1927"),
+        ("min", "SUM(A1:A5)+1927"),
+        ("max", "SUM(A1:A5)+1927"),
+    ] {
         let mut p = fixture("xlsx");
         let path = "xl/worksheets/identity-sheet.xml";
         let sheet = String::from_utf8(p[path].clone()).unwrap();
         let rules = "<s:conditionalFormatting sqref=\"A1:A5\"><s:cfRule type=\"colorScale\" priority=\"1\"><s:colorScale><s:cfvo type=\"formula\" val=\"SUM(A1:A5)+1927\"/><s:cfvo type=\"max\"/></s:colorScale></s:cfRule><s:cfRule type=\"dataBar\" priority=\"2\"><s:dataBar><s:cfvo type=\"min\"/><s:cfvo type=\"max\"/></s:dataBar></s:cfRule></s:conditionalFormatting>";
-        let rules = rules.replace("type=\"formula\"", &format!("type=\"{ty}\""));
+        let rules = rules
+            .replace("type=\"formula\"", &format!("type=\"{ty}\""))
+            .replace("SUM(A1:A5)+1927", expression);
         p.insert(
             path.into(),
             sheet
@@ -914,20 +923,33 @@ fn formula_cfvo_rules_removed_with_private_evidence() {
                 .into_bytes(),
         );
         let (bytes, report) = rebuild("xlsx", &p);
-        assert!(report
-            .removals
-            .iter()
-            .any(|r| r.value.contains("SUM(A1:A5)+1927")));
+        assert!(report.removals.iter().any(|r| r.value.contains(expression)));
         for part in members(&bytes).values() {
-            assert!(!String::from_utf8_lossy(part).contains("SUM(A1:A5)+1927"));
+            assert!(!String::from_utf8_lossy(part).contains(expression));
         }
         let reopened = office::inspect("document.xlsx", &bytes).unwrap();
         assert_eq!(report.inventory, reopened.inventory);
         assert!(members(&bytes)
             .values()
             .any(|b| String::from_utf8_lossy(b).contains("dataBar")));
-        // Readback must independently reject a formula-valued threshold.
-        assert!(office::inspect("document.xlsx", &archive(&p)).is_err());
+        // Inject into canonical delivered bytes so another source-only carrier
+        // cannot cause a false-positive readback refusal.
+        let mut tampered = members(&bytes);
+        let (_, xml) = tampered
+            .iter_mut()
+            .find(|(name, _)| name.starts_with("xl/worksheets/") && name.ends_with(".xml"))
+            .unwrap();
+        let text = String::from_utf8(xml.clone()).unwrap();
+        let close = text.rfind("</").unwrap();
+        let injected = rules.replace(
+            "<s:conditionalFormatting",
+            &format!("<s:conditionalFormatting xmlns:s=\"{S}\""),
+        );
+        *xml = format!("{}{injected}{}", &text[..close], &text[close..]).into_bytes();
+        let error = office::inspect("document.xlsx", &archive(&tampered))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("formula survived"), "{error:#}");
     }
 }
 
@@ -1026,6 +1048,30 @@ fn unmodified_office_saved_public_fixtures_and_planted_properties() {
             "pptx",
             include_bytes!("fixtures/office-public/SampleShow.pptx").as_slice(),
         ),
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/Bug64561.docx").as_slice(),
+        ),
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/tika-3816.docx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/1_NoIden.xlsx").as_slice(),
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/Excel_file_with_trash_item.xlsx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/text-highlight.pptx").as_slice(),
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/63200.pptx").as_slice(),
+        ),
     ] {
         let digest = sha256(input);
         let (output, report) =
@@ -1049,6 +1095,32 @@ fn unmodified_office_saved_public_fixtures_and_planted_properties() {
             &properties[at..]
         );
         planted.insert("docProps/core.xml".into(), properties.into_bytes());
+        add(
+            &mut planted,
+            "[trash]/planted.dat",
+            "application/octet-stream",
+            marker,
+        );
+        add(
+            &mut planted,
+            "customXML/planted.xml",
+            "application/xml",
+            &format!("<private>{marker}</private>"),
+        );
+        if ext == "docx" {
+            let xml = String::from_utf8(planted["word/document.xml"].clone()).unwrap();
+            if xml.contains("<w:sdtPr>") {
+                planted.insert("word/document.xml".into(), xml.replace("<w:sdtPr>", &format!("<w:sdtPr><w:dataBinding w:storeItemID=\"{marker}\" w:xpath=\"{marker}\"/>" )).into_bytes());
+            }
+        }
+        if ext == "xlsx" {
+            let xml = String::from_utf8(planted["xl/workbook.xml"].clone()).unwrap();
+            planted.insert(
+                "xl/workbook.xml".into(),
+                xml.replace("url=\"", &format!("url=\"{marker}/"))
+                    .into_bytes(),
+            );
+        }
         let (bytes, report) = rebuild(ext, &planted);
         assert!(report.removals.iter().any(|r| r.value.contains(marker)));
         assert!(!bytes.windows(marker.len()).any(|w| w == marker.as_bytes()));
@@ -1209,4 +1281,146 @@ fn word_effect_styles_and_proofing_markup_are_supported() {
         .values()
         .any(|b| String::from_utf8_lossy(b).contains("proofErr")));
     assert!(members(&bytes).contains_key("word/stylesWithEffects.xml"));
+}
+
+#[test]
+fn office_trash_case_insensitive_data_stores_and_content_controls() {
+    let mut p = fixture("docx");
+    add(
+        &mut p,
+        "[trash]/0000.dat",
+        "application/octet-stream",
+        "planted-1927-trash",
+    );
+    add(
+        &mut p,
+        "customXML/item4.xml",
+        "application/xml",
+        "<private>planted-1927-store</private>",
+    );
+    p.insert("word/_rels/document.xml.rels".into(), format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"store\" Type=\"{R}/customXml\" Target=\"../customXML/item4.xml\"/></Relationships>").into_bytes());
+    let xml = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    let control = "<w:sdt><w:sdtPr><w:alias w:val=\"planted-1927-alias\"/><w:dataBinding w:storeItemID=\"planted-1927-guid\" w:xpath=\"private/path\"/></w:sdtPr><w:sdtContent><w:p><w:r><w:t>Displayed control text</w:t></w:r></w:p></w:sdtContent></w:sdt>";
+    p.insert(
+        "word/document.xml".into(),
+        xml.replace("<w:body>", &format!("<w:body>{control}"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("Displayed control text"));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.reason.contains("content control")));
+    assert!(members(&bytes)
+        .iter()
+        .all(|(name, b)| !name.contains("customXML")
+            && !name.contains("[trash]")
+            && !String::from_utf8_lossy(b).contains("planted-1927")));
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.docx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn schema_layout_attributes_and_symbol_font_are_inventoried() {
+    let mut p = fixture("docx");
+    let xml = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    let table = "<w:tbl><w:tblPr><w:tblLayout w:type=\"fixed\"/></w:tblPr><w:tr><w:tc><w:p><w:r><w:t>Cell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>";
+    p.insert(
+        "word/document.xml".into(),
+        xml.replace("<w:body>", &format!("<w:body>{table}"))
+            .into_bytes(),
+    );
+    let (bytes, _) = rebuild("docx", &p);
+    office::inspect("document.docx", &bytes).unwrap();
+    let mut p = fixture("pptx");
+    let part = "ppt/slides/slide1.xml";
+    let xml = String::from_utf8(p[part].clone()).unwrap();
+    let xml = xml.replace("<p:txBody>", "<p:spPr bwMode=\"auto\"/><p:txBody>");
+    // Add a retained symbol font in an existing drawing run.
+    p.insert(
+        part.into(),
+        xml.replace("<a:t>", "<a:rPr><a:sym typeface=\"Symbol\"/></a:rPr><a:t>")
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("pptx", &p);
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("Symbol")));
+    office::inspect("document.pptx", &bytes).unwrap();
+    // A layout attribute is never an arbitrary string carrier.
+    let mut bad = members(&bytes);
+    for b in bad.values_mut() {
+        if let Ok(xml) = std::str::from_utf8(b) {
+            *b = xml
+                .replace("bwMode=\"auto\"", "bwMode=\"planted-private\"")
+                .into_bytes();
+        }
+    }
+    assert!(office::inspect("document.pptx", &archive(&bad)).is_err());
+}
+
+#[test]
+fn excel_recovery_is_removed_and_filter_values_are_content() {
+    let mut p = fixture("xlsx");
+    let xml = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    p.insert(
+        "xl/workbook.xml".into(),
+        xml.replace(
+            "</s:workbook>",
+            "<s:fileRecoveryPr autoRecover=\"1\"/></s:workbook>",
+        )
+        .into_bytes(),
+    );
+    let part = "xl/worksheets/identity-sheet.xml";
+    let xml = String::from_utf8(p[part].clone()).unwrap();
+    p.insert(part.into(), xml.replace("</s:worksheet>", "<s:autoFilter ref=\"A1:A5\"><s:filterColumn colId=\"0\" hiddenButton=\"0\"><s:filters><s:filter val=\"Private customer filter\"/></s:filters></s:filterColumn></s:autoFilter></s:worksheet>").into_bytes());
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("fileRecoveryPr")));
+    assert!(report.text().contains("Private customer filter"));
+    assert_eq!(
+        report.inventory,
+        office::inspect("document.xlsx", &bytes).unwrap().inventory
+    );
+}
+
+#[test]
+fn footer_field_boundaries_in_one_run_preserve_result_and_refuse_missing_result() {
+    for complete in [true, false] {
+        let mut p = fixture("docx");
+        let field = if complete {
+            "<w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>FILENAME planted-1927-path</w:instrText><w:fldChar w:fldCharType=\"separate\"/><w:t>Displayed footer</w:t><w:fldChar w:fldCharType=\"end\"/></w:r>"
+        } else {
+            "<w:r><w:fldChar w:fldCharType=\"begin\"/><w:instrText>PAGE</w:instrText></w:r>"
+        };
+        add(
+            &mut p,
+            "word/footer1.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml",
+            &format!("<w:ftr xmlns:w=\"{W}\"><w:p>{field}</w:p></w:ftr>"),
+        );
+        // Rebuild requires no orphan retained parts.
+        p.insert("word/_rels/document.xml.rels".into(), format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"footer\" Type=\"{R}/footer\" Target=\"footer1.xml\"/></Relationships>").into_bytes());
+        let result = office::rebuild("document.docx", &archive(&p), &BTreeMap::new());
+        if complete {
+            let (bytes, report) = result.unwrap();
+            assert!(report.text().contains("Displayed footer"));
+            assert!(members(&bytes)
+                .values()
+                .all(|b| !String::from_utf8_lossy(b).contains("planted-1927")));
+            office::inspect("document.docx", &bytes).unwrap();
+        } else {
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("safe displayed result"));
+        }
+    }
 }

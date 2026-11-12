@@ -4,6 +4,8 @@ fn main() -> anyhow::Result<()> {
     let root = std::env::args()
         .nth(1)
         .expect("usage: office-corpus DIRECTORY");
+    let detail_path = std::env::args().nth(2);
+    let mut details = Vec::new();
     let mut results = BTreeMap::<String, BTreeMap<String, usize>>::new();
     let mut files = Vec::new();
     fn visit(path: &Path, out: &mut Vec<std::path::PathBuf>) -> anyhow::Result<()> {
@@ -40,11 +42,15 @@ fn main() -> anyhow::Result<()> {
                 }
             })
             .clone();
+        details.push(serde_json::json!({"path": path, "sha256": vz_core::pipeline::sha256(&bytes), "format": ext, "result": reason}));
         *results
             .entry(ext.into())
             .or_default()
             .entry(reason)
             .or_default() += 1;
+    }
+    if let Some(path) = detail_path {
+        std::fs::write(path, serde_json::to_vec_pretty(&details)?)?;
     }
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())
