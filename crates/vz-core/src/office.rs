@@ -504,7 +504,7 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         (S,"col")=>"min max width style hidden bestFit customWidth outlineLevel collapsed",(S,"cols")=>"",
         (S,"sst")=>"count uniqueCount",(S,"dimension"|"mergeCell"|"autoFilter")=>"ref",(S,"mergeCells")=>"count",
         (S,"sheetFormatPr")=>"baseColWidth defaultColWidth defaultRowHeight customHeight zeroHeight thickTop thickBottom outlineLevelRow outlineLevelCol",
-        (S,"sheetView")=>"windowProtection showFormulas showGridLines showRowColHeaders showZeros rightToLeft tabSelected showRuler showOutlineSymbols defaultGridColor view topLeftCell colorId zoomScale zoomScaleNormal zoomScaleSheetLayoutView zoomScalePageLayoutView workbookViewId",
+        (S,"sheetView")=>"zoomToFit windowProtection showFormulas showGridLines showRowColHeaders showZeros rightToLeft tabSelected showRuler showOutlineSymbols defaultGridColor view topLeftCell colorId zoomScale zoomScaleNormal zoomScaleSheetLayoutView zoomScalePageLayoutView workbookViewId",
         (S,"workbookView")=>"visibility minimized showHorizontalScroll showVerticalScroll showSheetTabs xWindow yWindow windowWidth windowHeight tabRatio firstSheet activeTab autoFilterDateGrouping",
         (S,"workbookPr")=>"date1904 showObjects filterPrivacy defaultThemeVersion",
         (S,"selection")=>"pane activeCell activeCellId sqref",(S,"sheetPr")=>"syncHorizontal syncVertical syncRef transitionEvaluation transitionEntry published filterMode enableFormatConditionsCalculation",

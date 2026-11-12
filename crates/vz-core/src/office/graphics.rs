@@ -251,6 +251,13 @@ fn refs(n: &Node, out: &mut BTreeSet<String>) {
 }
 fn chartex(n: &Node, at: &str) -> Result<()> {
     ensure!(
+        !(n.ns == MC
+            && n.local == "Choice"
+            && n.attr("Requires")
+                .is_some_and(|v| v.contains("/chartex") || v.contains("/chartEx"))),
+        "Office 2016 chartEx is unsupported at {at}"
+    );
+    ensure!(
         !n.ns.contains("/chartex") && !n.ns.contains("/chartEx"),
         "Office 2016 chartEx is unsupported at {at}"
     );
@@ -285,6 +292,29 @@ fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) -> Result<()>
                 .iter()
                 .position(|b| {
                     b.local == "Choice"
+                        && b.attr("Requires").is_some_and(|v| {
+                            v.split_ascii_whitespace().all(|ns| {
+                                [
+                                W,
+                                S,
+                                P,
+                                A,
+                                WP,
+                                PIC,
+                                XDR,
+                                X14,
+                                XM,
+                                P14,
+                                C,
+                                CS,
+                                DGM,
+                                DSP,
+                                "http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac",
+                                "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main",
+                            ]
+                            .contains(&ns)
+                            })
+                        })
                         && (!b.children.is_empty()
                             || c.children
                                 .iter()
@@ -326,6 +356,88 @@ fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) -> Result<()>
         }
     }
     n.children = children;
+    Ok(())
+}
+fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
+    fn extension(n: &Node) -> bool {
+        n.ns.starts_with("http://schemas.microsoft.com/office/drawing/") && n.ns.ends_with("/chart")
+    }
+    fn hidden_points(n: &Node, active: bool, ids: &mut BTreeSet<u32>) -> Result<()> {
+        let active =
+            active || (extension(n) && words("filteredLitCache filteredCategoryTitle", &n.local));
+        if active && n.local == "pt" {
+            ids.insert(
+                n.attr("idx")
+                    .context("filtered chart point lacks index")?
+                    .parse()?,
+            );
+        }
+        for c in &n.children {
+            hidden_points(c, active, ids)?;
+        }
+        Ok(())
+    }
+    fn repair(n: &mut Node, ids: &BTreeSet<u32>, at: &str, report: &mut Report) -> Result<()> {
+        let mut kept = Vec::new();
+        for mut c in std::mem::take(&mut n.children) {
+            if c.ns == C && words("pt dPt dLbl", &c.local) {
+                let idx = if c.local == "pt" {
+                    c.attr("idx")
+                } else {
+                    c.children
+                        .iter()
+                        .find(|x| x.ns == C && x.local == "idx")
+                        .and_then(|x| x.attr("val"))
+                };
+                if let Some(idx) = idx {
+                    let index: u32 = idx.parse()?;
+                    if ids.contains(&index) {
+                        report.remove(
+                            at,
+                            "removed filtered chart point/label/formatting",
+                            String::from_utf8(serialize(&c)?)?,
+                        );
+                        continue;
+                    }
+                    let adjusted = index - ids.range(..index).count() as u32;
+                    if c.local == "pt" {
+                        c.attrs
+                            .insert((String::new(), "idx".into()), adjusted.to_string());
+                    } else if let Some(node) = c
+                        .children
+                        .iter_mut()
+                        .find(|x| x.ns == C && x.local == "idx")
+                    {
+                        node.attrs
+                            .insert((String::new(), "val".into()), adjusted.to_string());
+                    }
+                }
+            }
+            if c.ns == C && c.local == "ptCount" {
+                let count: u32 = c.attr("val").context("chart cache count absent")?.parse()?;
+                c.attrs.insert(
+                    (String::new(), "val".into()),
+                    (count - ids.range(..count).count() as u32).to_string(),
+                );
+            }
+            if c.local != "extLst" {
+                repair(&mut c, ids, at, report)?;
+            }
+            kept.push(c);
+        }
+        n.children = kept;
+        Ok(())
+    }
+    if n.ns == C && n.local == "ser" {
+        let mut ids = BTreeSet::new();
+        hidden_points(n, false, &mut ids)?;
+        if !ids.is_empty() {
+            repair(n, &ids, at, report)?;
+        }
+    }
+    for (i, c) in n.children.iter_mut().enumerate() {
+        filtered(c, &format!("{at}/point-scope[{i}]"), report)?;
+    }
     Ok(())
 }
 fn chart(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
@@ -452,6 +564,16 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
     {
         chartex(&parse(bytes, part)?, part)?;
     }
+    for (part, bytes) in parts.iter() {
+        let lower = part.to_ascii_lowercase();
+        ensure!(
+            !lower.contains("vbaproject")
+                && !lower.contains("/activex/")
+                && !lower.starts_with("_xmlsignatures/")
+                && !bytes.starts_with(&[0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1]),
+            "VBA/ActiveX/OLE/signature refused at {part}"
+        );
+    }
     let mut trees = BTreeMap::new();
     let mut deleted = BTreeMap::<String, BTreeSet<String>>::new();
     for (part, bytes) in parts.iter() {
@@ -464,6 +586,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         refs(&n, &mut before);
         resolve_alternates(&mut n, part, report)?;
         if n.ns == C {
+            filtered(&mut n, part, report)?;
             chart(&mut n, part, report)?;
         }
         let mut after = BTreeSet::new();
@@ -489,6 +612,29 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                 .is_some_and(|ids| rel.attr("Id").is_some_and(|id| ids.contains(id)))
                 || (trees.get(&own).is_some_and(|n| n.ns == C) && kind == "themeOverride");
             if drop {
+                ensure!(
+                    !words("oleObject control vbaProject", kind),
+                    "unrelated OLE/active/embedded content at {part}"
+                );
+                if kind == "package" {
+                    ensure!(
+                        trees.get(&own).is_some_and(|n| n.ns == C),
+                        "unproven chart workbook dependency at {part}"
+                    );
+                    if rel.attr("TargetMode") != Some("External") {
+                        let target = resolve(
+                            &own,
+                            rel.attr("Target").context("chart workbook target absent")?,
+                        )?;
+                        ensure!(
+                            target.ends_with(".xlsx")
+                                && parts
+                                    .get(&target)
+                                    .is_some_and(|b| b.starts_with(b"PK\x03\x04")),
+                            "unproven chart workbook dependency at {part}"
+                        );
+                    }
+                }
                 if kind == "themeOverride" {
                     report.warnings.push(format!(
                         "{own}: removing themeOverride may change chart colours"
@@ -579,7 +725,9 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         });
     }
     for (part, mut n) in trees.into_iter().chain(rels) {
-        if n.ns==S && n.local=="worksheet" {inspect_formulas(&n,&part,report)?;}
+        if n.ns == S && n.local == "worksheet" {
+            inspect_formulas(&n, &part, report)?;
+        }
         cleanse(&mut n, &part, report)?;
         parts.insert(part, serialize(&n)?);
     }

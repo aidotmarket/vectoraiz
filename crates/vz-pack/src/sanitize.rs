@@ -299,7 +299,12 @@ fn transform(
                 report
                     .warnings
                     .into_iter()
-                    .filter(|w| !removal_warnings.contains(w))
+                    .filter(|w| {
+                        !removal_warnings.contains(w)
+                            || ["chart", "SmartArt", "AlternateContent", "CELLRANGE"]
+                                .iter()
+                                .any(|kind| w.contains(kind))
+                    })
                     .map(|w| format!("{name}!{w}")),
             );
             budget

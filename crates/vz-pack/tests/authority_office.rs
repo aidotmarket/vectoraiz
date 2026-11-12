@@ -658,7 +658,7 @@ fn office_identity_named_media_part() {
     }
 }
 #[test]
-fn office_capacity_chart_deck_specific_refusal() {
+fn office_malformed_chart_deck_specific_refusal() {
     let mut p = fixture("pptx");
     add(
         &mut p,
@@ -671,7 +671,7 @@ fn office_capacity_chart_deck_specific_refusal() {
         .unwrap()
         .to_string();
     assert!(
-        error.contains("unsupported Office part ppt/charts/chart1.xml"),
+        error.contains("unsupported/Strict/mismatched root at ppt/charts/chart1.xml"),
         "{error}"
     );
 }
@@ -996,7 +996,7 @@ fn connected_excel_carriers_and_alternate_content_removed() {
 }
 
 #[test]
-fn unsupported_alternate_content_without_fallback_is_dropped() {
+fn unsupported_alternate_content_without_fallback_refuses() {
     let mut p = fixture("xlsx");
     let xml = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
     let block = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:unsupported\"><mc:Choice Requires=\"future\"><future:private>planted-1927</future:private></mc:Choice></mc:AlternateContent>";
@@ -1005,15 +1005,14 @@ fn unsupported_alternate_content_without_fallback_is_dropped() {
         xml.replace("</s:workbook>", &format!("{block}</s:workbook>"))
             .into_bytes(),
     );
-    let (bytes, report) = rebuild("xlsx", &p);
-    assert!(report
-        .removals
-        .iter()
-        .any(|r| r.value.contains("planted-1927")));
-    assert!(members(&bytes)
-        .values()
-        .all(|b| !String::from_utf8_lossy(b).contains("planted-1927")));
-    office::inspect("document.xlsx", &bytes).unwrap();
+    let err = office::rebuild("document.xlsx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("no supported AlternateContent branch; visible content would be lost"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -1616,4 +1615,180 @@ fn office_charted_cell_edit_refuses_without_source_mapping() {
         err.contains("chart cache-to-source mapping") && err.contains("xl/charts/"),
         "{err}"
     );
+}
+
+#[test]
+fn office_chart_alternate_fallback_orphans_and_shared_media() {
+    let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    let mut host = format!(
+        r#"<w:document xmlns:w="{W}" xmlns:a="{A}" xmlns:c="{C}" xmlns:r="{R}" xmlns:mc="{mc}" xmlns:v="urn:schemas-microsoft-com:vml"><w:body><w:p><w:r><mc:AlternateContent><mc:Choice Requires="c"><w:drawing><a:graphic><a:graphicData uri="{C}"><c:chart r:id="chart"/></a:graphicData></a:graphic></w:drawing></mc:Choice><mc:Fallback><w:pict><v:shape r:id="fallback"/></w:pict></mc:Fallback></mc:AlternateContent></w:r></w:p></w:body></w:document>"#
+    );
+    p.insert("word/document.xml".into(), host.as_bytes().to_vec());
+    add(
+        &mut p,
+        "word/media/fallback.wmf",
+        "image/x-wmf",
+        "unsupported fallback bytes",
+    );
+    p.insert("word/_rels/document.xml.rels".into(),format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="charts/chart1.xml"/><Relationship Id="fallback" Type="{R}/image" Target="media/fallback.wmf"/></Relationships>"#).into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(!members(&bytes).keys().any(|p| p.ends_with(".wmf")));
+    assert!(report
+        .warnings
+        .iter()
+        .any(|w| w.contains("AlternateContent")));
+    host = host.replace(
+        "</w:body>",
+        &format!(
+            r#"<w:p><w:r><w:drawing><a:blip r:embed="fallback"/></w:drawing></w:r></w:p></w:body>"#
+        ),
+    );
+    p.insert("word/document.xml".into(), host.into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(err.contains("unsupported Office media format"), "{err}");
+}
+#[test]
+fn office_chartex_choice_precedes_both_fallback_types_and_missing_branch_refuses() {
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    for ext in ["docx", "xlsx"] {
+        let mut p = fixture(ext);
+        let main = if ext == "docx" {
+            "word/document.xml"
+        } else {
+            "xl/workbook.xml"
+        };
+        let xml = String::from_utf8(p[main].clone()).unwrap();
+        let boundary = if ext == "docx" {
+            "</w:body>"
+        } else {
+            "</s:workbook>"
+        };
+        let ac = format!(
+            r#"<mc:AlternateContent xmlns:mc="{mc}" xmlns:cx="http://schemas.microsoft.com/office/drawing/2014/chartex"><mc:Choice Requires="cx"><cx:chart/></mc:Choice><mc:Fallback><placeholder>Picture or Excel placeholder</placeholder></mc:Fallback></mc:AlternateContent>{boundary}"#
+        );
+        p.insert(main.into(), xml.replace(boundary, &ac).into_bytes());
+        let err = office::rebuild(&format!("document.{ext}"), &archive(&p), &BTreeMap::new())
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            err.contains("Office 2016 chartEx is unsupported") && err.contains("}Choice["),
+            "{err}"
+        );
+    }
+    let mut p = fixture("docx");
+    let xml=String::from_utf8(p["word/document.xml"].clone()).unwrap().replace("</w:body>",&format!(r#"<mc:AlternateContent xmlns:mc="{mc}" xmlns:bad="urn:unsupported"><mc:Choice Requires="bad"><bad:picture/></mc:Choice><mc:Fallback/></mc:AlternateContent></w:body>"#));
+    p.insert("word/document.xml".into(), xml.into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("no supported AlternateContent branch; visible content would be lost"),
+        "{err}"
+    );
+}
+#[test]
+fn office_content_control_inside_field_instruction_never_surfaces() {
+    let mut p = fixture("docx");
+    p.insert("word/document.xml".into(),format!(r#"<w:document xmlns:w="{W}"><w:body><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:t>INSTRUCTION SECRET</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>Displayed value</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p></w:body></w:document>"#).into_bytes());
+    let err = office::rebuild("document.docx", &archive(&p), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        err.contains("content control in Word field instruction region"),
+        "{err}"
+    );
+}
+
+#[test]
+fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/office-public");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("s1934-provenance.json")).unwrap())
+            .unwrap();
+    for file in manifest["files"].as_array().unwrap() {
+        let name = file["file"].as_str().unwrap();
+        let source = std::fs::read(root.join(name)).unwrap();
+        assert_eq!(sha256(&source), file["sha256"].as_str().unwrap());
+        let result = office::rebuild(name, &source, &BTreeMap::new());
+        if name == "chartex.docx" || name == "stress024.xlsx" {
+            let error = result.err().unwrap().to_string();
+            assert!(
+                error.contains(if name == "chartex.docx" {
+                    "Office 2016 chartEx is unsupported"
+                } else {
+                    "chart plots hidden rows or columns"
+                }),
+                "{name}: {error}"
+            );
+            if name == "chartex.docx" {
+                assert!(error.contains("}Choice["), "{error}");
+            }
+            continue;
+        }
+        let (bytes, report) = result.unwrap_or_else(|e| panic!("{name}: {e}"));
+        let independent = office::inspect(name, &bytes).unwrap();
+        assert_eq!(report.inventory, independent.inventory);
+        assert!(!members(&bytes).keys().any(|p| p.contains("/embeddings/")));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(name);
+        std::fs::write(&path, &bytes).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        assert_eq!(
+            pages
+                .iter()
+                .map(|p| p.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            report.text()
+        );
+        if name == "smartart-rotated-text.pptx" {
+            assert_eq!(
+                report
+                    .inventory
+                    .iter()
+                    .filter(|v| v.location.ends_with("/text") && v.value.as_deref() == Some("jkl"))
+                    .count(),
+                2
+            );
+            let node = report
+                .inventory
+                .iter()
+                .find(|v| {
+                    v.location.contains("/data-")
+                        && v.location.ends_with("/text")
+                        && v.value.as_deref() == Some("jkl")
+                })
+                .unwrap();
+            let edits = BTreeMap::from([(
+                node.location.clone(),
+                Edit {
+                    expected_sha256: sha256(b"jkl"),
+                    value: "Edited child text".into(),
+                },
+            )]);
+            let (_, after) = office::edit(name, &bytes, &edits).unwrap();
+            assert_eq!(
+                after
+                    .inventory
+                    .iter()
+                    .filter(|v| v.location.ends_with("/text")
+                        && v.value.as_deref() == Some("Edited child text"))
+                    .count(),
+                2
+            );
+        }
+    }
 }
