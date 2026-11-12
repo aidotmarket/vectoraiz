@@ -129,6 +129,22 @@ fn diagram_models(
                 "duplicate SmartArt modelId at {part}"
             );
         }
+        for connection in &connections {
+            for key in ["srcId", "destId", "parTransId", "sibTransId"] {
+                if let Some(id) = connection.attr(key) {
+                    ensure!(
+                        ids.contains(id),
+                        "dangling SmartArt {key} at {part}/{}",
+                        connection.attr("modelId").unwrap_or("?")
+                    );
+                } else {
+                    ensure!(
+                        !words("srcId destId", key),
+                        "missing SmartArt {key} at {part}"
+                    );
+                }
+            }
+        }
         let mut hidden = BTreeSet::new();
         for point in points {
             let value = text(point);
@@ -365,6 +381,88 @@ fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) -> Result<()>
     n.children = children;
     Ok(())
 }
+fn filtered_series(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
+    fn gather(n: &Node, hidden: &mut BTreeSet<u32>) -> Result<()> {
+        if n.ns
+            .starts_with("http://schemas.microsoft.com/office/drawing/")
+            && n.ns.ends_with("/chart")
+            && n.local.starts_with("filtered")
+            && n.local.ends_with("Series")
+        {
+            let mut indices = Vec::new();
+            visit(n, C, "idx", &mut indices);
+            let idx = indices
+                .first()
+                .context("filtered chart series identity missing")?;
+            hidden.insert(
+                idx.attr("val")
+                    .context("filtered chart series index missing")?
+                    .parse()?,
+            );
+        }
+        for c in &n.children {
+            gather(c, hidden)?;
+        }
+        Ok(())
+    }
+    let mut hidden = BTreeSet::new();
+    gather(n, &mut hidden)?;
+    if hidden.is_empty() {
+        return Ok(());
+    }
+    fn prune(n: &mut Node, ids: &BTreeSet<u32>, at: &str, report: &mut Report) -> Result<()> {
+        let mut children = Vec::new();
+        for mut c in std::mem::take(&mut n.children) {
+            if c.ns == C && words("ser legendEntry", &c.local) {
+                let idx = c
+                    .children
+                    .iter_mut()
+                    .find(|c| c.ns == C && c.local == "idx")
+                    .context("chart series identity missing")?;
+                let index: u32 = idx
+                    .attr("val")
+                    .context("chart series index missing")?
+                    .parse()?;
+                if ids.contains(&index) {
+                    report.remove(
+                        at,
+                        "removed filtered chart series and associated legend entry",
+                        String::from_utf8(serialize(&c)?)?,
+                    );
+                    continue;
+                }
+                idx.attrs.insert(
+                    (String::new(), "val".into()),
+                    (index - ids.range(..index).count() as u32).to_string(),
+                );
+                if c.local == "ser" {
+                    if let Some(order) = c
+                        .children
+                        .iter_mut()
+                        .find(|c| c.ns == C && c.local == "order")
+                    {
+                        let old: u32 = order
+                            .attr("val")
+                            .context("chart series order missing")?
+                            .parse()?;
+                        order.attrs.insert(
+                            (String::new(), "val".into()),
+                            old.saturating_sub(ids.range(..old).count() as u32)
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+            if c.local != "extLst" {
+                prune(&mut c, ids, at, report)?;
+            }
+            children.push(c);
+        }
+        n.children = children;
+        Ok(())
+    }
+    prune(n, &hidden, at, report)
+}
 fn filtered(n: &mut Node, at: &str, report: &mut Report) -> Result<()> {
     fn extension(n: &Node) -> bool {
         n.ns.starts_with("http://schemas.microsoft.com/office/drawing/") && n.ns.ends_with("/chart")
@@ -598,6 +696,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         refs(&n, &mut before);
         resolve_alternates(&mut n, part, report)?;
         if n.ns == C {
+            filtered_series(&mut n, part, report)?;
             filtered(&mut n, part, report)?;
             chart(&mut n, part, report)?;
         }
@@ -798,51 +897,60 @@ pub(super) fn paired_edits(
         .filter(|(p, _)| p.ends_with(".rels"))
         .map(|(p, n)| (p.clone(), n.clone()))
         .collect();
-    for (part, data) in trees
-        .iter()
-        .filter(|(_, n)| n.ns == DGM && n.local == "dataModel")
-    {
-        let target = drawing_for(part, data, trees, &rels)?;
-        let mut nodes = BTreeMap::new();
-        paths(data, part, &mut nodes, None);
-        paths(&trees[&target], &target, &mut nodes, None);
-        let mut connections = Vec::new();
-        visit(data, DGM, "cxn", &mut connections);
-        for cxn in connections
+    loop {
+        let previous = result.len();
+        for (part, data) in trees
             .iter()
-            .filter(|n| n.attr("type") == Some("presOf"))
+            .filter(|(_, n)| n.ns == DGM && n.local == "dataModel")
         {
-            let model = nodes.get(&(DGM.to_owned(), cxn.attr("srcId").unwrap_or("").to_owned()));
-            let drawing = nodes.get(&(DSP.to_owned(), cxn.attr("destId").unwrap_or("").to_owned()));
-            if let (Some(model), Some(drawing)) = (model, drawing) {
-                let touched = model
-                    .iter()
-                    .chain(drawing)
-                    .any(|(at, _)| edits.contains_key(at));
-                if !touched {
-                    continue;
-                }
-                ensure!(
-                    model.len() == drawing.len()
-                        && model.iter().zip(drawing).all(|(a, b)| a.1 == b.1),
-                    "SmartArt paired edit cannot prove run mapping at {part}"
-                );
-                for (a, b) in model.iter().zip(drawing) {
-                    if let Some(edit) = edits.get(&a.0).or_else(|| edits.get(&b.0)) {
-                        for (at, prior) in [a, b] {
-                            ensure!(
-                                crate::pipeline::sha256(prior.as_bytes()) == edit.expected_sha256,
-                                "SmartArt prior-value mismatch at {at}"
-                            );
-                            ensure!(
-                                result.get(at).is_none_or(|e| e.value == edit.value),
-                                "conflicting SmartArt twin edit at {at}"
-                            );
-                            result.insert(at.clone(), edit.clone());
+            let target = drawing_for(part, data, trees, &rels)?;
+            let mut nodes = BTreeMap::new();
+            paths(data, part, &mut nodes, None);
+            paths(&trees[&target], &target, &mut nodes, None);
+            let mut connections = Vec::new();
+            visit(data, DGM, "cxn", &mut connections);
+            for cxn in connections
+                .iter()
+                .filter(|n| n.attr("type") == Some("presOf"))
+            {
+                let model =
+                    nodes.get(&(DGM.to_owned(), cxn.attr("srcId").unwrap_or("").to_owned()));
+                let drawing =
+                    nodes.get(&(DSP.to_owned(), cxn.attr("destId").unwrap_or("").to_owned()));
+                if let (Some(model), Some(drawing)) = (model, drawing) {
+                    let touched = model
+                        .iter()
+                        .chain(drawing)
+                        .any(|(at, _)| result.contains_key(at));
+                    if !touched {
+                        continue;
+                    }
+                    ensure!(
+                        model.len() == drawing.len()
+                            && model.iter().zip(drawing).all(|(a, b)| a.1 == b.1),
+                        "SmartArt paired edit cannot prove run mapping at {part}"
+                    );
+                    for (a, b) in model.iter().zip(drawing) {
+                        if let Some(edit) = result.get(&a.0).or_else(|| result.get(&b.0)).cloned() {
+                            for (at, prior) in [a, b] {
+                                ensure!(
+                                    crate::pipeline::sha256(prior.as_bytes())
+                                        == edit.expected_sha256,
+                                    "SmartArt prior-value mismatch at {at}"
+                                );
+                                ensure!(
+                                    result.get(at).is_none_or(|e| e.value == edit.value),
+                                    "conflicting SmartArt twin edit at {at}"
+                                );
+                                result.insert(at.clone(), edit.clone());
+                            }
                         }
                     }
                 }
             }
+        }
+        if result.len() == previous {
+            break;
         }
     }
     Ok(result)

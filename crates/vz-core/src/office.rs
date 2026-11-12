@@ -435,7 +435,8 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         return Some("");
     }
     Some(match (ns,el) {
-        (XDR,"graphicFrame"|"nvGraphicFramePr"|"cNvGraphicFramePr"|"xfrm")=>"macro",
+        (XDR,"graphicFrame"|"nvGraphicFramePr"|"cNvGraphicFramePr")=>"",
+        (XDR,"xfrm")=>"rot flipH flipV",
         (S,"chartsheet")=>"",
 
         (W,"rStyle"|"tblStyleColBandSize"|"tblStyleRowBandSize")=>"val",
@@ -1308,6 +1309,23 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     }
     ensure!(field.is_none(), "unterminated Word field at {part}: safe displayed result requires begin/separate/end boundaries; recalculate and save locally, or exclude");
     n.children = children;
+    if [P, XDR].contains(&n.ns.as_str()) {
+        for key in ["macro", "textlink"] {
+            if let Some(value) = n.attr(key) {
+                ensure!(
+                    value.is_empty(),
+                    "active Office shape {key} dependency at {part}/{}",
+                    n.local
+                );
+                report.remove(
+                    &format!("{part}/@{key}"),
+                    "removed empty shape action/text-link attribute",
+                    String::new(),
+                );
+                n.attrs.remove(&(String::new(), key.into()));
+            }
+        }
+    }
     let attrs = std::mem::take(&mut n.attrs);
     for ((ns, k), v) in attrs {
         if n.ignorable.contains(&ns)
@@ -1329,6 +1347,12 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     Ok(())
 }
 fn validate_node(n: &Node, part: &str) -> Result<()> {
+    if n.ns == graphics::DSP && n.local == "dataModelExt" {
+        ensure!(
+            root_for(part) == Some((graphics::DGM, "dataModel")),
+            "SmartArt cache extension outside data model at {part}"
+        );
+    }
     if n.ns == A && n.local == "ext" && n.attr("uri").is_some() {
         ensure!(
             n.attr("uri") == Some(graphics::DSP)
