@@ -744,7 +744,9 @@ fn engine_load_reuses_verification_record() {
 fn switching_chat_keeps_embedding_and_recipe_and_turn_off_is_typed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let engines = Engines::load_embedding(
-        &root.join(".assets"),
+        &std::env::var_os("VZ_TEST_ASSETS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.join(".assets")),
         &root.join("spike/fixtures/models.json"),
         true,
     )
