@@ -580,6 +580,7 @@ async def table_trial(context, client_context):
         error = type(exc).__name__
     finally:
         await unknown.close()
+    unknown_elapsed_ms = (time.monotonic()-started)*1000
     await asyncio.sleep(6)
     accept.cancel()
     await asyncio.gather(accept, return_exceptions=True)
@@ -598,12 +599,14 @@ async def table_trial(context, client_context):
     return {'status': 'FAIL', 'offered_kernel_source_addresses': offered, 'connect_errors': errors,
             'bound_kernel_sources': bound, 'error_codes': error_codes,
             'table_size': before, 'table_size_after': len(server.registry.sources),
-            'unknown_legitimate_signin': {'offered': 1, 'success': int(status == 200), 'status': status, 'error': error, 'latency_ms':(time.monotonic()-started)*1000},
+            'unknown_legitimate_signin': {'offered': 1, 'success': int(status == 200), 'status': status, 'error': error, 'latency_ms':unknown_elapsed_ms},
             'same_ipv6_64_unique_keys': ipv6, 'same_ipv6_64_model_addresses': 2048,
             'separate_model': {'table_size': model_full, 'unknown_rejected': model_unknown is None,
                                'metrics': model.metrics, 'kernel_evidence': False},
             'metrics': server.registry.metrics,
-            'reason': 'IPv4 kernel accept exhaustion tested on loopback; IPv6 churn is normalization model only; unknown legitimate source rejection is a design failure'}
+            'kernel_exhaustion_qualified': before == 1024,
+            'reason': ('Kernel table exhaustion unqualified: source aliases unavailable; ' if bound < 1025 else '') +
+                      'separate model fills 1024 keys and rejects unknown legitimate source; IPv6 same-/64 churn is normalization model only; required case FAIL'}
 
 
 async def main(args):
@@ -618,7 +621,7 @@ async def main(args):
                         '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1',
                         '-keyout', str(key), '-out', str(certificate)], stdout=log, stderr=subprocess.STDOUT, check=True)
     key.chmod(0o600)
-    for protocol in ('http/1.1', 'h2'):
+    for protocol in args.protocols:
         await trial(root, protocol, args.seconds, certificate, key)
     server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     server_context.load_cert_chain(certificate, key)
@@ -633,4 +636,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', type=Path, required=True)
     parser.add_argument('--seconds', type=int, default=600)
+    parser.add_argument('--protocols', nargs='*', choices=('http/1.1', 'h2'), default=['http/1.1', 'h2'],
+                        help='Select trials; an empty list runs only table exhaustion. Does not reuse partial runs.')
     asyncio.run(main(parser.parse_args()))

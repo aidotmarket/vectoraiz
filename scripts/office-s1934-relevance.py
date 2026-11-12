@@ -173,8 +173,11 @@ def score(root):
                                for key, ratio in result['ratio_to_exact'].items()}
     office_runs = json.loads((root / 'office-run.json').read_text())
     diagnostics = {}
-    for name in ('exact', 'ivf_flat'):
+    for name in sorted({row['path'] for row in office_runs}):
         selected = [r for r in office_runs if r['path'] == name]
+        drafts = json.loads((root / 'office-drafts.json').read_text())
+        if len(selected) != len(drafts) or {r['id'] for r in selected} != {r['id'] for r in drafts}:
+            raise ValueError('incomplete/duplicate office diagnostic run')
         diagnostics[name] = {
             'offered': len(selected), 'author_intended_doc_in_chunk_top10': sum(r['id'] in r['documents'] for r in selected),
             'by_format': {fmt: {'offered': sum(r['format'] == fmt for r in selected),

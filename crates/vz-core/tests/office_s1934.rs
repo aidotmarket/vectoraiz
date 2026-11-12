@@ -118,7 +118,7 @@ fn s1934_candidate() -> Result<()> {
                     let vector=engine.vector(query,true)?;let embed_ms=start.elapsed().as_secs_f64()*1000.;drop(engine);
                     let (hits,phases,top10)=snapshot.search(query,&vector,8).await?;
                     let latency_ms=arrival.elapsed().as_secs_f64()*1000.;
-                    Ok::<_,anyhow::Error>(json!({"identity":identity,"mode":mode,"latency_ms":latency_ms,"guard_ms":guard_ms,"embed_ms":embed_ms,"scheduling_ms":scheduled_ms,"storage":phases,"correct_extraction_regression":hits.iter().any(|h|h.chunk.text.starts_with(query)),"vector_top10":top10,"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"query":query}))
+                    Ok::<_,anyhow::Error>(json!({"identity":identity,"mode":mode,"latency_ms":latency_ms,"guard_ms":guard_ms,"embed_ms":embed_ms,"scheduling_ms":scheduled_ms,"storage":phases,"correct_extraction_regression":hits.iter().any(|h|h.chunk.text.starts_with(query)),"vector_top10":top10,"documents":{let mut seen=std::collections::HashSet::new();hits.iter().filter(|h|seen.insert(h.chunk.doc_id.clone())).take(10).map(|h|h.chunk.doc_id.clone()).collect::<Vec<_>>()},"query":query}))
                 }));
             }
             for job in jobs {samples.push(job.await??);}
@@ -206,12 +206,14 @@ fn s1934_relevance() -> Result<()> {
         let snapshot = Snapshot::open(&root.join("lance"), &root.join("combined.sqlite"),Candidate::IvfFlat,54099).await?;
         let mut lookup = rusqlite::Connection::open(root.join("combined.sqlite"))?;
         let mut pending = Vec::new(); let mut count=0;
+        let mut scifact_mapping = Vec::new();
         for line in BufReader::new(std::fs::File::open(root.join("scifact/corpus.jsonl"))?).lines() {
             let document:serde_json::Value=serde_json::from_str(&line?)?;
             let id=format!("scifact-{}",document["_id"].as_str().context("id")?);
             let pages=[Page {page:1,text:format!("{}\n{}",document["title"].as_str().unwrap_or(""),document["text"].as_str().context("abstract")?),needs_ocr:false}];
             let mut chunks=chunk(&id,&pages);
             for batch in chunks.chunks_mut(32) {for chunk in batch {chunk.embedding=engine.vector(&chunk.text,false)?;}}
+            for row in &chunks {scifact_mapping.push(json!({"chunk_id":row.chunk_id,"doc_id":row.doc_id,"page":row.page}));}
             pending.extend(chunks);count+=1;
             if pending.len()>=512 {
                 append_relevance(&snapshot,&mut lookup,&pending).await?;pending.clear();
@@ -219,6 +221,7 @@ fn s1934_relevance() -> Result<()> {
             }
         }
         if !pending.is_empty() {append_relevance(&snapshot,&mut lookup,&pending).await?;}
+        std::fs::write(root.join("scifact-chunk-mapping.json"),serde_json::to_vec_pretty(&scifact_mapping)?)?;
         let office: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(root.join("office-extracted.json"))?)?;
         let mut office_chunks = 0;
         let mut mapping = Vec::new();
@@ -247,28 +250,28 @@ fn s1934_relevance() -> Result<()> {
         let exact=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::Exact,54099).await?;
         let candidate=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::IvfFlat,54099).await?;
         let ids=std::fs::read_to_string(root.join("scifact/qrels/test.tsv"))?.lines().skip(1).filter_map(|l|l.split('\t').next().map(str::to_owned)).collect::<std::collections::HashSet<_>>();
-        let mut runs=serde_json::Map::new();runs.insert("exact".into(),json!([]));runs.insert("ivf_flat".into(),json!([]));
+        let mut runs=serde_json::Map::new();runs.insert("exact".into(),json!([]));runs.insert("ivf_flat".into(),json!([]));runs.insert("selected_exact".into(),json!([]));
         for line in BufReader::new(std::fs::File::open(root.join("scifact/queries.jsonl"))?).lines() {
             let query:serde_json::Value=serde_json::from_str(&line?)?;let id=query["_id"].as_str().context("query id")?;
             if !ids.contains(id) {continue;}
             let text=query["text"].as_str().context("query text")?;let vector=engine.vector(text,true)?;
             let reference=exact.vector(&vector).await?.into_iter().take(10).map(|(id,_)|id).collect::<std::collections::HashSet<_>>();
-            for (name,snapshot) in [("exact",&exact),("ivf_flat",&candidate)] {
-                let start=Instant::now();let (hits,phases,top)=snapshot.search(text,&vector,10).await?;
+            for (name,snapshot) in [("exact",&exact),("selected_exact",&exact),("ivf_flat",&candidate)] {
+                let start=Instant::now();let (hits,phases,top)=snapshot.search(text,&vector,80).await?;
                 let recall=top.iter().filter(|id|reference.contains(*id)).count() as f64/10.;
-                runs[name].as_array_mut().unwrap().push(json!({"id":id,"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"vector_recall_at10":recall}));
+                runs[name].as_array_mut().unwrap().push(json!({"id":id,"documents":{let mut seen=std::collections::HashSet::new();hits.iter().filter(|h|seen.insert(h.chunk.doc_id.clone())).take(10).map(|h|h.chunk.doc_id.clone()).collect::<Vec<_>>()},"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"vector_recall_at10":recall}));
             }
-            std::fs::write(root.join("scifact-run.json"),serde_json::to_vec_pretty(&json!({"runs":runs,"scope":{"load_documents":1000,"load_chunks":54099,"scifact_documents":count,"office_documents":office.len(),"office_chunks":office_chunks,"office":"extracted drafts indexed; unjudged queries excluded from human scoring","parameters":"E3 P256, probes32, refine4, L2, 40 vector + 40 FTS, RRF60","optimize_ms":optimize_ms,"index_ms":index_ms,"recipe":engine.recipe}}))?)?;
+            std::fs::write(root.join("scifact-run.json"),serde_json::to_vec_pretty(&json!({"runs":runs,"scope":{"load_documents":1000,"load_chunks":54099,"scifact_documents":count,"scifact_chunks":scifact_mapping.len(),"selected_path":"Exact","baseline":"exact vector + identical FTS/RRF","document_ranking":"deduplicate full fused 80-candidate chunk pool before top10","office_documents":office.len(),"office_chunks":office_chunks,"office":"extracted drafts indexed; unjudged queries excluded from human scoring","parameters":"E3 P256, probes32, refine4, L2, 40 vector + 40 FTS, RRF60","optimize_ms":optimize_ms,"index_ms":index_ms,"recipe":engine.recipe}}))?)?;
         }
         let drafts: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(root.join("office-drafts.json"))?)?;
         let mut office_runs = Vec::new();
         for query in drafts {
             let text = query["query"].as_str().context("draft query")?;
             let vector = engine.vector(text, true)?;
-            for (name, snapshot) in [("exact", &exact), ("ivf_flat", &candidate)] {
+            for (name, snapshot) in [("exact", &exact), ("selected_exact", &exact), ("ivf_flat", &candidate)] {
                 let start = Instant::now();
                 let (hits, phases, _) = snapshot.search(text, &vector, 10).await?;
-                office_runs.push(json!({"path":name,"id":query["id"],"format":query["format"],"language":query["language"],"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"judgment_status":"UNJUDGED; author-intent diagnostics only"}));
+                office_runs.push(json!({"path":name,"id":query["id"],"format":query["format"],"language":query["language"],"documents":{let mut seen=std::collections::HashSet::new();hits.iter().filter(|h|seen.insert(h.chunk.doc_id.clone())).take(10).map(|h|h.chunk.doc_id.clone()).collect::<Vec<_>>()},"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"judgment_status":"UNJUDGED; author-intent diagnostics only"}));
             }
         }
         std::fs::write(root.join("office-run.json"), serde_json::to_vec_pretty(&office_runs)?)?;
