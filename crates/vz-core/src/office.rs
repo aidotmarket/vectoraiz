@@ -706,8 +706,18 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
         return None;
     })
 }
+// OOXML numeric lexical values only: no expressions, whitespace or nonfinite values.
+fn plain_number(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || b"+-.eE".contains(&b))
+        && value.parse::<f64>().is_ok_and(f64::is_finite)
+}
 fn formula(n: &Node) -> bool {
-    ([S, X14].contains(&n.ns.as_str()) && n.local == "cfvo" && n.attr("type") == Some("formula"))
+    ([S, X14].contains(&n.ns.as_str())
+        && n.local == "cfvo"
+        && (n.attr("type") == Some("formula") || n.attr("val").is_some_and(|v| !plain_number(v))))
         || ([S, X14].contains(&n.ns.as_str())
             && words(
                 "f formula formula1 formula2 calculatedColumnFormula totalsRowFormula",
@@ -943,20 +953,22 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                                 XM,
                                 P14,
                                 "http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac",
+                                "http://schemas.microsoft.com/office/spreadsheetml/2010/11/main",
                             ]
                             .contains(&ns)
                         })
                     })
             });
-            let selected = supported
-                .or_else(|| c.children.iter().position(|b| b.local == "Fallback"))
-                .context("AlternateContent has no supported branch or fallback")?;
+            let selected =
+                supported.or_else(|| c.children.iter().position(|b| b.local == "Fallback"));
             report.remove(
                 part,
                 "resolved AlternateContent; removed alternate branches",
                 String::from_utf8(serialize(&c)?)?,
             );
-            resolved.extend(std::mem::take(&mut c.children[selected].children));
+            if let Some(selected) = selected {
+                resolved.extend(std::mem::take(&mut c.children[selected].children));
+            }
         } else {
             resolved.push(c);
         }

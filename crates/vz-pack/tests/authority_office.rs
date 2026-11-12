@@ -901,38 +901,41 @@ fn office_standard_word_rendering_settings_refuse_active_neighbors() {
 
 #[test]
 fn formula_cfvo_rules_removed_with_private_evidence() {
-    let mut p = fixture("xlsx");
-    let path = "xl/worksheets/identity-sheet.xml";
-    let sheet = String::from_utf8(p[path].clone()).unwrap();
-    let rules = "<s:conditionalFormatting sqref=\"A1:A5\"><s:cfRule type=\"colorScale\" priority=\"1\"><s:colorScale><s:cfvo type=\"formula\" val=\"SUM(A1:A5)+1927\"/><s:cfvo type=\"max\"/></s:colorScale></s:cfRule><s:cfRule type=\"dataBar\" priority=\"2\"><s:dataBar><s:cfvo type=\"min\"/><s:cfvo type=\"max\"/></s:dataBar></s:cfRule></s:conditionalFormatting>";
-    p.insert(
-        path.into(),
-        sheet
-            .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
-            .into_bytes(),
-    );
-    let (bytes, report) = rebuild("xlsx", &p);
-    assert!(report
-        .removals
-        .iter()
-        .any(|r| r.value.contains("SUM(A1:A5)+1927")));
-    for part in members(&bytes).values() {
-        assert!(!String::from_utf8_lossy(part).contains("SUM(A1:A5)+1927"));
+    for ty in ["formula", "num", "percent", "percentile", "min", "max"] {
+        let mut p = fixture("xlsx");
+        let path = "xl/worksheets/identity-sheet.xml";
+        let sheet = String::from_utf8(p[path].clone()).unwrap();
+        let rules = "<s:conditionalFormatting sqref=\"A1:A5\"><s:cfRule type=\"colorScale\" priority=\"1\"><s:colorScale><s:cfvo type=\"formula\" val=\"SUM(A1:A5)+1927\"/><s:cfvo type=\"max\"/></s:colorScale></s:cfRule><s:cfRule type=\"dataBar\" priority=\"2\"><s:dataBar><s:cfvo type=\"min\"/><s:cfvo type=\"max\"/></s:dataBar></s:cfRule></s:conditionalFormatting>";
+        let rules = rules.replace("type=\"formula\"", &format!("type=\"{ty}\""));
+        p.insert(
+            path.into(),
+            sheet
+                .replace("</s:worksheet>", &format!("{rules}</s:worksheet>"))
+                .into_bytes(),
+        );
+        let (bytes, report) = rebuild("xlsx", &p);
+        assert!(report
+            .removals
+            .iter()
+            .any(|r| r.value.contains("SUM(A1:A5)+1927")));
+        for part in members(&bytes).values() {
+            assert!(!String::from_utf8_lossy(part).contains("SUM(A1:A5)+1927"));
+        }
+        let reopened = office::inspect("document.xlsx", &bytes).unwrap();
+        assert_eq!(report.inventory, reopened.inventory);
+        assert!(members(&bytes)
+            .values()
+            .any(|b| String::from_utf8_lossy(b).contains("dataBar")));
+        // Readback must independently reject a formula-valued threshold.
+        assert!(office::inspect("document.xlsx", &archive(&p)).is_err());
     }
-    let reopened = office::inspect("document.xlsx", &bytes).unwrap();
-    assert_eq!(report.inventory, reopened.inventory);
-    assert!(members(&bytes)
-        .values()
-        .any(|b| String::from_utf8_lossy(b).contains("dataBar")));
-    // Readback must independently reject a formula-valued threshold.
-    assert!(office::inspect("document.xlsx", &archive(&p)).is_err());
 }
 
 #[test]
 fn connected_excel_carriers_and_alternate_content_removed() {
     let mut p = fixture("xlsx");
     let workbook = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
-    let alternate = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:x15ac=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac\"><mc:Choice Requires=\"x15ac\"><x15ac:absPath url=\"C:/planted-1927/private\"/></mc:Choice><mc:Fallback/></mc:AlternateContent>";
+    let alternate = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:x15=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/main\" xmlns:x15ac=\"http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac\"><mc:Choice Requires=\"x15\"><x15ac:absPath url=\"C:/planted-1927/private\"/></mc:Choice></mc:AlternateContent>";
     p.insert(
         "xl/workbook.xml".into(),
         workbook
@@ -968,6 +971,27 @@ fn connected_excel_carriers_and_alternate_content_removed() {
         report.inventory,
         office::inspect("document.xlsx", &bytes).unwrap().inventory
     );
+}
+
+#[test]
+fn unsupported_alternate_content_without_fallback_is_dropped() {
+    let mut p = fixture("xlsx");
+    let xml = String::from_utf8(p["xl/workbook.xml"].clone()).unwrap();
+    let block = "<mc:AlternateContent xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:future=\"urn:unsupported\"><mc:Choice Requires=\"future\"><future:private>planted-1927</future:private></mc:Choice></mc:AlternateContent>";
+    p.insert(
+        "xl/workbook.xml".into(),
+        xml.replace("</s:workbook>", &format!("{block}</s:workbook>"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("xlsx", &p);
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.value.contains("planted-1927")));
+    assert!(members(&bytes)
+        .values()
+        .all(|b| !String::from_utf8_lossy(b).contains("planted-1927")));
+    office::inspect("document.xlsx", &bytes).unwrap();
 }
 
 #[test]
