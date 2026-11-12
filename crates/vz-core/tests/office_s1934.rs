@@ -124,7 +124,7 @@ fn s1934_candidate() -> Result<()> {
             for job in jobs {samples.push(job.await??);}
         }
         let after=rss();
-        std::fs::write(root.join(format!("{name}.json")),serde_json::to_vec_pretty(&json!({"candidate":candidate,"index_build_ms":build_ms,"baseline_rss_bytes":baseline,"one_snapshot_rss_bytes":after,"incremental_rss_bytes":after.saturating_sub(baseline),"plan":plan,"indices":indices,"samples":samples,"training_sample_identity":"Lance random sample; exact row IDs not exposed: qualification gap","relevance":"extraction regression only; not human qualification","cold":"first open; no OS cache flush","refresh":"not measured in this candidate trial"}))?)?;
+        std::fs::write(root.join(format!("{name}.json")),serde_json::to_vec_pretty(&json!({"candidate":candidate,"access_recipe":{"embedding":engines.lock().await.recipe,"vector_path":candidate,"metric":"L2","partitions":snapshot.partitions,"probes":snapshot.partitions.min(32),"candidates":40,"rrf_k":60,"weights":[1,1],"PQ_subvectors":48,"PQ_bits":8,"sample_rate":128,"iterations":50,"HNSW_edges":20,"HNSW_ef_construction":300,"HNSW_ef":256,"refine_factor":4,"path_change_requires_requalification":true},"source_hashes":{"core":vz_core::pipeline::sha256(include_bytes!("../src/storage/office_s1934.rs")),"test":vz_core::pipeline::sha256(include_bytes!("office_s1934.rs"))},"index_build_ms":build_ms,"baseline_rss_bytes":baseline,"one_snapshot_rss_bytes":after,"incremental_rss_bytes":after.saturating_sub(baseline),"plan":plan,"indices":indices,"samples":samples,"training_sample_identity":"Lance random sample; exact row IDs not exposed: qualification gap","relevance":"extraction regression only; not human qualification","cold":"first open; no OS cache flush","refresh":"not measured in this candidate trial"}))?)?;
         Ok::<_,anyhow::Error>(())
     })
 }
@@ -177,7 +177,8 @@ fn s1934_refresh() -> Result<()> {
         // N2: Exact has no vector index to update; optimize the selected
         // path's FTS index and refresh the bounded contiguous representation.
         next.table.optimize(lancedb::table::OptimizeAction::Index(Default::default())).await?;
-        harness::write_vectors(&root.join("refresh.sqlite"))?;
+        // The selected Lance exact scan reads the new table version directly.
+        // There is no vector index or contiguous-file representation to update.
         let update_ms=start.elapsed().as_secs_f64()*1000.;
         let two_snapshot_rss=rss();
         let vector=engine.vector("office reference",true)?;
@@ -185,7 +186,7 @@ fn s1934_refresh() -> Result<()> {
         let _=next.search("office reference",&vector,8).await?;
         let weak=Arc::downgrade(&old);let reader=old.clone();drop(old);
         assert!(weak.upgrade().is_some());let start=Instant::now();drop(reader);assert!(weak.upgrade().is_none());
-        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"index_update_and_vector_file_ms":update_ms,"post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
+        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"fts_update_ms":update_ms,"post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
         Ok::<_,anyhow::Error>(())
     })
 }

@@ -170,6 +170,17 @@ pub async fn prepare(spool: &Path, root: &Path) -> Result<()> {
         )
         .execute()
         .await?;
+    drop(table);
+    let params = lancedb::table::ReadParams {
+        index_cache_size_bytes: 128 * 1024 * 1024,
+        metadata_cache_size_bytes: 32 * 1024 * 1024,
+        ..Default::default()
+    };
+    let table = connection
+        .open_table("chunks")
+        .lance_read_params(params)
+        .execute()
+        .await?;
     table
         .create_index(&["text"], Index::FTS(FtsIndexBuilder::default()))
         .execute()
@@ -354,6 +365,18 @@ impl Snapshot {
             let mut chunk: Chunk = serde_json::from_slice(&payload)?;
             chunk.embedding.clear();
             hits.push(Hit { chunk, score });
+        }
+        if limit <= 8 {
+            anyhow::ensure!(
+                hits.iter()
+                    .map(|h| h.chunk.text.len()
+                        + h.chunk.chunk_id.len()
+                        + h.chunk.doc_id.len()
+                        + h.chunk.heading_path.iter().map(String::len).sum::<usize>())
+                    .sum::<usize>()
+                    <= 128 * 1024,
+                "browser output budget"
+            );
         }
         Ok((
             hits,

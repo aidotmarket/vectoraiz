@@ -125,7 +125,7 @@ def prepare(root):
                          'judgment_status': 'UNJUDGED', 'support_location': 'Approval sheet or final content page/passage'})
     (root / 'office-drafts.json').write_text(json.dumps(rows, ensure_ascii=False, indent=2))
     pinned = [root / 'SciFact-LICENSE.md', root / 'BEIR-README.md', root / 'scifact.zip',
-              root / 'scifact/corpus.jsonl', root / 'scifact/queries.jsonl', root / 'scifact/qrels/test.tsv',
+              root / 'scifact/corpus.jsonl', root / 'scifact/queries.jsonl', root / 'scifact/qrels/test.tsv', root / 'CC-BY-4.0.txt', root / 'CC-BY-SA-4.0.txt', root / 'ODC-By-1.0.html', root / 'CC0-1.0.txt',
               fixtures / 'LICENSE-CC0.txt', root / 'office-drafts.json']
     (root / 'fixture-pins.json').write_text(json.dumps({
         'files': {str(p.relative_to(root)): {'sha256': digest(p), 'bytes': p.stat().st_size} for p in pinned},
