@@ -1,6 +1,8 @@
 //! Parser implementations run exclusively inside the supervised worker.
 use crate::{pipeline::Page, worker::Request};
 use anyhow::{bail, Context, Result};
+use calamine::{open_workbook_auto, Reader};
+use quick_xml::{events::Event, Reader as XmlReader};
 use std::{fs::File, io::Read};
 
 pub const MAX_TOTAL: u64 = 512_000_000;
@@ -92,17 +94,77 @@ fn parse_inner(request: &Request) -> Result<Vec<Page>> {
             }
             Ok(vec![page(1, text)])
         }
-        "docx" | "xlsx" | "pptx" => {
+        "docx" => {
             let mut zip = validate_zip(path)?;
-            // Retain ingest's tighter declared/actual and 100:1 limits.
-            let _ = &mut zip;
-            let input = std::fs::read(path)?;
-            let (_, report) = crate::office::rebuild(
-                path.to_str().context("UTF-8 Office path")?,
-                &input,
-                &Default::default(),
-            )?;
-            Ok(vec![page(1, report.text())])
+            let mut xml = String::new();
+            zip.by_name("word/document.xml")?
+                .take(MAX_PART)
+                .read_to_string(&mut xml)?;
+            let mut reader = XmlReader::from_str(&xml);
+            let mut text = String::new();
+            loop {
+                match reader.read_event()? {
+                    Event::Text(t) => text.push_str(&quick_xml::escape::unescape(&t.decode()?)?),
+                    Event::End(e) if e.local_name().as_ref() == b"p" => text.push('\n'),
+                    Event::Empty(e) if e.local_name().as_ref() == b"tab" => text.push(' '),
+                    Event::Empty(e) if e.local_name().as_ref() == b"br" => text.push('\n'),
+                    Event::Eof => break,
+                    _ => (),
+                }
+            }
+            Ok(vec![page(1, text)])
+        }
+        "xlsx" => {
+            validate_zip(path)?;
+            let mut workbook = open_workbook_auto(path)?;
+            let names = workbook.sheet_names().to_vec();
+            let mut pages = Vec::new();
+            for (i, name) in names.into_iter().enumerate() {
+                let range = workbook.worksheet_range(&name)?;
+                let mut text = format!("# {name}\n");
+                for row in range.rows() {
+                    text.push_str(
+                        &row.iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    );
+                    text.push('\n');
+                }
+                pages.push(page(i as u32 + 1, text));
+            }
+            Ok(pages)
+        }
+        "pptx" => {
+            let mut zip = validate_zip(path)?;
+            let mut names: Vec<_> = zip
+                .file_names()
+                .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+                .map(str::to_owned)
+                .collect();
+            names.sort();
+            let mut pages = Vec::new();
+            for (i, name) in names.iter().enumerate() {
+                let mut xml = String::new();
+                zip.by_name(name)?.take(MAX_PART).read_to_string(&mut xml)?;
+                let mut reader = XmlReader::from_str(&xml);
+                let mut text = String::new();
+                let mut in_text = false;
+                loop {
+                    match reader.read_event()? {
+                        Event::Start(e) if e.local_name().as_ref() == b"t" => in_text = true,
+                        Event::Text(t) if in_text => {
+                            text.push_str(&quick_xml::escape::unescape(&t.decode()?)?)
+                        }
+                        Event::End(e) if e.local_name().as_ref() == b"t" => in_text = false,
+                        Event::End(e) if e.local_name().as_ref() == b"p" => text.push('\n'),
+                        Event::Eof => break,
+                        _ => (),
+                    }
+                }
+                pages.push(page(i as u32 + 1, text));
+            }
+            Ok(pages)
         }
         "pdf" => pdf(request),
         _ => bail!("unsupported format: {ext}"),
@@ -185,6 +247,29 @@ impl crate::Ocr for AppleVision {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ordinary_ingest_does_not_require_listing_sanitizer() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("chart.docx");
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file(
+            "word/document.xml",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        zip.write_all(br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:proofErr w:type="spellStart"/><w:r><w:t>Searchable ordinary document</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+        zip.finish().unwrap();
+        let input = std::fs::read(&path).unwrap();
+        assert!(crate::office::rebuild("chart.docx", &input, &Default::default()).is_err());
+        let pages = parse(&Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        assert!(pages[0].text.contains("Searchable ordinary document"));
+    }
     #[test]
     fn entry_limit() {
         assert!(check_expansion(MAX_ENTRIES + 1, 0, 0, 0)
