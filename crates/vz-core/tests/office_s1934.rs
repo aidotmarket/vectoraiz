@@ -189,3 +189,79 @@ fn s1934_refresh() -> Result<()> {
         Ok::<_,anyhow::Error>(())
     })
 }
+
+#[test]
+fn s1934_relevance() -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    use vz_core::pipeline::{chunk, Page};
+    let Some(root) = std::env::var_os("VZ_S1934_RELEVANCE") else {
+        return Ok(());
+    };
+    let root = Path::new(&root);
+    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async {
+        let engine = vz_core::engine::Engines::load_embedding(
+            Path::new(&std::env::var_os("VZ_OFFICE_ASSETS").context("assets")?),
+            Path::new(&std::env::var_os("VZ_OFFICE_PINS").context("pins")?),false)?;
+        let snapshot = Snapshot::open(&root.join("lance"), &root.join("combined.sqlite"),Candidate::IvfFlat,54099).await?;
+        let mut lookup = rusqlite::Connection::open(root.join("combined.sqlite"))?;
+        let mut pending = Vec::new(); let mut count=0;
+        for line in BufReader::new(std::fs::File::open(root.join("scifact/corpus.jsonl"))?).lines() {
+            let document:serde_json::Value=serde_json::from_str(&line?)?;
+            let id=format!("scifact-{}",document["_id"].as_str().context("id")?);
+            let pages=[Page {page:1,text:format!("{}\n{}",document["title"].as_str().unwrap_or(""),document["text"].as_str().context("abstract")?),needs_ocr:false}];
+            let mut chunks=chunk(&id,&pages);
+            for batch in chunks.chunks_mut(32) {for chunk in batch {chunk.embedding=engine.vector(&chunk.text,false)?;}}
+            pending.extend(chunks);count+=1;
+            if pending.len()>=512 {
+                append_relevance(&snapshot,&mut lookup,&pending).await?;pending.clear();
+                std::fs::write(root.join("embedding-progress.json"),json!({"documents":count}).to_string())?;
+            }
+        }
+        if !pending.is_empty() {append_relevance(&snapshot,&mut lookup,&pending).await?;}
+        let optimize=Instant::now();
+        snapshot.table.optimize(lancedb::table::OptimizeAction::Index(Default::default())).await?;
+        let optimize_ms=optimize.elapsed().as_secs_f64()*1000.;drop(snapshot);drop(lookup);
+        let exact=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::Exact,54099).await?;
+        let candidate=Snapshot::open(&root.join("lance"),&root.join("combined.sqlite"),Candidate::IvfFlat,54099).await?;
+        let ids=std::fs::read_to_string(root.join("scifact/qrels/test.tsv"))?.lines().skip(1).filter_map(|l|l.split('\t').next().map(str::to_owned)).collect::<std::collections::HashSet<_>>();
+        let mut runs=serde_json::Map::new();runs.insert("exact".into(),json!([]));runs.insert("ivf_flat".into(),json!([]));
+        for line in BufReader::new(std::fs::File::open(root.join("scifact/queries.jsonl"))?).lines() {
+            let query:serde_json::Value=serde_json::from_str(&line?)?;let id=query["_id"].as_str().context("query id")?;
+            if !ids.contains(id) {continue;}
+            let text=query["text"].as_str().context("query text")?;let vector=engine.vector(text,true)?;
+            let reference=exact.vector(&vector).await?.into_iter().take(10).map(|(id,_)|id).collect::<std::collections::HashSet<_>>();
+            for (name,snapshot) in [("exact",&exact),("ivf_flat",&candidate)] {
+                let start=Instant::now();let (hits,phases,top)=snapshot.search(text,&vector,10).await?;
+                let recall=top.iter().filter(|id|reference.contains(*id)).count() as f64/10.;
+                runs[name].as_array_mut().unwrap().push(json!({"id":id,"documents":hits.iter().map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"passages":hits.iter().map(|h|&h.chunk.text).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases,"vector_recall_at10":recall}));
+            }
+            std::fs::write(root.join("scifact-run.json"),serde_json::to_vec_pretty(&json!({"runs":runs,"scope":{"load_documents":1000,"load_chunks":54099,"scifact_documents":count,"office":"unjudged drafts excluded from scoring","parameters":"E3 P256, probes32, refine4, L2, 40 vector + 40 FTS, RRF60","optimize_ms":optimize_ms,"recipe":engine.recipe}}))?)?;
+        }
+        Ok::<_,anyhow::Error>(())
+    })
+}
+
+async fn append_relevance(
+    snapshot: &Snapshot,
+    lookup: &mut rusqlite::Connection,
+    chunks: &[vz_core::pipeline::Chunk],
+) -> Result<()> {
+    for chunks in chunks.chunks(512) {
+        let batch = vz_core::storage::chunks_batch(chunks)?;
+        anyhow::ensure!(
+            batch.get_array_memory_size() <= 16 * 1024 * 1024,
+            "relevance batch budget"
+        );
+        let tx = lookup.transaction()?;
+        for chunk in chunks {
+            tx.execute(
+                "INSERT INTO chunks(id,payload) VALUES(?1,?2)",
+                rusqlite::params![chunk.chunk_id, serde_json::to_vec(chunk)?],
+            )?;
+        }
+        let reader = arrow_array::RecordBatchIterator::new(vec![Ok(batch.clone())], batch.schema());
+        snapshot.table.add(Box::new(reader)).execute().await?;
+        tx.commit()?;
+    }
+    Ok(())
+}
