@@ -500,3 +500,5 @@ mod tests {
 
 #[cfg(feature = "office-feasibility")]
 pub mod office;
+#[cfg(feature = "office-feasibility")]
+pub mod office_s1934;
