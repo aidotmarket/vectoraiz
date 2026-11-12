@@ -1060,7 +1060,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
     }
     n.children = resolved;
 
-    if !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
+    if !(n.ns == graphics::C && n.local == "separator") && !words("t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",&n.local)&&n.text.trim().is_empty(){n.text.clear();}
     let mut old = Vec::new();
     for c in std::mem::take(&mut n.children) {
         if c.ns == W
@@ -1485,6 +1485,7 @@ fn validate_node_context(n: &Node, part: &str, series_tx: bool) -> Result<()> {
     }
     ensure!(
         n.text.trim().is_empty()
+            || (n.ns == graphics::C && n.local == "separator")
             || words(
                 "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter align posOffset col row colOff rowOff sqref tableStyleId formatCode",
                 &n.local
@@ -1793,7 +1794,10 @@ fn walk(
             )?;
         }
     }
-    if !n.text.is_empty() || words("t v", &n.local) {
+    if !n.text.is_empty()
+        || words("t v", &n.local)
+        || (n.ns == graphics::C && n.local == "separator")
+    {
         let at = format!("{location}/text");
         if let Some(edit) = edits.get(&at) {
             ensure!(
@@ -1826,16 +1830,17 @@ fn walk(
                 "Office text"
             },
             Some(result.text.clone()),
-            words(
-                "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter",
-                &n.local,
-            ) && ![
-                format!("{{{W}}}p["),
-                format!("{{{A}}}p["),
-                format!("{{{S}}}is["),
-            ]
-            .iter()
-            .any(|s| location.contains(s)),
+            (n.ns == graphics::C && n.local == "separator")
+                || words(
+                    "t v oddHeader oddFooter evenHeader evenFooter firstHeader firstFooter",
+                    &n.local,
+                ) && ![
+                    format!("{{{W}}}p["),
+                    format!("{{{A}}}p["),
+                    format!("{{{S}}}is["),
+                ]
+                .iter()
+                .any(|s| location.contains(s)),
             true,
         )?;
     }

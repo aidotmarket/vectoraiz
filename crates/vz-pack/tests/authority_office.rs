@@ -2443,3 +2443,28 @@ fn office_real_linked_chart_is_static_and_unrelated_ole_refuses() {
         );
     }
 }
+
+#[test]
+fn office_chart_separators_retain_exact_text_and_inventory() {
+    for separator in [", ", "; ", " ", "\n", ""] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let xml = String::from_utf8(p[path].clone()).unwrap().replace(
+            "</c:dLbl>",
+            &format!("<c:separator>{separator}</c:separator></c:dLbl>"),
+        );
+        p.insert(path.into(), xml.into_bytes());
+        let (bytes, report) = rebuild("docx", &p);
+        let entry = report
+            .inventory
+            .iter()
+            .find(|v| v.location.contains("}separator[") && v.location.ends_with("/text"))
+            .unwrap();
+        assert_eq!(entry.value.as_deref(), Some(separator));
+        assert!(entry.content);
+        assert_eq!(
+            report.inventory,
+            office::inspect("document.docx", &bytes).unwrap().inventory
+        );
+    }
+}
