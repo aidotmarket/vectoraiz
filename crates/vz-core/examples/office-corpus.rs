@@ -23,16 +23,23 @@ fn main() -> anyhow::Result<()> {
     }
     visit(Path::new(&root), &mut files)?;
     files.sort();
+    let mut cache = BTreeMap::new();
     for path in files {
         let ext = path.extension().unwrap().to_str().unwrap();
         let bytes = std::fs::read(&path)?;
         let name = format!("document.{ext}");
-        let result = vz_core::office::rebuild(&name, &bytes, &Default::default())
-            .and_then(|(bytes, _)| vz_core::office::inspect(&name, &bytes));
-        let reason = match result {
-            Ok(_) => "PASS".to_owned(),
-            Err(e) => e.to_string(),
-        };
+        let key = (vz_core::pipeline::sha256(&bytes), ext.to_owned());
+        let reason = cache
+            .entry(key)
+            .or_insert_with(|| {
+                match vz_core::office::rebuild(&name, &bytes, &Default::default())
+                    .and_then(|(bytes, _)| vz_core::office::inspect(&name, &bytes))
+                {
+                    Ok(_) => "PASS".to_owned(),
+                    Err(e) => e.to_string(),
+                }
+            })
+            .clone();
         *results
             .entry(ext.into())
             .or_default()

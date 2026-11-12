@@ -174,6 +174,12 @@ fn build(
             ensure!(allowed, "edit location has no proven rebuild handler");
         }
         let source = source.canonicalize()?;
+        let origin_removals = origin
+            .as_ref()
+            .and_then(|(_, private)| private.get("office_removals"))
+            .map(|records| serde_json::from_value::<Vec<vz_core::office::Removal>>(records.clone()))
+            .transpose()?
+            .unwrap_or_default();
         let mut carried_legacy_office_removals = false;
         for (position, mut doc) in indexed.into_iter().enumerate() {
             pack.check_policy()?;
@@ -298,22 +304,16 @@ fn build(
                     &name,
                 )?;
                 budget.from_origin.insert(location.clone());
-                if let Some((_, private)) = &origin {
-                    if let Some(records) = private.get("office_removals") {
-                        budget.removals.extend(
-                            serde_json::from_value::<Vec<vz_core::office::Removal>>(
-                                records.clone(),
-                            )?
-                            .into_iter()
-                            .filter(|r| {
-                                r.location.starts_with(&format!("{location}!"))
-                                    || (!carried_legacy_office_removals
-                                        && !r.location.contains('!'))
-                            }),
-                        );
-                        carried_legacy_office_removals = true;
-                    }
-                }
+                budget.removals.extend(
+                    origin_removals
+                        .iter()
+                        .filter(|r| {
+                            r.location.starts_with(&format!("{location}!"))
+                                || (!carried_legacy_office_removals && !r.location.contains('!'))
+                        })
+                        .cloned(),
+                );
+                carried_legacy_office_removals = true;
             }
             let bytes = sanitize::rewrite(&location, &bytes, changes, &mut mapping, &mut budget)?;
             mapping.insert(relative.clone(), location.clone());
@@ -1020,12 +1020,14 @@ mod tests {
                 .iter()
                 .find(|e| e.kind == "Office text" && e.value.is_some())
                 .unwrap();
-            let removal_warnings = review
-                .warnings
-                .iter()
-                .filter(|w| w.contains("removed attribute"))
-                .count();
-            assert!(removal_warnings <= 3, "duplicate removal warnings");
+            for record in records {
+                let warning = format!(
+                    "{}: {}",
+                    record["location"].as_str().unwrap(),
+                    record["reason"].as_str().unwrap()
+                );
+                assert_eq!(review.warnings.iter().filter(|w| **w == warning).count(), 1);
+            }
             if round < 3 {
                 changes.origin = Some(current.clone());
                 changes.edits.insert(

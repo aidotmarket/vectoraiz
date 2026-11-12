@@ -27,7 +27,7 @@ const XML: &str = "http://www.w3.org/XML/1998/namespace";
 pub const MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const MAX_VALUES: usize = 5_000_000;
 pub const MAX_PARTS: usize = 10_000;
-pub const ALLOWLIST_VERSION: u32 = 1;
+pub const ALLOWLIST_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Value {
@@ -386,7 +386,14 @@ fn serialize(n: &Node) -> Result<Vec<u8>> {
             }
         }
         for (k, v) in &attrs {
-            start.push_attribute((k.as_str(), v.as_str()));
+            let escaped = quick_xml::escape::escape(v)
+                .replace('\n', "&#10;")
+                .replace('\r', "&#13;")
+                .replace('\t', "&#9;");
+            start.push_attribute(quick_xml::events::attributes::Attribute {
+                key: quick_xml::name::QName(k.as_bytes()),
+                value: std::borrow::Cow::Owned(escaped.into_bytes()),
+            });
         }
         w.write_event(Event::Start(start))?;
         if !n.text.is_empty() {
@@ -406,7 +413,7 @@ fn words(s: &str, k: &str) -> bool {
     s.split_ascii_whitespace().any(|x| x == k)
 }
 
-// Version 1: each entry is an element plus its permitted unqualified (or
+// Version 2: each entry is an element plus its permitted unqualified (or
 // Word-qualified) attributes. This deliberately refuses unimplemented layout
 // constructs; a namespace match by itself never permits retention.
 fn rule(ns: &str, el: &str) -> Option<&'static str> {
@@ -418,11 +425,11 @@ fn rule(ns: &str, el: &str) -> Option<&'static str> {
         return Some("");
     }
     Some(match (ns,el) {
-        (W,"rStyle")=>"val",
+        (W,"rStyle"|"tblStyleColBandSize"|"tblStyleRowBandSize")=>"val",
         (W,"separator"|"continuationSeparator")=>"",
         (P,"notesStyle")=>"",(P,"nvPr")=>"isPhoto userDrawn",
         (P,"bg")=>"bwMode",(P,"bgPr")=>"shadeToTitle",(P,"bgRef")=>"idx",
-        (A,"spPr")=>"bwMode",
+        (A,"spPr")=>"bwMode",(A,"style")=>"",
         (A,"custGeom"|"gdLst"|"ahLst"|"cxnLst"|"pathLst"|"close")=>"",
         (A,"ahXY")=>"gdRefX minX maxX gdRefY minY maxY",
         (A,"ahPolar")=>"gdRefR minR maxR gdRefAng minAng maxAng",
@@ -647,7 +654,7 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
         (REL, "Relationships")
     } else if path == "word/document.xml" {
         (W, "document")
-    } else if path == "word/styles.xml" {
+    } else if ["word/styles.xml", "word/stylesWithEffects.xml"].contains(&path) {
         (W, "styles")
     } else if path == "word/fontTable.xml" {
         (W, "fonts")
@@ -701,7 +708,7 @@ fn root_for(path: &str) -> Option<(&'static str, &'static str)> {
 }
 fn formula(n: &Node) -> bool {
     ([S, X14].contains(&n.ns.as_str()) && n.local == "cfvo" && n.attr("type") == Some("formula"))
-        || (n.ns == S
+        || ([S, X14].contains(&n.ns.as_str())
             && words(
                 "f formula formula1 formula2 calculatedColumnFormula totalsRowFormula",
                 &n.local,
@@ -1042,13 +1049,13 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
         );
         let drop=(n.ns==W&&n.local=="settings"&&c.ns=="http://schemas.openxmlformats.org/officeDocument/2006/math"&&c.local=="mathPr")||
             (c.ns==P&&words("clrMru printPr",&c.local))||
-            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc rsid proofErr shapeDefaults hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic",&c.local))||
+            (c.ns==W&&words("embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc savePreviewPicture printerSettings rsid proofErr shapeDefaults hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic",&c.local))||
             (c.ns==S&&words("legacyDrawing legacyDrawingHF",&c.local))||
             (c.ns=="http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"&&c.local=="absPath")||
             (c.ns==S&&c.local=="fileVersion")||
             (c.ns==W&&words("del moveFrom commentRangeStart commentRangeEnd commentReference docVars rsids documentProtection writeProtection attachedTemplate trackRevisions altChunk glossaryDocument instrText",&c.local))||
             (c.ns==S&&words("calcPr calcChain fileSharing customWorkbookViews pivotCaches pivotTableParts phoneticPr rPh sheetProtection workbookProtection",&c.local))||
-            (c.ns==P&&words("custDataLst custData tags",&c.local));
+            (c.ns==P&&words("custDataLst custData tags embeddedFontLst",&c.local));
         if drop {
             report.remove(
                 part,
@@ -1340,7 +1347,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
         return ns == A;
     }
     if part == "word/settings.xml" {
-        return ns==W&&(style_allowlist::settings_element(el)||words("settings zoom defaultTabStop characterSpacingControl evenAndOddHeaders displayBackgroundShape compat compatSetting proofState themeFontLang clrSchemeMapping decimalSymbol listSeparator view mirrorMargins autoHyphenation consecutiveHyphenLimit hyphenationZone doNotHyphenateCaps gutterAtTop defaultTableStyle doNotTrackMoves doNotTrackFormatting doNotUseHTMLParagraphAutoSpacing numFmt numStart numRestart pos footnote endnote",el));
+        return ns==W&&(style_allowlist::settings_element(el)||words("settings doNotAutoCompressPictures zoom defaultTabStop characterSpacingControl evenAndOddHeaders displayBackgroundShape compat compatSetting proofState themeFontLang clrSchemeMapping decimalSymbol listSeparator view mirrorMargins autoHyphenation consecutiveHyphenLimit hyphenationZone doNotHyphenateCaps gutterAtTop defaultTableStyle doNotTrackMoves doNotTrackFormatting doNotUseHTMLParagraphAutoSpacing numFmt numStart numRestart pos footnote endnote",el));
     }
     if part == "word/fontTable.xml" {
         return ns == W
@@ -1352,7 +1359,7 @@ fn part_allows(part: &str, ns: &str, el: &str) -> bool {
     if part == "ppt/tableStyles.xml" {
         return ns == A;
     }
-    if part == "word/styles.xml" {
+    if ["word/styles.xml", "word/stylesWithEffects.xml"].contains(&part) {
         return ns == W
             && !words(
                 "document body p r t tbl tr tc hdr ftr hyperlink drawing",
@@ -1416,7 +1423,7 @@ fn content_attr(n: &Node, k: &str) -> bool {
         || (n.ns == REL && k == "Target" && n.attr("TargetMode") == Some("External"))
 }
 fn walk(
-    n: &Node,
+    mut n: Node,
     location: &str,
     report: &mut Report,
     edits: &BTreeMap<String, Edit>,
@@ -1441,7 +1448,7 @@ fn walk(
     }
     for ((ns, k), value) in &mut result.attrs {
         let at = format!("{location}/@{{{ns}}}{k}");
-        let content = content_attr(n, k);
+        let content = content_attr(&n, k);
         if let Some(edit) = edits.get(&at) {
             ensure!(
                 content
@@ -1584,7 +1591,7 @@ fn walk(
     }
     let mut counts = BTreeMap::<(String, String), usize>::new();
     let mut cell_refs = BTreeSet::new();
-    for c in &n.children {
+    for c in std::mem::take(&mut n.children) {
         let index = counts.entry((c.ns.clone(), c.local.clone())).or_default();
         *index += 1;
         let selector = if let Some(id) = c.shape_id() {
@@ -1592,7 +1599,7 @@ fn walk(
         } else if c.ns == S && c.local == "c" {
             let r = c.attr("r").context("cell lacks stable reference")?;
             ensure!(
-                cell_refs.insert(r),
+                cell_refs.insert(r.to_owned()),
                 "duplicate cell reference at {location}/{r}"
             );
             format!("cell/{r}")
@@ -1611,6 +1618,34 @@ fn walk(
 }
 fn read_package(input: &[u8]) -> Result<(BTreeMap<String, Vec<u8>>, u64)> {
     let mut zip = zip::ZipArchive::new(Cursor::new(input))?;
+    // ZipArchive indexes by name and collapses exact duplicates. Count the
+    // original central-directory records before trusting that index.
+    let mut central = usize::try_from(zip.central_directory_start())?;
+    let mut entries = 0;
+    while input.get(central..central + 4) == Some(b"PK\x01\x02") {
+        ensure!(
+            central + 46 <= input.len(),
+            "truncated Office ZIP directory"
+        );
+        let size = |offset| {
+            u16::from_le_bytes([input[central + offset], input[central + offset + 1]]) as usize
+        };
+        let length = 46 + size(28) + size(30) + size(32);
+        central = central
+            .checked_add(length)
+            .context("Office ZIP directory overflow")?;
+        ensure!(
+            central <= input.len(),
+            "truncated Office ZIP directory entry"
+        );
+        entries += 1;
+        ensure!(
+            entries <= MAX_PARTS,
+            "OFFICE_PART_LIMIT_EXCEEDED: {entries} / {MAX_PARTS}"
+        );
+    }
+    ensure!(entries == zip.len(), "duplicate Office ZIP member names");
+
     ensure!(
         zip.len() <= MAX_PARTS,
         "OFFICE_PART_LIMIT_EXCEEDED: {} / {MAX_PARTS}",
@@ -1834,6 +1869,9 @@ fn expected_type(path: &str, root: &Node, ext: &str) -> Result<&'static str> {
         (P, "presentationPr") => {
             "application/vnd.openxmlformats-officedocument.presentationml.presProps+xml"
         }
+        (W, "styles") if path == "word/stylesWithEffects.xml" => {
+            "application/vnd.ms-word.stylesWithEffects+xml"
+        }
         (W, "styles") => {
             "application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"
         }
@@ -1981,7 +2019,7 @@ pub fn inspect(name: &str, input: &[u8]) -> Result<Report> {
         validate_node(&root, part)?;
         ensure!(!formula(&root), "formula survived at {part}");
         let mut applied = BTreeSet::new();
-        walk(&root, part, &mut report, &BTreeMap::new(), &mut applied)?;
+        let root = walk(root, part, &mut report, &BTreeMap::new(), &mut applied)?;
         if part.ends_with(".rels") {
             let own = owner(part)?;
             for r in &root.children {
@@ -2142,7 +2180,7 @@ pub fn edit(name: &str, input: &[u8], edits: &BTreeMap<String, Edit>) -> Result<
         } else {
             let root = parse(&bytes, &part)?;
             let mut ignored = Report::default();
-            let root = walk(&root, &part, &mut ignored, edits, &mut applied)?;
+            let root = walk(root, &part, &mut ignored, edits, &mut applied)?;
             validate_node(&root, &part)?;
             serialize(&root)?
         };
@@ -2244,14 +2282,20 @@ fn rebuild_inner(
         if part.starts_with("xl/drawings/") && part.ends_with(".vml") {
             let vml = parse(bytes, part)?;
             fn notes_only(n: &Node) -> bool {
-                if n.local == "shape" && n.ns == "urn:schemas-microsoft-com:vml" {
-                    return n.children.iter().any(|c| {
+                if words("OLEObject control", &n.local) {
+                    return false;
+                }
+                if n.local == "shape"
+                    && n.ns == "urn:schemas-microsoft-com:vml"
+                    && !n.children.iter().any(|c| {
                         c.ns == "urn:schemas-microsoft-com:office:excel"
                             && c.local == "ClientData"
                             && c.attr("ObjectType") == Some("Note")
-                    });
+                    })
+                {
+                    return false;
                 }
-                !words("OLEObject control", &n.local) && n.children.iter().all(notes_only)
+                n.children.iter().all(notes_only)
             }
             ensure!(notes_only(&vml), "non-comment VML dependency at {part}");
         }
@@ -2420,6 +2464,9 @@ fn rebuild_inner(
                 .to_owned();
             ensure!(
                 (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || (ty == "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
+                        && resolve(&own, &target)? == "word/stylesWithEffects.xml"
+                        && rel.attr("TargetMode") != Some("External"))
                     || (rel.attr("TargetMode") != Some("External")
                         && [
                             format!("{REL}/metadata/core-properties"),
@@ -2467,7 +2514,7 @@ fn rebuild_inner(
                     present.contains(&resolved),
                     "dangling relationship at {part}/{id}: {resolved}"
                 );
-                ensure!(words("officeDocument styles settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink",kind),"unsupported content dependency at {part}/{id}");
+                ensure!(words("officeDocument styles stylesWithEffects settings numbering fontTable theme header footer footnotes endnotes worksheet sharedStrings table drawing slide slideMaster slideLayout notesSlide notesMaster handoutMaster presProps tableStyles image hyperlink",kind),"unsupported content dependency at {part}/{id}");
                 if part == "_rels/.rels" && kind == "officeDocument" {
                     ensure!(
                         office_root.replace(resolved.clone()).is_none(),
@@ -2545,7 +2592,7 @@ fn rebuild_inner(
         let delivered = rename.get(&part).unwrap_or(&part);
         // Values are read back again below. This first walk applies bound edits.
         let mut ignored = Report::default();
-        let edited = walk(&root, delivered, &mut ignored, edits, &mut applied)?;
+        let edited = walk(root, delivered, &mut ignored, edits, &mut applied)?;
         rewritten.insert(delivered.clone(), serialize(&edited)?);
     }
     ensure!(
@@ -2644,6 +2691,36 @@ fn validate_references(root: &Node, part: &str, ids: Option<&BTreeSet<String>>) 
 #[cfg(test)]
 mod media_tests {
     use super::*;
+    #[test]
+    fn png_icc_profile_is_removed_and_pixels_survive() {
+        let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([30, 90, 150]),
+        ));
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let encoded = encoded.into_inner();
+        let marker = b"planted-ICC-profile-1927";
+        let mut input = encoded[..33].to_vec(); // signature + IHDR
+        input.extend_from_slice(&(marker.len() as u32).to_be_bytes());
+        input.extend_from_slice(b"iCCP");
+        input.extend_from_slice(marker);
+        // The whole ancillary chunk is discarded before image decoding.
+        input.extend_from_slice(&[0; 4]);
+        input.extend_from_slice(&encoded[33..]);
+        let (output, removals) = filter_media(&input, "image.png").unwrap();
+        assert!(removals
+            .iter()
+            .any(|r| r.value.contains("planted-ICC-profile-1927")));
+        assert_eq!(
+            image::load_from_memory(&output).unwrap().to_rgb8(),
+            image.to_rgb8()
+        );
+        assert!(!output.windows(marker.len()).any(|w| w == marker));
+    }
     #[test]
     fn jpeg_metadata_filter_preserves_decoded_pixels() {
         let image = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(

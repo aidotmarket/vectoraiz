@@ -1,5 +1,5 @@
-//! Constructed OOXML adversarial fixtures. These are not Microsoft 365 corpus
-//! qualification; installed Office/Document Inspector remains a manual gate.
+//! Constructed OOXML adversarial fixtures plus public Office-saved originals.
+//! Installed Microsoft 365/Document Inspector remains a manual qualification gate.
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read, Write},
@@ -1033,4 +1033,156 @@ fn unmodified_office_saved_public_fixtures_and_planted_properties() {
             assert!(!member.windows(marker.len()).any(|w| w == marker.as_bytes()));
         }
     }
+}
+
+#[test]
+fn exact_duplicate_zip_members_refuse() {
+    let mut p = fixture("docx");
+    p.insert("word/documenz.xml".into(), p["word/document.xml"].clone());
+    let mut bytes = archive(&p);
+    let name = b"word/documenz.xml";
+    for i in 0..=bytes.len() - name.len() {
+        if &bytes[i..i + name.len()] == name {
+            bytes[i..i + name.len()].copy_from_slice(b"word/document.xml");
+        }
+    }
+    let error = office::rebuild("document.docx", &bytes, &BTreeMap::new())
+        .err()
+        .unwrap();
+    assert!(
+        error.to_string().contains("duplicate Office ZIP member"),
+        "{error:#}"
+    );
+    assert!(office::inspect("document.docx", &bytes).is_err());
+}
+
+#[test]
+fn attribute_whitespace_roundtrips_and_structural_strings_stay_out_of_chunks() {
+    let mut p = fixture("pptx");
+    let slide = String::from_utf8(p["ppt/slides/slide1.xml"].clone()).unwrap();
+    p.insert(
+        "ppt/slides/slide1.xml".into(),
+        slide
+            .replace(
+                "Project ORION alt text",
+                "one&#10;two&#13;three&#9;four &amp; five",
+            )
+            .into_bytes(),
+    );
+    add(&mut p,"ppt/theme/theme1.xml","application/vnd.openxmlformats-officedocument.theme+xml", &format!("<a:theme xmlns:a=\"{A}\" name=\"STRUCTURAL-THEME-1927\"><a:themeElements><a:fontScheme name=\"STRUCTURAL-SCHEME-1927\"><a:majorFont><a:latin typeface=\"STRUCTURAL-FONT-1927\"/></a:majorFont></a:fontScheme></a:themeElements></a:theme>"));
+    let (bytes, r) = rebuild("pptx", &p);
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("one\ntwo\rthree\tfour & five")));
+    assert!(!r.text().contains("STRUCTURAL-"));
+    assert!(r
+        .inventory
+        .iter()
+        .any(|v| v.value.as_deref() == Some("STRUCTURAL-FONT-1927")));
+    let reopened = office::inspect("document.pptx", &bytes).unwrap();
+    assert_eq!(r.inventory, reopened.inventory);
+    assert!(members(&bytes)
+        .values()
+        .any(|v| String::from_utf8_lossy(v).contains("one&#10;two&#13;three&#9;four &amp; five")));
+}
+
+#[test]
+fn office_saved_files_with_listing_refused_parts_still_ingest() {
+    let temp = tempfile::tempdir().unwrap();
+    for (ext, input, chart) in [
+        (
+            "docx",
+            include_bytes!("fixtures/office-public/SampleDoc.docx").as_slice(),
+            "word/charts/chart1.xml",
+        ),
+        (
+            "xlsx",
+            include_bytes!("fixtures/office-public/WithVariousData.xlsx").as_slice(),
+            "xl/charts/chart1.xml",
+        ),
+        (
+            "pptx",
+            include_bytes!("fixtures/office-public/SampleShow.pptx").as_slice(),
+            "ppt/charts/chart1.xml",
+        ),
+    ] {
+        let mut p = members(input);
+        add(
+            &mut p,
+            chart,
+            "application/vnd.openxmlformats-officedocument.drawingml.chart+xml",
+            "<unsupported-chart/>",
+        );
+        let bytes = archive(&p);
+        assert!(office::rebuild(&format!("document.{ext}"), &bytes, &BTreeMap::new()).is_err());
+        let path = temp.path().join(format!("document.{ext}"));
+        std::fs::write(&path, bytes).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        assert!(pages.iter().any(|p| !p.text.trim().is_empty()), "{ext}");
+    }
+}
+
+#[test]
+fn duplicate_shape_ids_use_distinct_positional_edit_bindings() {
+    let mut p = fixture("pptx");
+    let path = "ppt/slides/slide1.xml";
+    let slide = String::from_utf8(p[path].clone()).unwrap();
+    let start = slide.find("<p:sp>").unwrap();
+    let end = slide.find("</p:sp>").unwrap() + "</p:sp>".len();
+    let second = slide[start..end].replace("retained body", "second body");
+    p.insert(
+        path.into(),
+        slide
+            .replace("</p:spTree>", &format!("{second}</p:spTree>"))
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("pptx", &p);
+    let target = report
+        .inventory
+        .iter()
+        .find(|v| {
+            v.kind == "Office text" && v.value.as_deref() == Some("Project ORION second body")
+        })
+        .unwrap();
+    let edits = BTreeMap::from([(
+        target.location.clone(),
+        Edit {
+            expected_sha256: sha256(target.value.as_ref().unwrap().as_bytes()),
+            value: "Edited second shape".into(),
+        },
+    )]);
+    let (_, edited) = office::edit("document.pptx", &bytes, &edits).unwrap();
+    assert!(edited.text().contains("Project ORION retained body"));
+    assert!(edited.text().contains("Edited second shape"));
+    let locations: std::collections::BTreeSet<_> =
+        report.inventory.iter().map(|v| &v.location).collect();
+    assert_eq!(locations.len(), report.inventory.len());
+}
+
+#[test]
+fn word_effect_styles_and_proofing_markup_are_supported() {
+    let mut p = fixture("docx");
+    let body = String::from_utf8(p["word/document.xml"].clone()).unwrap();
+    p.insert(
+        "word/document.xml".into(),
+        body.replace(
+            "<w:r>",
+            "<w:proofErr w:type=\"spellStart\"/><w:r><w:rPr><w:rStyle w:val=\"Emphasis\"/></w:rPr>",
+        )
+        .into_bytes(),
+    );
+    add(&mut p,"word/stylesWithEffects.xml","application/vnd.ms-word.stylesWithEffects+xml", &format!("<w:styles xmlns:w=\"{W}\"><w:style w:type=\"table\" w:styleId=\"Grid\"><w:tblPr><w:tblStyleColBandSize w:val=\"1\"/><w:tblStyleRowBandSize w:val=\"1\"/></w:tblPr></w:style></w:styles>"));
+    p.insert("word/_rels/document.xml.rels".into(),format!("<Relationships xmlns=\"{REL}\"><Relationship Id=\"effects\" Type=\"http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects\" Target=\"stylesWithEffects.xml\"/></Relationships>").into_bytes());
+    let (bytes, report) = rebuild("docx", &p);
+    assert!(report.text().contains("retained body"));
+    assert!(!members(&bytes)
+        .values()
+        .any(|b| String::from_utf8_lossy(b).contains("proofErr")));
+    assert!(members(&bytes).contains_key("word/stylesWithEffects.xml"));
 }
