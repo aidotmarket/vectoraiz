@@ -2460,3 +2460,47 @@ fn office_chart_separators_retain_exact_text_and_inventory() {
         );
     }
 }
+
+#[test]
+fn office_zero_point_chart_caches_are_present_not_missing() {
+    for title_empty in [false, true] {
+        let mut p = chart_fixture("docx", "<c:plotVisOnly/>");
+        let path = "word/charts/chart1.xml";
+        let mut xml = String::from_utf8(p[path].clone()).unwrap();
+        for (point, value) in [("Category marker", ""), ("42", "")] {
+            let before = format!(r#"<c:ptCount val="1"/><c:pt idx="0"><c:v>{point}</c:v></c:pt>"#);
+            xml = xml.replace(&before, &format!(r#"<c:ptCount val="0"/>{value}"#));
+        }
+        if title_empty {
+            xml = xml.replace(
+                r#"<c:ptCount val="1"/><c:pt idx="0"><c:v>Chart series marker</c:v></c:pt>"#,
+                r#"<c:ptCount val="0"/>"#,
+            );
+        }
+        p.insert(path.into(), xml.into_bytes());
+        let (bytes, report) = rebuild("docx", &p);
+        assert!(!report.text().contains("Category marker"));
+        assert!(!report.text().contains("42"));
+        assert_eq!(
+            report.inventory,
+            office::inspect("document.docx", &bytes).unwrap().inventory
+        );
+        assert!(report
+            .inventory
+            .iter()
+            .any(|v| v.location.contains("}ptCount[") && v.value.as_deref() == Some("0")));
+        // Empty without an explicit zero count still lacks a usable cache.
+        let mut bad = p.clone();
+        let xml = String::from_utf8(bad[path].clone())
+            .unwrap()
+            .replace(r#"<c:ptCount val="0"/>"#, "");
+        bad.insert(path.into(), xml.into_bytes());
+        assert!(
+            office::rebuild("document.docx", &archive(&bad), &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("chart cache missing")
+        );
+    }
+}

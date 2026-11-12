@@ -437,7 +437,11 @@ pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bo
                 format!("chart cache missing; recalculate/save locally or exclude at {at}")
             })?;
         ensure!(
-            cached.children.iter().any(|c| c.local == "pt"),
+            cached.children.iter().any(|c| c.ns == C && c.local == "pt")
+                || cached
+                    .children
+                    .iter()
+                    .any(|c| c.ns == C && c.local == "ptCount" && c.attr("val") == Some("0")),
             "chart cache missing; recalculate/save locally or exclude at {at}"
         );
         report.remove(
@@ -448,17 +452,16 @@ pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bo
         if n.local == "strRef" && series_text {
             let points: Vec<_> = cached.children.iter().filter(|c| c.local == "pt").collect();
             ensure!(
-                points.len() == 1,
+                points.len() <= 1,
                 "chart text reference has ambiguous cache at {at}"
             );
             n.local = "v".into();
             n.attrs.clear();
-            n.source_cell = points[0]
-                .children
-                .iter()
-                .find(|c| c.local == "v")
+            n.source_cell = points
+                .first()
+                .and_then(|p| p.children.iter().find(|c| c.local == "v"))
                 .and_then(|c| c.source_cell.clone());
-            n.text = points[0].string();
+            n.text = points.first().map(|p| p.string()).unwrap_or_default();
             n.children.clear();
         } else {
             cached.local = if cache == "strCache" {
