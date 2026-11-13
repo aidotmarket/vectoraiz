@@ -52,6 +52,7 @@ input[type="checkbox"] { accent-color: #2563eb; }
 .warning { background: #fff7ed; color: #7c2d12; }
 .notice { padding: 16px; border-radius: 10px; }
 [role="alert"] { color: #b91c1c; }
+.listing-test-switch { position: sticky; top: 0; z-index: 2; margin-bottom: 16px; padding: 8px 12px; border: 1px solid #fdba74; border-radius: 8px; background: #fff7ed; color: #7c2d12; }
 .update-banner { margin: 0 auto 24px; max-width: 1080px; background: #eff6ff; }
 .library-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .source-cards { display: flex; flex-wrap: wrap; gap: 12px; }

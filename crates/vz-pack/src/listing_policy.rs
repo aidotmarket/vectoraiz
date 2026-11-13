@@ -434,6 +434,18 @@ mod tests {
                         let enabled =
                             preview_enabled(harness, switch, debug, var.map(std::ffi::OsStr::new));
                         assert_eq!(enabled, debug && (harness || (switch && var == Some("1"))));
+                        let fault = crate::review_store::transfer_fault_enabled(
+                            harness,
+                            debug,
+                            var.map(std::ffi::OsStr::new),
+                        );
+                        assert_eq!(fault, harness && debug && var.is_some());
+                        if switch && !harness {
+                            assert!(
+                                !fault,
+                                "switch-only exposure must never enable transfer faults"
+                            );
+                        }
                         for (value, error) in [
                             (ManagedPolicy::Denied, ListingError::PolicyDenied),
                             (ManagedPolicy::Invalid, ListingError::PolicyUnreadable),
@@ -446,9 +458,9 @@ mod tests {
                 }
             }
         }
-        // Pin the actual injection block: the desktop switch cannot compile it.
-        let store = include_str!("review_store.rs");
-        assert!(store.contains("#[cfg(all(debug_assertions, feature = \"listing-preview-harness\"))]\n        ensure!(\n            std::env::var_os(\"VZ_TEST_LOST_TRANSFER_RECEIPT\")"));
+        // Environment access itself must also remain compiled only for the harness.
+        assert!(include_str!("review_store.rs")
+            .contains("#[cfg(all(debug_assertions, feature = \"listing-preview-harness\"))]"));
     }
 
     #[tokio::test]

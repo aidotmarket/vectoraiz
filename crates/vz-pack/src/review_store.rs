@@ -1,6 +1,15 @@
 //! Private, append-only review generations. This storage is not a sanitizer or
 //! a listing entry point: certification and transfer gates are separate.
 //! No private binding, receipt, or source name belongs in delivered payloads.
+#[cfg(any(test, all(debug_assertions, feature = "listing-preview-harness")))]
+pub(crate) fn transfer_fault_enabled(
+    harness_compiled: bool,
+    debug_assertions: bool,
+    var: Option<&std::ffi::OsStr>,
+) -> bool {
+    harness_compiled && debug_assertions && var.is_some()
+}
+
 use crate::{
     listing_policy::{ListingError, ListingPolicy, PolicyLease},
     review::{ListingReview, Sha256, StagedArtifact},
@@ -424,7 +433,11 @@ impl NativePackReview<'_> {
         // the durable receipt. Release builds cannot enable this fault.
         #[cfg(all(debug_assertions, feature = "listing-preview-harness"))]
         ensure!(
-            std::env::var_os("VZ_TEST_LOST_TRANSFER_RECEIPT").is_none(),
+            !transfer_fault_enabled(
+                cfg!(feature = "listing-preview-harness"),
+                cfg!(debug_assertions),
+                std::env::var_os("VZ_TEST_LOST_TRANSFER_RECEIPT").as_deref(),
+            ),
             "injected lost transfer receipt"
         );
         self.pack

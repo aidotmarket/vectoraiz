@@ -536,7 +536,7 @@ export default function App() {
       <footer>Version {version}</footer>
     </aside>
     <main className="content">
-      {listingTestSwitch && <div role="status">Test switch on — listing review preview</div>}
+      {listingTestSwitch && <div className="listing-test-switch" role="status">Test switch on — listing review preview</div>}
       <aside aria-label="Updates" aria-live="polite">
       {availableVersion && <div className="update-banner card">
         <p>vectorAIz {availableVersion} is available</p>
