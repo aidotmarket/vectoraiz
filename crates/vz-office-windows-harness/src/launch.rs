@@ -16,8 +16,9 @@ use windows_sys::Win32::{
     Security::{Authorization::*, Isolation::*, *},
     Storage::FileSystem::*,
     System::{
-        Diagnostics::ToolHelp::*, JobObjects::*, Pipes::*, ProcessStatus::*,
-        RemoteDesktop::ProcessIdToSessionId, Threading::*,
+        Diagnostics::ToolHelp::*, JobObjects::*, Memory::*, Pipes::*, ProcessStatus::*,
+        RemoteDesktop::ProcessIdToSessionId, SystemServices::JOB_OBJECT_MSG_NOTIFICATION_LIMIT,
+        Threading::*, IO::*,
     },
 };
 
@@ -273,11 +274,13 @@ fn limits(job: HANDLE) -> Result<JOBOBJECT_EXTENDED_LIMIT_INFORMATION> {
 fn limit_json(info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> Value {
     json!({"flags":info.BasicLimitInformation.LimitFlags,
         "active_process_limit":info.BasicLimitInformation.ActiveProcessLimit,
+        "min_working_set_bytes":info.BasicLimitInformation.MinimumWorkingSetSize,
+        "max_working_set_bytes":info.BasicLimitInformation.MaximumWorkingSetSize,
         "process_commit_limit_bytes":info.ProcessMemoryLimit,"job_commit_limit_bytes":info.JobMemoryLimit,
         "peak_process_commit_bytes":info.PeakProcessMemoryUsed,"peak_job_commit_bytes":info.PeakJobMemoryUsed})
 }
 
-fn process_snapshot() -> Result<Vec<Value>> {
+pub(crate) fn process_snapshot() -> Result<Vec<Value>> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
     ensure!(
         snapshot != INVALID_HANDLE_VALUE,
@@ -294,6 +297,7 @@ fn process_snapshot() -> Result<Vec<Value>> {
         let session_ok = unsafe { ProcessIdToSessionId(entry.th32ProcessID, &mut session) };
         rows.push(json!({"pid":entry.th32ProcessID,"parent_pid":entry.th32ParentProcessID,
             "session":if session_ok != 0 {Some(session)} else {None},
+            "session_query_skipped":session_ok == 0,
             "image_name":String::from_utf16_lossy(&entry.szExeFile[..entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len())])}));
         rc = unsafe { Process32NextW(snapshot.0, &mut entry) };
     }
@@ -302,6 +306,41 @@ fn process_snapshot() -> Result<Vec<Value>> {
         "process enumeration incomplete"
     );
     Ok(rows)
+}
+
+/// Query only job PIDs, then join Toolhelp image names without opening processes.
+pub(crate) fn job_members(job: HANDLE) -> Value {
+    unsafe {
+        let mut storage = [0usize; 1026];
+        let ok = QueryInformationJobObject(
+            job,
+            JobObjectBasicProcessIdList,
+            storage.as_mut_ptr().cast(),
+            size_of_val(&storage) as u32,
+            null_mut(),
+        );
+        let error = if ok == 0 { GetLastError() } else { 0 };
+        let list = &*(storage.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST);
+        let snapshot = process_snapshot();
+        let pids = std::slice::from_raw_parts(
+            list.ProcessIdList.as_ptr(),
+            (list.NumberOfProcessIdsInList as usize).min(1024),
+        );
+        let members: Vec<Value> = pids
+            .iter()
+            .map(|pid| {
+                snapshot
+                    .as_ref()
+                    .ok()
+                    .and_then(|rows| rows.iter().find(|r| r["pid"] == *pid))
+                    .cloned()
+                    .unwrap_or_else(|| json!({"pid":pid,"image_name":null}))
+            })
+            .collect();
+        json!({"available":ok != 0,"error_code":error,"assigned_processes":list.NumberOfAssignedProcesses,
+            "members":members,"snapshot_available":snapshot.is_ok(),
+            "interpretation":"Images are observed job members; conhost presence must be observed, not assumed"})
+    }
 }
 
 fn low_scratch(path: &Path) -> Result<()> {
@@ -641,7 +680,14 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let lpac = mode != "diagnostic-plain-appcontainer";
     let worker = std::fs::canonicalize(&args[0])?;
     let confined = match args[1].to_str() {
-        Some("confined" | "confined-process" | "confined-job") => true,
+        Some(
+            "confined"
+            | "confined-process"
+            | "confined-job"
+            | "confined-job-ws"
+            | "confined-hard-ws"
+            | "confined-notification",
+        ) => true,
         Some("control") => false,
         _ if diagnostic => true,
         _ => bail!("invalid mode"),
@@ -764,6 +810,11 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         } else {
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
         };
+        if mode == "confined-job-ws" {
+            info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_WORKINGSET;
+            info.BasicLimitInformation.MinimumWorkingSetSize = 64 * 1024 * 1024;
+            info.BasicLimitInformation.MaximumWorkingSetSize = MEMORY;
+        }
         info.BasicLimitInformation.ActiveProcessLimit = if confined { 1 } else { 0 };
         // Independent diagnostics retain the LPAC and process-count restriction.
         // Only the non-tested ceiling is loosened; ordinary runs retain both 1.5 GiB limits.
@@ -798,10 +849,54 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
                 && got.BasicLimitInformation.ActiveProcessLimit
                     == info.BasicLimitInformation.ActiveProcessLimit
                 && got.ProcessMemoryLimit == info.ProcessMemoryLimit
-                && got.JobMemoryLimit == info.JobMemoryLimit,
+                && got.JobMemoryLimit == info.JobMemoryLimit
+                && (mode != "confined-job-ws"
+                    || (got.BasicLimitInformation.MinimumWorkingSetSize
+                        == info.BasicLimitInformation.MinimumWorkingSetSize
+                        && got.BasicLimitInformation.MaximumWorkingSetSize
+                            == info.BasicLimitInformation.MaximumWorkingSetSize)),
             "job limit readback mismatch"
         );
         Some(handle)
+    };
+    // Completion port is owned until after worker exit; setup failure never resumes it.
+    let notification_port = if mode == "confined-notification" {
+        let port =
+            Handle(unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, null_mut(), 0, 1) });
+        ensure!(!port.0.is_null(), "CreateIoCompletionPort");
+        let association = JOBOBJECT_ASSOCIATE_COMPLETION_PORT {
+            CompletionKey: 1usize as _,
+            CompletionPort: port.0,
+        };
+        let mut info: JOBOBJECT_NOTIFICATION_LIMIT_INFORMATION = unsafe { zeroed() };
+        info.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY;
+        info.JobMemoryLimit = MEMORY as u64;
+        let handle = job.as_ref().context("notification job")?.0;
+        check(
+            unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectAssociateCompletionPortInformation,
+                    &association as *const _ as _,
+                    size_of_val(&association) as u32,
+                )
+            },
+            "associate completion port",
+        )?;
+        check(
+            unsafe {
+                SetInformationJobObject(
+                    handle,
+                    JobObjectNotificationLimitInformation,
+                    &info as *const _ as _,
+                    size_of_val(&info) as u32,
+                )
+            },
+            "set notification limit",
+        )?;
+        Some(port)
+    } else {
+        None
     };
     let before = job
         .as_ref()
@@ -889,6 +984,33 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         )?;
         ensure!(assigned != 0, "job assignment readback");
     }
+    let working_set_cap = if mode == "confined-hard-ws" {
+        check(
+            unsafe {
+                SetProcessWorkingSetSizeEx(
+                    process_handle.0,
+                    64 * 1024 * 1024,
+                    MEMORY,
+                    QUOTA_LIMITS_HARDWS_MAX_ENABLE,
+                )
+            },
+            "hard working-set cap before resume",
+        )?;
+        let (mut min, mut max, mut flags) = (0, 0, 0);
+        check(
+            unsafe { GetProcessWorkingSetSizeEx(process_handle.0, &mut min, &mut max, &mut flags) },
+            "working-set cap readback",
+        )?;
+        ensure!(
+            max == MEMORY && flags & QUOTA_LIMITS_HARDWS_MAX_ENABLE != 0,
+            "hard cap readback mismatch"
+        );
+        json!({"minimum_bytes":min,"maximum_bytes":max,"flags":flags,"applied_before_resume":true})
+    } else {
+        Value::Null
+    };
+    let job_members_before = job.as_ref().map(|j| job_members(j.0));
+    let mut observed_job_members = job_members_before.clone();
     let token = if confined {
         Some(token_readback(
             process_handle.0,
@@ -971,6 +1093,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let errors = collect(stderr, result_path.with_extension("stderr.log"));
     let mut shell_seen = std::collections::BTreeMap::new();
     let mut shell_errors = Vec::new();
+    let mut skipped_sessions = std::collections::BTreeSet::new();
+    if let Some(Ok(rows)) = &shell_before {
+        for row in rows.iter().filter(|r| r["session_query_skipped"] == true) {
+            skipped_sessions.insert(row["pid"].as_u64().unwrap_or(0));
+        }
+    }
     let mut sample_shell = || {
         if !observe_shell {
             return;
@@ -979,6 +1107,9 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             Ok(rows) => {
                 for row in rows {
                     let pid = row["pid"].as_u64().unwrap_or(0);
+                    if row["session_query_skipped"] == true {
+                        skipped_sessions.insert(pid);
+                    }
                     if let Some(Ok(before)) = &shell_before {
                         if !before.iter().any(|old| {
                             old["pid"] == row["pid"] && old["image_name"] == row["image_name"]
@@ -993,9 +1124,64 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     };
     let start = Instant::now();
     let deadline = Duration::from_secs(45);
+    let mut notifications = Vec::new();
+    let mut notification_errors = Vec::new();
+    let mut drain_notifications = || {
+        if let Some(port) = &notification_port {
+            loop {
+                let (mut message, mut key, mut pid) = (0, 0, null_mut());
+                let ok = unsafe {
+                    GetQueuedCompletionStatus(port.0, &mut message, &mut key, &mut pid, 0)
+                };
+                if ok == 0 {
+                    let error = unsafe { GetLastError() };
+                    if error != WAIT_TIMEOUT {
+                        notification_errors.push(error);
+                    }
+                    break;
+                }
+                notifications.push(json!({"message":message,"key":key,"pid":pid as usize,
+                    "limit_violation":message == JOB_OBJECT_MSG_NOTIFICATION_LIMIT}));
+            }
+        }
+    };
     let mut timed_out = false;
     loop {
         sample_shell();
+        if let Some(job) = &job {
+            let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
+            let ok = unsafe {
+                QueryInformationJobObject(
+                    job.0,
+                    JobObjectBasicAccountingInformation,
+                    &mut accounting as *mut _ as _,
+                    size_of_val(&accounting) as u32,
+                    null_mut(),
+                )
+            };
+            let previous = observed_job_members
+                .as_ref()
+                .and_then(|v| v["assigned_processes"].as_u64())
+                .unwrap_or(0);
+            if ok != 0 && accounting.ActiveProcesses as u64 > previous {
+                let mut members = job_members(job.0);
+                members["accounting_active_processes"] = json!(accounting.ActiveProcesses);
+                let conhost = members["members"].as_array().is_some_and(|rows| {
+                    rows.iter().any(|r| {
+                        r["image_name"]
+                            .as_str()
+                            .is_some_and(|n| n.eq_ignore_ascii_case("conhost.exe"))
+                    })
+                });
+                members["extra_process_attribution"] = json!(if conhost {
+                    "conhost.exe observed in job; console host contributes to member count"
+                } else {
+                    "unresolved; inspect observed member image names; no conhost assumed"
+                });
+                observed_job_members = Some(members);
+            }
+        }
+        drain_notifications();
         let wait = unsafe { WaitForSingleObject(process_handle.0, 50) };
         if wait == WAIT_OBJECT_0 {
             break;
@@ -1011,6 +1197,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             break;
         }
     }
+    drain_notifications();
     let shell_after_worker = Instant::now();
     while observe_shell && shell_after_worker.elapsed() < Duration::from_secs(5) {
         sample_shell();
@@ -1019,6 +1206,9 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let shell_observation = if observe_shell {
         json!({"window_ms":shell_start.elapsed().as_millis(),"after_worker_window_ms":5000,"poll_interval_ms":50,
             "baseline_available":matches!(shell_before, Some(Ok(_))),
+            "observation_api":"CreateToolhelp32Snapshot; no process handles or elevation",
+            "inaccessible_session_process_count":skipped_sessions.len(),
+            "processes_skipped":0,
             "baseline_error":shell_before.as_ref().and_then(|r| r.as_ref().err()).map(|e| e.to_string()),
             "new_processes":shell_seen.values().collect::<Vec<_>>(),"snapshot_errors":shell_errors,
             "launch_ruled_out":false,
@@ -1114,7 +1304,10 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         json!({"status":if exit == 0 && !timed_out && !capture_overflow && write_error.is_none() && response.is_some() {"pass"} else {"fail"},
         "mode":args[1].to_string_lossy(),"exit_code":exit,"deadline_kill":timed_out,
         "elapsed_ms":start.elapsed().as_millis(),"job_before_resume":before,"job_after":after,
-        "token_before_resume":token,"sampler_enabled":false,"memory_counters_available":counters_ok,
+        "token_before_resume":token,"working_set_cap_before_resume":working_set_cap,
+        "job_members_before_resume":job_members_before,"observed_job_members":observed_job_members,"completion_port_notifications":notifications,
+        "limit_violation_notification_received":if notification_port.is_some() {Some(notifications.iter().any(|n| n["limit_violation"] == true))} else {None},
+        "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":false,"memory_counters_available":counters_ok,
         "working_set_bytes":if counters_ok {Some(counters.WorkingSetSize)} else {None},
         "peak_working_set_bytes":if counters_ok {Some(counters.PeakWorkingSetSize)} else {None},
         "private_commit_bytes":if counters_ok {Some(counters.PrivateUsage)} else {None},

@@ -67,6 +67,10 @@ def plan():
         for kind in ("virtual", "mapping", "mapping-reserve", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
             rows[-1]["memory_scope"] = scope
+    for variant in ("job-ws", "hard-ws", "notification"):
+        for kind in ("mapping", "mapping-reserve"):
+            add(f"section-{variant}-{kind}", op="memory", kind=kind)
+            rows[-1]["experiment"] = variant
     add("scratch-control", op="scratch")
     rows[-1]["expect"] = "allow"
     for extension in ("txt", "md", "html", "docx", "xlsx", "pdf"):
@@ -83,9 +87,9 @@ def initial_manifest():
             "sampler_enabled": False,
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
-            "aggregate_scope": "active-process limit 1; independent job-ceiling diagnostic has one member, no multi-child aggregate claim",
+            "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
             "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
-            "counts": {"pass": 0, "fail": 0, "unrun": len(specs)}, "status": "fail"}
+            "counts": {"pass": 0, "fail": 0, "unrun": len(specs), "not-applicable": 0}, "status": "fail"}
 
 
 def outside(path):
@@ -96,11 +100,15 @@ def outside(path):
 
 
 def validate_manifest(manifest):
-    expected = {row["id"] for row in plan()}
+    planned = {row["id"]: row for row in plan()}
+    expected = set(planned)
     rows = manifest["rows"]
     assert len(rows) == len(expected) and {row["id"] for row in rows} == expected, "missing or duplicate probe rows"
     for row in rows:
-        assert row["status"] in ("pass", "fail", "unrun") and row["reason"], "invalid status/reason"
+        assert row["status"] in ("pass", "fail", "unrun", "not-applicable") and row["reason"], "invalid status/reason"
+        if row["status"] == "not-applicable":
+            probe = planned[row["id"]].get("request", {})
+            assert probe.get("op") == "network" and probe.get("transport") == "udp" and probe.get("operation") == "listen"
         for mode in ("control", "confined"):
             result = row.get(mode, {})
             if result.get("stderr_capture_available"):
@@ -110,7 +118,12 @@ def validate_manifest(manifest):
         if row["id"].startswith("format-"):
             for mode in ("control", "confined"):
                 assert "response" not in row.get(mode, {}), "raw parser response in public manifest"
-    counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun")}
+                result = row.get(mode, {})
+                if result.get("parser_error_present"):
+                    assert isinstance(result.get("parser_error_excerpt"), str)
+                    assert len(result["parser_error_excerpt"].encode("utf-8")) <= 2048
+                    assert isinstance(result.get("parser_error_excerpt_truncated"), bool)
+    counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun", "not-applicable")}
     assert counts == manifest["counts"], "counts mismatch"
     assert manifest["status"] in ("pass", "fail")
     diagnostic = manifest["launch_diagnostic"]
@@ -161,6 +174,8 @@ def evaluate(spec, control, confined):
         return "fail", "positive-control worker did not complete successfully"
     if confined.get("status") != "pass":
         return "fail", "confined worker did not complete successfully"
+    if spec.get("experiment"):
+        return "fail", "measurement only; section experiment does not establish confinement"
     before = control.get("response", {})
     after = confined.get("response", {})
     if spec["expect"] == "equal":
@@ -259,6 +274,20 @@ def parser_diff_summary(control, confined):
             "cause": "unattributed; font/glyph mentions are diagnostics, not proof of cause"}
 
 
+def error_excerpt(response):
+    """Bounded error only; complete response stays private. Redact Windows paths."""
+    import re
+    error = response.get("error")
+    if error is None:
+        return {"parser_error_excerpt": None, "parser_error_excerpt_truncated": False}
+    text = json.dumps(error, ensure_ascii=False)
+    text = re.sub(r"[A-Za-z]:[\\/][^\"\r\n]*", "<redacted-path>", text)
+    text = re.sub(r"\\\\[^\"\r\n]+", "<redacted-path>", text)
+    raw = text.encode("utf-8")
+    return {"parser_error_excerpt": raw[:2048].decode("utf-8", errors="ignore"),
+            "parser_error_excerpt_truncated": len(raw) > 2048}
+
+
 def public_result(result, format_row=False):
     result = dict(result)
     # Launch/setup failures may have no worker pipe to capture; do not imply empty stderr.
@@ -271,6 +300,7 @@ def public_result(result, format_row=False):
             result["response_sha256"] = hashlib.sha256(json.dumps(response, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
             result["pages"] = len(response.get("pages", []))
             result["parser_error_present"] = response.get("error") is not None
+            result.update(error_excerpt(response))
     elif response:
         result["response"] = response
     return result
@@ -322,7 +352,12 @@ class Endpoints:
             try:
                 if transport == "tcp":
                     connection, _ = server.accept()
-                    connection.close()
+                    with connection:
+                        connection.settimeout(3)
+                        try:
+                            connection.recv(1024)
+                        except OSError:
+                            pass
                 else:
                     server.recvfrom(1024)
             except (OSError, TimeoutError):
@@ -340,14 +375,19 @@ class Endpoints:
             return None
         family = "ipv4" if probe["family"] == 2 else "ipv6"
         scope = probe.get("scope", "loopback")
-        address = self.addresses.get((family, scope))
+        if probe["transport"] == "udp" and probe["operation"] == "listen":
+            return "not-applicable: listen requires a connection-oriented socket"
+        # Bind/listen need a local interface; sendto controls use a reachable local listener.
+        endpoint_scope = "loopback" if probe["operation"] in ("bind", "listen", "sendto") else scope
+        probe["endpoint_scope"] = endpoint_scope
+        address = self.addresses.get((family, endpoint_scope))
         if address is None:
             return "runner has no address for requested family/scope"
         probe["address"] = address
         if probe["operation"] in ("bind", "listen", "multicast"):
             probe["port"] = 0
         else:
-            port = self.ports.get((family, scope, probe["transport"]))
+            port = self.ports.get((family, endpoint_scope, probe["transport"]))
             if port is None:
                 return "positive-control endpoint unavailable"
             probe["port"] = port
@@ -413,7 +453,7 @@ def run_suite(args):
     specs = plan()
     manifest = initial_manifest()
     def save():
-        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun")}
+        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
         target = out / "manifest.json"
         temporary = out / "manifest.json.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -455,8 +495,13 @@ def run_suite(args):
                 probe = dict(item.get("request", {}))
                 reason = endpoints.configure(probe) if probe else None
                 if reason:
-                    entry.update(status="unrun", reason=reason)
+                    entry.update(status="not-applicable" if reason.startswith("not-applicable:") else "unrun", reason=reason)
                     continue
+                if probe.get("op") == "network":
+                    entry["requested_scope"] = probe.get("scope")
+                    entry["endpoint_scope"] = probe.get("endpoint_scope")
+                if item.get("experiment"):
+                    entry["experiment"] = item["experiment"]
                 results = []
                 for mode in ("control", "confined"):
                     sentinel.write_bytes(b"C1-private-sentinel\n")
@@ -481,6 +526,8 @@ def run_suite(args):
                         launch_mode = mode
                         if mode == "confined" and item.get("memory_scope", "both") != "both":
                             launch_mode += "-" + item["memory_scope"]
+                        if mode == "confined" and item.get("experiment"):
+                            launch_mode = "confined-" + item["experiment"]
                         code = command([args.launcher.resolve(), args.worker.resolve(), launch_mode,
                                         request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
                         result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": "fail", "reason": "launcher produced no result"}
@@ -488,14 +535,26 @@ def run_suite(args):
                         if code != 0:
                             result["status"] = "fail"
                         results.append(result)
+                        entry[mode] = public_result(result, "format" in item)
                     finally:
-                        shutil.rmtree(scratch)
+                        try:
+                            shutil.rmtree(scratch)
+                        except OSError as error:
+                            # Shell handlers may retain a handle; preserve completed observations.
+                            entry["cleanup_error"] = type(error).__name__
+                            (folder / (mode + "-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
                         for changed in (sentinel_root / "created.txt", sentinel_root / "host.txt.renamed"):
-                            changed.unlink(missing_ok=True)
+                            try:
+                                changed.unlink(missing_ok=True)
+                            except OSError as error:
+                                entry["cleanup_error"] = type(error).__name__
+                                (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
                 status, reason = evaluate(item, *results)
                 entry.update(status=status, reason=reason,
                              control=public_result(results[0], "format" in item),
                              confined=public_result(results[1], "format" in item))
+                if entry.get("cleanup_error"):
+                    entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
                 if item.get("format") == "pdf":
                     entry["diff_summary"] = parser_diff_summary(*results)
                 if item.get("memory_scope"):
@@ -517,8 +576,8 @@ def run_suite(args):
                 shutil.rmtree(sentinel_root)
             except OSError as error:
                 manifest["cleanup_error"] = type(error).__name__
-        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun")}
-        manifest["status"] = "pass" if all(row["status"] == "pass" for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else "fail"
+        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
+        manifest["status"] = "pass" if all(row["status"] in ("pass", "not-applicable") for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else "fail"
         save()
     print(json.dumps({"status": manifest["status"], "counts": manifest["counts"]}))
     return 0 if manifest["status"] == "pass" else 1
@@ -589,7 +648,26 @@ def self_test():
                            job_after={"peak_process_commit_bytes":LIMIT, "peak_job_commit_bytes":LIMIT + 4096})
     assert evaluate(memory_spec, memory_control, memory_confined) == (
         "fail", "reported peak committed memory exceeded its configured ceiling")
-    assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 3
+    assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 6
+    assert len([s for s in specs if s.get("experiment")]) == 6
+    assert evaluate(next(s for s in specs if s.get("experiment")), positive, positive)[0] == "fail"
+    error = public_result({"response": {"error": "PDFium load failed: C:\\private\\pdfium.dll", "pages": []}}, True)
+    assert "PDFium load failed" in error["parser_error_excerpt"]
+    assert "private" not in error["parser_error_excerpt"]
+    assert error["pages"] == 0 and error["parser_error_present"]
+    assert error_excerpt({"error": "é" * 3000})["parser_error_excerpt_truncated"]
+    # Configure controls without depending on this host's routes or network services.
+    endpoints = Endpoints.__new__(Endpoints)
+    endpoints.addresses = {("ipv4", "loopback"): "127.0.0.1", ("ipv4", "internet"): "1.1.1.1"}
+    endpoints.ports = {("ipv4", "loopback", "tcp"): 12345, ("ipv4", "loopback", "udp"): 12346}
+    for operation in ("bind", "listen", "sendto"):
+        probe = dict(op="network", family=2, scope="internet", transport="tcp", operation=operation)
+        assert endpoints.configure(probe) is None
+        assert probe["address"] == "127.0.0.1" and probe["endpoint_scope"] == "loopback"
+    probe.update(transport="udp", operation="listen")
+    assert endpoints.configure(probe).startswith("not-applicable:")
+    probe.update(operation="sendto")
+    assert endpoints.configure(probe) is None and probe["port"] == 12346 and probe["endpoint_scope"] == "loopback"
     manifest = initial_manifest()
     validate_manifest(manifest)
     # Exercise durable collection after launch failure and malformed output,
@@ -618,11 +696,44 @@ def self_test():
         validate_manifest(manifest)
         assert all(result["status"] == "fail" for result in manifest["launch_diagnostic"]["variations"])
         assert manifest["launch_diagnostic"]["variations"][0]["launch_trace"]["create_process_error_code"] == 203
+    # Regression: cleanup PermissionError must retain both shell observations.
+    with tempfile.TemporaryDirectory(prefix="shell-cleanup-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        worker = folder / "worker.exe"
+        worker.write_bytes(b"synthetic")
+        actual_rmtree = shutil.rmtree
+        def cleanup(path, *args, **kwargs):
+            if Path(path).name == "control-scratch":
+                raise PermissionError("synthetic retained shell handle")
+            return actual_rmtree(path, *args, **kwargs)
+        def shell_command(argv, log, timeout=70):
+            Path(argv[4]).write_text(json.dumps({"status": "pass", "response": {
+                "probe": {"success": True}}, "shell_launch_observation": {
+                    "launch_ruled_out": False, "new_processes": [],
+                    "processes_skipped": 0}}), encoding="utf-8")
+            return 0
+        fake_endpoints = SimpleNamespace(configure=lambda probe: None, close=lambda: None)
+        with patch(__name__ + ".plan", return_value=[shell]), \
+             patch(__name__ + ".launch_diagnostic"), \
+             patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".command", side_effect=shell_command), \
+             patch.object(sys, "platform", "win32"), \
+             patch.object(Path, "home", return_value=folder), \
+             patch.object(shutil, "rmtree", side_effect=cleanup), \
+             patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
+            run_args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker, pdfium=None)
+            assert run_suite(run_args) == 1
+            observed = json.loads((run_args.out / "manifest.json").read_text())
+            row = observed["rows"][0]
+            assert row["cleanup_error"] == "PermissionError" and row["status"] == "fail"
+            assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False
+                       for mode in ("control", "confined"))
+            validate_manifest(observed)
     # Diagnostic launch failures are evidence, not a suite acceptance gate.
     completed = json.loads(json.dumps(manifest))
     for row in completed["rows"]:
         row.update(status="pass", reason="synthetic validation control")
-    completed.update(status="pass", counts={"pass": len(specs), "fail": 0, "unrun": 0},
+    completed.update(status="pass", counts={"pass": len(specs), "fail": 0, "unrun": 0, "not-applicable": 0},
                      source_sha="synthetic", worker_sha256="synthetic")
     validate_manifest(completed)
     # The extended token evidence must still reject an unverified diagnostic.

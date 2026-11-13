@@ -285,6 +285,38 @@ fn network(v: &Value) -> Result<Value> {
         }
     };
     let addr = &storage as *const _ as *const SOCKADDR;
+    // A stream socket must connect before sendto. Poll bounds the local control.
+    // Still execute sendto if connect fails, preserving the LPAC literal API result.
+    let connect_before_sendto = if operation == "sendto" && !udp {
+        let rc = unsafe { connect(socket.0, addr, length) };
+        let mut result = wsa("connect before TCP sendto", rc as i64, rc == 0);
+        if rc == SOCKET_ERROR && result["error_code"] == WSAEWOULDBLOCK as u32 {
+            let mut poll = WSAPOLLFD {
+                fd: socket.0,
+                events: POLLOUT,
+                revents: 0,
+            };
+            let polled = unsafe { WSAPoll(&mut poll, 1, 3000) };
+            let mut error = 0i32;
+            let mut len = size_of_val(&error) as i32;
+            let queried = unsafe {
+                getsockopt(
+                    socket.0,
+                    SOL_SOCKET,
+                    SO_ERROR,
+                    &mut error as *mut _ as _,
+                    &mut len,
+                )
+            };
+            result["poll_return"] = json!(polled);
+            result["socket_error"] = json!(error);
+            result["success"] =
+                json!(polled > 0 && queried == 0 && error == 0 && poll.revents & POLLWRNORM != 0);
+        }
+        Some(result)
+    } else {
+        None
+    };
     let bind_before_listen = if operation == "listen" {
         let rc = unsafe { bind(socket.0, addr, length) };
         Some(wsa("bind before listen", rc as i64, rc == 0))
@@ -384,6 +416,7 @@ fn network(v: &Value) -> Result<Value> {
     result["socket_creation"] = creation;
     result["nonblocking"] = nonblocking_result;
     result["bind_before_listen"] = json!(bind_before_listen);
+    result["connect_before_sendto"] = json!(connect_before_sendto);
     Ok(result)
 }
 
@@ -755,11 +788,34 @@ fn mapping(reserve: bool) -> Result<Value> {
         );
         steps.push(json!({"held_bytes":held,"before":before_step,"after":memory_snapshot(),"result":result}));
     }
-    let at_peak = memory_snapshot();
+    let mut at_peak = memory_snapshot();
+    at_peak["job_members"] = crate::launch::job_members(null_mut());
     if !view.Value.is_null() {
         unsafe { UnmapViewOfFile(view) };
     }
     result["creation"] = creation;
+    let commit_growth = match (
+        before["system"]["commit_total_bytes"].as_i64(),
+        at_peak["system"]["commit_total_bytes"].as_i64(),
+    ) {
+        (Some(a), Some(b))
+            if before["system"]["available"] == true && at_peak["system"]["available"] == true =>
+        {
+            Some(b - a)
+        }
+        _ => None,
+    };
+    let max_ws = steps
+        .iter()
+        .filter_map(|s| s["after"]["process"]["peak_working_set_bytes"].as_u64())
+        .max();
+    result["system_commit_growth_bytes"] = json!(commit_growth);
+    result["system_commit_growth_scope"] =
+        json!("system-wide before creation to held section; concurrent activity included");
+    result["touch_completed"] = json!(held == target);
+    result["max_observed_working_set_bytes"] = json!(max_ws);
+    result["working_set_within_1_5_gib"] = json!(max_ws.map(|ws| ws <= MEMORY as u64));
+    result["paging_note"] = json!("Completed touch under resident cap is consistent with eviction; pagefile writes are not directly measured");
     result["before"] = before;
     result["after_creation"] = after_creation;
     result["after_mapping"] = after_mapping;
@@ -866,7 +922,8 @@ fn memory(kind: &str) -> Result<Value> {
             break;
         }
     }
-    let at_peak = memory_snapshot();
+    let mut at_peak = memory_snapshot();
+    at_peak["job_members"] = crate::launch::job_members(null_mut());
     for ptr in pointers {
         if kind == "malloc" {
             unsafe { free(ptr) };
