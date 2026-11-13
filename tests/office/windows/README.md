@@ -262,3 +262,28 @@ are printed into CI logs. Only manifest.json is uploaded as an artifact.
 All workflow actions use immutable commit SHAs. Manifest validation scans decoded
 strings recursively for drive paths and IP literals and refuses publication on a match.
 This harness makes no Windows confinement or C1 qualification claim.
+
+Fold 7 stage B
+--------------
+
+Every confined launch now sets the job working-set limit to 1.5 GiB and reads
+it back before resume; failure refuses launch. The hard-ws diagnostic adds a
+per-process hard cap to that baseline (it does not isolate the alternative).
+Self-ws rows try raising and disabling the worker cap, record call results and
+readbacks, then touch a fresh section after each attempt in the same process.
+Alter-job also attempts to clear the job working-set flag when it can open the job.
+Section rows use the parent's live kernel peak counter, with 4,096-byte tolerance.
+A completed touch is the documented paging residual. File-backed rows resize a
+scratch file to 2 GiB, map it and touch every page; scratch cleanup is required.
+System physical available/total and commit before/after are retained alongside
+parent samples. System commit deltas include concurrent host activity; the
+single-worker run bounds attribution but cannot establish causality on a shared host.
+
+The separate section-sampler row polls private commit, working set and run-window
+system commit growth every 50 ms and terminates the job over budget (or on missing
+sampler data, which fails the row). It records overshoot, detection/kill latency
+and parent-loop gaps; responsiveness here means this launcher loop stays within
+one second, not a product UI qualification. A sampler kill never passes a kernel
+refusal row. Extra section commit/page-file use can still slow or stall the PC.
+Actual ingest/render/OCR, supported client builds and ordinary/hostile/scanned
+fixture qualification remain owed; these are synthetic parser harness rows.

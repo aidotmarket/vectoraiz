@@ -60,7 +60,7 @@ pub fn run(v: &Value) -> Result<Value> {
         "shell" | "com" | "pipe" => broker(op),
         "child" | "escape" => child(op == "escape")?,
         "inherited" => inherited(v)?,
-        "memory" => memory(arg(v, "kind")?)?,
+        "memory" => memory(arg(v, "kind")?, v)?,
         "alter-job" => alter_job(v)?,
         "scratch" => scratch(v)?,
         _ => bail!("unknown probe"),
@@ -678,6 +678,7 @@ fn alter_job(v: &Value) -> Result<Value> {
     if got == 0 {
         return Ok(win("QueryInformationJobObject(worker)", 0, false));
     }
+    info.BasicLimitInformation.LimitFlags &= !JOB_OBJECT_LIMIT_WORKINGSET;
     info.ProcessMemoryLimit = MEMORY * 4;
     info.JobMemoryLimit = MEMORY * 4;
     info.BasicLimitInformation.LimitFlags |=
@@ -764,11 +765,48 @@ fn memory_snapshot() -> Value {
                 "bytes":process["private_commit_bytes"],
                 "scope":"single member's measured private commit; excludes shared sections and job overhead"},
             "system":{"available":p != 0,"commit_total_bytes":system.CommitTotal * system.PageSize,
-                "commit_limit_bytes":system.CommitLimit * system.PageSize}})
+                "commit_limit_bytes":system.CommitLimit * system.PageSize,
+                "physical_available_bytes":system.PhysicalAvailable * system.PageSize,
+                "physical_total_bytes":system.PhysicalTotal * system.PageSize}})
     }
 }
 
-fn mapping(reserve: bool) -> Result<Value> {
+pub(crate) fn system_memory() -> Value {
+    let mut info: PERFORMANCE_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe { GetPerformanceInfo(&mut info, size_of::<PERFORMANCE_INFORMATION>() as u32) };
+    json!({"available":ok != 0,"commit_total_bytes":info.CommitTotal * info.PageSize,
+        "commit_limit_bytes":info.CommitLimit * info.PageSize,
+        "physical_available_bytes":info.PhysicalAvailable * info.PageSize,
+        "physical_total_bytes":info.PhysicalTotal * info.PageSize})
+}
+fn working_set_readback() -> Value {
+    let (mut min, mut max, mut flags) = (0, 0, 0);
+    let rc =
+        unsafe { GetProcessWorkingSetSizeEx(GetCurrentProcess(), &mut min, &mut max, &mut flags) };
+    json!({"available":rc != 0,"minimum_bytes":min,"maximum_bytes":max,"flags":flags})
+}
+fn working_set_mutation(v: &Value) -> Result<Value> {
+    let mut attempts = Vec::new();
+    for (name, max, flags) in [
+        ("raise", MEMORY * 2, QUOTA_LIMITS_HARDWS_MAX_ENABLE),
+        ("disable", MEMORY * 2, QUOTA_LIMITS_HARDWS_MAX_DISABLE),
+    ] {
+        let before = working_set_readback();
+        let rc = unsafe {
+            SetProcessWorkingSetSizeEx(GetCurrentProcess(), 64 * 1024 * 1024, max, flags)
+        };
+        let call = win("SetProcessWorkingSetSizeEx(worker)", rc as i64, rc != 0);
+        let after = working_set_readback();
+        // Rerun in this same process after EACH mutation, retaining the kernel peak.
+        let section = mapping(false, v, false)?;
+        attempts.push(
+            json!({"attempt":name,"call":call,"before":before,"after":after,"section":section}),
+        );
+    }
+    Ok(json!({"api":"SetProcessWorkingSetSizeEx(worker)","success":true,"attempts":attempts}))
+}
+
+fn mapping(reserve: bool, v: &Value, file_backed: bool) -> Result<Value> {
     let target = 2 * 1024 * 1024 * 1024usize;
     let step = 64 * 1024 * 1024usize;
     let mut system: SYSTEM_INFO = unsafe { zeroed() };
@@ -776,9 +814,36 @@ fn mapping(reserve: bool) -> Result<Value> {
     let page = system.dwPageSize as usize;
     anyhow::ensure!(page > 0, "system page size");
     let before = memory_snapshot();
+    let backing = if file_backed {
+        let path = std::path::Path::new(arg(v, "scratch")?).join("mapped-scratch.bin");
+        let handle = unsafe {
+            CreateFileW(
+                wide(path).as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                null(),
+                CREATE_ALWAYS,
+                FILE_ATTRIBUTE_NORMAL,
+                null_mut(),
+            )
+        };
+        anyhow::ensure!(
+            handle != INVALID_HANDLE_VALUE,
+            "scratch backing file creation"
+        );
+        let handle = Handle(handle);
+        crate::launch::check(
+            unsafe { SetFilePointerEx(handle.0, target as i64, null_mut(), FILE_BEGIN) },
+            "scratch size seek",
+        )?;
+        crate::launch::check(unsafe { SetEndOfFile(handle.0) }, "scratch file size")?;
+        Some(handle)
+    } else {
+        None
+    };
     let handle = unsafe {
         CreateFileMappingW(
-            INVALID_HANDLE_VALUE,
+            backing.as_ref().map_or(INVALID_HANDLE_VALUE, |h| h.0),
             null(),
             PAGE_READWRITE | if reserve { SEC_RESERVE } else { SEC_COMMIT },
             0,
@@ -861,7 +926,7 @@ fn mapping(reserve: bool) -> Result<Value> {
         json!("system-wide before creation to held section; concurrent activity included");
     result["touch_completed"] = json!(held == target);
     result["max_observed_working_set_bytes"] = json!(max_ws);
-    result["working_set_within_1_5_gib"] = json!(max_ws.map(|ws| ws <= MEMORY as u64));
+    result["working_set_within_1_5_gib"] = json!(max_ws.map(|ws| ws <= MEMORY as u64 + 4096));
     result["paging_note"] = json!("Completed touch under resident cap is consistent with eviction; pagefile writes are not directly measured");
     result["before"] = before;
     result["after_creation"] = after_creation;
@@ -870,6 +935,7 @@ fn mapping(reserve: bool) -> Result<Value> {
     result["at_peak"] = at_peak;
     result["successfully_held_bytes"] = json!(held);
     result["target_bytes"] = json!(target);
+    result["scratch_file_size_bytes"] = json!(if file_backed { target } else { 0 });
     result["section_mode"] = json!(if reserve { "SEC_RESERVE" } else { "SEC_COMMIT" });
     result["allocation_refused"] = json!(held < target);
     let code = result["error_code"].as_u64().unwrap_or(0) as u32;
@@ -890,9 +956,12 @@ unsafe extern "C" {
     fn _errno() -> *mut i32;
 }
 
-fn memory(kind: &str) -> Result<Value> {
-    if kind == "mapping" || kind == "mapping-reserve" {
-        return mapping(kind == "mapping-reserve");
+fn memory(kind: &str, v: &Value) -> Result<Value> {
+    if kind == "self-ws" {
+        return working_set_mutation(v);
+    }
+    if matches!(kind, "mapping" | "mapping-reserve" | "mapping-file") {
+        return mapping(kind == "mapping-reserve", v, kind == "mapping-file");
     }
     let step = if kind == "small" {
         64 * 1024

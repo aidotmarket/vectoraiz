@@ -686,7 +686,8 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             | "confined-job"
             | "confined-job-ws"
             | "confined-hard-ws"
-            | "confined-notification",
+            | "confined-notification"
+            | "confined-sampler",
         ) => true,
         Some("control") => false,
         _ if diagnostic => true,
@@ -825,7 +826,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         } else {
             JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
         };
-        if mode == "confined-job-ws" {
+        if confined {
             info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_WORKINGSET;
             info.BasicLimitInformation.MinimumWorkingSetSize = 64 * 1024 * 1024;
             info.BasicLimitInformation.MaximumWorkingSetSize = MEMORY;
@@ -865,7 +866,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
                     == info.BasicLimitInformation.ActiveProcessLimit
                 && got.ProcessMemoryLimit == info.ProcessMemoryLimit
                 && got.JobMemoryLimit == info.JobMemoryLimit
-                && (mode != "confined-job-ws"
+                && (!confined
                     || (got.BasicLimitInformation.MinimumWorkingSetSize
                         == info.BasicLimitInformation.MinimumWorkingSetSize
                         && got.BasicLimitInformation.MaximumWorkingSetSize
@@ -1021,7 +1022,10 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             max == MEMORY && flags & QUOTA_LIMITS_HARDWS_MAX_ENABLE != 0,
             "hard cap readback mismatch"
         );
-        json!({"minimum_bytes":min,"maximum_bytes":max,"flags":flags,"applied_before_resume":true})
+        json!({"mechanism":"job plus per-process hard cap","minimum_bytes":min,"maximum_bytes":max,"flags":flags,"applied_before_resume":true,"readback_verified":true})
+    } else if confined {
+        json!({"mechanism":"job working-set limit","minimum_bytes":64 * 1024 * 1024,
+            "maximum_bytes":MEMORY,"applied_before_resume":true,"readback_verified":true})
     } else {
         Value::Null
     };
@@ -1078,6 +1082,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     } else {
         None
     };
+    let system_before = crate::probes::system_memory();
+    let sampler_enabled = mode == "confined-sampler";
+    ensure!(
+        !sampler_enabled || system_before["available"] == true,
+        "sampler baseline unavailable"
+    );
     let shell_start = Instant::now();
     ensure!(
         unsafe { ResumeThread(thread.0) } != u32::MAX,
@@ -1173,7 +1183,57 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         }
     };
     let mut timed_out = false;
+    let mut samples = Vec::new();
+    let mut parent_peak_ws = 0usize;
+    let mut max_overshoot = 0u64;
+    let mut sampler_kill = Value::Null;
+    let mut previous_sample = Instant::now();
+    let mut max_loop_gap_ms = 0u128;
     loop {
+        let now = Instant::now();
+        max_loop_gap_ms = max_loop_gap_ms.max(now.duration_since(previous_sample).as_millis());
+        previous_sample = now;
+        let mut memory: PROCESS_MEMORY_COUNTERS_EX = unsafe { zeroed() };
+        let available = unsafe {
+            GetProcessMemoryInfo(
+                process_handle.0,
+                &mut memory as *mut _ as _,
+                size_of_val(&memory) as u32,
+            )
+        } != 0;
+        let system = crate::probes::system_memory();
+        let growth = system["commit_total_bytes"]
+            .as_u64()
+            .zip(system_before["commit_total_bytes"].as_u64())
+            .map(|(current, base)| current.saturating_sub(base));
+        if available {
+            parent_peak_ws = parent_peak_ws.max(memory.PeakWorkingSetSize);
+        }
+        let measured = (memory.PrivateUsage as u64)
+            .max(memory.WorkingSetSize as u64)
+            .max(growth.unwrap_or(0));
+        max_overshoot = max_overshoot.max(measured.saturating_sub(MEMORY as u64));
+        samples.push(
+            json!({"elapsed_ms":start.elapsed().as_millis(),"process_available":available,
+            "private_commit_bytes":memory.PrivateUsage,"working_set_bytes":memory.WorkingSetSize,
+            "peak_working_set_bytes":memory.PeakWorkingSetSize,"system":system,
+            "run_system_commit_growth_bytes":growth}),
+        );
+        if sampler_enabled
+            && (!available || system["available"] != true || measured > MEMORY as u64)
+        {
+            let detected = Instant::now();
+            check(
+                unsafe { TerminateJobObject(job.as_ref().context("sampler job")?.0, 137) },
+                "sampler job termination",
+            )?;
+            let waited = unsafe { WaitForSingleObject(process_handle.0, 5000) };
+            sampler_kill = json!({"terminated_job":true,"over_budget":available && system["available"] == true && measured > MEMORY as u64,
+                "threshold_bytes":MEMORY,"detected_after_ms":start.elapsed().as_millis(),
+                "time_to_kill_ms":detected.elapsed().as_millis(),"exit_observed":waited == WAIT_OBJECT_0,
+                "overshoot_bytes":max_overshoot});
+            break;
+        }
         sample_shell();
         if let Some(job) = &job {
             let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = unsafe { zeroed() };
@@ -1256,6 +1316,9 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             size_of_val(&counters) as u32,
         )
     } != 0;
+    if counters_ok {
+        parent_peak_ws = parent_peak_ws.max(counters.PeakWorkingSetSize);
+    }
     let after = job
         .as_ref()
         .map(|j| limits(j.0).map(|i| limit_json(&i)))
@@ -1336,7 +1399,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         "token_before_resume":token,"working_set_cap_before_resume":working_set_cap,
         "job_members_before_resume":job_members_before,"observed_job_members":observed_job_members,"completion_port_notifications":notifications,
         "limit_violation_notification_received":if notification_port.is_some() {Some(notifications.iter().any(|n| n["limit_violation"] == true))} else {None},
-        "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":false,"memory_counters_available":counters_ok,
+        "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":sampler_enabled,"sampler_kill":sampler_kill,
+        "launcher_responsive":max_loop_gap_ms <= 1000,"max_parent_loop_gap_ms":max_loop_gap_ms,
+        "parent_memory_samples":samples,"parent_peak_working_set_bytes":if parent_peak_ws > 0 {Some(parent_peak_ws)} else {None},
+        "system_before_resume":system_before,"system_after":crate::probes::system_memory(),
+        "system_commit_attribution":"before/after delta during isolated single-worker row; concurrent host activity included, not causal attribution",
+        "memory_counters_available":counters_ok,
         "working_set_bytes":if counters_ok {Some(counters.WorkingSetSize)} else {None},
         "peak_working_set_bytes":if counters_ok {Some(counters.PeakWorkingSetSize)} else {None},
         "private_commit_bytes":if counters_ok {Some(counters.PrivateUsage)} else {None},

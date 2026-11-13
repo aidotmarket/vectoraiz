@@ -159,13 +159,18 @@ def plan():
     for op in ("dns", "shell", "com", "pipe", "child", "escape", "inherited", "alter-job"):
         add(op, op=op)
     for scope in ("both", "process", "job"):
-        for kind in ("virtual", "mapping", "mapping-reserve", "small", "malloc", "burst"):
+        for kind in ("virtual", "mapping", "mapping-reserve", "mapping-file", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
             rows[-1]["memory_scope"] = scope
     for variant in ("job-ws", "hard-ws", "notification"):
         for kind in ("mapping", "mapping-reserve"):
             add(f"section-{variant}-{kind}", op="memory", kind=kind)
             rows[-1]["experiment"] = variant
+    for variant in ("job-ws", "hard-ws"):
+        add(f"section-{variant}-self-ws", op="memory", kind="self-ws")
+        rows[-1]["experiment"] = variant
+    add("section-sampler", op="memory", kind="mapping")
+    rows[-1]["experiment"] = "sampler"
     add("scratch-control", op="scratch")
     rows[-1]["expect"] = "allow"
     for extension in ("txt", "md", "html", "docx", "xlsx", "pdf"):
@@ -179,7 +184,7 @@ def initial_manifest():
             "os": platform.system(), "os_build": platform.version(),
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
-            "sampler_enabled": False,
+            "sampler_enabled": "per-row; section-sampler enabled, all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
@@ -285,12 +290,22 @@ def evaluate(spec, control, confined):
         return "fail", "LPAC could not be verified; confined worker was not resumed"
     if control.get("status") != "pass":
         return "fail", "positive-control worker did not complete successfully"
+    if spec.get("experiment") == "sampler":
+        kill = confined.get("sampler_kill") or {}
+        control_probe = control.get("response", {}).get("probe", {})
+        if not control_probe.get("touch_completed"):
+            return "fail", "sampler control did not complete section touch"
+        if (confined.get("exit_code") == 137 and confined.get("launch_trace", {}).get("grants_restored") is True
+                and confined.get("sampler_enabled") is True and kill.get("terminated_job") is True
+                and kill.get("over_budget") is True and kill.get("exit_observed") is True
+                and confined.get("launcher_responsive") is True and not confined.get("deadline_kill")
+                and isinstance(kill.get("overshoot_bytes"), int) and isinstance(kill.get("time_to_kill_ms"), int)):
+            return "pass", "parent killed over-budget job; overshoot and latency recorded; launcher remained responsive (best effort)"
+        return "fail", "sampler did not establish over-budget job kill and responsive launcher"
     if confined.get("exit_code") == 0xC0000008:
         return "fail", "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
     if confined.get("status") != "pass":
         return "fail", "confined worker did not complete successfully"
-    if spec.get("experiment"):
-        return "fail", "measurement only; section experiment does not establish confinement"
     before = control.get("response", {})
     after = confined.get("response", {})
     if spec["expect"] == "equal":
@@ -320,6 +335,33 @@ def evaluate(spec, control, confined):
             return "unrun", "not exercisable: no socket obtainable by any tested route"
     if not positive.get("success"):
         return "unrun", "positive-control API unavailable or unsuccessful; no denial established"
+    if op == "memory" and spec["request"]["kind"] in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
+        cap = confined.get("working_set_cap_before_resume") or {}
+        job = confined.get("job_before_resume") or {}
+        if (cap.get("maximum_bytes") != LIMIT or cap.get("readback_verified") is not True
+                or job.get("max_working_set_bytes") != LIMIT or not job.get("flags", 0) & 1):
+            return "fail", "missing pre-resume working-set job cap readback"
+        peak = confined.get("parent_peak_working_set_bytes")
+        if not isinstance(peak, int) or peak <= 0 or peak > LIMIT + 4096:
+            return "fail", "parent-read kernel peak working set missing or above cap plus one page"
+        sections = [negative]
+        if spec["request"]["kind"] == "self-ws":
+            attempts = negative.get("attempts", [])
+            if [a.get("attempt") for a in attempts] != ["raise", "disable"]:
+                return "fail", "missing self-raise/disable attempts"
+            if any(not a.get("after", {}).get("available") or "return_code" not in a.get("call", {}) for a in attempts):
+                return "fail", "working-set mutation call or readback missing"
+            sections = [a.get("section", {}) for a in attempts]
+        for section in sections:
+            if not section.get("touch_completed") and not (section.get("allocation_refused") and section.get("allocation_limit_error")):
+                return "fail", "section exercise neither completed nor kernel-refused"
+            for phase in ("before", "at_peak"):
+                system = section.get(phase, {}).get("system", {})
+                if system.get("available") is not True or any(not isinstance(system.get(key), int) for key in ("commit_total_bytes", "physical_available_bytes", "physical_total_bytes")):
+                    return "fail", "section system commit/physical-memory evidence missing"
+        if spec["request"]["kind"] == "mapping-file" and negative.get("scratch_file_size_bytes") != 2 * 1024 ** 3:
+            return "fail", "scratch-file view size not established"
+        return "pass", "parent-read kernel peak within cap plus one page; completed section touch is documented paging residual"
     if spec["id"] == "inherited":
         if not positive.get("identity_match"):
             return "fail", "inherited-handle positive control identity mismatch"
@@ -334,6 +376,7 @@ def evaluate(spec, control, confined):
         return "fail", "generic or unexplained error is not explicit denial evidence"
     prerequisites = {
         "ReadFile": {"CreateFileW"}, "WriteFile": {"CreateFileW"},
+        "connect+WSAPoll+SO_ERROR": {"connect"},
         "CoCreateInstance(ShellWindows, LOCAL_SERVER)": {"CoInitializeEx"},
         "SetInformationJobObject(raise process and job limits)": {"OpenJobObjectW(SET_ATTRIBUTES)", "QueryInformationJobObject(worker)"},
     }
@@ -770,8 +813,23 @@ def self_test():
     memory_confined["response"]["probe"]["successfully_held_bytes"] = LIMIT + 1
     assert evaluate(memory_spec, memory_control, memory_confined)[0] == "fail"
     assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 6
-    assert len([s for s in specs if s.get("experiment")]) == 6
+    assert len([s for s in specs if s.get("experiment")]) == 9
     assert evaluate(next(s for s in specs if s.get("experiment")), positive, positive)[0] == "fail"
+    section_spec = next(s for s in specs if s["id"] == "memory-both-mapping")
+    system = {"available": True, "commit_total_bytes": 3 * LIMIT, "physical_available_bytes": LIMIT, "physical_total_bytes": 8 * LIMIT}
+    section = response(success=True, touch_completed=True, before={"system": system}, at_peak={"system": system})
+    section.update(working_set_cap_before_resume={"maximum_bytes": LIMIT, "readback_verified": True},
+                   job_before_resume={"max_working_set_bytes": LIMIT, "flags": 1}, parent_peak_working_set_bytes=LIMIT + 4096)
+    assert evaluate(section_spec, section, section)[0] == "pass"
+    section["parent_peak_working_set_bytes"] += 1
+    assert evaluate(section_spec, section, section)[0] == "fail"
+    sampler_spec = next(s for s in specs if s["id"] == "section-sampler")
+    killed = {"status": "fail", "exit_code": 137, "launch_trace": {"grants_restored": True},
+              "sampler_enabled": True, "launcher_responsive": True,
+              "sampler_kill": {"terminated_job": True, "over_budget": True, "exit_observed": True, "overshoot_bytes": 123, "time_to_kill_ms": 2}}
+    assert evaluate(sampler_spec, section, killed)[0] == "pass"
+    killed["sampler_kill"]["over_budget"] = False
+    assert evaluate(sampler_spec, section, killed)[0] == "fail"
     error = public_result({"response": {"error": "PDFium load failed: C:\\private\\pdfium.dll", "pages": []}}, True)
     assert "PDFium load failed" in error["parser_error_excerpt"]
     assert "private" not in error["parser_error_excerpt"]
