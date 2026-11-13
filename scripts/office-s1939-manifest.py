@@ -42,10 +42,17 @@ def main(a):
     busy = under['preparation']
     phases = {'writer_lookup_busy_ms': 18000, 'lance_append_busy_ms': 12000, 'fts_ms': 25000}
     phase_cases = {k: {'status': 'pass' if busy[k] <= limit else 'fail', 'measured_ms': busy[k], 'maximum_ms': limit} for k, limit in phases.items()}
+    prior_busy = read('search-final/under-search/under-search.json')['preparation']
+    for key, limit in phases.items():
+        phase_cases[key]['prior_measured_ms'] = prior_busy[key]
+        phase_cases[key]['observed_max_ms'] = max(busy[key], prior_busy[key])
+        phase_cases[key]['status'] = 'pass' if max(busy[key], prior_busy[key]) <= limit else 'fail'
     phase_cases['validation_close_promotion_ms'] = {'status': 'pass' if busy['validation_close_ms'] + busy['promotion_ms'] <= 5000 else 'fail',
             'measured_ms': busy['validation_close_ms'] + busy['promotion_ms'], 'maximum_ms': 5000}
     old_owner = control['preparation']['owner_to_ready_ms']
     new_owner = busy['owner_to_ready_ms']
+    previous_loaded = read('search-final/under-search/under-search.json')['preparation']
+    previous_control = read('search-loaded-e4/under-search.json')['preparation']
     historical = {}
     for role, row in prior['items']['3_confinement']['roles'].items():
         failed = row['failed']
@@ -69,7 +76,7 @@ def main(a):
             'scanned_refused': sum(r['scanned'] for r in ordinary), 'raster_mismatches': sum(bool(r.get('differences')) for r in ordinary),
             'hostile_offered': len(hostile), 'hostile_pass': sum(r['status'] == 'pass' for r in hostile), 'cases': rows}
     tests = {}
-    for name in ('fmt', 'python-compile', 'clippy-retry', 'tests-complete'):
+    for name in ('fmt-final', 'python-final', 'clippy-retry', 'tests-complete'):
         file = e / (name + '.exit')
         code = int(file.read_text()) if file.exists() else None
         tests[name] = {'status': 'pass' if code == 0 else 'fail' if code is not None else 'unrun', 'exit_code': code, 'log': name + '.log'}
@@ -89,8 +96,8 @@ def main(a):
              'definition': 'sum writer/lookup, Lance append excluding producer receive wait, FTS and validation/promotion busy durations regardless of overlap; owner-to-ready independently measured',
              'under_25_search': {'preparation': busy, 'phases': phase_cases, 'identities': under['identities'], 'queries': len(under['samples']),
                    'max_search_ms': max(r['latency_ms'] for r in under['samples']), 'status': 'pass' if busy['preparation_busy_ms'] <= 60000 and max(r['latency_ms'] for r in under['samples']) <= 5000 else 'fail',
-                   'peak_process_rss_bytes': peak(search + '/under-search/prepare-under-search.log')},
-             'recovery_owner_no_regression': {'status': 'pass' if new_owner <= old_owner else 'fail', 'same_corpus': True, 'same_25_identity_queries': True,
+                   'peak_process_rss_bytes': peak(search + '/under-search/prepare-under-search.log'), 'baseline_rss_bytes': under['baseline_rss_bytes'], 'incremental_peak_rss_bytes': peak(search + '/under-search/prepare-under-search.log') - under['baseline_rss_bytes'], 'preparation_memory_status': 'pass' if peak(search + '/under-search/prepare-under-search.log') - under['baseline_rss_bytes'] <= 1536*1024*1024 else 'fail'},
+             'recovery_owner_no_regression': {'status': 'pass' if new_owner <= old_owner and previous_loaded['owner_to_ready_ms'] <= previous_control['owner_to_ready_ms'] else 'fail', 'latest_pair_status': 'pass' if new_owner <= old_owner else 'fail', 'prior_pair_delta_ms': previous_loaded['owner_to_ready_ms']-previous_control['owner_to_ready_ms'], 'same_corpus': True, 'same_25_identity_queries': True,
                    'successor_ms': new_owner, 'E4_release_ms': old_owner, 'delta_ms': new_owner-old_owner,
                    'limitation': 'independent runs with shared host load/cache; no statistical guarantee'},
              'full_owner_extraction_embedding_to_ready': status('unrun', 'both controls recover identical already extracted/embedded generations; full owner extraction/embedding not repeated'),
@@ -132,6 +139,7 @@ def main(a):
     (e / 'results-table.md').write_text(table)
     text = '# Office C1 S1939 feasibility rerun\n\n**RETURN_TO_DESIGN; C1 FAIL. No enabled distribution.**\n\n' + table
     text += f"\nRelease preparation uses a streamed typed successor, two batches at most, and separately charged writer/lookup, append, FTS and promotion work. The loaded FTS phase is {busy['fts_ms']/1000:.3f} s against 25 s. Loaded recovery owner-to-ready is {new_owner/1000:.3f} s versus {old_owner/1000:.3f} s for the E4 release control. Full owner extraction/embedding was not rerun.\n"
+    text += f"\nPreserved earlier loaded observation: FTS {prior_busy['fts_ms']/1000:.3f} s; successor owner-to-ready {previous_loaded['owner_to_ready_ms']/1000:.3f} s versus E4 {previous_control['owner_to_ready_ms']/1000:.3f} s. Its phase/no-regression misses remain failures despite the faster repeat.\n"
     text += '\nIngest and render each retain four unproven/failing broker/open-URL rows. All 22 E4 failures per role are accounted for; the five originally lacking controls remain labelled in history. AF_UNIX now has a successful external listener control. Literal socket checks pass before and after closing a supplied descriptor; this does not qualify routed outcome confinement.\n'
     text += '\nEach role compares 60 multilingual office fixtures plus five hostile refusal controls. Fifty ordinary fixtures match; eight non-scanned PDFs change raster bytes and two scans are refused. OCR is blocked: the Tesseract header/link probe fails and all five offline traineddata/license pins are absent. No download or unconfined retry occurs.\n'
     text += '\nThe dedicated memory helper refuses an over-budget dirtyable baseline, but replacing excluded read-only mappings permits touching 2 GiB writable memory. The hard resident requirement remains FAIL. Real ingest/render startup and allocation probes are retained separately; OCR is blocked.\n'
