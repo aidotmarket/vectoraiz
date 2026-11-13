@@ -162,17 +162,20 @@ class ListingPreviewBuildGate(unittest.TestCase):
                            'fn main() { println!("{} {}", process_preview_enabled(), test_switch_on()); }')
             executable = root / ('preview.exe' if os.name == 'nt' else 'preview')
             rtk = ['rtk', 'proxy'] if shutil.which('rtk') else []
-            # The one release-profile switch compile is deliberately exempt
-            # from the shipping feature gate above, just like the smoke probe.
-            subprocess.run([*rtk, 'rustc', str(src), '--cfg', f'feature="{self.feature}"',
-                            '--cfg', 'feature="listing-preview-harness"',
-                            '-C', 'debug-assertions=no', '-O', '-o', str(executable)],
-                           check=True, capture_output=True, text=True)
-            result = subprocess.run([*rtk, str(executable)],
-                                    env=dict(os.environ, VZ_LISTING_PREVIEW_TEST='1'),
-                                    check=True, capture_output=True, text=True)
-            self.assertEqual(result.stdout.strip(), 'false false')
-            self.assertNotIn(b'VZ_LISTING_PREVIEW_TEST', executable.read_bytes())
+            # Exercise both profiles so the release check cannot pass vacuously.
+            for debug in [False, True]:
+                with self.subTest(debug=debug):
+                    subprocess.run([*rtk, 'rustc', str(src), '--cfg', f'feature="{self.feature}"',
+                                    '--cfg', 'feature="listing-preview-harness"',
+                                    '-C', f'debug-assertions={"yes" if debug else "no"}',
+                                    '-O', '-o', str(executable)],
+                                   check=True, capture_output=True, text=True)
+                    result = subprocess.run([*rtk, str(executable)],
+                                            env=dict(os.environ, VZ_LISTING_PREVIEW_TEST='1'),
+                                            check=True, capture_output=True, text=True)
+                    self.assertEqual(result.stdout.strip(), 'true true' if debug else 'false false')
+                    if not debug:
+                        self.assertNotIn(b'VZ_LISTING_PREVIEW_TEST', executable.read_bytes())
 
 
 class ModelTLSFixture(unittest.TestCase):

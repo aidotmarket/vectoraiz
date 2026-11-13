@@ -81,7 +81,7 @@ fn references(bytes: &[u8]) -> Result<(String, BTreeSet<String>)> {
 fn display_text(n: &Node, out: &mut String) {
     // Review inventory presents DrawingML runs joined within each paragraph.
     if n.ns == A && n.local == "p" {
-        out.push_str(&n.string());
+        out.push_str(&graphics::text(n));
         out.push('\n');
         return;
     }
@@ -96,6 +96,7 @@ fn display_text(n: &Node, out: &mut String) {
 pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> String {
     let mut pending = vec![(host.to_owned(), None)];
     let mut visited = BTreeSet::new();
+    let mut cache_models = BTreeMap::new();
     let mut text = String::new();
     while let Some((part, parent)) = pending.pop() {
         if !visited.insert(part.clone()) {
@@ -149,8 +150,13 @@ pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> Stri
                 Some((target, drawing))
             })();
             if let Some((target, drawing)) = cache {
+                let previous_model = cache_models.insert(target.clone(), part.clone());
                 if visited.insert(target) {
                     display_text(&drawing, &mut text);
+                } else if previous_model.is_some_and(|owner| owner != part) {
+                    // A different model consumed this shared cache. A cache
+                    // reached directly still counts as this model's display.
+                    display_text(&root, &mut text);
                 }
             } else {
                 display_text(&root, &mut text);

@@ -28,6 +28,8 @@ struct Args {
 }
 #[derive(Subcommand)]
 enum Operation {
+    /// Report listing preview exposure and managed policy without loading models.
+    ListingStatus,
     /// Rebuild private delivered bytes and inventory; does not accept the review.
     Preview {
         #[arg(long)]
@@ -133,6 +135,10 @@ fn run() -> Result<()> {
     let args = Args::parse();
     let policy = vz_pack::listing_policy::system();
     policy.refresh();
+    if let Operation::ListingStatus = &args.command {
+        println!("{}", serde_json::to_string(&policy.status())?);
+        return Ok(());
+    }
     if let Operation::Preview {
         store,
         source,
@@ -347,7 +353,8 @@ fn run() -> Result<()> {
                 let manifest = vz_pack::write(&args.state, &engines, &output, &query, current.as_ref())?;
                 println!("{}", serde_json::to_string(&manifest)?);
             }
-            Operation::SelfTest
+            Operation::ListingStatus
+            | Operation::SelfTest
             | Operation::Preview { .. }
             | Operation::Review { .. }
             | Operation::Upload { .. }

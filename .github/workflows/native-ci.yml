@@ -235,6 +235,7 @@ jobs:
             installed-ui.log
             installed-self-test.json
             installed-listing-*.json
+            installed-cli-listing.json
             installed-self-test.listing.json
             installed-pipeline.log
             installed-loaded-models.json

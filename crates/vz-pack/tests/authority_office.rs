@@ -2666,6 +2666,8 @@ fn office_graphics_ingest_joins_runs_like_review_inventory() {
         "<c:plotArea>",
         &format!(r#"<c:title><c:tx><c:rich xmlns:a="{A}"><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Multi</a:t></a:r><a:r><a:t>run title</a:t></a:r></a:p><a:p><a:r><a:t>Next paragraph</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea>"#),
     );
+    // Indentation outside a:t must not become paragraph content.
+    let xml = xml.replace("><", ">\n    <");
     parts.insert(path.into(), xml.into_bytes());
     // The listing inventory and ordinary ingest both see this host's chart.
     let host = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
@@ -2728,4 +2730,47 @@ fn office_smartart_ingest_falls_back_to_model_without_usable_cache() {
             assert_eq!(pages[0].text.matches(value).count(), 1, "fallback: {value}");
         }
     }
+}
+
+#[test]
+fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
+    let mut parts = smartart_fixture(false);
+    let model = String::from_utf8(parts["ppt/diagrams/data1.xml"].clone()).unwrap();
+    parts.insert(
+        "ppt/diagrams/data2.xml".into(),
+        model
+            .replace("Visible SmartArt marker", "Second model marker")
+            .replace("Undrawn secret marker", "Second undrawn marker")
+            .into_bytes(),
+    );
+    parts.insert(
+        "ppt/diagrams/_rels/data2.xml.rels".into(),
+        parts["ppt/diagrams/_rels/data1.xml.rels"].clone(),
+    );
+    let host = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    parts.insert("ppt/slides/slide1.xml".into(), host.replace("</p:spTree>", &format!(r#"<dgm:relIds xmlns:dgm="{DGM}" xmlns:r="{R}" r:dm="first"/><dgm:relIds xmlns:dgm="{DGM}" xmlns:r="{R}" r:dm="second"/></p:spTree>"#)).into_bytes());
+    parts.insert("ppt/slides/_rels/slide1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="first" Type="{R}/diagramData" Target="../diagrams/data1.xml"/><Relationship Id="second" Type="{R}/diagramData" Target="../diagrams/data2.xml"/></Relationships>"#).into_bytes());
+    // Pretty-print the drawing cache as well as the chart regression above.
+    let drawing = String::from_utf8(parts["ppt/diagrams/drawing1.xml"].clone()).unwrap();
+    parts.insert(
+        "ppt/diagrams/drawing1.xml".into(),
+        drawing.replace("><", ">\n    <").into_bytes(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared-cache.pptx");
+    std::fs::write(&path, archive(&parts)).unwrap();
+    let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+        path,
+        pdfium: None,
+        office: None,
+    })
+    .unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        pages[0].text.matches("Visible SmartArt marker\n").count(),
+        1
+    );
+    assert_eq!(pages[0].text.matches("Second model marker\n").count(), 1);
+    assert_eq!(pages[0].text.matches("Second undrawn marker\n").count(), 1);
+    assert!(!pages[0].text.contains("Undrawn secret marker"));
 }
