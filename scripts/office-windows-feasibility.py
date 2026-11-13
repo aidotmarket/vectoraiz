@@ -353,6 +353,8 @@ def evaluate(spec, control, confined):
                 return "fail", "missing literal INVALID_SOCKET creation evidence"
         elif creation.get("descriptor_returned") is not True:
             return "unrun", "not exercisable: no socket obtainable by any tested route"
+    if op == "afd" and (positive.get("success") is not True or positive.get("descriptor_returned") is not True):
+        return "unrun", "direct AFD control did not return a successful handle"
     if not positive.get("success"):
         return "unrun", "positive-control API unavailable or unsuccessful; no denial established"
     if op == "memory" and spec["request"]["kind"] in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
@@ -363,7 +365,7 @@ def evaluate(spec, control, confined):
             return "fail", "missing pre-resume working-set job cap readback"
         peak = confined.get("parent_peak_working_set_bytes")
         if not isinstance(peak, int) or peak <= 0 or peak > LIMIT + 4096:
-            return "fail", "parent-read kernel peak working set missing or above cap plus one page"
+            return "fail", f"parent-read kernel peak working set missing or above cap plus one page: peak={peak!r}, ceiling={LIMIT + 4096}"
         sections = [negative]
         if spec["request"]["kind"] == "self-ws":
             attempts = negative.get("attempts", [])
@@ -396,11 +398,13 @@ def evaluate(spec, control, confined):
         return ("pass", "permitted scratch operations succeeded") if negative.get("success") else ("fail", "permitted scratch operations refused")
     if negative.get("success"):
         return "fail", "confined API succeeded"
-    if op == "afd" and positive.get("descriptor_returned") is not True:
-        return "unrun", "direct AFD control did not return a handle"
     if op == "afd" and (negative.get("descriptor_returned") is not False or negative.get("error_code") != 0xC0000022):
         return "fail", "direct AFD creation lacks explicit STATUS_ACCESS_DENIED without handle"
     if not negative.get("explicit_denial"):
+        if op in ("winsock-catalog", "rpc", "dns"):
+            code = negative.get("error_code")
+            literal = f"{code} (0x{code:08X})" if isinstance(code, int) else repr(code)
+            return "fail", f"{negative.get('api')}: {negative.get('error_namespace')} status {literal} is not explicit denial evidence"
         return "fail", "generic or unexplained error is not explicit denial evidence"
     prerequisites = {
         "ReadFile": {"CreateFileW"}, "WriteFile": {"CreateFileW"},
@@ -892,6 +896,21 @@ def self_test():
     assert evaluate(afd_spec, afd_control, afd_denied)[0] == "pass"
     afd_denied["response"]["probe"]["error_code"] = 0xC000000D
     assert evaluate(afd_spec, afd_control, afd_denied)[0] == "fail"
+    assert evaluate(afd_spec, response(success=True, api="NtCreateFile(AFD endpoint)", descriptor_returned=False), afd_denied)[0] == "unrun"
+    assert evaluate(afd_spec, response(success=True, api="NtCreateFile(AFD endpoint)", descriptor_returned=False), afd_control)[0] == "unrun"
+    for op, api, code in (("winsock-catalog", "WSCEnumProtocols", 8),
+                          ("rpc", "RpcBindingFromStringBindingW(ncalrpc epmapper)", 14),
+                          ("dns", "GetAddrInfoW", 10093)):
+        spec = next(s for s in specs if s["id"] == op)
+        control = response(success=True, api=api)
+        failure = response(success=False, api=api, error_code=code,
+                           error_namespace="winsock" if op != "rpc" else "win32", explicit_denial=False)
+        status, reason = evaluate(spec, control, failure)
+        assert status == "fail" and f"{code} (0x{code:08X})" in reason
+        for denied_code in (5, 0x80070005, 0xC0000022):
+            denied = response(success=False, api=api, error_code=denied_code, explicit_denial=True)
+            assert evaluate(spec, control, denied)[0] == "pass"
+            assert evaluate(spec, response(success=False, api=api), denied)[0] == "unrun"
     rpc_spec = next(s for s in specs if s["id"] == "rpc")
     assert "named prerequisite" in evaluate(rpc_spec,
         response(success=True, api="RpcMgmtEpEltInqNextW(ncalrpc epmapper call)"),
@@ -923,6 +942,18 @@ def self_test():
     assert evaluate(section_spec, section, section)[0] == "pass"
     section["parent_peak_working_set_bytes"] += 1
     assert evaluate(section_spec, section, section)[0] == "fail"
+    file_spec = next(s for s in specs if s["id"] == "memory-process-mapping-file")
+    section["response"]["probe"]["scratch_file_size_bytes"] = 2 * 1024 ** 3
+    for peak, expected in ((None, "fail"), (LIMIT + 4096, "pass"), (LIMIT + 8192, "fail")):
+        section["parent_peak_working_set_bytes"] = peak
+        assert public_result(section)["parent_peak_working_set_bytes"] == peak
+        status, reason = evaluate(file_spec, section, section)
+        assert status == expected
+        if status == "fail":
+            assert f"peak={peak!r}" in reason
+    section["response"]["probe"]["scratch_file_size_bytes"] = 0
+    section["parent_peak_working_set_bytes"] = LIMIT
+    assert evaluate(file_spec, section, section)[0] == "fail"
     sampler_spec = next(s for s in specs if s["id"] == "section-sampler")
     killed = {"status": "fail", "exit_code": 137, "launch_trace": {"grants_restored": True},
               "sampler_enabled": True, "launcher_responsive": True,

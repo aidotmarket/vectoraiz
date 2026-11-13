@@ -31,6 +31,19 @@ fn row(api: &str, rc: i64, success: bool, error: u32, namespace: &str) -> Value 
     json!({"api":api,"return_code":rc,"success":success,"error_code":error,
         "error_namespace":namespace,"explicit_denial":!success && explicit})
 }
+// These residual probes can surface Win32, HRESULT or NTSTATUS access denial
+// directly, even through a Winsock API. Keep socket constructor rules separate.
+fn residual_status(api: &str, rc: i64, success: bool, error: u32, namespace: &str) -> Value {
+    let mut result = row(api, rc, success, error, namespace);
+    result["explicit_denial"] = json!(
+        !success
+            && (matches!(error, ERROR_ACCESS_DENIED | 0x80070005 | 0xC0000022)
+                || namespace == "winsock" && error == WSAEACCES as u32)
+    );
+    result["literal_status_hex"] = json!(format!("0x{error:08X}"));
+    result
+}
+
 fn win(api: &str, rc: i64, success: bool) -> Value {
     let error = if success {
         0
@@ -438,7 +451,7 @@ fn dns() -> Value {
     if !address.is_null() {
         unsafe { FreeAddrInfoW(address) };
     }
-    let mut result = row("GetAddrInfoW", rc as i64, rc == 0, rc as u32, "winsock");
+    let mut result = residual_status("GetAddrInfoW", rc as i64, rc == 0, rc as u32, "winsock");
     result["wsa_get_last_error"] = json!(error);
     result["startup"] = winsock.evidence();
     result
@@ -531,7 +544,7 @@ fn winsock_catalog() -> Value {
             let mut buffer: Vec<WSAPROTOCOL_INFOW> = vec![unsafe { zeroed() }; count];
             let rc =
                 unsafe { WSCEnumProtocols(null(), buffer.as_mut_ptr(), &mut length, &mut error) };
-            row(
+            residual_status(
                 "WSCEnumProtocols",
                 rc as i64,
                 rc > 0,
@@ -539,7 +552,7 @@ fn winsock_catalog() -> Value {
                 "winsock",
             )
         } else {
-            row(
+            residual_status(
                 "WSCEnumProtocols",
                 sizing as i64,
                 sizing > 0,
@@ -590,40 +603,49 @@ unsafe extern "system" {
         ea_length: u32,
     ) -> i32;
 }
+// Layout from phnt/include/ntafd.h: six 32-bit fields followed by WCHAR[1]
+// and C tail padding (28 bytes on x64). No transport device name is supplied.
+#[repr(C)]
+struct AfdOpenPacket {
+    endpoint_flags: u32,
+    group_id: u32,
+    address_family: i32,
+    socket_type: i32,
+    protocol: i32,
+    transport_device_name_length: u32,
+    transport_device_name: [u16; 1],
+}
+
+// NtCreateFile requires the EA buffer to be aligned, regardless of the alignment
+// of its individual fields. Zero initialization also covers both tail paddings.
+#[repr(C, align(8))]
+struct AfdOpenEa {
+    next_entry_offset: u32,
+    flags: u8,
+    ea_name_length: u8,
+    ea_value_length: u16,
+    ea_name: [u8; 16],
+    packet: AfdOpenPacket,
+}
+const _: () = {
+    assert!(size_of::<AfdOpenPacket>() == 28);
+    assert!(std::mem::offset_of!(AfdOpenEa, packet) == 24);
+    assert!(std::mem::align_of::<AfdOpenEa>() == 8);
+};
+
 fn afd(v: &Value) -> Result<Value> {
-    let family = v["family"].as_u64().context("AFD family")? as u32;
+    let family = v["family"].as_u64().context("AFD family")? as i32;
     let udp = v["transport"] == "udp";
-    // FILE_FULL_EA_INFORMATION + AfdOpenPacketXX NUL + AFD_OPEN_PACKET.
-    // Layout: phnt/include/ntafd.h (System Informer); no transport name, 28-byte value.
     // This private ABI is validated only by a succeeding same-build control.
-    let mut ea = [0u8; 52];
-    ea[5] = 15;
-    ea[6..8].copy_from_slice(&28u16.to_le_bytes());
-    ea[8..24].copy_from_slice(b"AfdOpenPacketXX\0");
-    for (offset, value) in [
-        (24, if udp { 0x11u32 } else { 0 }),
-        (28, 0),
-        (32, family),
-        (
-            36,
-            if udp {
-                SOCK_DGRAM as u32
-            } else {
-                SOCK_STREAM as u32
-            },
-        ),
-        (
-            40,
-            if udp {
-                IPPROTO_UDP as u32
-            } else {
-                IPPROTO_TCP as u32
-            },
-        ),
-        (44, 0),
-    ] {
-        ea[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
-    }
+    let mut ea: AfdOpenEa = unsafe { zeroed() };
+    ea.ea_name_length = 15;
+    ea.ea_value_length = size_of::<AfdOpenPacket>() as u16;
+    ea.ea_name = *b"AfdOpenPacketXX\0";
+    ea.packet.endpoint_flags = if udp { 0x11 } else { 0 };
+    ea.packet.address_family = family;
+    ea.packet.socket_type = if udp { SOCK_DGRAM } else { SOCK_STREAM };
+    ea.packet.protocol = if udp { IPPROTO_UDP } else { IPPROTO_TCP };
+    let ea_length = std::mem::offset_of!(AfdOpenEa, packet) + size_of::<AfdOpenPacket>();
     let mut name = wide(r"\Device\Afd\Endpoint");
     let mut string = NativeString {
         length: ((name.len() - 1) * 2) as u16,
@@ -654,8 +676,8 @@ fn afd(v: &Value) -> Result<Value> {
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             3,
             0,
-            ea.as_ptr().cast(),
-            ea.len() as u32,
+            (&ea as *const AfdOpenEa).cast(),
+            ea_length as u32,
         )
     };
     let returned = !handle.is_null() && handle != INVALID_HANDLE_VALUE;
@@ -672,7 +694,9 @@ fn afd(v: &Value) -> Result<Value> {
     result["io_status"] = json!(iosb.status);
     result["family"] = json!(family);
     result["transport"] = v["transport"].clone();
-    result["ea_value_bytes"] = json!(28);
+    result["ea_value_bytes"] = json!(ea.ea_value_length);
+    result["ea_buffer_bytes"] = json!(ea_length);
+    result["ea_buffer_alignment"] = json!(std::mem::align_of::<AfdOpenEa>());
     if returned {
         unsafe { CloseHandle(handle) };
     }
@@ -681,7 +705,7 @@ fn afd(v: &Value) -> Result<Value> {
 
 fn rpc_status(api: &str, status: i32) -> Value {
     // RPC_S_ACCESS_DENIED = 5. Unavailable endpoint/protocol errors are not denials.
-    row(api, status as i64, status == 0, status as u32, "win32")
+    residual_status(api, status as i64, status == 0, status as u32, "win32")
 }
 fn rpc() -> Value {
     unsafe {
@@ -1404,4 +1428,52 @@ fn memory(kind: &str, v: &Value) -> Result<Value> {
         result["explicit_denial"] = json!(true);
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn afd_unconfined_controls_return_handles() -> Result<()> {
+        for family in [AF_INET, AF_INET6] {
+            for transport in ["tcp", "udp"] {
+                let result = afd(&json!({"family": family, "transport": transport}))?;
+                assert_eq!(result["success"], true, "{result}");
+                assert_eq!(result["descriptor_returned"], true, "{result}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn residual_denials_preserve_literal_codes_and_socket_rules() {
+        for namespace in ["winsock", "win32"] {
+            for code in [5, 0x80070005, 0xC0000022] {
+                let result = residual_status("probe", -1, false, code, namespace);
+                assert_eq!(result["error_code"], code);
+                assert_eq!(result["literal_status_hex"], format!("0x{code:08X}"));
+                assert_eq!(result["explicit_denial"], true);
+                assert_eq!(
+                    residual_status("probe", 0, true, code, namespace)["explicit_denial"],
+                    false
+                );
+            }
+            // Literal failures from run 43514641441, plus missing endpoint.
+            for code in [8, 14, 10093, 1722] {
+                assert_eq!(
+                    residual_status("probe", -1, false, code, namespace)["explicit_denial"],
+                    false
+                );
+            }
+        }
+        assert_eq!(
+            row("socket", -1, false, 5, "winsock")["explicit_denial"],
+            false
+        );
+        assert_eq!(
+            row("socket", -1, false, WSAEACCES as u32, "winsock")["explicit_denial"],
+            true
+        );
+    }
 }

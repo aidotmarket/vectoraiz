@@ -174,3 +174,21 @@ showed sections escaping job private-commit accounting and completing under a
 working-set cap; run 43491499188 at the Gate 3 base reported 27 pass / 71 fail /
 4 unrun / 6 not-applicable. Fold 7 changes evaluation and adds evidence probes;
 these prior counts do not predict the new result.
+
+Fold 8 preserves the one-page tolerance for every section row, including the
+file-backed view. Failure reasons print the parent-read peak and ceiling. In run
+43514641441 the process-only file view peak was 1,610,620,928 bytes (cap + 8,192),
+so it remains a failure under the cap + 4,096 rule; the peak was present.
+
+The AFD EA uses an explicitly eight-byte-aligned C structure, following the
+[phnt layout](https://github.com/winsiderss/phnt/blob/master/ntafd.h). Its packet value
+is 28 bytes (six 32-bit fields, WCHAR[1], tail padding), starts at byte 24, and
+EaValueLength and the submitted buffer length derive from that layout. Padding
+is zeroed. A successful same-build control returning a handle remains required.
+
+Catalog, RPC and DNS retain numeric return/error codes and a hexadecimal literal
+status. Explicit access denial (5, 0x80070005, 0xC0000022, or Winsock WSAEACCES)
+is accepted only after a successful control and the existing API/prerequisite
+check. Other failures print their codes and stay FAIL. The prior run's catalog
+8, RPC 14 and DNS 10093 are not access denials. Socket creation and shell row
+classification are unchanged. These harness changes make no qualification claim.
