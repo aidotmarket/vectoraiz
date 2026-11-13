@@ -116,6 +116,11 @@ pub async fn prepare_streamed(
     root: &Path,
 ) -> Result<serde_json::Value> {
     let owner = Instant::now();
+    let successor = root.with_extension("pending");
+    anyhow::ensure!(
+        !root.exists() && !successor.exists(),
+        "fresh immutable successor required"
+    );
     let source = source.to_owned();
     let lookup = lookup.to_owned();
     let (sender, receiver) = std::sync::mpsc::sync_channel::<RecordBatch>(0);
@@ -209,7 +214,7 @@ pub async fn prepare_streamed(
         wait_ns: wait_ns.clone(),
     };
     let start = Instant::now();
-    let connection = lancedb::connect(root.to_str().context("UTF-8 root")?)
+    let connection = lancedb::connect(successor.to_str().context("UTF-8 root")?)
         .execute()
         .await?;
     let appended = connection
@@ -237,8 +242,12 @@ pub async fn prepare_streamed(
     drop(table);
     drop(connection);
     let validation_close_ms = start.elapsed().as_secs_f64() * 1000.;
+    let start = Instant::now();
+    std::fs::rename(&successor, root)?;
+    std::fs::File::open(root.parent().context("successor parent")?)?.sync_all()?;
+    let promotion_ms = start.elapsed().as_secs_f64() * 1000.;
     Ok(
-        serde_json::json!({"rows":rows,"writer_lookup_busy_ms":writer_lookup_ms,"lance_append_busy_ms":append_ms,"fts_ms":fts_ms,"validation_close_ms":validation_close_ms,"promotion_ms":null,"preparation_busy_ms":writer_lookup_ms+append_ms+fts_ms+validation_close_ms,"owner_to_ready_ms":owner.elapsed().as_secs_f64()*1000.,"owner_scope":"recovery from E4 extracted/embedded corpus; extraction/embedding not rerun","fts_operation":"initial full text-column scan/build; no vector index for Exact","promotion_status":"unrun: no product publication","batch_rows":BATCH_ROWS,"batch_bytes":BATCH_BYTES,"max_batches_in_flight":2,"profile":"release: whole dependency graph optimized"}),
+        serde_json::json!({"rows":rows,"writer_lookup_busy_ms":writer_lookup_ms,"lance_append_busy_ms":append_ms,"fts_ms":fts_ms,"validation_close_ms":validation_close_ms,"promotion_ms":promotion_ms,"preparation_busy_ms":writer_lookup_ms+append_ms+fts_ms+validation_close_ms+promotion_ms,"owner_to_ready_ms":owner.elapsed().as_secs_f64()*1000.,"owner_scope":"recovery from E4 extracted/embedded corpus; extraction/embedding not rerun","fts_operation":"initial full text-column scan/build; no vector index for Exact","promotion_status":"atomic private successor directory rename; product generation swap remains unrun","batch_rows":BATCH_ROWS,"batch_bytes":BATCH_BYTES,"max_batches_in_flight":2,"fts_num_shards":*lance_index::scalar::inverted::builder::LANCE_FTS_NUM_SHARDS,"fts_partition_mib":*lance_index::scalar::inverted::builder::LANCE_FTS_PARTITION_SIZE,"fts_flush_mib":std::env::var("LANCE_FTS_FLUSH_SIZE").unwrap_or_else(|_|"16".into()),"profile":"release: whole dependency graph optimized"}),
     )
 }
 

@@ -55,6 +55,10 @@ fn s1934_spool() -> Result<()> {
         return Ok(());
     }
     let root = Path::new(&root);
+    anyhow::ensure!(
+        !cfg!(debug_assertions),
+        "measure the whole graph in release"
+    );
     let result = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
@@ -67,6 +71,42 @@ fn s1934_spool() -> Result<()> {
     std::fs::write(
         root.join("preparation.json"),
         serde_json::to_vec_pretty(&result)?,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn s1939_e4_control() -> Result<()> {
+    let Some(root) = std::env::var_os("VZ_S1939_E4_CONTROL") else {
+        return Ok(());
+    };
+    anyhow::ensure!(
+        !cfg!(debug_assertions),
+        "measure the whole graph in release"
+    );
+    let root = Path::new(&root);
+    let owner = Instant::now();
+    let rows = harness::e4_spool(
+        Path::new(&std::env::var_os("VZ_S1934_SOURCE").context("source")?),
+        &root.join("lookup.sqlite"),
+    )?;
+    harness::write_vectors(&root.join("lookup.sqlite"))?;
+    let spool_ms = owner.elapsed().as_secs_f64() * 1000.;
+    let start = Instant::now();
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?
+        .block_on(harness::e4_prepare(
+            &root.join("lookup.sqlite"),
+            &root.join("base"),
+        ))?;
+    let lance_fts_ms = start.elapsed().as_secs_f64() * 1000.;
+    std::fs::write(
+        root.join("preparation.json"),
+        serde_json::to_vec_pretty(
+            &json!({"rows":rows,"spool_ms":spool_ms,"lance_fts_ms":lance_fts_ms,"preparation_busy_ms":spool_ms+lance_fts_ms,"owner_to_ready_ms":owner.elapsed().as_secs_f64()*1000.,"owner_scope":"recovery from same extracted/embedded corpus; not full original owner extraction run","profile":"release"}),
+        )?,
     )?;
     Ok(())
 }
@@ -298,4 +338,29 @@ async fn append_relevance(
         tx.commit()?;
     }
     Ok(())
+}
+
+#[test]
+fn s1939_scifact_exact() -> Result<()> {
+    use std::io::{BufRead, BufReader};
+    let Some(source) = std::env::var_os("VZ_S1939_SCIFACT") else {
+        return Ok(());
+    };
+    let source = Path::new(&source);
+    let root = std::env::var_os("VZ_S1934_ROOT").context("output")?;
+    let root = Path::new(&root);
+    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async {
+        let engine=vz_core::engine::Engines::load_embedding(Path::new(&std::env::var_os("VZ_OFFICE_ASSETS").context("assets")?),Path::new(&std::env::var_os("VZ_OFFICE_PINS").context("pins")?),false)?;
+        let snapshot=Snapshot::open(&source.join("lance"),&source.join("combined.sqlite"),Candidate::Exact,54099).await?;
+        let ids=std::fs::read_to_string(source.join("scifact/qrels/test.tsv"))?.lines().skip(1).filter_map(|l|l.split('\t').next().map(str::to_owned)).collect::<std::collections::HashSet<_>>();
+        let mut rows=Vec::new();
+        for line in BufReader::new(std::fs::File::open(source.join("scifact/queries.jsonl"))?).lines() {
+            let q:serde_json::Value=serde_json::from_str(&line?)?;let id=q["_id"].as_str().context("id")?;if !ids.contains(id) {continue;}
+            let text=q["text"].as_str().context("text")?;let start=Instant::now();let vector=engine.vector(text,true)?;
+            let(hits,phases,_)=snapshot.search(text,&vector,80).await?;let mut seen=std::collections::HashSet::new();
+            rows.push(json!({"id":id,"documents":hits.iter().filter(|h|seen.insert(h.chunk.doc_id.clone())).take(10).map(|h|&h.chunk.doc_id).collect::<Vec<_>>(),"latency_ms":start.elapsed().as_secs_f64()*1000.,"phases":phases}));
+        }
+        anyhow::ensure!(rows.len()==ids.len(),"complete SciFact held-out queries");
+        std::fs::write(root.join("scifact-exact.json"),serde_json::to_vec_pretty(&json!({"rows":rows,"path":"Exact","scope":"read-only E4 combined E3-scale + SciFact index; query code rebuilt in release; extraction/index pins retained","index_rebuilt":false}))?)?;Ok::<_,anyhow::Error>(())
+    })
 }

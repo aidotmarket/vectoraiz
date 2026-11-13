@@ -107,8 +107,13 @@ def main(a):
                 offered[name] = row
             content = {}
             for extension in ('txt', 'md', 'html', 'docx', 'xlsx', 'pdf', 'pdf_scan'):
-                fixture = next((Path(x['path']) for x in inventory if x['format'] == ('pdf' if extension == 'pdf_scan' else extension)
-                                and (extension != 'pdf_scan' or 'scanned' in x['name'])), None)
+                candidates = [Path(x['path']) for x in inventory if x['format'] == ('pdf' if extension == 'pdf_scan' else extension)
+                              and (extension != 'pdf_scan' or 'scanned' in x['name'])]
+                fixture = min(candidates, key=lambda p:p.stat().st_size) if candidates else None
+                if a.fixtures:
+                    draft_candidates = list(a.fixtures.glob('*.' + ('pdf' if extension == 'pdf_scan' else extension)))
+                    draft_candidates = [p for p in draft_candidates if ('scan' in p.name) == (extension == 'pdf_scan')]
+                    if draft_candidates: fixture = min(draft_candidates,key=lambda p:p.stat().st_size)
                 if fixture is None:
                     content[extension] = {'status': 'blocked', 'reason': 'fixture absent'}; continue
                 sb.write_text(w.profile(worker, fixture, pdfium, scratch))
@@ -135,4 +140,5 @@ def main(a):
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     for key in ('evidence', 'target', 'inventory', 'pdfium'): p.add_argument('--' + key, type=Path, required=True)
+    p.add_argument('--fixtures',type=Path)
     main(p.parse_args())

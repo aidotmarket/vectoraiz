@@ -26,18 +26,20 @@ int vz_office_bootstrap(const char *profile) {
         kern_return_t kr=mach_vm_region(mach_task_self(),&address,&size,VM_REGION_BASIC_INFO_64,(vm_region_info_t)&region,&count,&object);
         if(object!=MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),object);
         if(kr!=KERN_SUCCESS || size==0) break;
-        if(region.protection&VM_PROT_WRITE) writable+=size;
+        if(region.max_protection&VM_PROT_WRITE) writable+=size;
         if(address+size<address) break;address+=size;
     }
-    fprintf(stderr,"{\"writable_baseline_virtual_bytes\":%llu,\"resident_budget_proven\":false}\n",writable);
+    fprintf(stderr,"{\"dirtyable_baseline_bytes\":%llu,\"resident_budget_proven\":false}\n",writable);
     struct proc_taskinfo task = {0};
     if (proc_pidinfo(getpid(),PROC_PIDTASKINFO,0,&task,sizeof(task)) != sizeof(task)) return 70;
     uint64_t budget=1536ULL*1024*1024;
-    struct rlimit limit={task.pti_virtual_size+budget,task.pti_virtual_size+budget}, readback={0};
+    uint64_t remaining=writable<budget ? budget-writable:0;
+    struct rlimit limit={task.pti_virtual_size+remaining,task.pti_virtual_size+remaining}, readback={0};
     int rc=setrlimit(RLIMIT_AS,&limit), error=errno;
     if (getrlimit(RLIMIT_AS,&readback)) return 71;
-    fprintf(stderr,"{\"baseline_mapped_bytes\":%llu,\"role_budget_bytes\":%llu,\"requested_limit\":%llu,\"soft\":%llu,\"hard\":%llu,\"set_rc\":%d,\"errno\":%d,\"sampler_enabled\":false}\n",task.pti_virtual_size,budget,limit.rlim_cur,readback.rlim_cur,readback.rlim_max,rc,error);
+    fprintf(stderr,"{\"baseline_mapped_bytes\":%llu,\"role_budget_bytes\":%llu,\"dirtyable_baseline_bytes\":%llu,\"remaining_budget_bytes\":%llu,\"requested_limit\":%llu,\"soft\":%llu,\"hard\":%llu,\"set_rc\":%d,\"errno\":%d,\"sampler_enabled\":false}\n",task.pti_virtual_size,budget,writable,remaining,limit.rlim_cur,readback.rlim_cur,readback.rlim_max,rc,error);
     if (rc || readback.rlim_cur!=limit.rlim_cur || readback.rlim_max!=limit.rlim_max) return 72;
+    if(writable>budget) {fprintf(stderr,"dirtyable baseline exceeds role budget; refuse before input\n");return 77;}
     /* Do not inherit host files/sockets into the confined role. */
     int maxfd=getdtablesize();
     for(int fd=3;fd<maxfd;fd++) if(fd!=supplied_input && fd!=supplied_scratch) close(fd);
