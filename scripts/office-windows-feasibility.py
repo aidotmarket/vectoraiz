@@ -6,6 +6,8 @@ Worker and shell subprocesses run directly; confinement uses Win32 APIs.
 """
 import argparse
 import hashlib
+import http.server
+import secrets
 import importlib.util
 import ipaddress
 import json
@@ -147,6 +149,10 @@ def plan():
             for transport in transports:
                 add(f"socket-{family}-{transport}-{constructor}", op="network", family=FAMILIES[family],
                     transport=transport, operation="create", constructor=constructor)
+                rows[-1]["plain_appcontainer_comparison"] = True
+    for family in ("ipv4", "ipv6"):
+        for transport in ("tcp", "udp"):
+            add(f"afd-{family}-{transport}", op="afd", family=FAMILIES[family], transport=transport)
     for family in ("ipv4", "ipv6"):
         for scope in ("loopback", "lan", "internet"):
             for transport in ("tcp", "udp"):
@@ -158,6 +164,15 @@ def plan():
             operation="multicast", constructor="socket")
     for op in ("dns", "shell", "com", "pipe", "child", "escape", "inherited", "alter-job"):
         add(op, op=op)
+    next(s for s in rows if s["id"] == "shell")["request"]["api_variant"] = "w"
+    for variant in ("ex-no-ui", "ex-ui"):
+        add("shell-" + variant, op="shell", api_variant=variant)
+    for catalog in ("parameters", "protocol", "namespace"):
+        add("winsock-registry-" + catalog, op="winsock-registry", catalog=catalog)
+        rows[-1]["plain_appcontainer_comparison"] = True
+    add("winsock-catalog", op="winsock-catalog")
+    rows[-1]["plain_appcontainer_comparison"] = True
+    add("rpc", op="rpc")
     for scope in ("both", "process", "job"):
         for kind in ("virtual", "mapping", "mapping-reserve", "mapping-file", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
@@ -184,7 +199,7 @@ def initial_manifest():
             "os": platform.system(), "os_build": platform.version(),
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
-            "sampler_enabled": "per-row; section-sampler enabled, all other rows disabled",
+            "sampler_enabled": True, "sampler_scope": "section-sampler only; all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
@@ -227,7 +242,7 @@ def validate_manifest(manifest):
         if row["status"] == "not-applicable":
             probe = planned[row["id"]].get("request", {})
             assert probe.get("op") == "network" and probe.get("transport") == "udp" and probe.get("operation") == "listen"
-        for mode in ("control", "confined"):
+        for mode in ("control", "confined", "plain_appcontainer"):
             result = row.get(mode, {})
             if result.get("stderr_capture_available"):
                 assert isinstance(result.get("stderr_excerpt"), str)
@@ -320,8 +335,13 @@ def evaluate(spec, control, confined):
     positive = before.get("probe", {})
     negative = after.get("probe", {})
     op = spec["request"]["op"]
-    if op == "shell" and (negative.get("success") or negative.get("shell_execute_ex", {}).get("return_code")):
-        return "fail", "confined ShellExecuteW and/or ShellExecuteExW reported success; no explicit broker denial"
+    if op == "shell":
+        if confined.get("shell_listener", {}).get("get_received"):
+            return "fail", "confined shell dispatch reached nonce-correlated local listener"
+        if negative.get("success") or negative.get("shell_execute_ex", {}).get("return_code"):
+            return "fail", "confined ShellExecute API reported success; no explicit broker denial"
+        if not control.get("shell_listener", {}).get("get_received"):
+            return "unrun", "shell control listener did not receive nonce-correlated GET"
     if op == "network":
         creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
         if spec["request"]["operation"] == "create":
@@ -351,6 +371,10 @@ def evaluate(spec, control, confined):
                 return "fail", "missing self-raise/disable attempts"
             if any(not a.get("after", {}).get("available") or "return_code" not in a.get("call", {}) for a in attempts):
                 return "fail", "working-set mutation call or readback missing"
+            if any(a["after"].get("effective_job_cap", {}).get("available") is not True
+                   or a["after"]["effective_job_cap"].get("max_working_set_bytes") != LIMIT
+                   or not a["after"]["effective_job_cap"].get("flags", 0) & 1 for a in attempts):
+                return "fail", "self-mutation effective job cap readback missing or changed"
             sections = [a.get("section", {}) for a in attempts]
         for section in sections:
             if not section.get("touch_completed") and not (section.get("allocation_refused") and section.get("allocation_limit_error")):
@@ -372,11 +396,16 @@ def evaluate(spec, control, confined):
         return ("pass", "permitted scratch operations succeeded") if negative.get("success") else ("fail", "permitted scratch operations refused")
     if negative.get("success"):
         return "fail", "confined API succeeded"
+    if op == "afd" and positive.get("descriptor_returned") is not True:
+        return "unrun", "direct AFD control did not return a handle"
+    if op == "afd" and (negative.get("descriptor_returned") is not False or negative.get("error_code") != 0xC0000022):
+        return "fail", "direct AFD creation lacks explicit STATUS_ACCESS_DENIED without handle"
     if not negative.get("explicit_denial"):
         return "fail", "generic or unexplained error is not explicit denial evidence"
     prerequisites = {
         "ReadFile": {"CreateFileW"}, "WriteFile": {"CreateFileW"},
         "connect+WSAPoll+SO_ERROR": {"connect"},
+        "RpcMgmtEpEltInqNextW(ncalrpc epmapper call)": {"RpcBindingFromStringBindingW(ncalrpc epmapper)", "RpcBindingSetOption(call timeout)", "RpcMgmtEpEltInqBegin(ncalrpc epmapper)"},
         "CoCreateInstance(ShellWindows, LOCAL_SERVER)": {"CoInitializeEx"},
         "SetInformationJobObject(raise process and job limits)": {"OpenJobObjectW(SET_ATTRIBUTES)", "QueryInformationJobObject(worker)"},
     }
@@ -474,6 +503,37 @@ def public_result(result, format_row=False):
     elif response:
         result["response"] = response
     return result
+
+
+class ShellListener:
+    """One nonce and listener per API and mode; public output is boolean/hash only."""
+    def __init__(self, evidence):
+        self.nonce = secrets.token_hex(24)
+        self.received = threading.Event()
+        owner = self
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                with evidence.open("a", encoding="utf-8") as stream:
+                    stream.write(self.requestline + "\n" + str(self.headers) + "\n")
+                if self.path == "/" + owner.nonce:
+                    owner.received.set()
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"C1 synthetic shell control")
+            def log_message(self, *args):
+                pass
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.url = f"http://127.0.0.1:{self.server.server_port}/{self.nonce}"
+    def finish(self):
+        self.received.wait(2)
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(1)
+        return {"get_received": self.received.is_set(), "nonce_sha256": hashlib.sha256(self.nonce.encode()).hexdigest(),
+                "scope": "one API, mode and nonce; absence is not denial evidence"}
 
 
 class Endpoints:
@@ -674,12 +734,19 @@ def run_suite(args):
                     entry["endpoint_scope"] = probe.get("endpoint_scope")
                 if item.get("experiment"):
                     entry["experiment"] = item["experiment"]
-                results = []
-                for mode in ("control", "confined"):
+                results = {}
+                modes = ["confined", "control"] if probe.get("op") == "shell" else ["control", "confined"]
+                if item.get("plain_appcontainer_comparison"):
+                    modes.append("plain_appcontainer")
+                for mode in modes:
                     sentinel.write_bytes(b"C1-private-sentinel\n")
                     scratch = folder / (mode + "-scratch")
                     scratch.mkdir()
+                    listener = None
                     try:
+                        if probe.get("op") == "shell":
+                            listener = ShellListener(folder / (mode + "-http.log"))
+                            probe["url"] = listener.url
                         grants = []
                         if "format" in item:
                             fixture = fixtures[item["format"]]
@@ -694,7 +761,7 @@ def run_suite(args):
                         request_path = folder / (mode + "-request.json")
                         result_path = folder / (mode + "-result.json")
                         request_path.write_text(json.dumps(request), encoding="utf-8")
-                        launch_mode = mode
+                        launch_mode = "confined-plain-appcontainer" if mode == "plain_appcontainer" else mode
                         if mode == "confined" and item.get("memory_scope", "both") != "both":
                             launch_mode += "-" + item["memory_scope"]
                         if mode == "confined" and item.get("experiment"):
@@ -705,9 +772,14 @@ def run_suite(args):
                         result["launcher_exit"] = code
                         if code != 0:
                             result["status"] = "fail"
-                        results.append(result)
+                        if listener:
+                            result["shell_listener"] = listener.finish()
+                            listener = None
+                        results[mode] = result
                         entry[mode] = public_result(result, "format" in item)
                     finally:
+                        if listener:
+                            listener.finish()
                         error = cleanup_scratch(scratch, folder / (mode + "-cleanup.json"))
                         if error is not None:
                             entry["cleanup_error"] = type(error).__name__
@@ -717,14 +789,24 @@ def run_suite(args):
                             except OSError as error:
                                 entry["cleanup_error"] = type(error).__name__
                                 (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
-                status, reason = evaluate(item, *results)
+                if probe.get("op") == "network" and probe.get("operation") != "create":
+                    # Creation routes were all exercised earlier. Never infer a global
+                    # absence from only this operation's constructor.
+                    creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-", "afd-"))]
+                    routes_complete = all(r.get("confined", {}).get("status") == "pass" and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
+                    any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
+                    socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
+                    if not socket_exists and (not routes_complete or any_descriptor):
+                        entry.update(status="unrun", reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
+                        continue
+                status, reason = evaluate(item, results["control"], results["confined"])
                 entry.update(status=status, reason=reason,
-                             control=public_result(results[0], "format" in item),
-                             confined=public_result(results[1], "format" in item))
+                             control=public_result(results["control"], "format" in item),
+                             confined=public_result(results["confined"], "format" in item))
                 if entry.get("cleanup_error"):
                     entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
                 if item.get("format") == "pdf":
-                    entry["diff_summary"] = parser_diff_summary(*results)
+                    entry["diff_summary"] = parser_diff_summary(results["control"], results["confined"])
                 if item.get("memory_scope"):
                     entry["memory_scope"] = item["memory_scope"]
             except Exception as error:
@@ -799,10 +881,28 @@ def self_test():
     constructor = next(row for row in specs if row["id"].startswith("socket-"))
     assert evaluate(constructor, positive, response(success=False, return_code=-1, descriptor_returned=False, error_code=10093))[0] == "fail"
     shell = next(row for row in specs if row["id"] == "shell")
-    assert evaluate(shell, positive, response(success=True, shell_execute_ex={"return_code":1}))[0] == "fail"
+    assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True, shell_execute_ex={"return_code":1}))[0] == "fail"
     com = next(row for row in specs if row["id"] == "com")
     assert "named prerequisite" in evaluate(com, response(success=True, api="CoCreateInstance(ShellWindows, LOCAL_SERVER)"), response(success=False, explicit_denial=True, api="CoInitializeEx"))[1]
     assert evaluate(deny, response(success=True, api="ReadFile"), response(success=False, explicit_denial=True, api="unrelated"))[0] == "fail"
+    afd_spec = next(s for s in specs if s["id"] == "afd-ipv4-tcp")
+    afd_control = response(success=True, api="NtCreateFile(AFD endpoint)", descriptor_returned=True)
+    afd_denied = response(success=False, api="NtCreateFile(AFD endpoint)", descriptor_returned=False,
+                          error_code=0xC0000022, explicit_denial=True)
+    assert evaluate(afd_spec, afd_control, afd_denied)[0] == "pass"
+    afd_denied["response"]["probe"]["error_code"] = 0xC000000D
+    assert evaluate(afd_spec, afd_control, afd_denied)[0] == "fail"
+    rpc_spec = next(s for s in specs if s["id"] == "rpc")
+    assert "named prerequisite" in evaluate(rpc_spec,
+        response(success=True, api="RpcMgmtEpEltInqNextW(ncalrpc epmapper call)"),
+        response(success=False, explicit_denial=True, api="RpcMgmtEpEltInqBegin(ncalrpc epmapper)"))[1]
+    shell_control = response(success=True, api="ShellExecuteW(open URL)")
+    shell_control["shell_listener"] = {"get_received": True}
+    shell_denied = response(success=False, api="ShellExecuteW(open URL)", explicit_denial=True)
+    shell_denied["shell_listener"] = {"get_received": False}
+    assert evaluate(shell, shell_control, shell_denied)[0] == "pass"
+    shell_denied["shell_listener"]["get_received"] = True
+    assert evaluate(shell, shell_control, shell_denied)[0] == "fail"
     memory_spec = next(row for row in specs if row["id"] == "memory-job-virtual")
     memory_control = response(success=True, api="VirtualAlloc", successfully_held_bytes=2 * 1024 ** 3)
     memory_confined = response(success=False, api="VirtualAlloc", explicit_denial=True, allocation_refused=True,
@@ -884,6 +984,20 @@ def self_test():
         validate_manifest(manifest)
         assert all(result["status"] == "fail" for result in manifest["launch_diagnostic"]["variations"])
         assert manifest["launch_diagnostic"]["variations"][0]["launch_trace"]["create_process_error_code"] == 203
+    import urllib.request
+    with tempfile.TemporaryDirectory(prefix="listener-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        listener = ShellListener(folder / "http.log")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(listener.url + "-wrong", timeout=2) as received:
+            assert received.status == 200
+        assert not listener.received.is_set()
+        with opener.open(listener.url, timeout=2) as received:
+            assert received.status == 200
+        observation = listener.finish()
+        assert observation["get_received"] and not listener.thread.is_alive()
+        assert (folder / "http.log").read_text().count("GET /") == 2
+        assert "127.0.0.1" not in json.dumps(observation)
     # Loader closure must exclude unrelated DLLs and follow local imports,
     # including delay-load imports. Full paths stay in private evidence.
     with tempfile.TemporaryDirectory(prefix="loader-self-test-", dir=evidence) as temporary:
@@ -945,7 +1059,9 @@ def self_test():
             if Path(path).name == "control-scratch":
                 raise PermissionError("synthetic retained shell handle")
             return actual_rmtree(path, *args, **kwargs)
+        mode_order = []
         def shell_command(argv, log, timeout=70):
+            mode_order.append(argv[2])
             Path(argv[4]).write_text(json.dumps({"status": "pass", "response": {
                 "probe": {"success": True}}, "shell_launch_observation": {
                     "launch_ruled_out": False, "new_processes": [],
@@ -967,6 +1083,7 @@ def self_test():
             observed = json.loads((run_args.out / "manifest.json").read_text())
             row = observed["rows"][0]
             assert row["cleanup_error"] == "PermissionError" and row["status"] == "fail"
+            assert mode_order == ["confined", "control"]
             cleanup = json.loads((run_args.out / "shell/control-cleanup.json").read_text())
             assert cleanup["removed"] is False and len(cleanup["failures"]) == 5
             assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False

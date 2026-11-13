@@ -14,7 +14,8 @@ use windows_sys::{
         Networking::WinSock::*,
         Storage::FileSystem::*,
         System::{
-            Com::*, JobObjects::*, Memory::*, ProcessStatus::*, SystemInformation::*, Threading::*,
+            Com::*, JobObjects::*, Memory::*, ProcessStatus::*, Registry::*, Rpc::*,
+            SystemInformation::*, Threading::*,
         },
         UI::{Shell::*, WindowsAndMessaging::*},
     },
@@ -57,7 +58,12 @@ pub fn run(v: &Value) -> Result<Value> {
         "read" | "metadata" | "write" | "create" | "rename" | "delete" | "list" => files(v, op)?,
         "network" => network(v)?,
         "dns" => dns(),
-        "shell" | "com" | "pipe" => broker(op),
+        "shell" => shell(v)?,
+        "com" | "pipe" => broker(op),
+        "winsock-registry" => winsock_registry(v)?,
+        "winsock-catalog" => winsock_catalog(),
+        "afd" => afd(v)?,
+        "rpc" => rpc(),
         "child" | "escape" => child(op == "escape")?,
         "inherited" => inherited(v)?,
         "memory" => memory(arg(v, "kind")?, v)?,
@@ -248,6 +254,10 @@ fn network(v: &Value) -> Result<Value> {
         }
         return Ok(creation);
     }
+    if socket == INVALID_SOCKET {
+        return Ok(json!({"api":operation,"api_executed":false,"success":false,
+            "explicit_denial":false,"socket_creation":creation}));
+    }
     let socket = Socket(socket);
     let mut nonblocking = 1;
     let nonblocking_rc = unsafe { ioctlsocket(socket.0, FIONBIO, &mut nonblocking) };
@@ -434,40 +444,295 @@ fn dns() -> Value {
     result
 }
 
+fn shell(v: &Value) -> Result<Value> {
+    let url = wide(arg(v, "url")?);
+    let verb = wide("open");
+    unsafe {
+        if v["api_variant"] == "w" {
+            let rc = ShellExecuteW(
+                null_mut(),
+                verb.as_ptr(),
+                url.as_ptr(),
+                null(),
+                null(),
+                SW_HIDE,
+            ) as isize;
+            let mut result = row(
+                "ShellExecuteW(open URL)",
+                rc as i64,
+                rc > 32,
+                if rc > 32 { 0 } else { rc as u32 },
+                "shell",
+            );
+            result["explicit_denial"] = json!(rc == SE_ERR_ACCESSDENIED as isize);
+            return Ok(result);
+        }
+        let no_ui = v["api_variant"] == "ex-no-ui";
+        let mut ex: SHELLEXECUTEINFOW = zeroed();
+        ex.cbSize = size_of_val(&ex) as u32;
+        ex.fMask = SEE_MASK_NOCLOSEPROCESS
+            | SEE_MASK_NOASYNC
+            | if no_ui { SEE_MASK_FLAG_NO_UI } else { 0 };
+        ex.lpVerb = verb.as_ptr();
+        ex.lpFile = url.as_ptr();
+        ex.nShow = SW_HIDE;
+        SetLastError(0);
+        let called = ShellExecuteExW(&mut ex);
+        let error = if called != 0 { 0 } else { GetLastError() };
+        let mut result = row(
+            "ShellExecuteExW(SEE_MASK_NOASYNC)",
+            called as i64,
+            called != 0,
+            error,
+            "win32",
+        );
+        result["flag_no_ui"] = json!(no_ui);
+        result["process_handle_returned"] = json!(!ex.hProcess.is_null());
+        if !ex.hProcess.is_null() {
+            CloseHandle(ex.hProcess);
+        }
+        Ok(result)
+    }
+}
+
+fn winsock_registry(v: &Value) -> Result<Value> {
+    let suffix = match arg(v, "catalog")? {
+        "parameters" => "",
+        "protocol" => r"\Protocol_Catalog9",
+        "namespace" => r"\NameSpace_Catalog5",
+        _ => bail!("unknown catalog"),
+    };
+    let path = wide(format!(
+        r"SYSTEM\CurrentControlSet\Services\WinSock2\Parameters{suffix}"
+    ));
+    let mut key = null_mut();
+    let status = unsafe { RegOpenKeyExW(HKEY_LOCAL_MACHINE, path.as_ptr(), 0, KEY_READ, &mut key) };
+    let mut result = row(
+        "RegOpenKeyExW(Winsock catalog)",
+        status as i64,
+        status == 0,
+        status,
+        "win32",
+    );
+    if status == 0 {
+        unsafe { RegCloseKey(key) };
+    }
+    result["catalog"] = v["catalog"].clone();
+    result["startup"] = Winsock::new().evidence();
+    Ok(result)
+}
+fn winsock_catalog() -> Value {
+    let (mut length, mut error) = (0, 0);
+    let sizing = unsafe { WSCEnumProtocols(null(), null_mut(), &mut length, &mut error) };
+    let sizing_error = error;
+    let mut result =
+        if sizing == SOCKET_ERROR && error == WSAENOBUFS && length > 0 && length <= 1024 * 1024 {
+            let count = (length as usize).div_ceil(size_of::<WSAPROTOCOL_INFOW>());
+            let mut buffer: Vec<WSAPROTOCOL_INFOW> = vec![unsafe { zeroed() }; count];
+            let rc =
+                unsafe { WSCEnumProtocols(null(), buffer.as_mut_ptr(), &mut length, &mut error) };
+            row(
+                "WSCEnumProtocols",
+                rc as i64,
+                rc > 0,
+                if rc >= 0 { 0 } else { error as u32 },
+                "winsock",
+            )
+        } else {
+            row(
+                "WSCEnumProtocols",
+                sizing as i64,
+                sizing > 0,
+                error as u32,
+                "winsock",
+            )
+        };
+    result["sizing_return"] = json!(sizing);
+    result["sizing_error"] = json!(sizing_error);
+    result["buffer_bytes"] = json!(length);
+    result["startup"] = Winsock::new().evidence();
+    result
+}
+
+#[repr(C)]
+struct NativeString {
+    length: u16,
+    maximum_length: u16,
+    buffer: *mut u16,
+}
+#[repr(C)]
+struct ObjectAttributes {
+    length: u32,
+    root: HANDLE,
+    name: *mut NativeString,
+    attributes: u32,
+    security_descriptor: *mut std::ffi::c_void,
+    security_quality: *mut std::ffi::c_void,
+}
+#[repr(C)]
+struct IoStatus {
+    status: usize,
+    information: usize,
+}
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtCreateFile(
+        handle: *mut HANDLE,
+        access: u32,
+        attributes: *mut ObjectAttributes,
+        iosb: *mut IoStatus,
+        allocation: *const i64,
+        file_attributes: u32,
+        share: u32,
+        disposition: u32,
+        options: u32,
+        ea: *const std::ffi::c_void,
+        ea_length: u32,
+    ) -> i32;
+}
+fn afd(v: &Value) -> Result<Value> {
+    let family = v["family"].as_u64().context("AFD family")? as u32;
+    let udp = v["transport"] == "udp";
+    // FILE_FULL_EA_INFORMATION + AfdOpenPacketXX NUL + AFD_OPEN_PACKET.
+    // Layout: phnt/include/ntafd.h (System Informer); no transport name, 28-byte value.
+    // This private ABI is validated only by a succeeding same-build control.
+    let mut ea = [0u8; 52];
+    ea[5] = 15;
+    ea[6..8].copy_from_slice(&28u16.to_le_bytes());
+    ea[8..24].copy_from_slice(b"AfdOpenPacketXX\0");
+    for (offset, value) in [
+        (24, if udp { 0x11u32 } else { 0 }),
+        (28, 0),
+        (32, family),
+        (
+            36,
+            if udp {
+                SOCK_DGRAM as u32
+            } else {
+                SOCK_STREAM as u32
+            },
+        ),
+        (
+            40,
+            if udp {
+                IPPROTO_UDP as u32
+            } else {
+                IPPROTO_TCP as u32
+            },
+        ),
+        (44, 0),
+    ] {
+        ea[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    let mut name = wide(r"\Device\Afd\Endpoint");
+    let mut string = NativeString {
+        length: ((name.len() - 1) * 2) as u16,
+        maximum_length: (name.len() * 2) as u16,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut attributes = ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root: null_mut(),
+        name: &mut string,
+        attributes: 0x40,
+        security_descriptor: null_mut(),
+        security_quality: null_mut(),
+    };
+    let mut iosb = IoStatus {
+        status: 0,
+        information: 0,
+    };
+    let mut handle = null_mut();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            GENERIC_READ | GENERIC_WRITE | 0x00100000,
+            &mut attributes,
+            &mut iosb,
+            null(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            3,
+            0,
+            ea.as_ptr().cast(),
+            ea.len() as u32,
+        )
+    };
+    let returned = !handle.is_null() && handle != INVALID_HANDLE_VALUE;
+    let success = status >= 0 && returned;
+    let mut result = row(
+        "NtCreateFile(AFD endpoint)",
+        status as i64,
+        success,
+        status as u32,
+        "ntstatus",
+    );
+    result["explicit_denial"] = json!(status as u32 == 0xC0000022 && !returned);
+    result["descriptor_returned"] = json!(returned);
+    result["io_status"] = json!(iosb.status);
+    result["family"] = json!(family);
+    result["transport"] = v["transport"].clone();
+    result["ea_value_bytes"] = json!(28);
+    if returned {
+        unsafe { CloseHandle(handle) };
+    }
+    Ok(result)
+}
+
+fn rpc_status(api: &str, status: i32) -> Value {
+    // RPC_S_ACCESS_DENIED = 5. Unavailable endpoint/protocol errors are not denials.
+    row(api, status as i64, status == 0, status as u32, "win32")
+}
+fn rpc() -> Value {
+    unsafe {
+        let mut binding = null_mut();
+        let rc = RpcBindingFromStringBindingW(wide("ncalrpc:[epmapper]").as_ptr(), &mut binding);
+        let mut stages = vec![rpc_status(
+            "RpcBindingFromStringBindingW(ncalrpc epmapper)",
+            rc,
+        )];
+        if rc != 0 {
+            return stages.remove(0);
+        }
+        let timeout = RpcBindingSetOption(binding, RPC_C_OPT_CALL_TIMEOUT, 3000);
+        stages.push(rpc_status("RpcBindingSetOption(call timeout)", timeout));
+        if timeout != 0 {
+            RpcBindingFree(&mut binding);
+            return stages.pop().unwrap();
+        }
+        let mut inquiry = null_mut();
+        let rc = RpcMgmtEpEltInqBegin(
+            binding,
+            RPC_C_EP_ALL_ELTS,
+            null(),
+            RPC_C_VERS_ALL,
+            null(),
+            &mut inquiry,
+        );
+        let mut result = rpc_status("RpcMgmtEpEltInqBegin(ncalrpc epmapper)", rc);
+        stages.push(result.clone());
+        if rc == 0 {
+            let mut interface: RPC_IF_ID = zeroed();
+            let rc = RpcMgmtEpEltInqNextW(
+                inquiry as _,
+                &mut interface,
+                null_mut(),
+                null_mut(),
+                null_mut(),
+            );
+            result = rpc_status("RpcMgmtEpEltInqNextW(ncalrpc epmapper call)", rc);
+            result["inquiry_cleanup_status"] = json!(RpcMgmtEpEltInqDone(&mut inquiry));
+        }
+        result["binding_cleanup_status"] = json!(RpcBindingFree(&mut binding));
+        result["stages"] = json!(stages);
+        result
+    }
+}
+
 fn broker(op: &str) -> Value {
     unsafe {
         SetLastError(0);
         match op {
-            "shell" => {
-                let rc = ShellExecuteW(
-                    null_mut(),
-                    wide("open").as_ptr(),
-                    wide("https://example.com").as_ptr(),
-                    null(),
-                    null(),
-                    SW_HIDE,
-                ) as isize;
-                let mut result = win("ShellExecuteW(open URL)", rc as i64, rc > 32);
-                result["explicit_denial"] = json!(rc == SE_ERR_ACCESSDENIED as isize);
-                let verb = wide("open");
-                let url = wide("https://example.com");
-                let mut ex: SHELLEXECUTEINFOW = zeroed();
-                ex.cbSize = size_of_val(&ex) as u32;
-                ex.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
-                ex.lpVerb = verb.as_ptr();
-                ex.lpFile = url.as_ptr();
-                ex.nShow = SW_HIDE;
-                SetLastError(0);
-                let called = ShellExecuteExW(&mut ex);
-                let error = if called != 0 { 0 } else { GetLastError() };
-                result["shell_execute_ex"] = json!({"return_code":called,
-                    "error_code":error,"hprocess":ex.hProcess as usize,
-                    "process_id":if ex.hProcess.is_null() {0} else {GetProcessId(ex.hProcess)}});
-                if !ex.hProcess.is_null() {
-                    CloseHandle(ex.hProcess);
-                }
-                result
-            }
             "pipe" => {
                 let handle = CreateFileW(
                     wide(r"\\.\pipe\lsarpc").as_ptr(),
@@ -590,6 +855,13 @@ struct HandleEntry {
 }
 #[link(name = "ntdll")]
 unsafe extern "system" {
+    fn NtQueryObject(
+        handle: HANDLE,
+        class: u32,
+        info: *mut std::ffi::c_void,
+        len: u32,
+        returned: *mut u32,
+    ) -> i32;
     fn NtQueryInformationProcess(
         process: HANDLE,
         class: u32,
@@ -637,7 +909,35 @@ fn inherited(v: &Value) -> Result<Value> {
         unsafe { std::slice::from_raw_parts(storage.as_ptr().add(2).cast::<HandleEntry>(), count) };
     let present = entries.iter().any(|entry| entry.handle == handle);
     // Only query a handle confirmed present in our own table. Never ReadFile on a raw value.
-    let identity = if present {
+    let mut object_type = None;
+    if present {
+        let mut buffer = vec![0usize; 512];
+        let mut returned = 0;
+        let status = unsafe {
+            NtQueryObject(
+                handle,
+                2,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * size_of::<usize>()) as u32,
+                &mut returned,
+            )
+        };
+        if status >= 0 {
+            let name = unsafe { &*buffer.as_ptr().cast::<NativeString>() };
+            let begin = buffer.as_ptr() as usize;
+            let end = begin + buffer.len() * size_of::<usize>();
+            let pointer = name.buffer as usize;
+            if pointer >= begin
+                && pointer.saturating_add(name.length as usize) <= end
+                && name.length % 2 == 0
+            {
+                object_type = Some(String::from_utf16_lossy(unsafe {
+                    std::slice::from_raw_parts(name.buffer, name.length as usize / 2)
+                }));
+            }
+        }
+    }
+    let identity = if object_type.as_deref() == Some("File") {
         file_identity(handle).ok()
     } else {
         None
@@ -647,7 +947,7 @@ fn inherited(v: &Value) -> Result<Value> {
         .is_some_and(|id| *id == v["attack_identity"]);
     Ok(
         json!({"api":"NtQueryInformationProcess(ProcessHandleInformation)","success":present && matches,
-        "enumeration_succeeded":true,"ntstatus":status as u32,"present":present,"identity":identity,"identity_match":matches}),
+        "enumeration_succeeded":true,"ntstatus":status as u32,"present":present,"object_type":object_type,"identity":identity,"identity_match":matches}),
     )
 }
 
@@ -751,6 +1051,7 @@ fn memory_snapshot() -> Value {
         json!({"process":process,
             "job":{"available":j != 0,"error_code":je,
                 "flags":job.BasicLimitInformation.LimitFlags,"active_process_limit":job.BasicLimitInformation.ActiveProcessLimit,
+                "max_working_set_bytes":job.BasicLimitInformation.MaximumWorkingSetSize,
                 "peak_process_commit_bytes":job.PeakProcessMemoryUsed,"peak_job_commit_bytes":job.PeakJobMemoryUsed},
             "accounting":{"available":a != 0,"error_code":ae,"active_processes":accounting.ActiveProcesses,
                 "total_processes":accounting.TotalProcesses,"terminated_processes":accounting.TotalTerminatedProcesses,
@@ -783,7 +1084,8 @@ fn working_set_readback() -> Value {
     let (mut min, mut max, mut flags) = (0, 0, 0);
     let rc =
         unsafe { GetProcessWorkingSetSizeEx(GetCurrentProcess(), &mut min, &mut max, &mut flags) };
-    json!({"available":rc != 0,"minimum_bytes":min,"maximum_bytes":max,"flags":flags})
+    json!({"available":rc != 0,"minimum_bytes":min,"maximum_bytes":max,"flags":flags,
+        "effective_job_cap":memory_snapshot()["job"]})
 }
 fn working_set_mutation(v: &Value) -> Result<Value> {
     let mut attempts = Vec::new();

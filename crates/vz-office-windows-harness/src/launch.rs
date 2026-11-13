@@ -677,7 +677,10 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             ),
         "invalid diagnostic"
     );
-    let lpac = mode != "diagnostic-plain-appcontainer";
+    let lpac = !matches!(
+        mode,
+        "diagnostic-plain-appcontainer" | "confined-plain-appcontainer"
+    );
     let worker = std::fs::canonicalize(&args[0])?;
     let confined = match args[1].to_str() {
         Some(
@@ -687,7 +690,8 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             | "confined-job-ws"
             | "confined-hard-ws"
             | "confined-notification"
-            | "confined-sampler",
+            | "confined-sampler"
+            | "confined-plain-appcontainer",
         ) => true,
         Some("control") => false,
         _ if diagnostic => true,
@@ -1346,7 +1350,14 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             stderr_excerpt = stderr_excerpt.replace(path.as_ref(), "<redacted-path>");
         }
     }
-    for key in ["sentinel", "directory", "created", "scratch", "address"] {
+    for key in [
+        "sentinel",
+        "directory",
+        "created",
+        "scratch",
+        "address",
+        "url",
+    ] {
         if let Some(path) = value["office_windows_probe"][key].as_str() {
             if !path.is_empty() {
                 stderr_excerpt = stderr_excerpt.replace(path, "<redacted>");
