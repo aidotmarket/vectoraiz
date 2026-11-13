@@ -13,7 +13,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 anyhow = "1"
 
 [features]
-office-feasibility = ["vz-core/office-feasibility"]
+office-feasibility = ["vz-core/office-feasibility", "dep:vz-office-windows-harness", "vz-office-windows-harness/office-feasibility"]
+
+[target.'cfg(windows)'.dependencies]
+vz-office-windows-harness = { path = "../vz-office-windows-harness", optional = true }
 
 [[bin]]
 name = "vz-office-worker"

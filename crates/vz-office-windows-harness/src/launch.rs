@@ -191,14 +191,17 @@ impl Attributes {
         })
     }
     fn set<T>(&self, key: u32, value: &T) -> Result<()> {
+        self.set_bytes(key, value as *const T as *const c_void, size_of::<T>())
+    }
+    fn set_bytes(&self, key: u32, value: *const c_void, bytes: usize) -> Result<()> {
         check(
             unsafe {
                 UpdateProcThreadAttribute(
                     self.ptr,
                     0,
                     key as usize,
-                    value as *const T as *const c_void,
-                    size_of::<T>(),
+                    value,
+                    bytes,
                     null_mut(),
                     null(),
                 )
@@ -331,10 +334,7 @@ fn token_readback(process: HANDLE) -> Result<Value> {
     }
     let mut bytes = 0;
     unsafe { GetTokenInformation(token.0, TokenCapabilities, null_mut(), 0, &mut bytes) };
-    ensure!(
-        bytes >= size_of::<TOKEN_GROUPS>() as u32,
-        "TokenCapabilities size"
-    );
+    ensure!(bytes >= size_of::<u32>() as u32, "TokenCapabilities size");
     let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
     check(
         unsafe {
@@ -348,7 +348,7 @@ fn token_readback(process: HANDLE) -> Result<Value> {
         },
         "TokenCapabilities",
     )?;
-    let count = unsafe { (*(buffer.as_ptr() as *const TOKEN_GROUPS)).GroupCount };
+    let count = unsafe { *(buffer.as_ptr() as *const u32) };
     ensure!(count == 0, "effective token has capabilities={count}");
     Ok(json!({"appcontainer":fields[0],"lpac":fields[1],"capability_count":count}))
 }
@@ -374,7 +374,7 @@ pub fn main() -> Result<()> {
 fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     let worker = std::fs::canonicalize(&args[0])?;
     let confined = match args[1].to_str() {
-        Some("confined") => true,
+        Some("confined" | "confined-process" | "confined-job") => true,
         Some("control") => false,
         _ => bail!("invalid mode"),
     };
@@ -428,13 +428,28 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     )?;
     // Probe request is JSON, ordinary parser requests keep their wire shape.
     let mut value: Value = serde_json::from_slice(&request)?;
+    let job_name = format!(
+        "Local\\vectoraiz-C1-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    );
     if let Some(probe) = value.get_mut("office_windows_probe") {
         probe["attack_handle"] = json!(attack.as_raw_handle() as usize);
+        probe["job_name"] = json!(job_name);
     }
     let request = serde_json::to_vec(&value)?;
-    let handles = [child_stdin.0, child_stdout.0, child_stderr.0];
+    let mut handles = vec![child_stdin.0, child_stdout.0, child_stderr.0];
+    if !confined {
+        handles.push(attack.as_raw_handle());
+    }
     let attributes = Attributes::new(if confined { 3 } else { 1 })?;
-    attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, &handles)?;
+    attributes.set_bytes(
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+        handles.as_ptr().cast(),
+        size_of_val(handles.as_slice()),
+    )?;
     let mut caps: SECURITY_CAPABILITIES = unsafe { zeroed() };
     let opt_out: u32 = 1; // PROCESS_CREATION_ALL_APPLICATION_PACKAGES_OPT_OUT
     if let Some(profile) = &profile {
@@ -443,21 +458,39 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         // ProcThreadAttributeValue(15, FALSE, TRUE, FALSE), SDK macro not exported by windows-sys.
         attributes.set(0x0002_000f, &opt_out)?;
     }
-    let job = if confined {
-        let handle = Handle(unsafe { CreateJobObjectW(null(), null()) });
+    let job = {
+        let handle = Handle(unsafe { CreateJobObjectW(null(), wide(&job_name).as_ptr()) });
         ensure!(
             !handle.0.is_null(),
             "CreateJobObjectW: {}",
             std::io::Error::last_os_error()
         );
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_PROCESS_MEMORY
-            | JOB_OBJECT_LIMIT_JOB_MEMORY
-            | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-            | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-        info.BasicLimitInformation.ActiveProcessLimit = 1;
-        info.ProcessMemoryLimit = MEMORY;
-        info.JobMemoryLimit = MEMORY;
+        info.BasicLimitInformation.LimitFlags = if confined {
+            JOB_OBJECT_LIMIT_PROCESS_MEMORY
+                | JOB_OBJECT_LIMIT_JOB_MEMORY
+                | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_ACTIVE_PROCESS
+        } else {
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        };
+        info.BasicLimitInformation.ActiveProcessLimit = if confined { 1 } else { 0 };
+        // Independent diagnostics retain the LPAC and process-count restriction.
+        // Only the non-tested ceiling is loosened; ordinary runs retain both 1.5 GiB limits.
+        info.ProcessMemoryLimit = if args[1] == "confined-job" {
+            MEMORY * 2
+        } else if confined {
+            MEMORY
+        } else {
+            0
+        };
+        info.JobMemoryLimit = if args[1] == "confined-process" {
+            MEMORY * 2
+        } else if confined {
+            MEMORY
+        } else {
+            0
+        };
         check(
             unsafe {
                 SetInformationJobObject(
@@ -472,14 +505,13 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         let got = limits(handle.0)?;
         ensure!(
             got.BasicLimitInformation.LimitFlags == info.BasicLimitInformation.LimitFlags
-                && got.BasicLimitInformation.ActiveProcessLimit == 1
-                && got.ProcessMemoryLimit == MEMORY
-                && got.JobMemoryLimit == MEMORY,
+                && got.BasicLimitInformation.ActiveProcessLimit
+                    == info.BasicLimitInformation.ActiveProcessLimit
+                && got.ProcessMemoryLimit == info.ProcessMemoryLimit
+                && got.JobMemoryLimit == info.JobMemoryLimit,
             "job limit readback mismatch"
         );
         Some(handle)
-    } else {
-        None
     };
     let before = job
         .as_ref()
@@ -647,7 +679,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     }
     Ok(
         json!({"status":if exit == 0 && !timed_out && response.is_some() {"pass"} else {"fail"},
-        "mode":if confined {"confined"} else {"control"},"exit_code":exit,"deadline_kill":timed_out,
+        "mode":args[1].to_string_lossy(),"exit_code":exit,"deadline_kill":timed_out,
         "elapsed_ms":start.elapsed().as_millis(),"job_before_resume":before,"job_after":after,
         "token_before_resume":token,"sampler_enabled":false,"memory_counters_available":counters_ok,
         "working_set_bytes":if counters_ok {Some(counters.WorkingSetSize)} else {None},

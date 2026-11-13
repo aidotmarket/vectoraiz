@@ -11098,6 +11098,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vz-core",
+ "vz-office-windows-harness",
 ]
 
 [[package]]
