@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 1_610_612_736
@@ -38,6 +39,98 @@ def command(argv, log, timeout=70):
         except subprocess.TimeoutExpired:
             stream.write(b"\nHARNESS SUBPROCESS DEADLINE EXCEEDED\n")
             return 124
+
+
+def loader_files(worker, pdfium, out):
+    """Exact local loader closure; system DLL ACLs are never changed.
+
+    MSVC dumpbin reports normal and delay-load dependencies. Keep its full output
+    private and fail closed if dependency inspection fails.
+    """
+    worker = worker.resolve(strict=True)
+    if pdfium:
+        source = pdfium.resolve(strict=True)
+        target = worker.parent / "pdfium.dll"
+        if target.exists():
+            if digest(target) != digest(source):
+                raise RuntimeError("worker directory contains a different PDFium DLL")
+        else:
+            shutil.copyfile(source, target)
+        pdfium = target.resolve(strict=True)
+    siblings = {p.name.lower(): p for p in worker.parent.iterdir()
+                if p.is_file() and p.suffix.lower() == ".dll"}
+    pending = [worker]
+    inspected = set()
+    dlls = set()
+    common = None
+    while pending or common is None:
+        if not pending:
+            common = sorted(dlls)
+            if pdfium:
+                pending.append(pdfium)
+            else:
+                break
+        image = pending.pop()
+        if image in inspected:
+            continue
+        inspected.add(image)
+        if image != worker:
+            if image.parent != worker.parent:
+                raise RuntimeError("loader grant escapes worker directory")
+            dlls.add(image)
+        log = out / ("loader-" + str(len(inspected)) + ".log")
+        if command(["dumpbin", "/nologo", "/dependents", image], log) != 0:
+            raise RuntimeError("DLL dependency inspection failed")
+        output = log.read_text(encoding="utf-8", errors="replace")
+        if not any(kind in output for kind in ("File Type: EXECUTABLE IMAGE", "File Type: DLL")):
+            raise RuntimeError("unrecognized DLL dependency inspection output")
+        dependencies = False
+        for line in output.splitlines():
+            name = line.strip()
+            if name.startswith("Image has the following") and name.endswith("dependencies:"):
+                dependencies = True
+            if dependencies and line.startswith("    ") and name.lower().endswith(".dll"):
+                if Path(name).name != name or "/" in name or "\\" in name:
+                    raise RuntimeError("unexpected DLL dependency path")
+                sibling = siblings.get(name.lower())
+                if sibling:
+                    pending.append(sibling.resolve(strict=True))
+    paths = sorted(dlls)
+    records = [{"path": str(p), "sha256": digest(p), "access": "read-execute"}
+               for p in [worker, *paths]]
+    (out / "loader-grants.json").write_text(json.dumps(records, indent=2), encoding="utf-8")
+    return pdfium, common, paths, [{"file": Path(r["path"]).name, "sha256": r["sha256"],
+                            "access": r["access"]} for r in records]
+
+
+def cleanup_scratch(path, evidence):
+    """Retry retained shell handles for at most 3.75 seconds; keep every failure.
+
+    Windows supplies the blocked filename and error code, but not the owning
+    handle. Do not infer ownership or kill unrelated shell handler processes.
+    """
+    failures = []
+    for attempt, delay in enumerate((0, 0.25, 0.5, 1, 2), 1):
+        if delay:
+            time.sleep(delay)
+        try:
+            shutil.rmtree(path)
+            error = None
+            break
+        except OSError as caught:
+            if isinstance(caught, FileNotFoundError) and not path.exists():
+                error = None
+                break
+            error = caught
+            failures.append({"attempt": attempt, "error": type(caught).__name__,
+                             "message": str(caught), "filename": caught.filename,
+                             "filename2": caught.filename2,
+                             "winerror": getattr(caught, "winerror", None),
+                             "handle_owner": "unavailable from filesystem error"})
+    if failures:
+        evidence.write_text(json.dumps({"removed": error is None, "failures": failures}, indent=2),
+                            encoding="utf-8")
+    return error
 
 
 def plan():
@@ -421,7 +514,7 @@ def launch_diagnostic(args, out, manifest, save):
         result_path = folder / (variation + ".json")
         try:
             code = command([args.launcher.resolve(), args.worker.resolve(), "diagnostic-" + variation,
-                            request, result_path, scratch, attack], folder / (variation + ".log"))
+                            request, result_path, scratch, attack, *getattr(args, "loader_dlls", [])], folder / (variation + ".log"))
             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {
                 "status": "fail", "reason": "launcher produced no diagnostic result"}
             result.update(variation=variation, launcher_exit=code)
@@ -472,6 +565,8 @@ def run_suite(args):
                 manifest["source_sha"] = (out / "source-sha.log").read_text().strip()
         if args.pdfium:
             manifest["pdfium_sha256"] = digest(args.pdfium)
+        args.pdfium, args.loader_dlls, args.pdfium_dlls, manifest["loader_grants"] = loader_files(
+            args.worker, args.pdfium, out)
         # First runtime experiment, before any positive control or confined probe.
         launch_diagnostic(args, out, manifest, save)
         spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
@@ -513,13 +608,12 @@ def run_suite(args):
                             fixture = fixtures[item["format"]]
                             request = {"path": str(fixture), "pdfium": str(args.pdfium.resolve()) if args.pdfium else None}
                             grants = [fixture]
-                            if item["format"] == "pdf":
-                                grants.append(args.pdfium.resolve())
                             entry["fixture_sha256"] = digest(fixture)
                         else:
                             probe.update(sentinel=str(sentinel), directory=str(sentinel_root),
                                          created=str(sentinel_root / "created.txt"), scratch=str(scratch))
                             request = {"office_windows_probe": probe}
+                        grants.extend(args.pdfium_dlls if item.get("format") == "pdf" else args.loader_dlls)
                         request_path = folder / (mode + "-request.json")
                         result_path = folder / (mode + "-result.json")
                         request_path.write_text(json.dumps(request), encoding="utf-8")
@@ -537,12 +631,9 @@ def run_suite(args):
                         results.append(result)
                         entry[mode] = public_result(result, "format" in item)
                     finally:
-                        try:
-                            shutil.rmtree(scratch)
-                        except OSError as error:
-                            # Shell handlers may retain a handle; preserve completed observations.
+                        error = cleanup_scratch(scratch, folder / (mode + "-cleanup.json"))
+                        if error is not None:
                             entry["cleanup_error"] = type(error).__name__
-                            (folder / (mode + "-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
                         for changed in (sentinel_root / "created.txt", sentinel_root / "host.txt.renamed"):
                             try:
                                 changed.unlink(missing_ok=True)
@@ -696,6 +787,56 @@ def self_test():
         validate_manifest(manifest)
         assert all(result["status"] == "fail" for result in manifest["launch_diagnostic"]["variations"])
         assert manifest["launch_diagnostic"]["variations"][0]["launch_trace"]["create_process_error_code"] == 203
+    # Loader closure must exclude unrelated DLLs and follow local imports,
+    # including delay-load imports. Full paths stay in private evidence.
+    with tempfile.TemporaryDirectory(prefix="loader-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        binary = folder / "worker.exe"
+        source = folder / "assets"
+        source.mkdir()
+        pdfium = source / "pdfium.dll"
+        for path in (binary, pdfium, folder / "runtime.dll", folder / "delay.dll", folder / "unrelated.dll"):
+            path.write_bytes(path.name.encode())
+        def imports(argv, log):
+            names = {"worker.exe": ["KERNEL32.dll", "runtime.dll"],
+                     "runtime.dll": ["delay.dll"], "delay.dll": [],
+                     "pdfium.dll": ["runtime.dll"]}[Path(argv[-1]).name]
+            log.write_text("Dump of file " + str(argv[-1]) +
+                           ("\nFile Type: DLL" if Path(argv[-1]).suffix == ".dll" else "\nFile Type: EXECUTABLE IMAGE") +
+                           "\n  Image has the following dependencies:\n" +
+                           "".join("    " + name + "\n" for name in names), encoding="utf-8")
+            return 0
+        with patch(__name__ + ".command", side_effect=imports):
+            staged, common, all_dlls, public = loader_files(binary, pdfium, folder)
+        assert staged == folder / "pdfium.dll" and digest(staged) == digest(pdfium)
+        assert {p.name for p in common} == {"runtime.dll", "delay.dll"}
+        assert {p.name for p in all_dlls} == {"runtime.dll", "delay.dll", "pdfium.dll"}
+        assert str(folder) not in json.dumps(public)
+        assert str(folder) in (folder / "loader-grants.json").read_text()
+        with patch(__name__ + ".command", return_value=1):
+            try:
+                loader_files(binary, pdfium, folder)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("failed dependency inspection accepted")
+        scratch = folder / "scratch"
+        scratch.mkdir()
+        blocked = scratch / "retained.txt"
+        blocked.write_text("synthetic")
+        actual_rmtree = shutil.rmtree
+        calls = []
+        def transient(path):
+            calls.append(path)
+            if len(calls) < 3:
+                raise PermissionError(13, "retained handle", str(blocked))
+            actual_rmtree(path)
+        with patch.object(shutil, "rmtree", side_effect=transient), patch.object(time, "sleep") as sleep:
+            assert cleanup_scratch(scratch, folder / "cleanup.json") is None
+        cleanup = json.loads((folder / "cleanup.json").read_text())
+        assert cleanup["removed"] and len(cleanup["failures"]) == 2 and len(calls) == 3
+        assert cleanup["failures"][0]["filename"] == str(blocked)
+        assert sleep.call_count == 2
     # Regression: cleanup PermissionError must retain both shell observations.
     with tempfile.TemporaryDirectory(prefix="shell-cleanup-self-test-", dir=evidence) as temporary:
         folder = outside(Path(temporary))
@@ -715,6 +856,8 @@ def self_test():
         fake_endpoints = SimpleNamespace(configure=lambda probe: None, close=lambda: None)
         with patch(__name__ + ".plan", return_value=[shell]), \
              patch(__name__ + ".launch_diagnostic"), \
+             patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+             patch.object(time, "sleep"), \
              patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
              patch(__name__ + ".command", side_effect=shell_command), \
              patch.object(sys, "platform", "win32"), \
@@ -726,6 +869,8 @@ def self_test():
             observed = json.loads((run_args.out / "manifest.json").read_text())
             row = observed["rows"][0]
             assert row["cleanup_error"] == "PermissionError" and row["status"] == "fail"
+            cleanup = json.loads((run_args.out / "shell/control-cleanup.json").read_text())
+            assert cleanup["removed"] is False and len(cleanup["failures"]) == 5
             assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False
                        for mode in ("control", "confined"))
             validate_manifest(observed)

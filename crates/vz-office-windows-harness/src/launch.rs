@@ -730,7 +730,21 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         for input in &args[6..] {
             let path = std::fs::canonicalize(input)?;
             ensure!(path.is_file(), "exact regular file grants only");
-            grants.push(Grant::new(&path, profile.sid, FILE_GENERIC_READ, 0)?);
+            let dll = path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("dll"));
+            if dll {
+                ensure!(
+                    path.parent() == worker.parent(),
+                    "DLL grant outside worker directory"
+                );
+            }
+            grants.push(Grant::new(
+                &path,
+                profile.sid,
+                FILE_GENERIC_READ | if dll { FILE_GENERIC_EXECUTE } else { 0 },
+                0,
+            )?);
         }
     }
     let (stdin, child_stdin) = pipe(false)?;
@@ -928,6 +942,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     trace["environment_inherited"] = json!(mode == "diagnostic-null-environment");
     trace["current_directory_null"] = json!(mode == "diagnostic-null-directory");
     let directory = wide(&scratch);
+    trace["detached_process"] = json!(true);
     let created = unsafe {
         CreateProcessW(
             application.as_ptr(),
@@ -938,7 +953,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             CREATE_SUSPENDED
                 | EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_UNICODE_ENVIRONMENT
-                | CREATE_NO_WINDOW,
+                | DETACHED_PROCESS,
             if mode == "diagnostic-null-environment" {
                 null()
             } else {
@@ -1011,6 +1026,16 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     };
     let job_members_before = job.as_ref().map(|j| job_members(j.0));
     let mut observed_job_members = job_members_before.clone();
+    ensure!(
+        job_members_before.as_ref().is_some_and(|members| {
+            members["available"] == true
+                && members["assigned_processes"] == 1
+                && members["members"]
+                    .as_array()
+                    .is_some_and(|rows| rows.len() == 1 && rows[0]["pid"] == process.dwProcessId)
+        }),
+        "detached worker must be the only job member before resume"
+    );
     let token = if confined {
         Some(token_readback(
             process_handle.0,
@@ -1039,6 +1064,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         for grant in grants.iter_mut().rev() {
             grant.restore()?;
         }
+        trace["grants_restored"] = json!(true);
         if let Some(profile) = &mut profile {
             profile.remove()?;
         }
@@ -1296,12 +1322,14 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     for grant in grants.iter_mut().rev() {
         grant.restore()?;
     }
+    trace["grants_restored"] = json!(true);
     // Profile deletion is explicit so cleanup failure cannot turn into a pass.
     if let Some(profile) = &mut profile {
         profile.remove()?;
     }
     Ok(
-        json!({"status":if exit == 0 && !timed_out && !capture_overflow && write_error.is_none() && response.is_some() {"pass"} else {"fail"},
+        json!({"status":if exit == 0 && !timed_out && !capture_overflow && write_error.is_none() && response.is_some()
+            && (!confined || observed_job_members.as_ref().is_some_and(|m| m["available"] == true && m["assigned_processes"] == 1)) {"pass"} else {"fail"},
         "mode":args[1].to_string_lossy(),"exit_code":exit,"deadline_kill":timed_out,
         "elapsed_ms":start.elapsed().as_millis(),"job_before_resume":before,"job_after":after,
         "token_before_resume":token,"working_set_cap_before_resume":working_set_cap,
