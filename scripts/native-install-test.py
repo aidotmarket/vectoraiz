@@ -116,24 +116,43 @@ try:
         # A per-machine app cannot write WebView2's default profile next to its
         # executable in Program Files. Match Tauri's user-scoped production profile.
         env['WEBVIEW2_USER_DATA_FOLDER'] = str(data / 'webview2')
-        step('Launch installed WebView self-test (120s report deadline)')
-        ui_log = Path('installed-ui.log').resolve().open('w')
-        child = subprocess.Popen([str(binary), '--smoke-test', '--cpu'], cwd=cwd, env=env,
-                                 stdout=ui_log, stderr=subprocess.STDOUT)
-        try:
-            deadline = time.monotonic() + 120
-            while not report.exists() and time.monotonic() < deadline and child.poll() is None:
-                time.sleep(0.5)
-            assert report.is_file(), 'Installed WebView self-test did not return a report'
-            step('Self-test report received')
-            result = json.loads(report.read_text())
-            assert result['status'] == 'OK', result
-            assert child.wait(timeout=20) == 0
-        finally:
-            if child.poll() is None:
-                child.kill()
-                child.wait(timeout=10)
-            ui_log.close()
+        # Close every existing desktop before each launch: the single-instance
+        # plugin would otherwise focus it without inheriting this environment.
+        for enabled in [False, True]:
+            if windows:
+                subprocess.run(['taskkill.exe', '/F', '/IM', 'vectoraiz.exe'], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(['pkill', '-x', 'vectoraiz'], check=False)
+            launch_env = dict(env)
+            launch_env.pop('VZ_LISTING_PREVIEW_TEST', None)
+            if enabled:
+                launch_env['VZ_LISTING_PREVIEW_TEST'] = '1'
+            probe = report.with_suffix('.listing.json')
+            report.unlink(missing_ok=True)
+            probe.unlink(missing_ok=True)
+            step(f'Launch installed desktop listing probe: switch={enabled}')
+            with Path(f'installed-ui-{enabled}.log').resolve().open('w') as ui_log:
+                child = subprocess.Popen([str(binary), '--smoke-test', '--cpu'], cwd=cwd,
+                                         env=launch_env, stdout=ui_log, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 120
+                    while not report.exists() and time.monotonic() < deadline and child.poll() is None:
+                        time.sleep(0.5)
+                    assert report.is_file(), 'Installed WebView self-test did not return a report'
+                    result = json.loads(report.read_text())
+                    assert result['status'] == 'OK', result
+                    assert child.wait(timeout=20) == 0
+                    evidence = json.loads(probe.read_text())
+                    assert evidence['status']['listing_authority_preview_v1'] is enabled, evidence
+                    assert evidence['status']['test_switch_on'] is enabled, evidence
+                    marker = 'Test switch on — listing review preview' if enabled else None
+                    assert evidence['marker'] == marker, evidence
+                    Path(f'installed-listing-{enabled}.json').write_text(json.dumps(evidence, indent=2))
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=10)
     # Acquisition and pipeline run while the installed binary still exists.
     # Budgets: install 240s + self-test 140s + acquisition 900s + pipeline 300s
     # + startup 30s + single-instance 180s + uninstall 120s < CI step 35 minutes.

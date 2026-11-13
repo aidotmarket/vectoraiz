@@ -71,6 +71,102 @@ class DefaultPinsFold(unittest.TestCase):
         self.assertIn('build --debug --ci --features smoke-test,custom-protocol', workflow)
 
 
+class ListingPreviewBuildGate(unittest.TestCase):
+    feature = 'listing-preview-test-switch'
+
+    def check_inputs(self, root):
+        allowed = []
+        for path in [*root.glob('.github/workflows/*'), *root.glob('scripts/**/*')]:
+            if not path.is_file() or path.suffix not in {'.yml', '.yaml', '.py', '.sh', '.ps1', '.js', '.mjs'}:
+                continue
+            if path == root / 'scripts/native-build-tests.py':
+                continue
+            for line in path.read_text().splitlines():
+                if self.feature not in line:
+                    continue
+                self.assertEqual(path, root / '.github/workflows/native-ci.yml', str(path))
+                prefix = 'run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol,'
+                self.assertTrue(line.strip().startswith(prefix + self.feature + ' --bundles '), line)
+                self.assertIn('--config src-tauri/gen/stage1.conf.json', line)
+                self.assertIn('--debug', line.split())
+                allowed.append(line.split('--bundles ')[1].split()[0])
+        self.assertCountEqual(allowed, ['app', 'msi'])
+        for path in root.rglob('Cargo.toml'):
+            if any(part in {'target', 'node_modules'} for part in path.parts):
+                continue
+            features = tomllib.loads(path.read_text()).get('features', {})
+            def defaults_enable(name, visited):
+                if self.feature in name:
+                    return True
+                if name in visited:
+                    return False
+                return any(defaults_enable(child, visited | {name}) for child in features.get(name, []))
+            self.assertFalse(defaults_enable('default', set()), str(path))
+            if self.feature in features:
+                self.assertIn(path.relative_to(root).as_posix(), ['crates/vz-pack/Cargo.toml', 'app/src-tauri/Cargo.toml'])
+            for name, values in features.items():
+                if any(self.feature in value for value in values):
+                    self.assertEqual(path, root / 'app/src-tauri/Cargo.toml')
+                    self.assertEqual(name, self.feature)
+            for dependency in tomllib.loads(path.read_text()).get('dependencies', {}).values():
+                if isinstance(dependency, dict):
+                    self.assertFalse(any(self.feature in value for value in dependency.get('features', [])), str(path))
+        for name in ['tauri.conf.json', 'tauri.stage1.conf.json', 'gen/stage1.conf.json']:
+            path = root / 'app/src-tauri' / name
+            if path.exists():
+                self.assertNotIn(self.feature, path.read_text(), str(path))
+
+    def test_switch_only_in_two_debug_stage1_commands(self):
+        self.check_inputs(version.ROOT)
+
+    def test_gate_rejects_other_workflow_script_default_config_and_missing_debug(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ['.github/workflows', 'scripts']:
+                (root / name).mkdir(parents=True)
+            workflow = root / '.github/workflows/native-ci.yml'
+            original = (version.ROOT / '.github/workflows/native-ci.yml').read_text()
+            workflow.write_text(original)
+            self.check_inputs(root)
+            for name, text in [
+                ('.github/workflows/other.yml', f'run: cargo build --features {self.feature}'),
+                ('scripts/accidental.py', f'features = "{self.feature}"'),
+                ('crates/accidental/Cargo.toml', f'[features]\ndefault = ["indirect"]\nindirect = ["{self.feature}"]'),
+                ('app/src-tauri/gen/stage1.conf.json', json.dumps({'build': {'features': [self.feature]}})),
+            ]:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                with self.subTest(name=name), self.assertRaises(AssertionError):
+                    self.check_inputs(root)
+                path.unlink()
+            workflow.write_text(original.replace('build --debug --ci --features smoke-test', 'build --ci --features smoke-test'))
+            with self.assertRaises(AssertionError):
+                self.check_inputs(root)
+
+    def test_release_profile_compiles_out_listing_switch(self):
+        source = (version.ROOT / 'crates/vz-pack/src/listing_policy.rs').read_text()
+        functions = source[source.index('pub fn preview_enabled('):source.index('#[derive')]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            src = root / 'preview.rs'
+            src.write_text('use std::sync::OnceLock;\n' + functions +
+                           'fn main() { println!("{} {}", process_preview_enabled(), test_switch_on()); }')
+            executable = root / ('preview.exe' if os.name == 'nt' else 'preview')
+            rtk = ['rtk', 'proxy'] if shutil.which('rtk') else []
+            # The one release-profile switch compile is deliberately exempt
+            # from the shipping feature gate above, just like the smoke probe.
+            subprocess.run([*rtk, 'rustc', str(src), '--cfg', f'feature="{self.feature}"',
+                            '--cfg', 'feature="listing-preview-harness"',
+                            '-C', 'debug-assertions=no', '-O', '-o', str(executable)],
+                           check=True, capture_output=True, text=True)
+            result = subprocess.run([*rtk, str(executable)],
+                                    env=dict(os.environ, VZ_LISTING_PREVIEW_TEST='1'),
+                                    check=True, capture_output=True, text=True)
+            self.assertEqual(result.stdout.strip(), 'false false')
+            self.assertNotIn(b'VZ_LISTING_PREVIEW_TEST', executable.read_bytes())
+
+
 class ModelTLSFixture(unittest.TestCase):
     def test_loopback_bind_does_not_resolve_dns(self):
         spec = importlib.util.spec_from_file_location('model_fixture', Path(__file__).with_name('models-test-server.py'))

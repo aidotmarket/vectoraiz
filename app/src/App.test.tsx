@@ -2344,6 +2344,6 @@ it("keeps the test switch marker visible across desktop views, including managed
 it("omits the test switch marker when the switch is off", async () => {
   mockListing();
   render(<App />);
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_status"));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_status", undefined));
   expect(screen.queryByText("Test switch on — listing review preview")).not.toBeInTheDocument();
 });

@@ -157,11 +157,11 @@ jobs:
       - name: Package ad-hoc macOS app (no updater signing key)
         if: runner.os == 'macOS'
         working-directory: app
-        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol --bundles app --config src-tauri/gen/stage1.conf.json
+        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol,listing-preview-test-switch --bundles app --config src-tauri/gen/stage1.conf.json
       - name: Package unsigned per-machine Windows MSI
         if: runner.os == 'Windows'
         working-directory: app
-        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol --bundles msi --config src-tauri/gen/stage1.conf.json
+        run: npm run tauri -- build --debug --ci --features smoke-test,custom-protocol,listing-preview-test-switch --bundles msi --config src-tauri/gen/stage1.conf.json
       - name: Collect installers and unsigned update archives
         run: python scripts/native-package.py collect
       - uses: actions/upload-artifact@v4

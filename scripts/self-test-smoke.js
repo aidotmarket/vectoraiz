@@ -9,6 +9,12 @@
     }
   };
   await report('self-test: started');
+  const status = await window.__TAURI_INTERNALS__.invoke('listing_status');
+  const marker = 'Test switch on — listing review preview';
+  if (status.test_switch_on) await wait(() => document.body.textContent.includes(marker));
+  await report('listing-probe:' + JSON.stringify({
+    status, marker: document.body.textContent.includes(marker) ? marker : null,
+  }));
   await wait(() => document.querySelector('nav a[href="#settings"]'));
   document.querySelector('nav a[href="#settings"]').click();
   await wait(() => document.querySelector('nav a[href="#settings"]').getAttribute('aria-current') === 'page'
