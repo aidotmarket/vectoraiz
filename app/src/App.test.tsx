@@ -2326,3 +2326,24 @@ it("fails closed when listing availability cannot be read", async () => {
   expect(await screen.findByText("Listing availability could not be checked. Try reopening Settings.")).toBeInTheDocument();
   expect(screen.queryByRole("button", {name: "Prepare listing"})).not.toBeInTheDocument();
 });
+
+
+it("keeps the test switch marker visible across desktop views, including managed denial", async () => {
+  invoke.mockImplementation(async (command: string) => command === "listing_status"
+    ? {listing_authority_preview_v1: true, test_switch_on: true, code: "POLICY_DENIED", reason: "Denied"}
+    : {available: false});
+  render(<App />);
+  expect(await screen.findByText("Test switch on — listing review preview")).toBeInTheDocument();
+  at("Settings");
+  expect(screen.getByText("Test switch on — listing review preview")).toBeInTheDocument();
+  expect(screen.queryByRole("button", {name: "Review what your buyer receives"})).not.toBeInTheDocument();
+  at("Ask");
+  expect(screen.getByText("Test switch on — listing review preview")).toBeInTheDocument();
+});
+
+it("omits the test switch marker when the switch is off", async () => {
+  mockListing();
+  render(<App />);
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_status"));
+  expect(screen.queryByText("Test switch on — listing review preview")).not.toBeInTheDocument();
+});

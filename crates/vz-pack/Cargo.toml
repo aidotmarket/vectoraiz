@@ -9,6 +9,8 @@ publish.workspace = true
 default = []
 # Enabled solely by scripts/pipeline-e2e.py's explicit acceptance build.
 listing-preview-harness = []
+# Opt-in exposure for debug desktop Stage 1 bundles only.
+listing-preview-test-switch = []
 
 [dependencies]
 vz-core.workspace = true
