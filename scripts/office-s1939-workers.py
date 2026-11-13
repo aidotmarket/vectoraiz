@@ -111,6 +111,14 @@ def main(a):
                         passed = positive[name]['positive_control_succeeded'] and probe.get('xpc_error') is True and probe.get('endpoint_lookup_error') == 1100 and row['exit_code'] == 0
                         row['status'] = 'pass' if passed else 'fail'
                         row['denial_semantics'] = 'generic XPC error plus same-process kernel denial of identical endpoint; XPC error alone does not pass'
+                    elif name == 'open_url':
+                        passed = (positive[name]['positive_control_succeeded']
+                                  and probe.get('explicit_launch_denial') is True
+                                  and row['exit_code'] == 0 and not row['deadline_kill'])
+                        row['status'] = 'pass' if passed else 'fail'
+                        row['denial_semantics'] = 'require explicit LaunchServices permission-denial OSStatus; generic errno or incorrect-format OSStatus never passes'
+                        if not passed:
+                            row['reason'] = 'unproven: positive control absent or no explicit launch-denial OSStatus; see raw probe'
                     elif not positive[name]['positive_control_succeeded'] or not passed:
                         row['status'] = 'fail'
                         row['reason'] = 'unproven: error without positive control or explicit denial'

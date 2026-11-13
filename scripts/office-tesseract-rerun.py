@@ -82,6 +82,10 @@ def main(a):
             result['roles'][role] = rows
             (root / 'ocr.json').write_text(json.dumps(result, indent=2) + '\n')
             print(role, name, row['status'], flush=True)
+    if a.content_only:
+        result['memory'] = {'status': 'NOT RERUN; prior failure unchanged; content-only follow-up'}
+        (root / 'ocr.json').write_text(json.dumps(result, indent=2) + '\n')
+        return
     # Real initialized OCR executable, pre-input limits, no sampler.
     for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty'):
         result['memory'][kind] = w.execute([helper, sb, 'memory', assets, kind, scratch / kind], root, 'memory-' + kind)
@@ -100,4 +104,5 @@ if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     for key in ('evidence', 'assets', 'worker', 'pdfium', 'drafts'):
         p.add_argument('--' + key, type=Path, required=True)
+    p.add_argument('--content-only', action='store_true', help='rerun affected raster/OCR content without memory probes')
     main(p.parse_args())
