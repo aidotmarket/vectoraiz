@@ -17,7 +17,7 @@ fn validate_bytes(bytes: &[u8]) -> Result<zip::ZipArchive<std::io::Cursor<&[u8]>
     Ok(archive)
 }
 pub fn parse(ext: &str, bytes: &[u8]) -> Result<Vec<Page>> {
-    match ext.as_str() {
+    match ext {
         "txt" | "md" | "markdown" => Ok(vec![page(1, String::from_utf8(bytes.to_vec())?)]),
         "html" | "htm" => {
             let html = scraper::Html::parse_document(&String::from_utf8(bytes.to_vec())?);
