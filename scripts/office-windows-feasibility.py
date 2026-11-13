@@ -811,8 +811,9 @@ def self_test():
         assert staged == folder / "pdfium.dll" and digest(staged) == digest(pdfium)
         assert {p.name for p in common} == {"runtime.dll", "delay.dll"}
         assert {p.name for p in all_dlls} == {"runtime.dll", "delay.dll", "pdfium.dll"}
-        assert str(folder) not in json.dumps(public)
-        assert str(folder) in (folder / "loader-grants.json").read_text()
+        assert all(set(record) == {"file", "sha256", "access"} for record in public)
+        private = json.loads((folder / "loader-grants.json").read_text())
+        assert all(Path(record["path"]).parent == folder for record in private)
         with patch(__name__ + ".command", return_value=1):
             try:
                 loader_files(binary, pdfium, folder)
