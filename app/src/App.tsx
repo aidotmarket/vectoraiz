@@ -214,13 +214,14 @@ export default function App() {
     }
   }, [view, models, cloud, appClients]);
   const [listingReason, setListingReason] = useState("Listing availability could not be checked. Try reopening Settings.");
+  const [listingTestSwitch, setListingTestSwitch] = useState(false);
   const [listingPreview, setListingPreview] = useState(false);
   const [showListingReview, setShowListingReview] = useState(false);
   useEffect(() => {
-    if (view !== "Settings") return;
     let active = true;
     const refresh = () => {
-      void invoke<{reason: string; listing_authority_preview_v1?: boolean; code?: string}>("listing_status").then(status => {
+      void invoke<{reason: string; listing_authority_preview_v1?: boolean; test_switch_on?: boolean; code?: string}>("listing_status").then(status => {
+        if (active) setListingTestSwitch(status?.test_switch_on === true);
         if (active) setListingPreview(status?.listing_authority_preview_v1 === true && status.code === "REVIEW_REQUIRED");
         if (active) setListingReason(typeof status?.reason === "string" ? status.reason : "Listing is unavailable.");
       }).catch(() => { if (active) {setListingPreview(false); setListingReason("Listing availability could not be checked. Try reopening Settings.");} });
@@ -535,6 +536,7 @@ export default function App() {
       <footer>Version {version}</footer>
     </aside>
     <main className="content">
+      {listingTestSwitch && <div className="listing-test-switch" role="status">Test switch on — listing review preview</div>}
       <aside aria-label="Updates" aria-live="polite">
       {availableVersion && <div className="update-banner card">
         <p>vectorAIz {availableVersion} is available</p>

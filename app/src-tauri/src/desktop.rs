@@ -121,6 +121,12 @@ fn self_test<R: tauri::Runtime>(
     #[cfg(feature = "smoke-test")]
     if smoke_test_requested() {
         if let Some(checkpoint) = checkpoint {
+            if let Some(probe) = checkpoint.strip_prefix("listing-probe:") {
+                if let Some(report) = std::env::var_os("VZ_INSTALLED_SELF_TEST_REPORT") {
+                    let path = std::path::PathBuf::from(report).with_extension("listing.json");
+                    std::fs::write(path, probe).expect("installed desktop listing probe");
+                }
+            }
             if let Some(control) = std::env::var_os("VZ_A9_CONTROL_DIR") {
                 let control = std::path::PathBuf::from(control);
                 if let Some(id) = checkpoint.strip_prefix("m3-a9-ready:") {

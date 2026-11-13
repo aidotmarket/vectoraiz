@@ -6,10 +6,50 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio_util::sync::CancellationToken;
 
-/// Exposure flag. No environment variable or user preference can enable this
-/// journey. Search, index and answers do not consult it.
-pub const LISTING_AUTHORITY_PREVIEW_V1: bool =
-    cfg!(all(feature = "listing-preview-harness", debug_assertions));
+/// Preview exposure is compiled for the acceptance harness or opted into in a
+/// debug desktop test build. Search, index and answers do not consult it.
+pub fn preview_enabled(
+    harness_compiled: bool,
+    switch_compiled: bool,
+    debug_assertions: bool,
+    var: Option<&std::ffi::OsStr>,
+) -> bool {
+    debug_assertions
+        && (harness_compiled || (switch_compiled && var == Some(std::ffi::OsStr::new("1"))))
+}
+
+fn process_preview_state() -> (bool, bool) {
+    static ENABLED: OnceLock<(bool, bool)> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        #[cfg(all(feature = "listing-preview-test-switch", debug_assertions))]
+        let var = std::env::var_os("VZ_LISTING_PREVIEW_TEST");
+        #[cfg(not(all(feature = "listing-preview-test-switch", debug_assertions)))]
+        let var: Option<std::ffi::OsString> = None;
+        let switch_on = preview_enabled(
+            false,
+            cfg!(feature = "listing-preview-test-switch"),
+            cfg!(debug_assertions),
+            var.as_deref(),
+        );
+        (
+            preview_enabled(
+                cfg!(feature = "listing-preview-harness"),
+                cfg!(feature = "listing-preview-test-switch"),
+                cfg!(debug_assertions),
+                var.as_deref(),
+            ),
+            switch_on,
+        )
+    })
+}
+
+pub fn process_preview_enabled() -> bool {
+    process_preview_state().0
+}
+
+pub fn test_switch_on() -> bool {
+    process_preview_state().1
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -52,6 +92,7 @@ impl std::error::Error for ListingError {}
 #[derive(Clone, Debug, Serialize)]
 pub struct ListingStatus {
     pub listing_authority_preview_v1: bool,
+    pub test_switch_on: bool,
     pub managed_policy: ManagedPolicy,
     pub policy_generation: u64,
     pub available: bool,
@@ -143,7 +184,7 @@ impl ListingPolicy {
     }
 
     pub fn status(&self) -> ListingStatus {
-        self.status_for_flag(LISTING_AUTHORITY_PREVIEW_V1)
+        self.status_for_flag(process_preview_enabled())
     }
 
     fn status_for_flag(&self, enabled: bool) -> ListingStatus {
@@ -157,6 +198,7 @@ impl ListingPolicy {
         };
         ListingStatus {
             listing_authority_preview_v1: enabled,
+            test_switch_on: test_switch_on(),
             managed_policy: state.value,
             policy_generation: state.generation,
             available: false,
@@ -172,8 +214,12 @@ impl ListingPolicy {
     /// Availability check for the new review commands. Managed denial always
     /// precedes feature availability. This grants no transfer capability.
     pub fn require_preview(&self) -> Result<(), ListingError> {
+        self.require_preview_for_flag(process_preview_enabled())
+    }
+
+    fn require_preview_for_flag(&self, enabled: bool) -> Result<(), ListingError> {
         let lease = self.policy_lease()?;
-        if !LISTING_AUTHORITY_PREVIEW_V1 {
+        if !enabled {
             return Err(ListingError::PreviewDisabled);
         }
         lease.check(self)
@@ -193,7 +239,7 @@ pub fn system() -> &'static ListingPolicy {
     static POLICY: OnceLock<ListingPolicy> = OnceLock::new();
     static MONITOR: OnceLock<()> = OnceLock::new();
     let policy = POLICY.get_or_init(|| ListingPolicy::new(Arc::new(OsPolicy)));
-    if LISTING_AUTHORITY_PREVIEW_V1 {
+    if process_preview_enabled() {
         MONITOR.get_or_init(|| {
             #[cfg(windows)]
             std::thread::spawn(move || watch_registry(policy));
@@ -373,6 +419,79 @@ fn read_os_policy() -> ManagedPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preview_matrix_and_managed_precedence() {
+        struct Fixed(ManagedPolicy);
+        impl PolicySource for Fixed {
+            fn read(&self) -> ManagedPolicy {
+                self.0
+            }
+        }
+        for harness in [false, true] {
+            for switch in [false, true] {
+                for debug in [false, true] {
+                    for var in [None, Some("1"), Some("true"), Some("0"), Some(" 1")] {
+                        let enabled =
+                            preview_enabled(harness, switch, debug, var.map(std::ffi::OsStr::new));
+                        assert_eq!(enabled, debug && (harness || (switch && var == Some("1"))));
+                        let fault = crate::review_store::transfer_fault_enabled(
+                            harness,
+                            debug,
+                            var.map(std::ffi::OsStr::new),
+                        );
+                        assert_eq!(fault, harness && debug && var.is_some());
+                        if switch && !harness {
+                            assert!(
+                                !fault,
+                                "switch-only exposure must never enable transfer faults"
+                            );
+                        }
+                        for (value, error) in [
+                            (ManagedPolicy::Denied, ListingError::PolicyDenied),
+                            (ManagedPolicy::Invalid, ListingError::PolicyUnreadable),
+                        ] {
+                            let policy = ListingPolicy::new(Arc::new(Fixed(value)));
+                            assert_eq!(policy.status_for_flag(enabled).code, error);
+                            assert_eq!(policy.require_preview_for_flag(enabled), Err(error));
+                        }
+                    }
+                }
+            }
+        }
+        // Environment access itself must also remain compiled only for the harness.
+        assert!(include_str!("review_store.rs")
+            .contains("#[cfg(all(debug_assertions, feature = \"listing-preview-harness\"))]"));
+    }
+
+    #[tokio::test]
+    async fn switch_enabled_policy_change_cancels_active_job() {
+        struct Mutable(Mutex<ManagedPolicy>);
+        impl PolicySource for Mutable {
+            fn read(&self) -> ManagedPolicy {
+                *self.0.lock().unwrap()
+            }
+        }
+        let source = Arc::new(Mutable(Mutex::new(ManagedPolicy::Allowed)));
+        let policy = ListingPolicy::new(source.clone());
+        let enabled = preview_enabled(false, true, true, Some(std::ffi::OsStr::new("1")));
+        policy.require_preview_for_flag(enabled).unwrap();
+        let lease = policy.policy_lease().unwrap();
+        let token = lease.cancellation_token();
+        let job = tokio::spawn(async move {
+            token.cancelled().await;
+        });
+        *source.0.lock().unwrap() = ManagedPolicy::Denied;
+        assert_eq!(
+            policy.status_for_flag(enabled).code,
+            ListingError::PolicyDenied
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), job)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(lease.check(&policy), Err(ListingError::StaleGeneration));
+    }
+
     #[test]
     fn exposure_flag_never_overrides_policy_or_missing_review() {
         struct Fixed(ManagedPolicy);

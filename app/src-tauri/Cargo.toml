@@ -6,6 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+listing-preview-test-switch = ["vz-pack/listing-preview-test-switch"]
 smoke-test = []
 ui-test = ["dep:tauri-plugin-wdio-webdriver"]
 custom-protocol = ["tauri/custom-protocol"]

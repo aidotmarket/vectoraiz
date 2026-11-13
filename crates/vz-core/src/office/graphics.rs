@@ -12,7 +12,7 @@ pub(super) fn visit<'a>(n: &'a Node, ns: &str, local: &str, out: &mut Vec<&'a No
         visit(c, ns, local, out);
     }
 }
-fn text(n: &Node) -> String {
+pub(super) fn text(n: &Node) -> String {
     let mut nodes = Vec::new();
     visit(n, A, "t", &mut nodes);
     nodes

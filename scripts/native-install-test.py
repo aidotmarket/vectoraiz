@@ -111,32 +111,67 @@ step(f'Installed executable: {binary}')
 try:
     if windows:
         check_pe_subsystems(installed)
+    # Sidecars never receive the desktop-only test switch feature.
+    cli = binary.with_name('vectoraiz-cli.exe' if windows else 'vectoraiz-cli')
+    step('Check installed CLI listing status with the test switch set')
+    with tempfile.TemporaryDirectory(prefix='vz-cli-listing-') as cwd:
+        status = subprocess.run([str(cli), 'listing-status'], cwd=cwd,
+                                env=dict(env, VZ_LISTING_PREVIEW_TEST='1'),
+                                timeout=30, check=True, capture_output=True,
+                                text=True, encoding='utf-8')
+    cli_status = json.loads(status.stdout)
+    assert cli_status['listing_authority_preview_v1'] is False, cli_status
+    assert cli_status['test_switch_on'] is False, cli_status
+    assert cli_status['code'] == 'PREVIEW_DISABLED', cli_status
+    Path('installed-cli-listing.json').write_text(
+        json.dumps(cli_status, indent=2), encoding='utf-8')
     # No checkout/assets in this working directory: exercise installed paths.
     with tempfile.TemporaryDirectory(prefix='vz-first-run-', ignore_cleanup_errors=True) as cwd:
         # A per-machine app cannot write WebView2's default profile next to its
         # executable in Program Files. Match Tauri's user-scoped production profile.
         env['WEBVIEW2_USER_DATA_FOLDER'] = str(data / 'webview2')
-        step('Launch installed WebView self-test (120s report deadline)')
-        ui_log = Path('installed-ui.log').resolve().open('w')
-        child = subprocess.Popen([str(binary), '--smoke-test', '--cpu'], cwd=cwd, env=env,
-                                 stdout=ui_log, stderr=subprocess.STDOUT)
-        try:
-            deadline = time.monotonic() + 120
-            while not report.exists() and time.monotonic() < deadline and child.poll() is None:
-                time.sleep(0.5)
-            assert report.is_file(), 'Installed WebView self-test did not return a report'
-            step('Self-test report received')
-            result = json.loads(report.read_text())
-            assert result['status'] == 'OK', result
-            assert child.wait(timeout=20) == 0
-        finally:
-            if child.poll() is None:
-                child.kill()
-                child.wait(timeout=10)
-            ui_log.close()
+        # Close every existing desktop before each launch: the single-instance
+        # plugin would otherwise focus it without inheriting this environment.
+        for enabled in [False, True]:
+            if windows:
+                subprocess.run(['taskkill.exe', '/F', '/IM', 'vectoraiz.exe'], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                subprocess.run(['pkill', '-x', 'vectoraiz'], check=False)
+            launch_env = dict(env)
+            launch_env.pop('VZ_LISTING_PREVIEW_TEST', None)
+            if enabled:
+                launch_env['VZ_LISTING_PREVIEW_TEST'] = '1'
+            probe = report.with_suffix('.listing.json')
+            report.unlink(missing_ok=True)
+            probe.unlink(missing_ok=True)
+            step(f'Launch installed desktop listing probe: switch={enabled}')
+            with Path('installed-ui.log').resolve().open('a') as ui_log:
+                child = subprocess.Popen([str(binary), '--smoke-test', '--cpu'], cwd=cwd,
+                                         env=launch_env, stdout=ui_log, stderr=subprocess.STDOUT)
+                try:
+                    deadline = time.monotonic() + 120
+                    while not report.exists() and time.monotonic() < deadline and child.poll() is None:
+                        time.sleep(0.5)
+                    assert report.is_file(), 'Installed WebView self-test did not return a report'
+                    result = json.loads(report.read_text(encoding='utf-8'))
+                    assert result['status'] == 'OK', result
+                    assert child.wait(timeout=20) == 0
+                    evidence = json.loads(probe.read_text(encoding='utf-8'))
+                    assert evidence['status']['listing_authority_preview_v1'] is enabled, evidence
+                    assert evidence['status']['test_switch_on'] is enabled, evidence
+                    marker = 'Test switch on — listing review preview' if enabled else None
+                    assert evidence['marker'] == marker, evidence
+                    Path(f'installed-listing-{enabled}.json').write_text(
+                        json.dumps(evidence, indent=2), encoding='utf-8')
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=10)
     # Acquisition and pipeline run while the installed binary still exists.
-    # Budgets: install 240s + self-test 140s + acquisition 900s + pipeline 300s
-    # + startup 30s + single-instance 180s + uninstall 120s < CI step 35 minutes.
+    # Budgets: install 240s + two self-test launches 280s + acquisition 900s
+    # + pipeline 300s + startup 30s + single-instance 180s + uninstall 120s
+    # = 2050s; CLI status adds 30s, leaving 20s in the 2100s CI step limit.
     with tempfile.TemporaryDirectory(prefix='vz-acquisition-run-', ignore_cleanup_errors=True) as cwd:
         models = data / 'models'
         assert not models.exists(), 'Acquisition must start with an empty model directory'
@@ -171,9 +206,9 @@ try:
         offline_output = pipeline_output.split('offline: start', 1)[1].split('offline: complete', 1)[0]
         assert 'VECTORAIZ_MODEL_TRANSFER:' not in offline_output, 'Offline pipeline emitted acquisition progress'
         assert not list(models.glob('*.partial')), 'Offline pipeline left a partial file'
-        loaded = {Path(item['path']).resolve(): item for item in json.loads(loaded_report.read_text())}
+        loaded = {Path(item['path']).resolve(): item for item in json.loads(loaded_report.read_text(encoding='utf-8'))}
         model_hashes = {}
-        for pin in json.loads(Path('spike/fixtures/models.json').read_text()).values():
+        for pin in json.loads(Path('spike/fixtures/models.json').read_text(encoding='utf-8')).values():
             path = (models / pin['file']).resolve()
             assert path.stat().st_size == pin['size'], f'Wrong acquired model size: {path}'
             with path.open('rb') as stream:
@@ -192,7 +227,7 @@ try:
     fixture_spec = importlib.util.spec_from_file_location('fetch_assets', Path('scripts/fetch-assets.py').resolve())
     fetcher = importlib.util.module_from_spec(fixture_spec)
     fixture_spec.loader.exec_module(fetcher)
-    tiers_manifest = json.loads(Path('spike/fixtures/models.tiers.json').read_text())
+    tiers_manifest = json.loads(Path('spike/fixtures/models.tiers.json').read_text(encoding='utf-8'))
     answers = [tier['pin'] for tier in tiers_manifest['answer_tiers']]
     second = answers[1]
     with tempfile.TemporaryDirectory(prefix='vz-migration-fixtures-', ignore_cleanup_errors=True) as fixture_dir:
@@ -258,7 +293,7 @@ try:
                     for filename,stamp in stamps.items():
                         current = (seed_models / filename).stat()
                         assert (current.st_size,current.st_mtime_ns,current.st_ino) == (stamp.st_size,stamp.st_mtime_ns,stamp.st_ino), 'Migration changed model stamps'
-                    selection = json.loads((seed_models / 'settings.json').read_text())
+                    selection = json.loads((seed_models / 'settings.json').read_text(encoding='utf-8'))
                     assert selection['answer'] == {'local_pin_sha256':answers[0]['sha256'],'selection_initialised':True}
                 if scenario == 'selected-without-records':
                     # Finish the installed target's cold verification outside the held

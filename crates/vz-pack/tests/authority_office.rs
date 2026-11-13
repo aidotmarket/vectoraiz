@@ -1818,8 +1818,9 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
                 assert_eq!(slide_pages[0].page, 1, "{label}");
                 for value in ["abc", "def", "ghi", "jkl"] {
                     assert!(
-                        slide_pages[0].text.contains(value),
-                        "{label}: slide 1 missing {value}"
+                        slide_pages[0].text.matches(value).count() == 1,
+                        "{label}: slide 1 must emit {value} exactly once: {}",
+                        slide_pages[0].text
                     );
                 }
             }
@@ -2655,4 +2656,121 @@ fn office_removed_binary_dependencies_record_digest_and_length() {
         removal.value,
         format!("sha256={} bytes={}", sha256(workbook), workbook.len())
     );
+}
+
+#[test]
+fn office_graphics_ingest_joins_runs_like_review_inventory() {
+    let mut parts = chart_fixture("pptx", "<c:plotVisOnly/>");
+    let path = "ppt/charts/chart1.xml";
+    let xml = String::from_utf8(parts[path].clone()).unwrap().replace(
+        "<c:plotArea>",
+        &format!(r#"<c:title><c:tx><c:rich xmlns:a="{A}"><a:bodyPr/><a:lstStyle/><a:p><a:r><a:t>Multi</a:t></a:r><a:r><a:t>run title</a:t></a:r></a:p><a:p><a:r><a:t>Next paragraph</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea>"#),
+    );
+    // Indentation outside a:t must not become paragraph content.
+    let xml = xml.replace("><", ">\n    <");
+    parts.insert(path.into(), xml.into_bytes());
+    // The listing inventory and ordinary ingest both see this host's chart.
+    let host = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    parts.insert("ppt/slides/slide1.xml".into(), host.replace("</p:spTree>", &format!(r#"<p:graphicFrame><a:graphic><a:graphicData uri="{C}"><c:chart xmlns:c="{C}" xmlns:r="{R}" r:id="chart"/></a:graphicData></a:graphic></p:graphicFrame></p:spTree>"#)).into_bytes());
+    parts.insert("ppt/slides/_rels/slide1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="chart" Type="{R}/chart" Target="../charts/chart1.xml"/></Relationships>"#).into_bytes());
+    let (rebuilt, report) = rebuild("pptx", &parts);
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.content && v.value.as_deref() == Some("Multirun title")));
+    assert!(report
+        .inventory
+        .iter()
+        .any(|v| v.content && v.value.as_deref() == Some("Next paragraph")));
+    for bytes in [archive(&parts), rebuilt] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("runs.pptx");
+        std::fs::write(&path, bytes).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        assert_eq!(pages.len(), 1);
+        assert_eq!(
+            pages[0]
+                .text
+                .matches("Multirun title\nNext paragraph")
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn office_smartart_ingest_falls_back_to_model_without_usable_cache() {
+    let source = std::fs::read(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/office-public/smartart-rotated-text.pptx"),
+    )
+    .unwrap();
+    for cache in [None, Some(b"invalid XML".as_slice())] {
+        let mut parts = members(&source);
+        if let Some(bytes) = cache {
+            parts.insert("ppt/diagrams/drawing1.xml".into(), bytes.to_vec());
+        } else {
+            parts.remove("ppt/diagrams/drawing1.xml");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fallback.pptx");
+        std::fs::write(&path, archive(&parts)).unwrap();
+        let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+            path,
+            pdfium: None,
+            office: None,
+        })
+        .unwrap();
+        for value in ["abc", "def", "ghi", "jkl"] {
+            assert_eq!(pages[0].text.matches(value).count(), 1, "fallback: {value}");
+        }
+    }
+}
+
+#[test]
+fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
+    let mut parts = smartart_fixture(false);
+    let model = String::from_utf8(parts["ppt/diagrams/data1.xml"].clone()).unwrap();
+    parts.insert(
+        "ppt/diagrams/data2.xml".into(),
+        model
+            .replace("Visible SmartArt marker", "Second model marker")
+            .replace("Undrawn secret marker", "Second undrawn marker")
+            .into_bytes(),
+    );
+    parts.insert(
+        "ppt/diagrams/_rels/data2.xml.rels".into(),
+        parts["ppt/diagrams/_rels/data1.xml.rels"].clone(),
+    );
+    let host = String::from_utf8(parts["ppt/slides/slide1.xml"].clone()).unwrap();
+    parts.insert("ppt/slides/slide1.xml".into(), host.replace("</p:spTree>", &format!(r#"<dgm:relIds xmlns:dgm="{DGM}" xmlns:r="{R}" r:dm="first"/><dgm:relIds xmlns:dgm="{DGM}" xmlns:r="{R}" r:dm="second"/></p:spTree>"#)).into_bytes());
+    parts.insert("ppt/slides/_rels/slide1.xml.rels".into(), format!(r#"<Relationships xmlns="{REL}"><Relationship Id="first" Type="{R}/diagramData" Target="../diagrams/data1.xml"/><Relationship Id="second" Type="{R}/diagramData" Target="../diagrams/data2.xml"/></Relationships>"#).into_bytes());
+    // Pretty-print the drawing cache as well as the chart regression above.
+    let drawing = String::from_utf8(parts["ppt/diagrams/drawing1.xml"].clone()).unwrap();
+    parts.insert(
+        "ppt/diagrams/drawing1.xml".into(),
+        drawing.replace("><", ">\n    <").into_bytes(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("shared-cache.pptx");
+    std::fs::write(&path, archive(&parts)).unwrap();
+    let pages = vz_core::parsers::parse(&vz_core::worker::Request {
+        path,
+        pdfium: None,
+        office: None,
+    })
+    .unwrap();
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        pages[0].text.matches("Visible SmartArt marker\n").count(),
+        1
+    );
+    assert_eq!(pages[0].text.matches("Second model marker\n").count(), 1);
+    assert_eq!(pages[0].text.matches("Second undrawn marker\n").count(), 1);
+    assert!(!pages[0].text.contains("Undrawn secret marker"));
 }

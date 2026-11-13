@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
 TARGET = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 CLI = TARGET / 'debug' / ('vectoraiz-cli.exe' if os.name == 'nt' else 'vectoraiz-cli')
-# Preview is enabled only for this acceptance build, never by environment or
-# user preference. Restore the default-off CLI even when the journey fails.
+# This CLI acceptance build uses the harness feature. The debug desktop has a
+# separate test switch; restore the default-off CLI even when the journey fails.
 subprocess.run([*RTK, "cargo", "build", "-p", "vz-cli", "-p", "vz-parser-worker", "--features", "vz-cli/listing-preview-harness"], cwd=ROOT, check=True)
 try:
     with tempfile.TemporaryDirectory(prefix='vz-pipeline-') as temp:
