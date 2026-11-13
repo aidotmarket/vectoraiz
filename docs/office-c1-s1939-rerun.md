@@ -40,7 +40,7 @@ Actual OCR pre-input RLIMIT_AS setup/readback and zero RLIMIT_NOFILE succeed; si
 
 ## PR #134 follow-up, stage 2
 
-Same pinned PDFium, inputs and target width (1600): both independent repeat controls are byte-stable for **10/10 PDFs per role**. Confined versus unconfined renders differ in **8/10 PDFs, 16/18 pages per role**, totaling **236,066 changed pixels per role**. All **18/18 extracted page texts and non-raster fields per role** match. Independent macOS ImageIO decoding exactly matches the Python decoder's full RGBA output for the Japanese control/confined example.
+Same pinned PDFium, inputs and target width (1600): both independent repeat controls are byte-stable for **10/10 PDFs per role**. Confined versus unconfined renders differ in **8/10 PDFs, 16/18 pages per role**, totaling **251,905 changed pixels per role**. All **18/18 extracted page texts and non-raster fields per role** match. Independent macOS ImageIO decoding exactly matches the Python decoder's full RGBA output for the Japanese control/confined example.
 
 Diagnostic-only file/dir tracing identifies lazy font discovery after readiness: `opendir(/Library/Fonts)` and `opendir(/System/Library/Fonts)` fail with **EMFILE (24)** under zero RLIMIT_NOFILE; controls enumerate both and load fonts, including Supplemental/Arial.ttf. The /System read grant cannot overcome the descriptor ceiling. This is font fallback caused by descriptor confinement, not random rendering, PNG encoding, DPI or color configuration. Successful font-file reads are hash-inventoried privately. The tracer is never used to qualify a worker.
 
