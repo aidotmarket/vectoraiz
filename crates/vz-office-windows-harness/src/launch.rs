@@ -15,7 +15,10 @@ use windows_sys::Win32::{
     Foundation::*,
     Security::{Authorization::*, Isolation::*, *},
     Storage::FileSystem::*,
-    System::{JobObjects::*, Pipes::*, ProcessStatus::*, Threading::*},
+    System::{
+        Diagnostics::ToolHelp::*, JobObjects::*, Pipes::*, ProcessStatus::*,
+        RemoteDesktop::ProcessIdToSessionId, Threading::*,
+    },
 };
 
 pub const MEMORY: usize = 1_610_612_736;
@@ -272,6 +275,33 @@ fn limit_json(info: &JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> Value {
         "active_process_limit":info.BasicLimitInformation.ActiveProcessLimit,
         "process_commit_limit_bytes":info.ProcessMemoryLimit,"job_commit_limit_bytes":info.JobMemoryLimit,
         "peak_process_commit_bytes":info.PeakProcessMemoryUsed,"peak_job_commit_bytes":info.PeakJobMemoryUsed})
+}
+
+fn process_snapshot() -> Result<Vec<Value>> {
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    ensure!(
+        snapshot != INVALID_HANDLE_VALUE,
+        "process snapshot: {}",
+        std::io::Error::last_os_error()
+    );
+    let snapshot = Handle(snapshot);
+    let mut entry: PROCESSENTRY32W = unsafe { zeroed() };
+    entry.dwSize = size_of_val(&entry) as u32;
+    let mut rows = Vec::new();
+    let mut rc = unsafe { Process32FirstW(snapshot.0, &mut entry) };
+    while rc != 0 {
+        let mut session = 0;
+        let session_ok = unsafe { ProcessIdToSessionId(entry.th32ProcessID, &mut session) };
+        rows.push(json!({"pid":entry.th32ProcessID,"parent_pid":entry.th32ParentProcessID,
+            "session":if session_ok != 0 {Some(session)} else {None},
+            "image_name":String::from_utf16_lossy(&entry.szExeFile[..entry.szExeFile.iter().position(|c| *c == 0).unwrap_or(entry.szExeFile.len())])}));
+        rc = unsafe { Process32NextW(snapshot.0, &mut entry) };
+    }
+    ensure!(
+        unsafe { GetLastError() } == ERROR_NO_MORE_FILES,
+        "process enumeration incomplete"
+    );
+    Ok(rows)
 }
 
 fn low_scratch(path: &Path) -> Result<()> {
@@ -893,6 +923,13 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         return Ok(json!({"status":"pass","mode":mode,"worker_resumed":false,
             "token_before_resume":token,"job_before_resume":before}));
     }
+    let observe_shell = value["office_windows_probe"]["op"] == "shell";
+    let shell_before = if observe_shell {
+        Some(process_snapshot())
+    } else {
+        None
+    };
+    let shell_start = Instant::now();
     ensure!(
         unsafe { ResumeThread(thread.0) } != u32::MAX,
         "ResumeThread failed"
@@ -906,21 +943,59 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         stdin.write_all(&(request.len() as u32).to_le_bytes())?;
         stdin.write_all(&request)
     });
-    fn collect(handle: Handle) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    fn collect(
+        handle: Handle,
+        path: PathBuf,
+    ) -> std::thread::JoinHandle<std::io::Result<(Vec<u8>, usize)>> {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
-            file(handle)
-                .take(32 * 1024 * 1024 + 5)
-                .read_to_end(&mut bytes)?;
-            Ok(bytes)
+            let mut total = 0;
+            let mut source = file(handle);
+            let mut durable = File::create(path)?;
+            let mut chunk = [0u8; 8192];
+            loop {
+                let count = source.read(&mut chunk)?;
+                if count == 0 {
+                    break;
+                }
+                durable.write_all(&chunk[..count])?;
+                total += count;
+                let keep = count.min((32 * 1024 * 1024 + 5usize).saturating_sub(bytes.len()));
+                bytes.extend_from_slice(&chunk[..keep]);
+            }
+            Ok((bytes, total))
         })
     }
-    let output = collect(stdout);
-    let errors = collect(stderr);
+    let result_path = Path::new(&args[3]);
+    let output = collect(stdout, result_path.with_extension("stdout.bin"));
+    let errors = collect(stderr, result_path.with_extension("stderr.log"));
+    let mut shell_seen = std::collections::BTreeMap::new();
+    let mut shell_errors = Vec::new();
+    let mut sample_shell = || {
+        if !observe_shell {
+            return;
+        }
+        match process_snapshot() {
+            Ok(rows) => {
+                for row in rows {
+                    let pid = row["pid"].as_u64().unwrap_or(0);
+                    if let Some(Ok(before)) = &shell_before {
+                        if !before.iter().any(|old| {
+                            old["pid"] == row["pid"] && old["image_name"] == row["image_name"]
+                        }) {
+                            shell_seen.insert(pid, row);
+                        }
+                    }
+                }
+            }
+            Err(error) => shell_errors.push(error.to_string()),
+        }
+    };
     let start = Instant::now();
     let deadline = Duration::from_secs(45);
     let mut timed_out = false;
     loop {
+        sample_shell();
         let wait = unsafe { WaitForSingleObject(process_handle.0, 50) };
         if wait == WAIT_OBJECT_0 {
             break;
@@ -936,6 +1011,21 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             break;
         }
     }
+    let shell_after_worker = Instant::now();
+    while observe_shell && shell_after_worker.elapsed() < Duration::from_secs(5) {
+        sample_shell();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let shell_observation = if observe_shell {
+        json!({"window_ms":shell_start.elapsed().as_millis(),"after_worker_window_ms":5000,"poll_interval_ms":50,
+            "baseline_available":matches!(shell_before, Some(Ok(_))),
+            "baseline_error":shell_before.as_ref().and_then(|r| r.as_ref().err()).map(|e| e.to_string()),
+            "new_processes":shell_seen.values().collect::<Vec<_>>(),"snapshot_errors":shell_errors,
+            "launch_ruled_out":false,
+            "limitation":"Snapshots can miss short-lived processes and reuse of an existing handler; absence cannot rule out launch"})
+    } else {
+        Value::Null
+    };
     let mut exit = 0;
     check(
         unsafe { GetExitCodeProcess(process_handle.0, &mut exit) },
@@ -961,18 +1051,48 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         .map_err(|_| anyhow::anyhow!("writer panic"))?
         .err()
         .map(|e| e.to_string());
-    let output = output
+    let (output, output_total) = output
         .join()
         .map_err(|_| anyhow::anyhow!("stdout reader panic"))??;
-    let errors = errors
+    let (errors, errors_total) = errors
         .join()
         .map_err(|_| anyhow::anyhow!("stderr reader panic"))??;
-    // Keep exact captured bytes privately, including crashes and malformed frames.
-    // Only the bounded/redacted JSON result is eligible for artifact publication.
-    let result_path = Path::new(&args[3]);
-    std::fs::write(result_path.with_extension("stdout.bin"), &output)?;
-    std::fs::write(result_path.with_extension("stderr.log"), &errors)?;
-    let capture_overflow = output.len() > 32 * 1024 * 1024 + 4 || errors.len() > 32 * 1024 * 1024;
+    // Full streams were spooled privately; only bounded prefixes enter memory.
+    let capture_overflow = output_total > 32 * 1024 * 1024 + 4 || errors_total > 32 * 1024 * 1024;
+    let mut stderr_excerpt = String::from_utf8_lossy(&errors).into_owned();
+    for argument in args {
+        let path = argument.to_string_lossy();
+        if path.len() > 3 {
+            stderr_excerpt = stderr_excerpt.replace(path.as_ref(), "<redacted-path>");
+        }
+    }
+    for key in ["sentinel", "directory", "created", "scratch", "address"] {
+        if let Some(path) = value["office_windows_probe"][key].as_str() {
+            if !path.is_empty() {
+                stderr_excerpt = stderr_excerpt.replace(path, "<redacted>");
+            }
+        }
+    }
+    for key in ["USERPROFILE", "SystemRoot"] {
+        if let Ok(path) = std::env::var(key) {
+            if !path.is_empty() {
+                stderr_excerpt = stderr_excerpt.replace(&path, "<redacted-path>");
+            }
+        }
+    }
+    let stderr_excerpt_truncated = stderr_excerpt.len() > 2048 || errors_total > errors.len();
+    let mut excerpt_end = stderr_excerpt.len().min(2048);
+    while !stderr_excerpt.is_char_boundary(excerpt_end) {
+        excerpt_end -= 1;
+    }
+    stderr_excerpt.truncate(excerpt_end);
+    let memory_progress: Vec<Value> = String::from_utf8_lossy(&errors)
+        .lines()
+        .filter_map(|line| line.strip_prefix("MEMORY_PROGRESS "))
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .rev()
+        .take(4)
+        .collect();
     let response = if output.len() >= 4 {
         let len = u32::from_le_bytes(output[..4].try_into()?) as usize;
         if len <= 32 * 1024 * 1024 && output.len() == len + 4 {
@@ -998,7 +1118,9 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         "working_set_bytes":if counters_ok {Some(counters.WorkingSetSize)} else {None},
         "peak_working_set_bytes":if counters_ok {Some(counters.PeakWorkingSetSize)} else {None},
         "private_commit_bytes":if counters_ok {Some(counters.PrivateUsage)} else {None},
-        "stdin_error":write_error,"stderr_bytes":errors.len(),"capture_overflow":capture_overflow,
+        "stdin_error":write_error,"stderr_capture_available":true,"stderr_bytes":errors_total,"stderr_excerpt":stderr_excerpt,
+        "stderr_excerpt_truncated":stderr_excerpt_truncated,"shell_launch_observation":shell_observation,
+        "capture_overflow":capture_overflow,"last_memory_progress_reverse_order":memory_progress,
         "capture_limit_bytes":32 * 1024 * 1024,"response":response}),
     )
 }

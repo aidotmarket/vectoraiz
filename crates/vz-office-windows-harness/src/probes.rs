@@ -1,6 +1,6 @@
 //! Hostile operations executed inside the actual, feature-gated parser worker.
 //! Results describe API outcomes; the parent evaluates independent controls.
-use crate::launch::{check, wide, Handle, MEMORY};
+use crate::launch::{wide, Handle, MEMORY};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::{
@@ -13,7 +13,9 @@ use windows_sys::{
         Foundation::*,
         Networking::WinSock::*,
         Storage::FileSystem::*,
-        System::{Com::*, JobObjects::*, Memory::*, ProcessStatus::*, Threading::*},
+        System::{
+            Com::*, JobObjects::*, Memory::*, ProcessStatus::*, SystemInformation::*, Threading::*,
+        },
         UI::{Shell::*, WindowsAndMessaging::*},
     },
 };
@@ -37,13 +39,12 @@ fn win(api: &str, rc: i64, success: bool) -> Value {
     row(api, rc, success, error, "win32")
 }
 fn wsa(api: &str, rc: i64, success: bool) -> Value {
-    let error = if success {
-        0
-    } else {
-        unsafe { WSAGetLastError() as u32 }
-    };
-    row(api, rc, success, error, "winsock")
+    let error = unsafe { WSAGetLastError() as u32 };
+    let mut result = row(api, rc, success, if success { 0 } else { error }, "winsock");
+    result["wsa_get_last_error"] = json!(error);
+    result
 }
+
 fn arg<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
     v[key]
         .as_str()
@@ -185,26 +186,32 @@ fn scratch(v: &Value) -> Result<Value> {
 struct Socket(SOCKET);
 impl Drop for Socket {
     fn drop(&mut self) {
-        unsafe { closesocket(self.0) };
+        if self.0 != INVALID_SOCKET {
+            unsafe { closesocket(self.0) };
+        }
     }
 }
-struct Winsock;
+struct Winsock(i32, i32);
 impl Winsock {
-    fn new() -> Result<Self> {
+    fn new() -> Self {
         let mut data = unsafe { zeroed() };
         let rc = unsafe { WSAStartup(0x0202, &mut data) };
-        anyhow::ensure!(rc == 0, "WSAStartup={rc}");
-        Ok(Self)
+        Self(rc, unsafe { WSAGetLastError() })
+    }
+    fn evidence(&self) -> Value {
+        json!({"api":"WSAStartup", "return_code":self.0, "success":self.0 == 0,"wsa_get_last_error":self.1})
     }
 }
 impl Drop for Winsock {
     fn drop(&mut self) {
-        unsafe { WSACleanup() };
+        if self.0 == 0 {
+            unsafe { WSACleanup() };
+        }
     }
 }
 
 fn network(v: &Value) -> Result<Value> {
-    let _winsock = Winsock::new()?;
+    let winsock = Winsock::new();
     let family = v["family"].as_u64().context("family")? as i32;
     let udp = v["transport"] == "udp";
     let operation = arg(v, "operation")?;
@@ -218,6 +225,7 @@ fn network(v: &Value) -> Result<Value> {
         IPPROTO_TCP
     };
     let kind = if udp { SOCK_DGRAM } else { SOCK_STREAM };
+    unsafe { WSASetLastError(0) };
     let socket = unsafe {
         if v["constructor"] == "WSASocketW" {
             WSASocketW(family, kind, protocol, null(), 0, WSA_FLAG_OVERLAPPED)
@@ -230,25 +238,20 @@ fn network(v: &Value) -> Result<Value> {
     } else {
         "socket"
     };
-    let creation = wsa(api, socket as i64, socket != INVALID_SOCKET);
+    let mut creation = wsa(api, socket as i64, socket != INVALID_SOCKET);
+    creation["startup"] = winsock.evidence();
+    creation["family"] = json!(family);
+    creation["descriptor_returned"] = json!(socket != INVALID_SOCKET);
     if operation == "create" {
         if socket != INVALID_SOCKET {
             unsafe { closesocket(socket) };
         }
         return Ok(creation);
     }
-    if socket == INVALID_SOCKET {
-        return Ok(json!({"api":operation,"return_code":null,"success":false,
-            "error_code":creation["error_code"],"error_namespace":"winsock",
-            "explicit_denial":creation["explicit_denial"],"api_executed":false,
-            "reason":"socket creation refused; target API unrun", "socket_creation":creation}));
-    }
     let socket = Socket(socket);
     let mut nonblocking = 1;
-    check(
-        unsafe { ioctlsocket(socket.0, FIONBIO, &mut nonblocking) } + 1,
-        "ioctlsocket",
-    )?;
+    let nonblocking_rc = unsafe { ioctlsocket(socket.0, FIONBIO, &mut nonblocking) };
+    let nonblocking_result = wsa("ioctlsocket", nonblocking_rc as i64, nonblocking_rc == 0);
     let address: std::net::IpAddr = arg(v, "address")?.parse()?;
     let port = v["port"].as_u64().context("port")? as u16;
     let mut storage: SOCKADDR_STORAGE = unsafe { zeroed() };
@@ -282,15 +285,12 @@ fn network(v: &Value) -> Result<Value> {
         }
     };
     let addr = &storage as *const _ as *const SOCKADDR;
-    if operation == "listen" {
+    let bind_before_listen = if operation == "listen" {
         let rc = unsafe { bind(socket.0, addr, length) };
-        if rc != 0 {
-            let mut result = wsa("bind before listen", rc as i64, false);
-            result["api_executed"] = json!(false);
-            result["socket_creation"] = creation;
-            return Ok(result);
-        }
-    }
+        Some(wsa("bind before listen", rc as i64, rc == 0))
+    } else {
+        None
+    };
     unsafe { WSASetLastError(0) };
     let (api, rc) = unsafe {
         match operation {
@@ -382,14 +382,13 @@ fn network(v: &Value) -> Result<Value> {
     }
     result["api_executed"] = json!(true);
     result["socket_creation"] = creation;
+    result["nonblocking"] = nonblocking_result;
+    result["bind_before_listen"] = json!(bind_before_listen);
     Ok(result)
 }
 
 fn dns() -> Value {
-    let _winsock = match Winsock::new() {
-        Ok(w) => w,
-        Err(e) => return json!({"api":"WSAStartup","success":false,"reason":e.to_string()}),
-    };
+    let winsock = Winsock::new();
     let mut address = null_mut();
     let rc = unsafe { GetAddrInfoW(wide("example.com").as_ptr(), null(), null(), &mut address) };
     let error = unsafe { WSAGetLastError() };
@@ -398,6 +397,7 @@ fn dns() -> Value {
     }
     let mut result = row("GetAddrInfoW", rc as i64, rc == 0, rc as u32, "winsock");
     result["wsa_get_last_error"] = json!(error);
+    result["startup"] = winsock.evidence();
     result
 }
 
@@ -416,6 +416,23 @@ fn broker(op: &str) -> Value {
                 ) as isize;
                 let mut result = win("ShellExecuteW(open URL)", rc as i64, rc > 32);
                 result["explicit_denial"] = json!(rc == SE_ERR_ACCESSDENIED as isize);
+                let verb = wide("open");
+                let url = wide("https://example.com");
+                let mut ex: SHELLEXECUTEINFOW = zeroed();
+                ex.cbSize = size_of_val(&ex) as u32;
+                ex.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+                ex.lpVerb = verb.as_ptr();
+                ex.lpFile = url.as_ptr();
+                ex.nShow = SW_HIDE;
+                SetLastError(0);
+                let called = ShellExecuteExW(&mut ex);
+                let error = GetLastError();
+                result["shell_execute_ex"] = json!({"return_code":called,
+                    "error_code":error,"hprocess":ex.hProcess as usize,
+                    "process_id":if ex.hProcess.is_null() {0} else {GetProcessId(ex.hProcess)}});
+                if !ex.hProcess.is_null() {
+                    CloseHandle(ex.hProcess);
+                }
                 result
             }
             "pipe" => {
@@ -507,6 +524,21 @@ fn child(escape: bool) -> Result<Value> {
             CloseHandle(info.hProcess);
         }
     }
+    if rc == 0 && result["error_code"] == ERROR_NOT_ENOUGH_QUOTA && !escape {
+        let state = memory_snapshot();
+        let job = &state["job"];
+        let accounting = &state["accounting"];
+        if job["available"] == true
+            && accounting["available"] == true
+            && job["flags"].as_u64().unwrap_or(0) & JOB_OBJECT_LIMIT_ACTIVE_PROCESS as u64 != 0
+            && job["active_process_limit"] == 1
+            && accounting["active_processes"] == 1
+        {
+            result["denial_category"] = json!("job_active_process_limit");
+            result["explicit_denial"] = json!(true);
+        }
+        result["quota_cause_evidence"] = state;
+    }
     result["child_was_suspended"] = json!(true);
     Ok(result)
 }
@@ -597,7 +629,155 @@ fn self_memory() -> Value {
         )
     };
     json!({"available":rc != 0,"working_set_bytes":counters.WorkingSetSize,
-        "peak_working_set_bytes":counters.PeakWorkingSetSize,"private_commit_bytes":counters.PrivateUsage})
+        "peak_working_set_bytes":counters.PeakWorkingSetSize,"private_commit_bytes":counters.PrivateUsage,
+        "peak_process_commit_bytes":counters.PeakPagefileUsage})
+}
+
+// NULL queries the caller's assigned job; query failures remain visible.
+fn memory_snapshot() -> Value {
+    unsafe {
+        let mut job: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+        let j = QueryInformationJobObject(
+            null_mut(),
+            JobObjectExtendedLimitInformation,
+            &mut job as *mut _ as _,
+            size_of_val(&job) as u32,
+            null_mut(),
+        );
+        let je = if j == 0 { GetLastError() } else { 0 };
+        let mut accounting: JOBOBJECT_BASIC_ACCOUNTING_INFORMATION = zeroed();
+        let a = QueryInformationJobObject(
+            null_mut(),
+            JobObjectBasicAccountingInformation,
+            &mut accounting as *mut _ as _,
+            size_of_val(&accounting) as u32,
+            null_mut(),
+        );
+        let ae = if a == 0 { GetLastError() } else { 0 };
+        let mut violation: JOBOBJECT_LIMIT_VIOLATION_INFORMATION = zeroed();
+        let v = QueryInformationJobObject(
+            null_mut(),
+            JobObjectLimitViolationInformation,
+            &mut violation as *mut _ as _,
+            size_of_val(&violation) as u32,
+            null_mut(),
+        );
+        let ve = if v == 0 { GetLastError() } else { 0 };
+        let mut system: PERFORMANCE_INFORMATION = zeroed();
+        system.cb = size_of_val(&system) as u32;
+        let p = GetPerformanceInfo(&mut system, size_of_val(&system) as u32);
+        let process = self_memory();
+        json!({"process":process,
+            "job":{"available":j != 0,"error_code":je,
+                "flags":job.BasicLimitInformation.LimitFlags,"active_process_limit":job.BasicLimitInformation.ActiveProcessLimit,
+                "peak_process_commit_bytes":job.PeakProcessMemoryUsed,"peak_job_commit_bytes":job.PeakJobMemoryUsed},
+            "accounting":{"available":a != 0,"error_code":ae,"active_processes":accounting.ActiveProcesses,
+                "total_processes":accounting.TotalProcesses,"terminated_processes":accounting.TotalTerminatedProcesses,
+                "page_faults":accounting.TotalPageFaultCount,"user_time_100ns":accounting.TotalUserTime,
+                "kernel_time_100ns":accounting.TotalKernelTime},
+            // Notification-time data is not a measurement of currently held job commit.
+            // https://learn.microsoft.com/windows/win32/api/winnt/ns-winnt-jobobject_limit_violation_information
+            "job_notification_commit":{"query_succeeded":v != 0,"error_code":ve,
+                "limit_flags":violation.LimitFlags,"violation_flags":violation.ViolationLimitFlags,
+                "bytes_at_notification":violation.JobMemory},
+            "single_member_private_commit":{"available":a != 0 && accounting.ActiveProcesses == 1 && process["available"] == true,
+                "bytes":process["private_commit_bytes"],
+                "scope":"single member's measured private commit; excludes shared sections and job overhead"},
+            "system":{"available":p != 0,"commit_total_bytes":system.CommitTotal * system.PageSize,
+                "commit_limit_bytes":system.CommitLimit * system.PageSize}})
+    }
+}
+
+fn mapping(reserve: bool) -> Result<Value> {
+    let target = 2 * 1024 * 1024 * 1024usize;
+    let step = 64 * 1024 * 1024usize;
+    let mut system: SYSTEM_INFO = unsafe { zeroed() };
+    unsafe { GetSystemInfo(&mut system) };
+    let page = system.dwPageSize as usize;
+    anyhow::ensure!(page > 0, "system page size");
+    let before = memory_snapshot();
+    let handle = unsafe {
+        CreateFileMappingW(
+            INVALID_HANDLE_VALUE,
+            null(),
+            PAGE_READWRITE | if reserve { SEC_RESERVE } else { SEC_COMMIT },
+            0,
+            target as u32,
+            null(),
+        )
+    };
+    let creation = win("CreateFileMappingW", handle as i64, !handle.is_null());
+    let after_creation = memory_snapshot();
+    eprintln!(
+        "MEMORY_PROGRESS {}",
+        json!({"phase":"section_creation","result":creation,"before":before,"after":after_creation})
+    );
+    if handle.is_null() {
+        return Ok(json!({"success":false,"explicit_denial":false,
+        "creation":creation,"before":before,"after_creation":after_creation}));
+    }
+    let handle = Handle(handle);
+    let view = unsafe { MapViewOfFile(handle.0, FILE_MAP_WRITE, 0, 0, target) };
+    let mut result = win("MapViewOfFile", view.Value as i64, !view.Value.is_null());
+    let after_mapping = memory_snapshot();
+    eprintln!(
+        "MEMORY_PROGRESS {}",
+        json!({"phase":"map_view","result":result,"after":after_mapping})
+    );
+    let mut held = 0;
+    let mut steps = Vec::new();
+    while !view.Value.is_null() && held < target {
+        let before_step = memory_snapshot();
+        let ptr = unsafe { view.Value.cast::<u8>().add(held) };
+        if reserve {
+            let committed = unsafe { VirtualAlloc(ptr.cast(), step, MEM_COMMIT, PAGE_READWRITE) };
+            result = win(
+                "VirtualAlloc(MEM_COMMIT on SEC_RESERVE view)",
+                committed as i64,
+                !committed.is_null(),
+            );
+            if committed.is_null() {
+                steps.push(json!({"held_bytes":held,"before":before_step,"after":memory_snapshot(),"result":result}));
+                break;
+            }
+        }
+        eprintln!(
+            "MEMORY_PROGRESS {}",
+            json!({"phase":"before_touch","held_bytes":held,"before":before_step})
+        );
+        for offset in (0..step).step_by(page) {
+            unsafe { std::ptr::write_volatile(ptr.add(offset), 42) };
+        }
+        held += step;
+        eprintln!(
+            "MEMORY_PROGRESS {}",
+            json!({"phase":"after_touch","held_bytes":held,"after":memory_snapshot()})
+        );
+        steps.push(json!({"held_bytes":held,"before":before_step,"after":memory_snapshot(),"result":result}));
+    }
+    let at_peak = memory_snapshot();
+    if !view.Value.is_null() {
+        unsafe { UnmapViewOfFile(view) };
+    }
+    result["creation"] = creation;
+    result["before"] = before;
+    result["after_creation"] = after_creation;
+    result["after_mapping"] = after_mapping;
+    result["steps"] = json!(steps);
+    result["at_peak"] = at_peak;
+    result["successfully_held_bytes"] = json!(held);
+    result["target_bytes"] = json!(target);
+    result["section_mode"] = json!(if reserve { "SEC_RESERVE" } else { "SEC_COMMIT" });
+    result["allocation_refused"] = json!(held < target);
+    let code = result["error_code"].as_u64().unwrap_or(0) as u32;
+    let refused = held < target
+        && matches!(
+            code,
+            ERROR_COMMITMENT_LIMIT | ERROR_NOT_ENOUGH_MEMORY | ERROR_OUTOFMEMORY
+        );
+    result["allocation_limit_error"] = json!(refused);
+    result["explicit_denial"] = json!(refused);
+    Ok(result)
 }
 
 #[link(name = "ucrt")]
@@ -608,6 +788,9 @@ unsafe extern "C" {
 }
 
 fn memory(kind: &str) -> Result<Value> {
+    if kind == "mapping" || kind == "mapping-reserve" {
+        return mapping(kind == "mapping-reserve");
+    }
     let step = if kind == "small" {
         64 * 1024
     } else if kind == "burst" {
@@ -617,36 +800,28 @@ fn memory(kind: &str) -> Result<Value> {
     };
     let target = 2 * 1024 * 1024 * 1024usize;
     let mut pointers = Vec::new();
-    let mut mappings = Vec::new();
     let mut committed = 0usize;
-    let before = self_memory();
+    let before = memory_snapshot();
+    let mut samples = Vec::new();
+    let mut max_held_private_commit = before["process"]["private_commit_bytes"]
+        .as_u64()
+        .unwrap_or(0);
+    let mut max_held_job_commit = if before["single_member_private_commit"]["available"] == true {
+        before["single_member_private_commit"]["bytes"].as_u64()
+    } else {
+        None
+    };
     let mut result = json!(null);
     let api = match kind {
-        "mapping" => "CreateFileMappingW(PAGE_READWRITE|SEC_COMMIT)",
         "malloc" => "malloc",
         "virtual" | "small" | "burst" => "VirtualAlloc(MEM_RESERVE|MEM_COMMIT)",
         _ => bail!("memory kind"),
     };
     while committed < target {
+        let before_call = memory_snapshot();
         unsafe { SetLastError(0) };
         let ok;
-        if kind == "mapping" {
-            let handle = unsafe {
-                CreateFileMappingW(
-                    INVALID_HANDLE_VALUE,
-                    null(),
-                    PAGE_READWRITE | SEC_COMMIT,
-                    0,
-                    step as u32,
-                    null(),
-                )
-            };
-            ok = !handle.is_null();
-            result = win(api, handle as i64, ok);
-            if ok {
-                mappings.push(Handle(handle));
-            }
-        } else {
+        {
             let ptr = if kind == "malloc" {
                 unsafe {
                     *_errno() = 0;
@@ -668,12 +843,30 @@ fn memory(kind: &str) -> Result<Value> {
                 pointers.push(ptr);
             }
         }
+        let after_call = memory_snapshot();
+        if ok {
+            committed += step;
+            max_held_private_commit = max_held_private_commit.max(
+                after_call["process"]["private_commit_bytes"]
+                    .as_u64()
+                    .unwrap_or(0),
+            );
+            if after_call["single_member_private_commit"]["available"] == true {
+                let current = after_call["single_member_private_commit"]["bytes"]
+                    .as_u64()
+                    .unwrap_or(0);
+                max_held_job_commit = Some(max_held_job_commit.unwrap_or(0).max(current));
+            }
+        }
+        // Small allocations retain only the refusal boundary and final sample.
+        if kind != "small" || !ok || committed == target {
+            samples.push(json!({"held_bytes":committed,"succeeded":ok,"before_call":before_call,"after_call":after_call}));
+        }
         if !ok {
             break;
         }
-        committed += step;
     }
-    let at_peak = self_memory();
+    let at_peak = memory_snapshot();
     for ptr in pointers {
         if kind == "malloc" {
             unsafe { free(ptr) };
@@ -681,7 +874,42 @@ fn memory(kind: &str) -> Result<Value> {
             unsafe { VirtualFree(ptr, 0, MEM_RELEASE) };
         }
     }
-    drop(mappings);
+    result["call_samples"] = json!(samples);
+    result["max_observed_held_private_commit_bytes"] = json!(max_held_private_commit);
+    result["max_observed_held_member_private_commit_bytes"] = json!(max_held_job_commit);
+    if let Some(failure) = samples.iter().find(|sample| sample["succeeded"] == false) {
+        let prior = &failure["before_call"];
+        let after = &failure["after_call"];
+        let peak_grew = match (
+            prior["job"]["peak_job_commit_bytes"].as_u64(),
+            after["job"]["peak_job_commit_bytes"].as_u64(),
+        ) {
+            (Some(a), Some(b))
+                if prior["job"]["available"] == true && after["job"]["available"] == true =>
+            {
+                Some(b > a)
+            }
+            _ => None,
+        };
+        let held_grew = match (
+            prior["single_member_private_commit"]["bytes"].as_u64(),
+            after["single_member_private_commit"]["bytes"].as_u64(),
+        ) {
+            (Some(a), Some(b))
+                if prior["single_member_private_commit"]["available"] == true
+                    && after["single_member_private_commit"]["available"] == true =>
+            {
+                Some(b > a)
+            }
+            _ => None,
+        };
+        result["refusal_analysis"] = json!({"reported_job_peak_increased":peak_grew,
+            "observed_held_member_private_commit_increased":held_grew,
+            "held_allocation_bytes":committed,
+            "transient_charge_inference":if peak_grew == Some(true) && held_grew == Some(false) {
+                "consistent with a transient refused-request charge; private commit excludes shared sections and snapshots do not prove duration"
+            } else { "not established; inspect before/after counters and query availability" }});
+    }
     result["step_bytes"] = json!(step);
     result["successfully_held_bytes"] = json!(committed);
     result["target_bytes"] = json!(target);

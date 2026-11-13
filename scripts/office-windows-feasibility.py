@@ -64,7 +64,7 @@ def plan():
     for op in ("dns", "shell", "com", "pipe", "child", "escape", "inherited", "alter-job"):
         add(op, op=op)
     for scope in ("both", "process", "job"):
-        for kind in ("virtual", "mapping", "small", "malloc", "burst"):
+        for kind in ("virtual", "mapping", "mapping-reserve", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
             rows[-1]["memory_scope"] = scope
     add("scratch-control", op="scratch")
@@ -101,6 +101,12 @@ def validate_manifest(manifest):
     assert len(rows) == len(expected) and {row["id"] for row in rows} == expected, "missing or duplicate probe rows"
     for row in rows:
         assert row["status"] in ("pass", "fail", "unrun") and row["reason"], "invalid status/reason"
+        for mode in ("control", "confined"):
+            result = row.get(mode, {})
+            if result.get("stderr_capture_available"):
+                assert isinstance(result.get("stderr_excerpt"), str)
+                assert len(result["stderr_excerpt"].encode("utf-8")) <= 2048, "unbounded stderr excerpt"
+                assert isinstance(result.get("stderr_excerpt_truncated"), bool)
         if row["id"].startswith("format-"):
             for mode in ("control", "confined"):
                 assert "response" not in row.get(mode, {}), "raw parser response in public manifest"
@@ -168,12 +174,26 @@ def evaluate(spec, control, confined):
         return ("pass", "all serialized parser response fields equal") if before == after else ("fail", "parser response content differs")
     positive = before.get("probe", {})
     negative = after.get("probe", {})
+    if spec["request"]["op"] == "shell":
+        observation = confined.get("shell_launch_observation") or {}
+        if observation.get("new_processes"):
+            return "fail", "new process observed during shell launch window; inspect attribution"
+        if not observation.get("launch_ruled_out"):
+            return "fail", "shell handler launch cannot be ruled out by process snapshots"
+    if spec["request"]["op"] == "network":
+        creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
+        if creation.get("success") or creation.get("descriptor_returned"):
+            return "fail", "confined socket creation returned a descriptor"
     if not positive.get("success"):
         return "unrun", "positive-control API unavailable or unsuccessful; no denial established"
     if spec["id"] == "inherited" and not positive.get("sentinel_match"):
         return "fail", "inherited-handle positive control did not read the sentinel"
     if spec["expect"] == "allow":
         return ("pass", "permitted scratch operations succeeded") if negative.get("success") else ("fail", "permitted scratch operations refused")
+    if spec["request"]["op"] == "network":
+        creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
+        if creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False:
+            return "fail", "missing literal INVALID_SOCKET creation evidence"
     if negative.get("success"):
         return "fail", "confined API succeeded"
     if not negative.get("explicit_denial"):
@@ -200,8 +220,51 @@ def evaluate(spec, control, confined):
     return "pass", "positive control succeeded; confined operation explicitly refused"
 
 
+def parser_diff_summary(control, confined):
+    """Lengths and error categories only; never publish extracted text or paths."""
+    before = control.get("response") or {}
+    after = confined.get("response") or {}
+    left, right = before.get("pages", []), after.get("pages", [])
+    differences = []
+    first = None
+    differing_count = 0
+    for index in range(max(len(left), len(right))):
+        a = left[index] if index < len(left) else None
+        b = right[index] if index < len(right) else None
+        if a != b:
+            differing_count += 1
+            if first is None:
+                first = index + 1
+            if len(differences) < 8:
+                differences.append({"page_index": index + 1,
+                                    "control_text_length": len((a or {}).get("text", "")),
+                                    "confined_text_length": len((b or {}).get("text", "")),
+                                    "missing_page": a is None or b is None,
+                                    "control_replacement_glyphs": (a or {}).get("text", "").count("\ufffd"),
+                                    "confined_replacement_glyphs": (b or {}).get("text", "").count("\ufffd")})
+    def diagnostics(result):
+        response = result.get("response") or {}
+        serialized = json.dumps(response.get("error"), ensure_ascii=False).lower()
+        serialized += " " + (result.get("stderr_excerpt") or "").lower()
+        return {"parser_error_present": response.get("error") is not None,
+                "font_error_mentioned": "font" in serialized,
+                "glyph_error_mentioned": "glyph" in serialized,
+                "stderr_excerpt_truncated": result.get("stderr_excerpt_truncated", False)}
+    return {"first_differing_page": first, "control_page_count": len(left),
+            "confined_page_count": len(right), "page_differences": differences,
+            "page_summary_truncated": differing_count > 8,
+            "control_total_text_length": sum(len(p.get("text", "")) for p in left),
+            "confined_total_text_length": sum(len(p.get("text", "")) for p in right),
+            "control_diagnostics": diagnostics(control), "confined_diagnostics": diagnostics(confined),
+            "cause": "unattributed; font/glyph mentions are diagnostics, not proof of cause"}
+
+
 def public_result(result, format_row=False):
     result = dict(result)
+    # Launch/setup failures may have no worker pipe to capture; do not imply empty stderr.
+    result.setdefault("stderr_capture_available", False)
+    result.setdefault("stderr_excerpt", None)
+    result.setdefault("stderr_excerpt_truncated", False)
     response = result.pop("response", None)
     if format_row:
         if response is not None:
@@ -433,6 +496,8 @@ def run_suite(args):
                 entry.update(status=status, reason=reason,
                              control=public_result(results[0], "format" in item),
                              confined=public_result(results[1], "format" in item))
+                if item.get("format") == "pdf":
+                    entry["diff_summary"] = parser_diff_summary(*results)
                 if item.get("memory_scope"):
                     entry["memory_scope"] = item["memory_scope"]
             except Exception as error:
@@ -483,6 +548,48 @@ def self_test():
     changed["response"]["pages"][0]["text"] += "changed"
     assert evaluate(fmt, parsed, changed)[0] == "fail"
     assert "response" not in public_result(parsed, True)
+    unavailable = public_result({"status": "fail"})
+    assert unavailable["stderr_capture_available"] is False and unavailable["stderr_excerpt"] is None
+    pdf_summary = parser_diff_summary(parsed, changed)
+    assert pdf_summary["first_differing_page"] == 1
+    assert pdf_summary["control_total_text_length"] != pdf_summary["confined_total_text_length"]
+    assert "C1 synthetic" not in json.dumps(pdf_summary)
+    assert parser_diff_summary(parsed, parsed)["first_differing_page"] is None
+    many = response()
+    many["response"] = {"pages": [{"text": "\ufffd"}] * 12, "error": "font missing"}
+    bounded = parser_diff_summary(parsed, many)
+    assert len(bounded["page_differences"]) == 8 and bounded["page_summary_truncated"]
+    assert bounded["confined_diagnostics"]["font_error_mentioned"]
+    assert bounded["page_differences"][0]["confined_replacement_glyphs"] == 1
+    net = next(row for row in specs if row["id"] == "network-ipv4-loopback-tcp-connect")
+    created = response(success=False, explicit_denial=True,
+                       socket_creation={"success": True, "descriptor_returned": True, "return_code": 42})
+    assert evaluate(net, positive, created)[0] == "fail"
+    assert evaluate(net, response(success=False), created)[0] == "fail"
+    assert evaluate(net, positive, explicit)[0] == "fail"
+    refused = response(success=False, explicit_denial=True,
+                       socket_creation={"success": False, "descriptor_returned": False, "return_code": -1})
+    assert evaluate(net, positive, refused)[0] == "pass"
+    uninitialized = response(success=False, explicit_denial=False, error_code=10093,
+                            socket_creation={"success": False, "descriptor_returned": False, "return_code": -1})
+    assert evaluate(net, positive, uninitialized)[0] == "fail"
+    shell = next(row for row in specs if row["id"] == "shell")
+    assert evaluate(shell, positive, explicit)[0] == "fail"
+    assert evaluate(shell, response(success=False), explicit)[0] == "fail"
+    quota = response(success=False, explicit_denial=True, error_code=1816,
+                     denial_category="job_active_process_limit")
+    assert evaluate(next(row for row in specs if row["id"] == "child"), positive, quota)[0] == "pass"
+    memory_spec = next(row for row in specs if row["id"] == "memory-job-virtual")
+    memory_control = response(success=True, successfully_held_bytes=2 * 1024 ** 3)
+    memory_confined = response(success=False, explicit_denial=True, allocation_refused=True,
+                               allocation_limit_error=True, successfully_held_bytes=1024 ** 3,
+                               max_observed_held_member_private_commit_bytes=1024 ** 3)
+    memory_confined.update(job_before_resume={"process_commit_limit_bytes":LIMIT * 2,
+                                             "job_commit_limit_bytes":LIMIT},
+                           job_after={"peak_process_commit_bytes":LIMIT, "peak_job_commit_bytes":LIMIT + 4096})
+    assert evaluate(memory_spec, memory_control, memory_confined) == (
+        "fail", "reported peak committed memory exceeded its configured ceiling")
+    assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 3
     manifest = initial_manifest()
     validate_manifest(manifest)
     # Exercise durable collection after launch failure and malformed output,
