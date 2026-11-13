@@ -45,44 +45,34 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install pinned RTK (bootstrap, verified Windows release)
+      - name: Set evidence directory
         run: |
-          $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $env:RUNNER_TEMP "office-c1-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          "KD_BRIDGE_JOB_EVIDENCE=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          $tools = Join-Path $env:RUNNER_TEMP 'office-c1-rtk'
-          New-Item -ItemType Directory -Path $tools -Force | Out-Null
-          $archive = Join-Path $tools 'rtk.zip'
-          Invoke-WebRequest 'https://github.com/rtk-ai/rtk/releases/download/v1.1.0/rtk-x86_64-pc-windows-msvc.zip' -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne 'c9a8f7a8bad471e64a343314168f38d2399a06fa327cdf5772fb0e645d99ea6f') { throw 'RTK archive hash mismatch' }
-          Expand-Archive $archive -DestinationPath $tools
-          $exe = @(Get-ChildItem $tools -Filter rtk.exe -Recurse)
-          if ($exe.Count -ne 1) { throw 'Expected one RTK executable' }
-          $exe[0].DirectoryName | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "OFFICE_EVIDENCE_DIR=$evidence" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Initialize complete all-unrun manifest before build
         run: |
-          rtk run python scripts/office-windows-feasibility.py --initialize-only --out $env:KD_BRIDGE_JOB_EVIDENCE
+          python scripts/office-windows-feasibility.py --initialize-only --out $env:OFFICE_EVIDENCE_DIR
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rtk run python scripts/office-windows-feasibility.py --self-test
+          python scripts/office-windows-feasibility.py --self-test
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # Toolchain steps follow native-ci.yml. OCR and model acquisition are omitted.
       - name: Initialize Windows compiler environment
         uses: ilammy/msvc-dev-cmd@v1
       - name: Install pinned Windows Vulkan SDK
         run: |
-          rtk run pwsh -NoProfile -File scripts/install-vulkan.ps1 *> "$env:KD_BRIDGE_JOB_EVIDENCE/vulkan-setup.log"
+          pwsh -NoProfile -File scripts/install-vulkan.ps1 *> "$env:OFFICE_EVIDENCE_DIR/vulkan-setup.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/vulkan-setup.log" -Tail 40
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/vulkan-setup.log" -Tail 40
           exit $code
       - name: Install protocol compiler
         run: |
-          rtk run python scripts/install-protoc.py *> "$env:KD_BRIDGE_JOB_EVIDENCE/protoc-setup.log"
+          python scripts/install-protoc.py *> "$env:OFFICE_EVIDENCE_DIR/protoc-setup.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/protoc-setup.log" -Tail 40
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/protoc-setup.log" -Tail 40
           exit $code
       - name: Install pinned Rust
         run: |
-          rtk run rustup show active-toolchain
+          rustup show active-toolchain
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: Swatinem/rust-cache@v2
         with:
@@ -90,51 +80,51 @@ jobs:
           shared-key: office-c1-windows
       - name: Regenerate restored llama CMake projects
         run: |
-          rtk run python scripts/native-cmake-cache.py
+          python scripts/native-cmake-cache.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Fetch verified PDFium only (no models or OCR assets)
         run: |
-          rtk run python scripts/office-windows-feasibility.py --fetch-pdfium "$env:KD_BRIDGE_JOB_EVIDENCE/assets" *> "$env:KD_BRIDGE_JOB_EVIDENCE/pdfium-setup.log"
+          python scripts/office-windows-feasibility.py --fetch-pdfium "$env:OFFICE_EVIDENCE_DIR/assets" *> "$env:OFFICE_EVIDENCE_DIR/pdfium-setup.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/pdfium-setup.log" -Tail 40
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/pdfium-setup.log" -Tail 40
           exit $code
       - name: Format and lint the Windows harness
         run: |
-          rtk run cargo fmt --all --check *> "$env:KD_BRIDGE_JOB_EVIDENCE/format.log"
+          cargo fmt --all --check *> "$env:OFFICE_EVIDENCE_DIR/format.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/format.log" -Tail 60
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/format.log" -Tail 60
           if ($code -ne 0) { exit $code }
-          rtk run cargo clippy --locked -p vz-office-windows-harness --all-targets --features office-feasibility -- -D warnings *> "$env:KD_BRIDGE_JOB_EVIDENCE/clippy.log"
+          cargo clippy --locked -p vz-office-windows-harness --all-targets --features office-feasibility -- -D warnings *> "$env:OFFICE_EVIDENCE_DIR/clippy.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/clippy.log" -Tail 60
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/clippy.log" -Tail 60
           exit $code
       - name: Build actual opt-in parser worker and suspended launcher
         run: |
-          rtk run cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch *> "$env:KD_BRIDGE_JOB_EVIDENCE/build.log"
+          cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch *> "$env:OFFICE_EVIDENCE_DIR/build.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/build.log" -Tail 80
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/build.log" -Tail 80
           exit $code
       - name: Run Stage A and B probes with independent positive controls
         timeout-minutes: 15
         run: |
-          rtk run python scripts/office-windows-feasibility.py --out "$env:KD_BRIDGE_JOB_EVIDENCE/run" --pdfium "$env:KD_BRIDGE_JOB_EVIDENCE/assets/pdfium.dll" *> "$env:KD_BRIDGE_JOB_EVIDENCE/suite.log"
+          python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run" --pdfium "$env:OFFICE_EVIDENCE_DIR/assets/pdfium.dll" *> "$env:OFFICE_EVIDENCE_DIR/suite.log"
           $code = $LASTEXITCODE
-          Get-Content "$env:KD_BRIDGE_JOB_EVIDENCE/suite.log" -Tail 110
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/suite.log" -Tail 110
           exit $code
       - name: Retain and validate redacted manifest even on failure
         if: always()
         run: |
-          $partial = "$env:KD_BRIDGE_JOB_EVIDENCE/run/manifest.json"
+          $partial = "$env:OFFICE_EVIDENCE_DIR/run/manifest.json"
           if (Test-Path $partial) {
-            Copy-Item $partial "$env:KD_BRIDGE_JOB_EVIDENCE/manifest.json" -Force
+            Copy-Item $partial "$env:OFFICE_EVIDENCE_DIR/manifest.json" -Force
           }
-          rtk run python scripts/office-windows-feasibility.py --validate-manifest "$env:KD_BRIDGE_JOB_EVIDENCE/manifest.json"
+          python scripts/office-windows-feasibility.py --validate-manifest "$env:OFFICE_EVIDENCE_DIR/manifest.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: office-c1-windows-feasibility-${{ github.run_id }}-${{ github.run_attempt }}
           # Raw requests, paths, fixture bytes and full logs remain private.
-          path: ${{ env.KD_BRIDGE_JOB_EVIDENCE }}/manifest.json
+          path: ${{ env.OFFICE_EVIDENCE_DIR }}/manifest.json
           if-no-files-found: error
           retention-days: 7

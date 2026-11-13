@@ -719,7 +719,7 @@ fn l2(values: &[f32], query: &[f32]) -> f32 {
         values
             .iter()
             .zip(query)
-            .map(|(a, b)| (f32::from_le(*a) - b).powi(2))
+            .map(|(a, b)| (*a - b).powi(2))
             .sum()
     }
 }

@@ -2,7 +2,7 @@
 """Windows C1 stage-1 runner. Private raw evidence; only manifest.json is public.
 
 No product listener. Temporary TCP/UDP positive-control endpoints close at exit.
-Every worker and shell subprocess passes through RTK; confinement uses Win32 APIs.
+Worker and shell subprocesses run directly; confinement uses Win32 APIs.
 """
 import argparse
 import hashlib
@@ -33,7 +33,7 @@ def command(argv, log, timeout=70):
     # Logs are durable and complete, including failures and timeout output.
     with log.open("wb") as stream:
         try:
-            return subprocess.run(["rtk", "run", *map(str, argv)], stdout=stream,
+            return subprocess.run(list(map(str, argv)), stdout=stream,
                                   stderr=subprocess.STDOUT, timeout=timeout, check=False).returncode
         except subprocess.TimeoutExpired:
             stream.write(b"\nHARNESS SUBPROCESS DEADLINE EXCEEDED\n")
@@ -287,8 +287,6 @@ def run_suite(args):
     try:
         if sys.platform != "win32":
             raise RuntimeError("Windows required; no Windows probes observed")
-        if not shutil.which("rtk"):
-            raise RuntimeError("rtk required for subprocess argv")
         manifest["worker_sha256"] = digest(args.worker)
         manifest["launcher_sha256"] = digest(args.launcher)
         if manifest["source_sha"] is None:

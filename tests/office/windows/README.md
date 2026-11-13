@@ -8,7 +8,7 @@ alter the shipped native worker launcher. Authority: runbooks `origin/main`
 The `vz-office-windows-harness` crate can be checked independently of native C++:
 
 ```
-rtk run cargo check --locked -p vz-office-windows-harness --features office-feasibility --target x86_64-pc-windows-msvc
+cargo check --locked -p vz-office-windows-harness --features office-feasibility --target x86_64-pc-windows-msvc
 ```
 
 Stage A launcher arguments:
@@ -44,11 +44,12 @@ Stage B
 -------
 
 Build the feature-gated **actual** parser worker and launcher, then run from
-PowerShell with RTK on PATH:
+PowerShell:
 
 ```
-rtk run cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch
-rtk run python scripts/office-windows-feasibility.py --out "$env:KD_BRIDGE_JOB_EVIDENCE/run-1" --pdfium C:/exact/pinned/pdfium.dll
+$env:OFFICE_EVIDENCE_DIR = Join-Path $env:RUNNER_TEMP "office-c1-local"
+cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch
+python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run-1" --pdfium C:/exact/pinned/pdfium.dll
 ```
 
 The runner has 99 planned rows. It creates a unique sentinel directory under
@@ -92,7 +93,7 @@ or unrun row; no expectation of a green qualification result is built in.
 Portable runner checks:
 
 ```
-rtk run python scripts/office-windows-feasibility.py --self-test
+python scripts/office-windows-feasibility.py --self-test
 ```
 
 Local full-worker cross-check was attempted but cannot build native C/C++
@@ -107,8 +108,9 @@ Stage C
 `.github/workflows/office-feasibility-windows.yml` has one `windows-2022` job,
 pushes only on `build/office-web-c1-feasibility-s1927` with harness/worker paths,
 and `workflow_dispatch`. It reuses native CI's Python, MSVC, Vulkan, protoc,
-pinned Rust and restored-CMake setup. RTK v1.1.0 is a SHA256-verified Windows
-release. Only the existing pinned PDFium is fetched, without model/OCR assets.
+pinned Rust and restored-CMake setup. Commands run directly, and
+`OFFICE_EVIDENCE_DIR` points under `$env:RUNNER_TEMP`. Only the existing pinned
+PDFium is fetched, without model/OCR assets.
 Checkout credentials are not persisted; permissions are read-only.
 
 The runner initializes every row as unrun **before the build**. The finalizer
