@@ -81,7 +81,7 @@ def main(a):
                            confined_repeat=compare(responses['confined-1'], responses['confined-2']),
                            control_vs_confined=compare(responses['control-1'], responses['confined-1']))
             # Explicitly segregated diagnosis: never qualify an injected process.
-            for mode in ('control', 'confined'):
+            for mode in (() if a.skip_trace else ('control', 'confined')):
                 label = name+'-trace-'+mode
                 env = {'PATH': os.environ['PATH'], 'HOME': str(target), 'DYLD_INSERT_LIBRARIES': str(tracer)}
                 argv = [worker, sb, 'control-'+role if mode=='control' else role, pdfium, path, scratch/label]
@@ -100,4 +100,5 @@ if __name__ == '__main__':
     for key in ('evidence', 'worker', 'pdfium', 'drafts'):
         p.add_argument('--'+key,type=Path,required=True)
     p.add_argument('--trace-only', action='store_true')
+    p.add_argument('--skip-trace', action='store_true')
     main(p.parse_args())

@@ -1,8 +1,10 @@
 """Bounded 8-bit RGB/RGBA PNG decoding for private pixel comparisons."""
 import struct
 import zlib
+from functools import lru_cache
 
 
+@lru_cache(maxsize=8)
 def decode(data):
     if data[:8] != b'\x89PNG\r\n\x1a\n':
         raise ValueError('PNG signature')

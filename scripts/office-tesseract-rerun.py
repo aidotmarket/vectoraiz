@@ -83,8 +83,16 @@ def main(a):
             (root / 'ocr.json').write_text(json.dumps(result, indent=2) + '\n')
             print(role, name, row['status'], flush=True)
     # Real initialized OCR executable, pre-input limits, no sampler.
-    for kind in ('anonymous', 'mach', 'many-small', 'malloc', 'burst', 'raise'):
+    for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty'):
         result['memory'][kind] = w.execute([helper, sb, 'memory', assets, kind, scratch / kind], root, 'memory-' + kind)
+    positive = w.execute([helper, sb, 'control-sockets', assets], root, 'control-sockets')
+    confined = w.execute([helper, sb, 'sockets', assets], root, 'confined-sockets')
+    before = positive.get('probe', {}).get('checks', [])
+    after = confined.get('probe', {}).get('checks', [])
+    result['strict_sockets'] = {'control': positive, 'confined': confined,
+        'status': 'pass' if len(before) == len(after) == 12 and all(
+            p['descriptor_returned'] and not q['descriptor_returned'] and q['rc'] == -1 and q['errno'] in (1, 13, 24)
+            for p, q in zip(before, after)) else 'fail'}
     (root / 'ocr.json').write_text(json.dumps(result, indent=2) + '\n')
 
 

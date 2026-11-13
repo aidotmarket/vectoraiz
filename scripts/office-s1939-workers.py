@@ -43,16 +43,18 @@ def main(a):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     worker = a.target.resolve() / 'release/vz-office-worker'
     pdfium = a.pdfium.resolve()
-    signed = w.common.run(['codesign', '--force', '--sign', '-', worker], root, 'sign-worker')
+    signing = ['codesign', '--verify', '--strict', worker] if a.verify_signature else ['codesign', '--force', '--sign', '-', worker]
+    signed = w.common.run(signing, root, 'verify-worker' if a.verify_signature else 'sign-worker')
     assert signed['exit_code'] == 0
-    inventory = json.loads(a.inventory.read_text())
+    inventory = [] if a.probes_only else json.loads(a.inventory.read_text())
     sentinel = root / 'host-sentinel.txt'
     snapshot = root / 'supplied.txt'
     sentinel.write_text('private host sentinel\n')
     snapshot.write_text('supplied snapshot\n')
     result = {'executable_sha256': w.common.digest(worker), 'pdfium_sha256': w.common.digest(pdfium),
               'roles': {}, 'Windows': {'status': 'NOT RUN'}, 'sampler_enabled': False,
-              'ocr': {'status': 'blocked', 'refusal': 'Scanned pages cannot be read with the installed offline OCR.'}}
+              'ocr': {'status': 'separate', 'runner': 'office-tesseract-rerun.py',
+                      'reason': 'This runner does not launch OCR; use the separately pinned OCR results.'}}
     # A real AF_UNIX endpoint supplies a route-positive control outside the worker.
     unix_path = root / 'control.sock'
     if unix_path.exists(): unix_path.unlink()
@@ -101,12 +103,20 @@ def main(a):
                     if name == 'unix_connect':
                         passed = positive[name]['positive_control_succeeded'] and probe.get('rc') == -1 and not probe.get('socket_created') and probe.get('errno') in (1, 13, 24)
                         row['status'] = 'pass' if passed else 'fail'
+                    elif name.startswith('mach_'):
+                        passed = positive[name]['positive_control_succeeded'] and probe.get('mach_error') == 1100 and row['exit_code'] == 0
+                        row['status'] = 'pass' if passed else 'fail'
+                        row['denial_semantics'] = 'BOOTSTRAP_NOT_PRIVILEGED=1100; unknown service=1102 does not pass'
+                    elif name == 'xpc_broker':
+                        passed = positive[name]['positive_control_succeeded'] and probe.get('xpc_error') is True and probe.get('endpoint_lookup_error') == 1100 and row['exit_code'] == 0
+                        row['status'] = 'pass' if passed else 'fail'
+                        row['denial_semantics'] = 'generic XPC error plus same-process kernel denial of identical endpoint; XPC error alone does not pass'
                     elif not positive[name]['positive_control_succeeded'] or not passed:
                         row['status'] = 'fail'
                         row['reason'] = 'unproven: error without positive control or explicit denial'
                 offered[name] = row
             content = {}
-            for extension in ('txt', 'md', 'html', 'docx', 'xlsx', 'pdf', 'pdf_scan'):
+            for extension in (() if a.probes_only else ('txt', 'md', 'html', 'docx', 'xlsx', 'pdf', 'pdf_scan')):
                 candidates = [Path(x['path']) for x in inventory if x['format'] == ('pdf' if extension == 'pdf_scan' else extension)
                               and (extension != 'pdf_scan' or 'scanned' in x['name'])]
                 fixture = min(candidates, key=lambda p:p.stat().st_size) if candidates else None
@@ -139,6 +149,9 @@ def main(a):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
-    for key in ('evidence', 'target', 'inventory', 'pdfium'): p.add_argument('--' + key, type=Path, required=True)
+    for key in ('evidence', 'target', 'pdfium'): p.add_argument('--' + key, type=Path, required=True)
+    p.add_argument('--inventory', type=Path)
+    p.add_argument('--probes-only', action='store_true')
+    p.add_argument('--verify-signature', action='store_true')
     p.add_argument('--fixtures',type=Path)
     main(p.parse_args())
