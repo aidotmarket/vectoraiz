@@ -98,6 +98,12 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:OFFICE_EVIDENCE_DIR/clippy.log" -Tail 60
           exit $code
+      - name: Verify suspended LPAC and ordinary AppContainer token checks
+        run: |
+          cargo test --locked -p vz-office-windows-harness --features office-feasibility -- --nocapture *> "$env:OFFICE_EVIDENCE_DIR/token-tests.log"
+          $code = $LASTEXITCODE
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/token-tests.log" -Tail 80
+          exit $code
       - name: Build actual opt-in parser worker and suspended launcher
         run: |
           cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch *> "$env:OFFICE_EVIDENCE_DIR/build.log"

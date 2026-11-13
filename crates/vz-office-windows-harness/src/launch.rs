@@ -312,46 +312,162 @@ fn low_scratch(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn token_readback(process: HANDLE, lpac: bool) -> Result<Value> {
+/// Query each class independently so unsupported classes survive in failed-row evidence.
+fn token_flag(
+    token: HANDLE,
+    class: TOKEN_INFORMATION_CLASS,
+    name: &str,
+    trace: &mut Value,
+) -> Result<u32> {
+    let mut value = 0u32;
+    let mut bytes = 0;
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            class,
+            &mut value as *mut _ as _,
+            size_of_val(&value) as u32,
+            &mut bytes,
+        )
+    };
+    let error = if ok == 0 {
+        Some(std::io::Error::last_os_error())
+    } else {
+        None
+    };
+    trace["token_queries"][name] = json!({"class":class,"succeeded":ok != 0,
+        "returned_bytes":bytes,"value":if ok != 0 {Some(value)} else {None},
+        "error_code":error.as_ref().and_then(|e| e.raw_os_error())});
+    if let Some(error) = error {
+        return Err(error).with_context(|| format!("GetTokenInformation({name}, class={class})"));
+    }
+    ensure!(
+        bytes == size_of_val(&value) as u32,
+        "{name}: unexpected result size={bytes}"
+    );
+    Ok(value)
+}
+
+/// Evaluate a synthetic file DACL with the effective child token, without resuming
+/// it or changing any filesystem ACL. Everyone satisfies the normal user check;
+/// the second ACE must satisfy the additional AppContainer package check.
+/// https://learn.microsoft.com/windows/win32/api/securitybaseapi/nf-securitybaseapi-accesscheck
+fn token_can_read(token: HANDLE, package: &str) -> Result<bool> {
+    let mut descriptor = null_mut();
+    check(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide(format!("O:SYG:SYD:(A;;0x1;;;WD)(A;;0x1;;;{package})")).as_ptr(),
+                1,
+                &mut descriptor,
+                null_mut(),
+            )
+        },
+        "LPAC read-check security descriptor",
+    )?;
+    let mapping = GENERIC_MAPPING {
+        GenericRead: FILE_GENERIC_READ,
+        GenericWrite: FILE_GENERIC_WRITE,
+        GenericExecute: FILE_GENERIC_EXECUTE,
+        GenericAll: FILE_ALL_ACCESS,
+    };
+    let mut privileges: PRIVILEGE_SET = unsafe { zeroed() };
+    let mut bytes = size_of_val(&privileges) as u32;
+    let mut granted = 0;
+    let mut allowed = 0;
+    let ok = unsafe {
+        AccessCheck(
+            descriptor,
+            token,
+            FILE_READ_DATA,
+            &mapping,
+            &mut privileges,
+            &mut bytes,
+            &mut granted,
+            &mut allowed,
+        )
+    };
+    // Capture the API error before LocalFree changes last-error state.
+    let result = check(ok, "LPAC AccessCheck(FILE_READ_DATA)");
+    unsafe { LocalFree(descriptor) };
+    result?;
+    ensure!(
+        allowed == 0 || granted & FILE_READ_DATA != 0,
+        "LPAC AccessCheck inconsistent grant"
+    );
+    Ok(allowed != 0)
+}
+
+fn lpac_access_readback(token: HANDLE, sid: PSID, lpac: bool, trace: &mut Value) -> Result<()> {
+    let mut impersonation = null_mut();
+    check(
+        unsafe { DuplicateToken(token, SecurityImpersonation, &mut impersonation) },
+        "LPAC DuplicateToken",
+    )?;
+    let impersonation = Handle(impersonation);
+    let mut sid_text = null_mut();
+    check(
+        unsafe { ConvertSidToStringSidW(sid, &mut sid_text) },
+        "LPAC package SID string",
+    )?;
+    let mut len = 0;
+    unsafe {
+        while *sid_text.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let package = unsafe { String::from_utf16(std::slice::from_raw_parts(sid_text, len)) };
+    unsafe { LocalFree(sid_text.cast()) };
+    let package = package?;
+    let specific = token_can_read(impersonation.0, &package);
+    let all_packages = token_can_read(impersonation.0, "S-1-15-2-1");
+    trace["lpac_access_check"] = json!({"method":"AccessCheck(FILE_READ_DATA)",
+        "container_sid_read":specific.as_ref().ok(),
+        "all_application_packages_read":all_packages.as_ref().ok(),
+        "container_sid_error":specific.as_ref().err().map(|e| format!("{e:#}")),
+        "all_application_packages_error":all_packages.as_ref().err().map(|e| format!("{e:#}"))});
+    ensure!(
+        specific?,
+        "LPAC verification failed: container SID cannot read positive control"
+    );
+    ensure!(all_packages? != lpac, "LPAC verification failed: ALL APPLICATION PACKAGES access does not match requested isolation");
+    Ok(())
+}
+
+fn token_readback(process: HANDLE, sid: PSID, lpac: bool, trace: &mut Value) -> Result<Value> {
+    trace["token_queries"] = json!({});
+    trace["lpac_verification"] = json!("unverified");
     let mut token = null_mut();
     check(
-        unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) },
+        unsafe { OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token) },
         "OpenProcessToken",
     )?;
     let token = Handle(token);
-    let mut fields = Vec::new();
-    for class in [TokenIsAppContainer, TokenIsLessPrivilegedAppContainer] {
-        let mut value = 0u32;
+    // Do not short-circuit: retain the outcome of each queried information class.
+    let appcontainer = token_flag(token.0, TokenIsAppContainer, "TokenIsAppContainer", trace);
+    let less_privileged = token_flag(
+        token.0,
+        TokenIsLessPrivilegedAppContainer,
+        "TokenIsLessPrivilegedAppContainer",
+        trace,
+    );
+    let capabilities = (|| -> Result<u32> {
         let mut bytes = 0;
-        check(
-            unsafe {
-                GetTokenInformation(
-                    token.0,
-                    class,
-                    &mut value as *mut _ as _,
-                    size_of_val(&value) as u32,
-                    &mut bytes,
-                )
-            },
-            "GetTokenInformation",
-        )?;
-        let expected = if class == TokenIsLessPrivilegedAppContainer {
-            u32::from(lpac)
+        let ok =
+            unsafe { GetTokenInformation(token.0, TokenCapabilities, null_mut(), 0, &mut bytes) };
+        let error = if ok == 0 {
+            unsafe { GetLastError() }
         } else {
-            1
+            0
         };
+        trace["token_queries"]["TokenCapabilities"] = json!({"class":TokenCapabilities,
+            "size_query_error_code":error,"required_bytes":bytes,"succeeded":false});
         ensure!(
-            value == expected,
-            "effective token class={class}, value={value}, expected={expected}"
+            ok == 0 && error == ERROR_INSUFFICIENT_BUFFER && bytes >= size_of::<u32>() as u32,
+            "TokenCapabilities size query: error={error}, bytes={bytes}"
         );
-        fields.push(value);
-    }
-    let mut bytes = 0;
-    unsafe { GetTokenInformation(token.0, TokenCapabilities, null_mut(), 0, &mut bytes) };
-    ensure!(bytes >= size_of::<u32>() as u32, "TokenCapabilities size");
-    let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
-    check(
-        unsafe {
+        let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
+        let ok = unsafe {
             GetTokenInformation(
                 token.0,
                 TokenCapabilities,
@@ -359,12 +475,57 @@ fn token_readback(process: HANDLE, lpac: bool) -> Result<Value> {
                 bytes,
                 &mut bytes,
             )
-        },
-        "TokenCapabilities",
-    )?;
-    let count = unsafe { *(buffer.as_ptr() as *const u32) };
+        };
+        let error = if ok == 0 {
+            unsafe { GetLastError() }
+        } else {
+            0
+        };
+        trace["token_queries"]["TokenCapabilities"]["error_code"] = json!(error);
+        trace["token_queries"]["TokenCapabilities"]["succeeded"] = json!(ok != 0);
+        ensure!(
+            ok != 0,
+            "GetTokenInformation(TokenCapabilities): os error {error}"
+        );
+        ensure!(
+            bytes >= size_of::<u32>() as u32 && bytes as usize <= buffer.len() * size_of::<usize>(),
+            "TokenCapabilities result size"
+        );
+        let count = unsafe { *(buffer.as_ptr() as *const u32) };
+        trace["token_queries"]["TokenCapabilities"]["count"] = json!(count);
+        Ok(count)
+    })();
+    let appcontainer = appcontainer?;
+    ensure!(
+        appcontainer == 1,
+        "effective token is not an AppContainer: {appcontainer}"
+    );
+    let count = capabilities?;
     ensure!(count == 0, "effective token has capabilities={count}");
-    Ok(json!({"appcontainer":fields[0],"lpac":fields[1],"capability_count":count}))
+    let method = match less_privileged {
+        Ok(value) => {
+            ensure!(
+                value == u32::from(lpac),
+                "effective TokenIsLessPrivilegedAppContainer={value}, expected={lpac}"
+            );
+            "TokenIsLessPrivilegedAppContainer"
+        }
+        Err(error) => {
+            let code = error
+                .downcast_ref::<std::io::Error>()
+                .and_then(|e| e.raw_os_error());
+            ensure!(
+                matches!(code, Some(code) if code == ERROR_INVALID_PARAMETER as i32 || code == ERROR_NOT_SUPPORTED as i32),
+                "LPAC verification failed: {error:#}"
+            );
+            lpac_access_readback(token.0, sid, lpac, trace)
+                .context("LPAC cannot be verified; refusing to resume worker")?;
+            "AccessCheck: container SID allowed; ALL APPLICATION PACKAGES isolation checked"
+        }
+    };
+    trace["lpac_verification"] = json!(method);
+    Ok(json!({"appcontainer":appcontainer,"lpac":u32::from(lpac),
+        "capability_count":count,"lpac_verification":method}))
 }
 
 /// Sorted UTF-16 entries, exactly double-NUL terminated. Only named directory
@@ -382,10 +543,7 @@ fn minimal_environment(
     entries.insert("TEMP", scratch.as_os_str().to_owned());
     entries.insert("TMP", scratch.as_os_str().to_owned());
     if local_app_data || expanded {
-        entries.insert(
-            "LOCALAPPDATA",
-            std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA")?,
-        );
+        entries.insert("LOCALAPPDATA", scratch.as_os_str().to_owned());
     }
     if expanded {
         for key in [
@@ -702,7 +860,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         ensure!(assigned != 0, "job assignment readback");
     }
     let token = if confined {
-        Some(token_readback(process_handle.0, lpac)?)
+        Some(token_readback(
+            process_handle.0,
+            profile.as_ref().context("confined profile")?.sid,
+            lpac,
+            trace,
+        )?)
     } else {
         None
     };
@@ -838,4 +1001,133 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         "stdin_error":write_error,"stderr_bytes":errors.len(),"capture_overflow":capture_overflow,
         "capture_limit_bytes":32 * 1024 * 1024,"response":response}),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_environment_uses_only_scratch_and_system_root() -> Result<()> {
+        let scratch = Path::new(r"C:\container-scratch");
+        let (block, keys) = minimal_environment(scratch, true, false)?;
+        assert_eq!(keys, ["LOCALAPPDATA", "SystemRoot", "TEMP", "TMP"]);
+        assert!(block.ends_with(&[0, 0]));
+        let entries: Vec<_> = block
+            .split(|unit| *unit == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf16(entry).unwrap())
+            .collect();
+        for key in ["LOCALAPPDATA", "TEMP", "TMP"] {
+            assert!(entries.contains(&format!("{key}={}", scratch.display())));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn suspended_lpac_and_plain_tokens_are_distinguished() -> Result<()> {
+        let root = std::env::var_os("OFFICE_EVIDENCE_DIR")
+            .or_else(|| std::env::var_os("KD_BRIDGE_JOB_EVIDENCE"))
+            .context("token regression requires an external evidence directory")?;
+        for lpac in [false, true] {
+            let mut trace = json!({});
+            let mut profile = Profile::new(&mut trace)?;
+            let scratch =
+                PathBuf::from(&root).join(format!("token-test-{}-{lpac}", std::process::id()));
+            std::fs::create_dir(&scratch)?;
+            low_scratch(&scratch)?;
+            let worker = std::env::current_exe()?;
+            let mut executable_grant = Grant::new(
+                &worker,
+                profile.sid,
+                FILE_GENERIC_READ | FILE_GENERIC_EXECUTE,
+                0,
+            )?;
+            let mut scratch_grant = Grant::new(
+                &scratch,
+                profile.sid,
+                FILE_ALL_ACCESS,
+                SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            )?;
+            let attributes = Attributes::new(if lpac { 2 } else { 1 })?;
+            let caps = SECURITY_CAPABILITIES {
+                AppContainerSid: profile.sid,
+                ..Default::default()
+            };
+            attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &caps)?;
+            let opt_out = 1u32;
+            if lpac {
+                attributes.set(0x0002_000f, &opt_out)?;
+            }
+            let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
+            startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
+            startup.lpAttributeList = attributes.ptr;
+            let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
+            let mut environment = minimal_environment(&scratch, true, false)?.0;
+            check(
+                unsafe {
+                    CreateProcessW(
+                        wide(&worker).as_ptr(),
+                        null_mut(),
+                        null(),
+                        null(),
+                        0,
+                        CREATE_SUSPENDED
+                            | EXTENDED_STARTUPINFO_PRESENT
+                            | CREATE_UNICODE_ENVIRONMENT
+                            | CREATE_NO_WINDOW,
+                        environment.as_mut_ptr().cast(),
+                        wide(&scratch).as_ptr(),
+                        &startup.StartupInfo,
+                        &mut process,
+                    )
+                },
+                "token regression CreateProcessW",
+            )?;
+            struct Suspended {
+                process: Handle,
+            }
+            impl Drop for Suspended {
+                fn drop(&mut self) {
+                    unsafe {
+                        TerminateProcess(self.process.0, 0);
+                        WaitForSingleObject(self.process.0, 5000);
+                    }
+                }
+            }
+            let child = Suspended {
+                process: Handle(process.hProcess),
+            };
+            let thread = Handle(process.hThread);
+            let verified = token_readback(child.process.0, profile.sid, lpac, &mut trace)?;
+            assert_eq!(verified["appcontainer"], 1);
+            assert_eq!(verified["lpac"], u32::from(lpac));
+            assert_eq!(verified["capability_count"], 0);
+            // Exercise the fallback even on OS builds that implement class 46.
+            let mut token = null_mut();
+            check(
+                unsafe {
+                    OpenProcessToken(child.process.0, TOKEN_QUERY | TOKEN_DUPLICATE, &mut token)
+                },
+                "token regression OpenProcessToken",
+            )?;
+            let token = Handle(token);
+            lpac_access_readback(token.0, profile.sid, lpac, &mut trace)?;
+            assert_eq!(trace["lpac_access_check"]["container_sid_read"], true);
+            assert_eq!(
+                trace["lpac_access_check"]["all_application_packages_read"],
+                !lpac
+            );
+            assert!(lpac_access_readback(token.0, profile.sid, !lpac, &mut json!({})).is_err());
+            assert!(token_readback(child.process.0, profile.sid, !lpac, &mut json!({})).is_err());
+            println!("token regression lpac={lpac}: {trace}");
+            drop(thread);
+            drop(child);
+            scratch_grant.restore()?;
+            executable_grant.restore()?;
+            profile.remove()?;
+            std::fs::remove_dir(scratch)?;
+        }
+        Ok(())
+    }
 }

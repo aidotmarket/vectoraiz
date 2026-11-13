@@ -120,9 +120,12 @@ def validate_manifest(manifest):
             trace = result["launch_trace"]
             assert trace["profile_created_before_launch"] and trace["create_process_succeeded"]
             token = result["token_before_resume"]
-            assert token == {"appcontainer": 1, "lpac": int(result["variation"] != "plain-appcontainer"), "capability_count": 0}
+            assert token["appcontainer"] == 1 and token["capability_count"] == 0
+            assert token["lpac"] == int(result["variation"] != "plain-appcontainer")
+            assert token["lpac_verification"] in (
+                "TokenIsLessPrivilegedAppContainer",
+                "AccessCheck: container SID allowed; ALL APPLICATION PACKAGES isolation checked")
     if manifest["status"] == "pass":
-        assert diagnostic["status"] == "complete"
         assert counts["fail"] == counts["unrun"] == 0 and not manifest.get("setup_error") and not manifest.get("cleanup_error")
         assert manifest.get("worker_sha256") and manifest.get("source_sha")
 
@@ -146,6 +149,8 @@ def fetch_pdfium(output):
 
 def evaluate(spec, control, confined):
     """Never turn launch failure, missing controls or generic errors into passes."""
+    if confined.get("launch_trace", {}).get("lpac_verification") == "unverified":
+        return "fail", "LPAC could not be verified; confined worker was not resumed"
     if control.get("status") != "pass":
         return "fail", "positive-control worker did not complete successfully"
     if confined.get("status") != "pass":
@@ -465,6 +470,9 @@ def self_test():
     assert evaluate(deny, positive, explicit)[0] == "pass"
     assert evaluate(deny, response(success=False), explicit)[0] == "unrun"
     assert evaluate(deny, positive, {"status": "fail"})[0] == "fail"
+    unverified = {"status": "fail", "launch_trace": {"lpac_verification": "unverified"}}
+    assert evaluate(deny, positive, unverified) == (
+        "fail", "LPAC could not be verified; confined worker was not resumed")
     assert evaluate(deny, positive, response(success=False, explicit_denial=False))[0] == "fail"
     assert evaluate(deny, positive, positive)[0] == "fail"
     assert evaluate({**deny, "id": "inherited"}, positive, explicit)[0] == "fail"
@@ -503,6 +511,30 @@ def self_test():
         validate_manifest(manifest)
         assert all(result["status"] == "fail" for result in manifest["launch_diagnostic"]["variations"])
         assert manifest["launch_diagnostic"]["variations"][0]["launch_trace"]["create_process_error_code"] == 203
+    # Diagnostic launch failures are evidence, not a suite acceptance gate.
+    completed = json.loads(json.dumps(manifest))
+    for row in completed["rows"]:
+        row.update(status="pass", reason="synthetic validation control")
+    completed.update(status="pass", counts={"pass": len(specs), "fail": 0, "unrun": 0},
+                     source_sha="synthetic", worker_sha256="synthetic")
+    validate_manifest(completed)
+    # The extended token evidence must still reject an unverified diagnostic.
+    diagnostic_pass = {"variation": "baseline", "status": "pass", "worker_resumed": False,
+        "launch_trace": {"profile_created_before_launch": True, "create_process_succeeded": True},
+        "token_before_resume": {"appcontainer": 1, "lpac": 1, "capability_count": 0,
+            "lpac_verification": "AccessCheck: container SID allowed; ALL APPLICATION PACKAGES isolation checked"}}
+    partial = initial_manifest()
+    partial["launch_diagnostic"].update(status="running", variations=[diagnostic_pass])
+    validate_manifest(partial)
+    for key, value in (("appcontainer", 0), ("lpac", 0), ("capability_count", 1), ("lpac_verification", "unverified")):
+        invalid = json.loads(json.dumps(partial))
+        invalid["launch_diagnostic"]["variations"][0]["token_before_resume"][key] = value
+        try:
+            validate_manifest(invalid)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("invalid diagnostic token accepted: " + key)
     manifest["rows"].pop()
     try:
         validate_manifest(manifest)
