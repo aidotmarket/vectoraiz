@@ -5,6 +5,11 @@ fn main() -> anyhow::Result<()> {
     use pdfium_render::prelude::*;
     use std::ffi::CString;
     unsafe extern "C" {
+        fn vz_office_fonts(
+            library: *const std::ffi::c_char,
+            directory: *const std::ffi::c_char,
+        ) -> i32;
+        fn vz_office_font_stats();
         fn vz_office_reserve_baseline() -> i32;
         fn vz_office_supply_fds(input: i32, scratch: i32, assets: i32);
         fn vz_office_socket_checks(close_fd: i32) -> i32;
@@ -24,6 +29,16 @@ fn main() -> anyhow::Result<()> {
     let asset = std::fs::File::open(&args[3])?;
     // Load required runtime assets before baseline, without accepting input.
     let pdfium = Pdfium::new(Pdfium::bind_to_library(&args[3])?);
+    let font_directory = std::env::current_exe()?
+        .parent()
+        .context("worker directory")?
+        .join("fonts");
+    let library = CString::new(args[3].as_str())?;
+    let directory = CString::new(font_directory.to_str().context("font directory UTF-8")?)?;
+    ensure!(
+        unsafe { vz_office_fonts(library.as_ptr(), directory.as_ptr()) } == 0,
+        "pinned font bundle preload refused"
+    );
     if args[2] == "memory" && args.get(4).is_some_and(|s| s == "reserved-dirty") {
         ensure!(
             unsafe { vz_office_reserve_baseline() } == 0,
@@ -99,6 +114,7 @@ fn main() -> anyhow::Result<()> {
         std::process::exit(unsafe { vz_office_memory_probe(kind.as_ptr(), scratch.as_ptr()) });
     }
     ensure!(real_role, "unknown role");
+    eprintln!("FONT_PROVIDER_READY");
     vz_core::worker::write_frame(
         std::io::stdout().lock(),
         &serde_json::json!({"ready":true,"role":args[2]}),
@@ -168,6 +184,7 @@ fn main() -> anyhow::Result<()> {
         std::io::stdout().lock(),
         &serde_json::json!({"pages":output}),
     )?;
+    unsafe { vz_office_font_stats() };
     Ok(())
 }
 
