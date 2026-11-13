@@ -132,7 +132,7 @@ try:
             report.unlink(missing_ok=True)
             probe.unlink(missing_ok=True)
             step(f'Launch installed desktop listing probe: switch={enabled}')
-            with Path(f'installed-ui-{enabled}.log').resolve().open('w') as ui_log:
+            with Path('installed-ui.log').resolve().open('a') as ui_log:
                 child = subprocess.Popen([str(binary), '--smoke-test', '--cpu'], cwd=cwd,
                                          env=launch_env, stdout=ui_log, stderr=subprocess.STDOUT)
                 try:

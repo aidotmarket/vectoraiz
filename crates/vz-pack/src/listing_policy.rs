@@ -18,27 +18,37 @@ pub fn preview_enabled(
         && (harness_compiled || (switch_compiled && var == Some(std::ffi::OsStr::new("1"))))
 }
 
-pub fn process_preview_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
+fn process_preview_state() -> (bool, bool) {
+    static ENABLED: OnceLock<(bool, bool)> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         #[cfg(all(feature = "listing-preview-test-switch", debug_assertions))]
         let var = std::env::var_os("VZ_LISTING_PREVIEW_TEST");
         #[cfg(not(all(feature = "listing-preview-test-switch", debug_assertions)))]
         let var: Option<std::ffi::OsString> = None;
-        preview_enabled(
-            cfg!(feature = "listing-preview-harness"),
+        let switch_on = preview_enabled(
+            false,
             cfg!(feature = "listing-preview-test-switch"),
             cfg!(debug_assertions),
             var.as_deref(),
+        );
+        (
+            preview_enabled(
+                cfg!(feature = "listing-preview-harness"),
+                cfg!(feature = "listing-preview-test-switch"),
+                cfg!(debug_assertions),
+                var.as_deref(),
+            ),
+            switch_on,
         )
     })
 }
 
+pub fn process_preview_enabled() -> bool {
+    process_preview_state().0
+}
+
 pub fn test_switch_on() -> bool {
-    cfg!(all(
-        feature = "listing-preview-test-switch",
-        debug_assertions
-    )) && process_preview_enabled()
+    process_preview_state().1
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

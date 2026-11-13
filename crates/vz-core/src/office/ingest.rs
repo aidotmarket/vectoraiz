@@ -79,6 +79,12 @@ fn references(bytes: &[u8]) -> Result<(String, BTreeSet<String>)> {
     Ok((root_ns, ids))
 }
 fn display_text(n: &Node, out: &mut String) {
+    // Review inventory presents DrawingML runs joined within each paragraph.
+    if n.ns == A && n.local == "p" {
+        out.push_str(&n.string());
+        out.push('\n');
+        return;
+    }
     if (n.ns == A && n.local == "t") || (n.ns == graphics::C && words("v separator", &n.local)) {
         out.push_str(&n.text);
         out.push('\n');
@@ -108,33 +114,46 @@ pub(super) fn graphics_text(zip: &mut zip::ZipArchive<File>, host: &str) -> Stri
             if root.local != "dataModel" {
                 continue;
             }
-            display_text(&root, &mut text);
-            // dataModelExt can name a relationship on the host that referenced
-            // this model, or on the data part itself (see drawing_for).
-            let mut extensions = Vec::new();
-            graphics::visit(&root, graphics::DSP, "dataModelExt", &mut extensions);
-            if extensions.len() != 1 {
-                continue;
-            }
-            let Some(id) = extensions[0].attr("relId") else {
-                continue;
-            };
-            let mut targets = BTreeSet::new();
-            for owner in std::iter::once(&part).chain(parent.as_ref()) {
-                for rel in relationships(zip, owner).unwrap_or_default() {
-                    if rel.attr("Id") == Some(id)
-                        && rel.attr("TargetMode") != Some("External")
-                        && rel.attr("Type")
-                            == Some("http://schemas.microsoft.com/office/2007/relationships/diagramDrawing")
-                    {
-                        if let Some(target) = rel.attr("Target").and_then(|t| resolve(owner, t).ok()) {
-                            targets.insert(target);
+            // Prefer the resolved drawing cache. A missing, external, ambiguous
+            // or unreadable cache falls back to the model during tolerant ingest.
+            let cache = (|| -> Option<(String, Node)> {
+                // dataModelExt may refer to the host or to the data part itself.
+                let mut extensions = Vec::new();
+                graphics::visit(&root, graphics::DSP, "dataModelExt", &mut extensions);
+                if extensions.len() != 1 {
+                    return None;
+                }
+                let id = extensions[0].attr("relId")?;
+                let mut targets = BTreeSet::new();
+                for owner in std::iter::once(&part).chain(parent.as_ref()) {
+                    for rel in relationships(zip, owner).unwrap_or_default() {
+                        if rel.attr("Id") == Some(id)
+                            && rel.attr("TargetMode") != Some("External")
+                            && rel.attr("Type") == Some("http://schemas.microsoft.com/office/2007/relationships/diagramDrawing")
+                        {
+                            if let Some(target) = rel.attr("Target").and_then(|t| resolve(owner, t).ok()) {
+                                targets.insert(target);
+                            }
                         }
                     }
                 }
-            }
-            if targets.len() == 1 {
-                pending.push((targets.pop_first().unwrap(), None));
+                if targets.len() != 1 {
+                    return None;
+                }
+                let target = targets.pop_first()?;
+                let mut drawing = read(zip, &target).ok()?;
+                if drawing.ns != graphics::DSP || drawing.local != "drawing" {
+                    return None;
+                }
+                graphics::resolve_alternates(&mut drawing, &target, &mut Report::default()).ok()?;
+                Some((target, drawing))
+            })();
+            if let Some((target, drawing)) = cache {
+                if visited.insert(target) {
+                    display_text(&drawing, &mut text);
+                }
+            } else {
+                display_text(&root, &mut text);
             }
             continue;
         }

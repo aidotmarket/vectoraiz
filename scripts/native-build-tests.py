@@ -77,7 +77,7 @@ class ListingPreviewBuildGate(unittest.TestCase):
     def check_inputs(self, root):
         allowed = []
         for path in [*root.glob('.github/workflows/*'), *root.glob('scripts/**/*')]:
-            if not path.is_file() or path.suffix not in {'.yml', '.yaml', '.py', '.sh', '.ps1', '.js', '.mjs'}:
+            if not path.is_file() or path.suffix not in {'.yml', '.yaml', '.py', '.sh', '.ps1', '.js', '.mjs', '.cjs', '.swift', '.bat', '.cmd'}:
                 continue
             if path == root / 'scripts/native-build-tests.py':
                 continue
@@ -108,9 +108,13 @@ class ListingPreviewBuildGate(unittest.TestCase):
                 if any(self.feature in value for value in values):
                     self.assertEqual(path, root / 'app/src-tauri/Cargo.toml')
                     self.assertEqual(name, self.feature)
-            for dependency in tomllib.loads(path.read_text()).get('dependencies', {}).values():
-                if isinstance(dependency, dict):
-                    self.assertFalse(any(self.feature in value for value in dependency.get('features', [])), str(path))
+            def check_dependencies(table):
+                for key, value in table.items():
+                    if key == 'features' and isinstance(value, list):
+                        self.assertFalse(any(self.feature in feature for feature in value), str(path))
+                    elif isinstance(value, dict):
+                        check_dependencies(value)
+            check_dependencies(tomllib.loads(path.read_text()))
         for name in ['tauri.conf.json', 'tauri.stage1.conf.json', 'gen/stage1.conf.json']:
             path = root / 'app/src-tauri' / name
             if path.exists():
@@ -118,6 +122,10 @@ class ListingPreviewBuildGate(unittest.TestCase):
 
     def test_switch_only_in_two_debug_stage1_commands(self):
         self.check_inputs(version.ROOT)
+        for name, expected in [('crates/vz-pack/Cargo.toml', []),
+                               ('app/src-tauri/Cargo.toml', ['vz-pack/' + self.feature])]:
+            features = tomllib.loads((version.ROOT / name).read_text())['features']
+            self.assertEqual(features[self.feature], expected)
 
     def test_gate_rejects_other_workflow_script_default_config_and_missing_debug(self):
         with tempfile.TemporaryDirectory() as temporary:

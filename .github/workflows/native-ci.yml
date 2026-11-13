@@ -234,6 +234,8 @@ jobs:
           path: |
             installed-ui.log
             installed-self-test.json
+            installed-listing-*.json
+            installed-self-test.listing.json
             installed-pipeline.log
             installed-loaded-models.json
             installed-single-instance.json
