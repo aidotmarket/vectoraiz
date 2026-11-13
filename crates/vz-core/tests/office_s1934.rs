@@ -55,23 +55,18 @@ fn s1934_spool() -> Result<()> {
         return Ok(());
     }
     let root = Path::new(&root);
-    let start = Instant::now();
-    let rows = harness::spool(
-        Path::new(&std::env::var_os("VZ_S1934_SOURCE").context("source")?),
-        &root.join("lookup.sqlite"),
-    )?;
-    harness::write_vectors(&root.join("lookup.sqlite"))?;
-    let spool_ms = start.elapsed().as_secs_f64() * 1000.;
-    let start = Instant::now();
-    tokio::runtime::Runtime::new()?.block_on(harness::prepare(
-        &root.join("lookup.sqlite"),
-        &root.join("base"),
-    ))?;
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(4)
+        .enable_all()
+        .build()?
+        .block_on(harness::prepare_streamed(
+            Path::new(&std::env::var_os("VZ_S1934_SOURCE").context("source")?),
+            &root.join("lookup.sqlite"),
+            &root.join("base"),
+        ))?;
     std::fs::write(
         root.join("preparation.json"),
-        serde_json::to_vec_pretty(
-            &json!({"rows":rows,"spool_ms":spool_ms,"lance_fts_ms":start.elapsed().as_secs_f64()*1000.,"rss_bytes":rss(),"batch_rows":1024,"batch_bytes":16777216}),
-        )?,
+        serde_json::to_vec_pretty(&result)?,
     )?;
     Ok(())
 }
@@ -131,7 +126,7 @@ fn s1934_candidate() -> Result<()> {
 
 #[test]
 fn s1934_refresh() -> Result<()> {
-    use rusqlite::{params, Connection};
+    use rusqlite::Connection;
     use vz_core::pipeline::Chunk;
     let Some(root) = std::env::var_os("VZ_S1934_REFRESH") else {
         return Ok(());
@@ -153,7 +148,7 @@ fn s1934_refresh() -> Result<()> {
         }
         let clone_ms = start.elapsed().as_secs_f64()*1000.;
         let mut db = Connection::open(root.join("refresh.sqlite"))?;
-        let mut changed:Vec<Chunk> = db.prepare("SELECT payload FROM chunks ORDER BY id LIMIT 360")?.query_map([],|r|r.get::<_,Vec<u8>>(0))?.map(|r|Ok(serde_json::from_slice(&r?)?)).collect::<Result<_>>()?;
+        let mut changed:Vec<Chunk> = db.prepare("SELECT id,doc_id,text,page,heading,tokens FROM chunks ORDER BY id LIMIT 360")?.query_map([],harness::lookup_chunk)?.collect::<rusqlite::Result<_>>()?;
         let removed = changed.iter().map(|c|c.chunk_id.clone()).collect::<Vec<_>>();
         let start = Instant::now();
         let mut additions = Vec::new();
@@ -167,7 +162,7 @@ fn s1934_refresh() -> Result<()> {
         let next=Snapshot::open(&root.join("refresh"),&root.join("refresh.sqlite"),Candidate::Exact,54099).await?;
         let tx=db.transaction()?;
         for id in &removed {tx.execute("DELETE FROM chunks WHERE id=?1",[id])?;}
-        for chunk in &changed {tx.execute("INSERT INTO chunks(id,payload) VALUES(?1,?2)",params![chunk.chunk_id,serde_json::to_vec(chunk)?])?;}
+        {let mut insert=tx.prepare(harness::LOOKUP_INSERT)?;for chunk in &changed {harness::insert_lookup(&mut insert,chunk)?;}}
         tx.commit()?;drop(db);
         let filter=format!("chunk_id IN ({})",removed.iter().map(|id|format!("'{}'",id.replace('\'',"''"))).collect::<Vec<_>>().join(","));
         next.table.delete(&filter).await?;
@@ -186,7 +181,7 @@ fn s1934_refresh() -> Result<()> {
         let _=next.search("office reference",&vector,8).await?;
         let weak=Arc::downgrade(&old);let reader=old.clone();drop(old);
         assert!(weak.upgrade().is_some());let start=Instant::now();drop(reader);assert!(weak.upgrade().is_none());
-        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"fts_update_ms":update_ms,"post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
+        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"fts_update_ms":update_ms,"fts_update_operation":"Lance OptimizeAction::Index: incremental tail indexing plus merge; not create_index full rebuild","post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
         Ok::<_,anyhow::Error>(())
     })
 }

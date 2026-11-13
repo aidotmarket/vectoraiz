@@ -71,10 +71,7 @@ def search(args):
                CARGO_TARGET_DIR=str(args.target.resolve()), VZ_S1934_ROOT=str(evidence),
                VZ_OFFICE_ASSETS=str(old / "run-v2/models"),
                VZ_OFFICE_PINS=str(old / "run-v2/models/pins.json"))
-    cargo = [CARGO, "test",
-             "--config", "profile.test.package.lance-linalg.opt-level=3",
-             "--config", "profile.test.package.lance-index.opt-level=3",
-             "--config", "profile.test.package.lance.opt-level=3", "-p", "vz-core", "--features", "office-feasibility",
+    cargo = [CARGO, "test", "--release", "-p", "vz-core", "--features", "office-feasibility",
              "--test", "office_s1934"]
     if not (evidence / "preparation.json").exists():
         result = run([*cargo, "s1934_spool", "--", "--nocapture"], evidence, "prepare",
