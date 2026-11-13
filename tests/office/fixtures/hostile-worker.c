@@ -70,10 +70,15 @@ int main(int argc, char **argv) {
         CFURLRef url=CFURLCreateWithString(NULL,CFSTR("c1-feasibility-probe://blocked"),NULL);
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-        OSStatus error=LSOpenCFURLRef(url,NULL);
+        /* Independent follow-up through the public launch-spec API. Preserve
+         * the final profile/descriptor ceiling; never warm broker Mach rights. */
+        LSLaunchURLSpec spec={0}; spec.itemURLs=CFArrayCreate(NULL,(const void **)&url,1,&kCFTypeArrayCallBacks);
+        spec.launchFlags=kLSLaunchDefaults | kLSLaunchDontAddToRecents;
+        OSStatus error=LSOpenFromURLSpec(&spec,NULL);
+        CFRelease(spec.itemURLs);
 #pragma clang diagnostic pop
         CFRelease(url);
-        printf("{\"rc\":%d,\"errno\":%d,\"ls_error\":%d,\"explicit_launch_denial\":%s}\n",error ? -1 : 0,errno,(int)error,error==kLSNoLaunchPermissionErr ? "true":"false");
+        printf("{\"rc\":%d,\"errno\":%d,\"ls_error\":%d,\"api\":\"LSOpenFromURLSpec\",\"explicit_launch_denial\":%s}\n",error ? -1 : 0,errno,(int)error,error==kLSNoLaunchPermissionErr ? "true":"false");
         return 0;
     } else if (!strcmp(probe,"inherited_host_read")) {
         char byte; rc=(int)read(atoi(argv[4]),&byte,1);

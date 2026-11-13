@@ -40,7 +40,7 @@ def main(a):
             'url_control_sha256':w.common.digest(binary),'roles':{},'Windows':'NOT RUN',
             'xpc_verdict':'generic XPC error alone never passes; require same-process kernel lookup denial for identical endpoint plus external XPC reply success',
             'control_endpoint':'com.apple.cfprefsd.daemon; read-only synthetic XPC dictionary',
-            'url_control':'LSOpenCFURLRef OSStatus=0 using registered private handler; process observation diagnostic only; URL AppleEvent consumption not qualified; no network URL or browser launch'}
+            'url_control':'LSOpenFromURLSpec OSStatus=0 using registered private handler; process observation diagnostic only; URL AppleEvent consumption not qualified; no network URL or browser launch'}
     snapshot=root/'supplied.txt';snapshot.write_text('supplied snapshot\n')
     host=root/'host-sentinel.txt';host.write_text('private sentinel\n')
     for role in ('ingest','render'):
@@ -62,7 +62,7 @@ def main(a):
                     if not launched:time.sleep(.05)
                 control['launched_private_control_pids']=launched
                 (target/'url-control-processes.json').write_text(json.dumps({'pids':launched,'executable':str(binary)}))
-                # LSOpenCFURLRef's own OSStatus is the positive API control.
+                # LSOpenFromURLSpec's own OSStatus is the positive API control.
                 # Do not claim URL delivery from process-table observation.
                 for pid in launched:
                     try:os.kill(pid,signal.SIGTERM)
@@ -76,7 +76,12 @@ def main(a):
             rows[name]={'status':'pass' if passed else 'fail','positive_control_succeeded':positive,
                         'explicit_denial':denial,'control':control,'confined':confined}
             if not passed:
-                rows[name]['reason']='Final descriptor-only LaunchServices call terminates before returning an OSStatus; a trap/generic error is not an explicit sandbox denial. Control success does not qualify this row.' if positive else 'External control did not succeed; see complete diagnostics.'
+                rows[name]['reason']=(
+                    f"LSOpenFromURLSpec under final descriptor-only profile exited {confined['exit_code']}; "
+                    f"deadline_kill={confined['deadline_kill']}; probe={p!r}. "
+                    'No kLSNoLaunchPermissionErr OSStatus returned. Signal/trap or generic error is not explicit denial; '
+                    'external API control success does not qualify this row. See confined-open_url.stderr/stdout.'
+                ) if positive else 'External control did not succeed; see complete diagnostics.'
         result['roles'][role]=rows
         (root/'brokers.json').write_text(json.dumps(result,indent=2)+'\n')
         print(role,{k:(v['positive_control_succeeded'],v['explicit_denial'],v['status']) for k,v in rows.items()},flush=True)
