@@ -20,7 +20,7 @@ w = d.w
 
 
 def compare(before, after):
-    result = {'all_fields_equal': before == after, 'pages': []}
+    result = {'all_fields_equal': before is not None and after is not None and before == after, 'pages': []}
     if not before or not after:
         result['failure'] = 'missing response'
         return result
@@ -53,9 +53,10 @@ def main(a):
     if signed['exit_code']: raise RuntimeError(signed)
     drafts = json.loads(a.drafts.read_text())
     result = {'worker_sha256': w.common.digest(worker), 'pdfium_sha256': w.common.digest(pdfium),
+              'font_bundle': json.loads((worker.parent / 'fonts/bundle.json').read_text()),
               'diagnostic_tracer_sha256': w.common.digest(tracer), 'roles': {},
               'tracer_policy': 'diagnostic only; qualified comparisons run without loader override',
-              'renderer_config': 'same pinned PDFium; target width 1600; same default render/color configuration',
+              'renderer_config': 'same pinned PDFium and byte-backed bundled font provider in both arms; target width 1600; same default render/color configuration',
               'Windows': 'NOT RUN'}
     for role in ('ingest', 'render'):
         target = root / role
@@ -89,6 +90,13 @@ def main(a):
                     completed = subprocess.run(['rtk','proxy',*map(str,argv)], input=request, stdout=out, stderr=err, env=env, timeout=30)
                 row[mode+'_trace'] = {'exit_code': completed.returncode, 'stderr': label+'.stderr', 'stdout': label+'.stdout',
                     'file_opens': [line for line in (target/(label+'.stderr')).read_text(errors='replace').splitlines() if line.startswith('FILE_TRACE')]}
+                lines = (target/(label+'.stderr')).read_text(errors='replace').splitlines()
+                marker = next((i for i, line in enumerate(lines) if line.startswith('FONT_PROVIDER_READY pid=')), None)
+                pid = lines[marker].split('pid=', 1)[1] if marker is not None else None
+                row[mode+'_trace']['readiness_marker_found'] = marker is not None
+                row[mode+'_trace']['worker_pid'] = pid
+                row[mode+'_trace']['post_readiness_path_attempts'] = None if marker is None else [line for line in lines[marker+1:] if line.startswith('FILE_TRACE pid='+pid+' ')]
+                row[mode+'_trace']['wrapper_path_attempts_excluded_by_pid'] = None if marker is None else [line for line in lines[marker+1:] if line.startswith('FILE_TRACE') and not line.startswith('FILE_TRACE pid='+pid+' ')]
             rows[name] = row
             result['roles'][role] = rows
             (root/'pdf-differences.json').write_text(json.dumps(result,indent=2)+'\n')
