@@ -93,6 +93,11 @@ int main(int argc, char **argv) {
         printf("{\"rc\":%d,\"errno\":%d,\"mach_error\":%d}\n",error==KERN_SUCCESS ? 0 : -1,errno,error);
         return 0;
     } else if (!strcmp(probe,"xpc_broker")) {
+        /* XPC collapses denied/absent endpoints into generic errors. Preserve
+         * an actual kernel lookup of the identical endpoint in this process. */
+        mach_port_t endpoint=MACH_PORT_NULL;
+        kern_return_t lookup=bootstrap_look_up(bootstrap_port,"com.apple.cfprefsd.daemon",&endpoint);
+        if(endpoint!=MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),endpoint);
         xpc_connection_t c=xpc_connection_create_mach_service("com.apple.cfprefsd.daemon",NULL,0);
         xpc_connection_set_event_handler(c, ^(xpc_object_t event) { (void)event; });
         xpc_connection_resume(c);
@@ -101,7 +106,7 @@ int main(int argc, char **argv) {
         xpc_object_t reply=xpc_connection_send_message_with_reply_sync(c,m);
         int denied = xpc_get_type(reply)==XPC_TYPE_ERROR;
         char *desc=xpc_copy_description(reply);
-        printf("{\"rc\":%d,\"errno\":%d,\"xpc_error\":%s}\n",denied ? -1 : 0,errno,denied ? "true":"false");
+        printf("{\"rc\":%d,\"errno\":%d,\"xpc_error\":%s,\"endpoint_lookup_error\":%d,\"endpoint_kernel_denial\":%s}\n",denied ? -1 : 0,errno,denied ? "true":"false",lookup,lookup==BOOTSTRAP_NOT_PRIVILEGED?"true":"false");
         free(desc); xpc_release(reply); xpc_release(m); xpc_connection_cancel(c); xpc_release(c);
         return 0;
     } else if (!strcmp(probe,"unix_connect")) {
