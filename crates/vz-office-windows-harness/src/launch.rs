@@ -777,6 +777,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     );
     if let Some(probe) = value.get_mut("office_windows_probe") {
         probe["attack_handle"] = json!(attack.as_raw_handle() as usize);
+        probe["attack_identity"] = crate::probes::file_identity(attack.as_raw_handle())?;
         probe["job_name"] = json!(job_name);
     }
     let request = serde_json::to_vec(&value)?;
@@ -1370,7 +1371,6 @@ mod tests {
     #[test]
     fn suspended_lpac_and_plain_tokens_are_distinguished() -> Result<()> {
         let root = std::env::var_os("OFFICE_EVIDENCE_DIR")
-            .or_else(|| std::env::var_os("KD_BRIDGE_JOB_EVIDENCE"))
             .context("token regression requires an external evidence directory")?;
         for lpac in [false, true] {
             let mut trace = json!({});

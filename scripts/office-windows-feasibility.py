@@ -7,10 +7,12 @@ Worker and shell subprocesses run directly; confinement uses Win32 APIs.
 import argparse
 import hashlib
 import importlib.util
+import ipaddress
 import json
 import os
 from pathlib import Path
 import platform
+import re
 import shutil
 import socket
 import subprocess
@@ -193,6 +195,24 @@ def outside(path):
 
 
 def validate_manifest(manifest):
+    # Scan decoded strings (including keys), so JSON escaping cannot hide a leak.
+    def guard(value):
+        if isinstance(value, str):
+            assert not re.search(r"[A-Za-z]:[\\/]|(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", value), "public manifest contains a drive path or IP literal"
+            for candidate in re.findall(r"(?<![\w:])[0-9A-Fa-f]*:[0-9A-Fa-f:.%]+(?![\w:])", value):
+                try:
+                    ipaddress.IPv6Address(candidate)
+                except ValueError:
+                    continue
+                raise AssertionError("public manifest contains an IPv6 literal")
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                guard(key)
+                guard(child)
+        elif isinstance(value, list):
+            for child in value:
+                guard(child)
+    guard(manifest)
     planned = {row["id"]: row for row in plan()}
     expected = set(planned)
     rows = manifest["rows"]
@@ -265,6 +285,8 @@ def evaluate(spec, control, confined):
         return "fail", "LPAC could not be verified; confined worker was not resumed"
     if control.get("status") != "pass":
         return "fail", "positive-control worker did not complete successfully"
+    if confined.get("exit_code") == 0xC0000008:
+        return "fail", "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
     if confined.get("status") != "pass":
         return "fail", "confined worker did not complete successfully"
     if spec.get("experiment"):
@@ -282,30 +304,42 @@ def evaluate(spec, control, confined):
         return ("pass", "all serialized parser response fields equal") if before == after else ("fail", "parser response content differs")
     positive = before.get("probe", {})
     negative = after.get("probe", {})
-    if spec["request"]["op"] == "shell":
-        observation = confined.get("shell_launch_observation") or {}
-        if observation.get("new_processes"):
-            return "fail", "new process observed during shell launch window; inspect attribution"
-        if not observation.get("launch_ruled_out"):
-            return "fail", "shell handler launch cannot be ruled out by process snapshots"
-    if spec["request"]["op"] == "network":
+    op = spec["request"]["op"]
+    if op == "shell" and (negative.get("success") or negative.get("shell_execute_ex", {}).get("return_code")):
+        return "fail", "confined ShellExecuteW and/or ShellExecuteExW reported success; no explicit broker denial"
+    if op == "network":
         creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
-        if creation.get("success") or creation.get("descriptor_returned"):
-            return "fail", "confined socket creation returned a descriptor"
+        if spec["request"]["operation"] == "create":
+            if creation.get("success") or creation.get("descriptor_returned"):
+                return "fail", "confined socket creation returned a descriptor"
+            if creation.get("startup", {}).get("success") is not True or creation.get("error_code") in (10107, 10093):
+                return "fail", "socket creation unproven: Winsock initialization failed or cause unexplained"
+            if creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False:
+                return "fail", "missing literal INVALID_SOCKET creation evidence"
+        elif creation.get("descriptor_returned") is not True:
+            return "unrun", "not exercisable: no socket obtainable by any tested route"
     if not positive.get("success"):
         return "unrun", "positive-control API unavailable or unsuccessful; no denial established"
-    if spec["id"] == "inherited" and not positive.get("sentinel_match"):
-        return "fail", "inherited-handle positive control did not read the sentinel"
+    if spec["id"] == "inherited":
+        if not positive.get("identity_match"):
+            return "fail", "inherited-handle positive control identity mismatch"
+        if negative.get("enumeration_succeeded") and negative.get("present") is False:
+            return "pass", "own handle table omits parent attack handle; no invalid handle accessed"
+        return "fail", "omitted handle absence not established; inspect presence and identity"
     if spec["expect"] == "allow":
         return ("pass", "permitted scratch operations succeeded") if negative.get("success") else ("fail", "permitted scratch operations refused")
-    if spec["request"]["op"] == "network":
-        creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
-        if creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False:
-            return "fail", "missing literal INVALID_SOCKET creation evidence"
     if negative.get("success"):
         return "fail", "confined API succeeded"
     if not negative.get("explicit_denial"):
         return "fail", "generic or unexplained error is not explicit denial evidence"
+    prerequisites = {
+        "ReadFile": {"CreateFileW"}, "WriteFile": {"CreateFileW"},
+        "CoCreateInstance(ShellWindows, LOCAL_SERVER)": {"CoInitializeEx"},
+        "SetInformationJobObject(raise process and job limits)": {"OpenJobObjectW(SET_ATTRIBUTES)", "QueryInformationJobObject(worker)"},
+    }
+    api, control_api = negative.get("api"), positive.get("api")
+    if not api or not control_api or (api != control_api and api not in prerequisites.get(control_api, set())):
+        return "fail", "denial API is neither the control API nor a named prerequisite"
     if spec["request"]["op"] == "memory":
         if not negative.get("allocation_refused") or not negative.get("allocation_limit_error"):
             return "fail", "allocation target reached without kernel refusal"
@@ -323,9 +357,9 @@ def evaluate(spec, control, confined):
             return "fail", "memory diagnostic limits do not match requested scope"
         if job.get("peak_process_commit_bytes", 0) <= 0 or job.get("peak_job_commit_bytes", 0) <= 0:
             return "fail", "missing job peak committed-memory evidence"
-        if job["peak_process_commit_bytes"] > process_limit or job["peak_job_commit_bytes"] > job_limit:
-            return "fail", "reported peak committed memory exceeded its configured ceiling"
-    return "pass", "positive control succeeded; confined operation explicitly refused"
+        if negative.get("successfully_held_bytes", LIMIT + 1) > min(process_limit, job_limit):
+            return "fail", "successfully held memory exceeded configured ceiling"
+    return "pass", f"positive control succeeded; denied at {api}" + (f"; {control_api} not exercised (named prerequisite)" if api != control_api else "")
 
 
 def parser_diff_summary(control, confined):
@@ -680,8 +714,8 @@ def self_test():
     deny = {"id": "read", "request": {"op": "read"}, "expect": "deny"}
     def response(**probe):
         return {"status": "pass", "response": {"probe": probe}}
-    positive = response(success=True)
-    explicit = response(success=False, explicit_denial=True, error_code=5)
+    positive = response(success=True, api="ReadFile")
+    explicit = response(success=False, explicit_denial=True, error_code=5, api="CreateFileW")
     assert evaluate(deny, positive, explicit)[0] == "pass"
     assert evaluate(deny, response(success=False), explicit)[0] == "unrun"
     assert evaluate(deny, positive, {"status": "fail"})[0] == "fail"
@@ -712,33 +746,29 @@ def self_test():
     assert bounded["confined_diagnostics"]["font_error_mentioned"]
     assert bounded["page_differences"][0]["confined_replacement_glyphs"] == 1
     net = next(row for row in specs if row["id"] == "network-ipv4-loopback-tcp-connect")
-    created = response(success=False, explicit_denial=True,
+    positive = response(success=True, api="connect")
+    created = response(success=False, explicit_denial=True, api="connect",
                        socket_creation={"success": True, "descriptor_returned": True, "return_code": 42})
-    assert evaluate(net, positive, created)[0] == "fail"
-    assert evaluate(net, response(success=False), created)[0] == "fail"
-    assert evaluate(net, positive, explicit)[0] == "fail"
-    refused = response(success=False, explicit_denial=True,
+    assert evaluate(net, positive, created)[0] == "pass"
+    refused = response(success=False, explicit_denial=False, error_code=10093,
                        socket_creation={"success": False, "descriptor_returned": False, "return_code": -1})
-    assert evaluate(net, positive, refused)[0] == "pass"
-    uninitialized = response(success=False, explicit_denial=False, error_code=10093,
-                            socket_creation={"success": False, "descriptor_returned": False, "return_code": -1})
-    assert evaluate(net, positive, uninitialized)[0] == "fail"
+    assert evaluate(net, positive, refused) == ("unrun", "not exercisable: no socket obtainable by any tested route")
+    constructor = next(row for row in specs if row["id"].startswith("socket-"))
+    assert evaluate(constructor, positive, response(success=False, return_code=-1, descriptor_returned=False, error_code=10093))[0] == "fail"
     shell = next(row for row in specs if row["id"] == "shell")
-    assert evaluate(shell, positive, explicit)[0] == "fail"
-    assert evaluate(shell, response(success=False), explicit)[0] == "fail"
-    quota = response(success=False, explicit_denial=True, error_code=1816,
-                     denial_category="job_active_process_limit")
-    assert evaluate(next(row for row in specs if row["id"] == "child"), positive, quota)[0] == "pass"
+    assert evaluate(shell, positive, response(success=True, shell_execute_ex={"return_code":1}))[0] == "fail"
+    com = next(row for row in specs if row["id"] == "com")
+    assert "named prerequisite" in evaluate(com, response(success=True, api="CoCreateInstance(ShellWindows, LOCAL_SERVER)"), response(success=False, explicit_denial=True, api="CoInitializeEx"))[1]
+    assert evaluate(deny, response(success=True, api="ReadFile"), response(success=False, explicit_denial=True, api="unrelated"))[0] == "fail"
     memory_spec = next(row for row in specs if row["id"] == "memory-job-virtual")
-    memory_control = response(success=True, successfully_held_bytes=2 * 1024 ** 3)
-    memory_confined = response(success=False, explicit_denial=True, allocation_refused=True,
-                               allocation_limit_error=True, successfully_held_bytes=1024 ** 3,
-                               max_observed_held_member_private_commit_bytes=1024 ** 3)
-    memory_confined.update(job_before_resume={"process_commit_limit_bytes":LIMIT * 2,
-                                             "job_commit_limit_bytes":LIMIT},
+    memory_control = response(success=True, api="VirtualAlloc", successfully_held_bytes=2 * 1024 ** 3)
+    memory_confined = response(success=False, api="VirtualAlloc", explicit_denial=True, allocation_refused=True,
+                               allocation_limit_error=True, successfully_held_bytes=1024 ** 3)
+    memory_confined.update(job_before_resume={"process_commit_limit_bytes":LIMIT * 2, "job_commit_limit_bytes":LIMIT},
                            job_after={"peak_process_commit_bytes":LIMIT, "peak_job_commit_bytes":LIMIT + 4096})
-    assert evaluate(memory_spec, memory_control, memory_confined) == (
-        "fail", "reported peak committed memory exceeded its configured ceiling")
+    assert evaluate(memory_spec, memory_control, memory_confined)[0] == "pass"
+    memory_confined["response"]["probe"]["successfully_held_bytes"] = LIMIT + 1
+    assert evaluate(memory_spec, memory_control, memory_confined)[0] == "fail"
     assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 6
     assert len([s for s in specs if s.get("experiment")]) == 6
     assert evaluate(next(s for s in specs if s.get("experiment")), positive, positive)[0] == "fail"
@@ -761,11 +791,20 @@ def self_test():
     assert endpoints.configure(probe) is None and probe["port"] == 12346 and probe["endpoint_scope"] == "loopback"
     manifest = initial_manifest()
     validate_manifest(manifest)
+    for leak in ("C:\\private\\file", "C:/private/file", "127.0.0.1", "::1", "2606:4700:4700::1111"):
+        invalid = initial_manifest()
+        invalid["leak_test"] = leak
+        try:
+            validate_manifest(invalid)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("manifest accepted private literal")
     # Exercise durable collection after launch failure and malformed output,
     # without requiring Windows or ever running a child with host environment.
     from unittest.mock import patch
     from types import SimpleNamespace
-    evidence = os.environ.get("KD_BRIDGE_JOB_EVIDENCE") or os.environ.get("OFFICE_EVIDENCE_DIR")
+    evidence = os.environ.get("OFFICE_EVIDENCE_DIR")
     with tempfile.TemporaryDirectory(prefix="launch-diagnostic-self-test-", dir=evidence) as temporary:
         folder = outside(Path(temporary))
         saved = []

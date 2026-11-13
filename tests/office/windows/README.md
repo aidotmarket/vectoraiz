@@ -242,3 +242,23 @@ PDF cause, shell outcomes, successful Windows controls and the second member's
 identity remain unobserved until the pushed workflow runs. Full local check
 logs, including the initial type-check failure and its correction, are stored
 outside the checkout in the job's private evidence root.
+
+Fold 7 stage A
+--------------
+
+Creation and operation verdicts are independent. Winsock startup 10107/10093
+remains FAIL (unproven); operation rows with no obtainable socket are unrun,
+"not exercisable". Denials identify the reached API and any named prerequisite.
+Job reported peaks remain evidence; held bytes plus kernel refusal decide commit rows.
+The inherited probe enumerates its own handles and compares file identity without
+reading an invalid handle. STATUS_INVALID_HANDLE exits are classified separately.
+Both successful shell API returns fail the row; last error after TRUE is ignored.
+
+Controls create live traffic: TCP to 1.1.1.1:443, UDP to port 53, DNS resolution
+of example.com, and (until the stage C local listener replacement) two default
+browser opens of https://example.com. Loopback/LAN endpoints are also exercised.
+Full logs remain in the runner temporary evidence directory; bounded log tails
+are printed into CI logs. Only manifest.json is uploaded as an artifact.
+All workflow actions use immutable commit SHAs. Manifest validation scans decoded
+strings recursively for drive paths and IP literals and refuses publication on a match.
+This harness makes no Windows confinement or C1 qualification claim.

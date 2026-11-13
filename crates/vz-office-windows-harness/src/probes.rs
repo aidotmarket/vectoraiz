@@ -459,7 +459,7 @@ fn broker(op: &str) -> Value {
                 ex.nShow = SW_HIDE;
                 SetLastError(0);
                 let called = ShellExecuteExW(&mut ex);
-                let error = GetLastError();
+                let error = if called != 0 { 0 } else { GetLastError() };
                 result["shell_execute_ex"] = json!({"return_code":called,
                     "error_code":error,"hprocess":ex.hProcess as usize,
                     "process_id":if ex.hProcess.is_null() {0} else {GetProcessId(ex.hProcess)}});
@@ -576,32 +576,79 @@ fn child(escape: bool) -> Result<Value> {
     Ok(result)
 }
 
+// ProcessHandleInformation uses pointer-sized fields, including both header counts.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct HandleEntry {
+    handle: HANDLE,
+    handle_count: usize,
+    pointer_count: usize,
+    granted_access: u32,
+    object_type_index: u32,
+    attributes: u32,
+    reserved: u32,
+}
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtQueryInformationProcess(
+        process: HANDLE,
+        class: u32,
+        info: *mut std::ffi::c_void,
+        len: u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+pub(crate) fn file_identity(handle: HANDLE) -> Result<Value> {
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { zeroed() };
+    anyhow::ensure!(
+        unsafe { GetFileInformationByHandle(handle, &mut info) } != 0,
+        "file identity query"
+    );
+    Ok(
+        json!({"volume":info.dwVolumeSerialNumber,"index_high":info.nFileIndexHigh,"index_low":info.nFileIndexLow}),
+    )
+}
 fn inherited(v: &Value) -> Result<Value> {
     let handle = v["attack_handle"].as_u64().context("attack handle")? as usize as HANDLE;
-    let mut bytes = [0u8; 64];
-    let mut count = 0;
-    unsafe { SetLastError(0) };
-    let rc = unsafe {
-        ReadFile(
-            handle,
-            bytes.as_mut_ptr(),
-            bytes.len() as u32,
-            &mut count,
-            null_mut(),
+    let mut storage = vec![0usize; 131072];
+    let mut returned = 0;
+    let status = unsafe {
+        NtQueryInformationProcess(
+            GetCurrentProcess(),
+            51,
+            storage.as_mut_ptr().cast(),
+            (storage.len() * size_of::<usize>()) as u32,
+            &mut returned,
         )
     };
-    let mut result = win(
-        "ReadFile(omitted inheritable parent handle)",
-        rc as i64,
-        rc != 0,
-    );
-    // An omitted handle may have been reused; never call unrelated readable data proof.
-    result["sentinel_match"] =
-        json!(rc != 0 && bytes[..count as usize].starts_with(b"C1-private-sentinel"));
-    if rc == 0 && result["error_code"] == ERROR_INVALID_HANDLE {
-        result["explicit_denial"] = json!(true);
+    if status < 0 {
+        return Ok(
+            json!({"api":"NtQueryInformationProcess(ProcessHandleInformation)","success":false,"enumeration_succeeded":false,"ntstatus":status as u32}),
+        );
     }
-    Ok(result)
+    let count = storage[0];
+    anyhow::ensure!(
+        count
+            <= (storage.len() * size_of::<usize>() - 2 * size_of::<usize>())
+                / size_of::<HandleEntry>(),
+        "handle table count exceeds buffer"
+    );
+    let entries =
+        unsafe { std::slice::from_raw_parts(storage.as_ptr().add(2).cast::<HandleEntry>(), count) };
+    let present = entries.iter().any(|entry| entry.handle == handle);
+    // Only query a handle confirmed present in our own table. Never ReadFile on a raw value.
+    let identity = if present {
+        file_identity(handle).ok()
+    } else {
+        None
+    };
+    let matches = identity
+        .as_ref()
+        .is_some_and(|id| *id == v["attack_identity"]);
+    Ok(
+        json!({"api":"NtQueryInformationProcess(ProcessHandleInformation)","success":present && matches,
+        "enumeration_succeeded":true,"ntstatus":status as u32,"present":present,"identity":identity,"identity_match":matches}),
+    )
 }
 
 fn alter_job(v: &Value) -> Result<Value> {

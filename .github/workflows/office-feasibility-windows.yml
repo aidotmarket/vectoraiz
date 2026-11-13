@@ -39,10 +39,10 @@ jobs:
       CARGO_BUILD_JOBS: '3'
       SOURCE_SHA: ${{ github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
       - name: Set evidence directory
@@ -57,7 +57,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       # Toolchain steps follow native-ci.yml. OCR and model acquisition are omitted.
       - name: Initialize Windows compiler environment
-        uses: ilammy/msvc-dev-cmd@v1
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1
       - name: Install pinned Windows Vulkan SDK
         run: |
           pwsh -NoProfile -File scripts/install-vulkan.ps1 *> "$env:OFFICE_EVIDENCE_DIR/vulkan-setup.log"
@@ -74,7 +74,7 @@ jobs:
         run: |
           rustup show active-toolchain
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@e9d7b9f1e587218970671bac74e5511ed9506e6a # v2
         with:
           cache-on-failure: true
           shared-key: office-c1-windows
@@ -118,6 +118,7 @@ jobs:
           Get-Content "$env:OFFICE_EVIDENCE_DIR/suite.log" -Tail 110
           exit $code
       - name: Retain and validate redacted manifest even on failure
+        id: validate_manifest
         if: always()
         run: |
           $partial = "$env:OFFICE_EVIDENCE_DIR/run/manifest.json"
@@ -126,8 +127,8 @@ jobs:
           }
           python scripts/office-windows-feasibility.py --validate-manifest "$env:OFFICE_EVIDENCE_DIR/manifest.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        if: always()
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always() && steps.validate_manifest.outcome == 'success'
         with:
           name: office-c1-windows-feasibility-${{ github.run_id }}-${{ github.run_attempt }}
           # Raw requests, paths, fixture bytes and full logs remain private.
