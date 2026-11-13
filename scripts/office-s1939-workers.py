@@ -124,6 +124,7 @@ def main(a):
                     'full_content_equal': same, 'comparison': 'all pages, text, HTML, dimensions and every PNG byte; catches font substitution/lazy resource differences',
                     'baseline': baseline, 'confined': confined,
                     'ocr_refusal': result['ocr']['refusal'] if scans else None,
+                    'partial_output_discarded': scans, 'snapshot_promoted': False,
                     'limitation': 'equality is regression evidence; DOCX images/styles/accessibility completeness remains unqualified'}
             result['roles'][role] = {'probes': offered, 'positive_controls': positive, 'socket_positive': sockets_control,
                                      'strict_creation': checks, 'content': content}
