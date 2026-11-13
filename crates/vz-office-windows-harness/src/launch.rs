@@ -42,7 +42,8 @@ struct Profile {
     sid: PSID,
 }
 impl Profile {
-    fn new() -> Result<Self> {
+    fn new(trace: &mut Value) -> Result<Self> {
+        trace["profile_api"] = json!("CreateAppContainerProfile");
         let name = wide(format!(
             "vectoraiz.C1.{}.{}",
             std::process::id(),
@@ -61,7 +62,12 @@ impl Profile {
                 &mut sid,
             )
         };
+        trace["profile_hresult"] = json!(hr);
         ensure!(hr >= 0, "CreateAppContainerProfile HRESULT={hr:#x}");
+        ensure!(
+            !sid.is_null(),
+            "CreateAppContainerProfile returned NULL SID"
+        );
         Ok(Self { name, sid })
     }
     fn remove(&mut self) -> Result<()> {
@@ -306,7 +312,7 @@ fn low_scratch(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn token_readback(process: HANDLE) -> Result<Value> {
+fn token_readback(process: HANDLE, lpac: bool) -> Result<Value> {
     let mut token = null_mut();
     check(
         unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) },
@@ -329,7 +335,15 @@ fn token_readback(process: HANDLE) -> Result<Value> {
             },
             "GetTokenInformation",
         )?;
-        ensure!(value == 1, "effective token class={class}, value={value}");
+        let expected = if class == TokenIsLessPrivilegedAppContainer {
+            u32::from(lpac)
+        } else {
+            1
+        };
+        ensure!(
+            value == expected,
+            "effective token class={class}, value={value}, expected={expected}"
+        );
         fields.push(value);
     }
     let mut bytes = 0;
@@ -353,6 +367,53 @@ fn token_readback(process: HANDLE) -> Result<Value> {
     Ok(json!({"appcontainer":fields[0],"lpac":fields[1],"capability_count":count}))
 }
 
+/// Sorted UTF-16 entries, exactly double-NUL terminated. Only named directory
+/// variables are copied; never PATH, credentials, proxies, or the full host env.
+fn minimal_environment(
+    scratch: &Path,
+    local_app_data: bool,
+    expanded: bool,
+) -> Result<(Vec<u16>, Vec<&'static str>)> {
+    let mut entries = std::collections::BTreeMap::new();
+    entries.insert(
+        "SystemRoot",
+        std::env::var_os("SystemRoot").context("SystemRoot")?,
+    );
+    entries.insert("TEMP", scratch.as_os_str().to_owned());
+    entries.insert("TMP", scratch.as_os_str().to_owned());
+    if local_app_data || expanded {
+        entries.insert(
+            "LOCALAPPDATA",
+            std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA")?,
+        );
+    }
+    if expanded {
+        for key in [
+            "USERPROFILE",
+            "APPDATA",
+            "ProgramData",
+            "SystemDrive",
+            "windir",
+        ] {
+            entries.insert(key, std::env::var_os(key).with_context(|| key)?);
+        }
+    }
+    let mut entries: Vec<_> = entries.into_iter().collect();
+    entries.sort_by_key(|(key, _)| key.to_ascii_uppercase());
+    let keys = entries.iter().map(|(key, _)| *key).collect();
+    let mut block = Vec::new();
+    for (key, value) in entries {
+        block.extend(OsStr::new(key).encode_wide());
+        block.push(b'=' as u16);
+        let value: Vec<_> = value.encode_wide().collect();
+        ensure!(!value.contains(&0), "environment value contains NUL");
+        block.extend(value);
+        block.push(0);
+    }
+    block.push(0);
+    Ok((block, keys))
+}
+
 /// Arguments are fixed paths; never forward arbitrary command strings to CreateProcess.
 pub fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
@@ -361,31 +422,62 @@ pub fn main() -> Result<()> {
         "worker mode request.json result.json scratch attack-file [exact-input ...]"
     );
     let result_path = PathBuf::from(&args[3]);
-    let result = run(&args);
+    let mut trace = json!({"profile_created_before_launch":false,"create_process_succeeded":false});
+    let result = run(&args, &mut trace);
     // Even setup errors have durable evidence. No private paths or request bytes in JSON.
-    let report = match &result {
+    let mut report = match &result {
         Ok(v) => v.clone(),
         Err(e) => json!({"status":"fail", "phase":"launch-or-collect", "reason":format!("{e:#}")}),
     };
+    report["launch_trace"] = trace;
     std::fs::write(result_path, serde_json::to_vec_pretty(&report)?)?;
     result.map(|_| ())
 }
 
-fn run(args: &[std::ffi::OsString]) -> Result<Value> {
+fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
+    let mode = args[1].to_str().context("mode")?;
+    let diagnostic = mode.starts_with("diagnostic-");
+    ensure!(
+        !diagnostic
+            || matches!(
+                mode,
+                "diagnostic-baseline"
+                    | "diagnostic-null-environment"
+                    | "diagnostic-expanded-environment"
+                    | "diagnostic-null-directory"
+                    | "diagnostic-plain-appcontainer"
+                    | "diagnostic-localappdata"
+            ),
+        "invalid diagnostic"
+    );
+    let lpac = mode != "diagnostic-plain-appcontainer";
     let worker = std::fs::canonicalize(&args[0])?;
     let confined = match args[1].to_str() {
         Some("confined" | "confined-process" | "confined-job") => true,
         Some("control") => false,
+        _ if diagnostic => true,
         _ => bail!("invalid mode"),
     };
+    trace["isolation_requested"] = json!(if !confined {
+        "unconfined"
+    } else if lpac {
+        "lpac"
+    } else {
+        "appcontainer"
+    });
     let request = std::fs::read(&args[2])?;
     ensure!(request.len() <= 32 * 1024 * 1024, "request budget");
     let scratch = std::fs::canonicalize(&args[4])?;
     let mut profile = if confined {
-        Some(Profile::new()?)
+        Some(Profile::new(trace)?)
     } else {
         None
     };
+    if profile.is_some() {
+        trace["profile_created_before_launch"] = json!(true);
+        trace["profile_api"] = json!("CreateAppContainerProfile");
+        trace["profile_capability_count"] = json!(0);
+    }
     let mut grants = Vec::new();
     if let Some(profile) = &profile {
         low_scratch(&scratch)?;
@@ -444,7 +536,15 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     if !confined {
         handles.push(attack.as_raw_handle());
     }
-    let attributes = Attributes::new(if confined { 3 } else { 1 })?;
+    let attributes = Attributes::new(if confined {
+        if lpac {
+            3
+        } else {
+            2
+        }
+    } else {
+        1
+    })?;
     attributes.set_bytes(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
         handles.as_ptr().cast(),
@@ -456,7 +556,9 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         caps.AppContainerSid = profile.sid;
         attributes.set(PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, &caps)?;
         // ProcThreadAttributeValue(15, FALSE, TRUE, FALSE), SDK macro not exported by windows-sys.
-        attributes.set(0x0002_000f, &opt_out)?;
+        if lpac {
+            attributes.set(0x0002_000f, &opt_out)?;
+        }
     }
     let job = {
         let handle = Handle(unsafe { CreateJobObjectW(null(), wide(&job_name).as_ptr()) });
@@ -527,35 +629,53 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     let mut process: PROCESS_INFORMATION = unsafe { zeroed() };
     let application = wide(&worker);
     let mut command = wide(format!("\"{}\"", worker.display()));
-    // Minimal environment: no host credentials, proxies, home/profile, or search PATH.
-    let system_root = std::env::var_os("SystemRoot").context("SystemRoot")?;
-    let mut environment = wide(format!(
-        "SystemRoot={}\0TEMP={}\0TMP={}\0",
-        system_root.to_string_lossy(),
-        scratch.display(),
-        scratch.display()
-    ));
-    environment.push(0);
-    check(
-        unsafe {
-            CreateProcessW(
-                application.as_ptr(),
-                command.as_mut_ptr(),
-                null(),
-                null(),
-                1,
-                CREATE_SUSPENDED
-                    | EXTENDED_STARTUPINFO_PRESENT
-                    | CREATE_UNICODE_ENVIRONMENT
-                    | CREATE_NO_WINDOW,
-                environment.as_ptr().cast(),
-                wide(&scratch).as_ptr(),
-                &startup.StartupInfo,
-                &mut process,
-            )
-        },
-        "CreateProcessW suspended",
+    // AppContainer setup rewrites profile-dependent variables. LOCALAPPDATA is
+    // required even with an explicit, otherwise minimal environment (error 203).
+    // https://learn.microsoft.com/windows/win32/secauthz/implementing-an-appcontainer
+    let mut environment = minimal_environment(
+        &scratch,
+        !diagnostic || mode == "diagnostic-localappdata",
+        mode == "diagnostic-expanded-environment",
     )?;
+    trace["environment_keys"] = if mode == "diagnostic-null-environment" {
+        Value::Null
+    } else {
+        json!(environment.1)
+    };
+    trace["environment_inherited"] = json!(mode == "diagnostic-null-environment");
+    trace["current_directory_null"] = json!(mode == "diagnostic-null-directory");
+    let directory = wide(&scratch);
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command.as_mut_ptr(),
+            null(),
+            null(),
+            1,
+            CREATE_SUSPENDED
+                | EXTENDED_STARTUPINFO_PRESENT
+                | CREATE_UNICODE_ENVIRONMENT
+                | CREATE_NO_WINDOW,
+            if mode == "diagnostic-null-environment" {
+                null()
+            } else {
+                environment.0.as_mut_ptr().cast()
+            },
+            if mode == "diagnostic-null-directory" {
+                null()
+            } else {
+                directory.as_ptr()
+            },
+            &startup.StartupInfo,
+            &mut process,
+        )
+    };
+    if created == 0 {
+        let error = std::io::Error::last_os_error();
+        trace["create_process_error_code"] = json!(error.raw_os_error());
+        bail!("CreateProcessW suspended: {error}");
+    }
+    trace["create_process_succeeded"] = json!(true);
     let process_handle = Handle(process.hProcess);
     let thread = Handle(process.hThread);
     // An error after creation always kills the suspended/running worker.
@@ -582,10 +702,34 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         ensure!(assigned != 0, "job assignment readback");
     }
     let token = if confined {
-        Some(token_readback(process_handle.0)?)
+        Some(token_readback(process_handle.0, lpac)?)
     } else {
         None
     };
+    if diagnostic {
+        // In particular, NULL environment inherits secrets: never resume any
+        // diagnostic child. Probe rows always use the sanitized LPAC path.
+        check(
+            unsafe { TerminateProcess(process_handle.0, 0) },
+            "diagnostic termination",
+        )?;
+        ensure!(
+            unsafe { WaitForSingleObject(process_handle.0, 5000) } == WAIT_OBJECT_0,
+            "diagnostic termination wait"
+        );
+        drop(kill);
+        drop(thread);
+        drop(process_handle);
+        drop(job);
+        for grant in grants.iter_mut().rev() {
+            grant.restore()?;
+        }
+        if let Some(profile) = &mut profile {
+            profile.remove()?;
+        }
+        return Ok(json!({"status":"pass","mode":mode,"worker_resumed":false,
+            "token_before_resume":token,"job_before_resume":before}));
+    }
     ensure!(
         unsafe { ResumeThread(thread.0) } != u32::MAX,
         "ResumeThread failed"

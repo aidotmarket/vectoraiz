@@ -81,6 +81,7 @@ def initial_manifest():
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
             "sampler_enabled": False,
+            "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
             "aggregate_scope": "active-process limit 1; independent job-ceiling diagnostic has one member, no multi-child aggregate claim",
             "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
@@ -106,7 +107,22 @@ def validate_manifest(manifest):
     counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun")}
     assert counts == manifest["counts"], "counts mismatch"
     assert manifest["status"] in ("pass", "fail")
+    diagnostic = manifest["launch_diagnostic"]
+    assert diagnostic["status"] in ("unrun", "running", "complete") and diagnostic["reason"]
+    names = [result["variation"] for result in diagnostic["variations"]]
+    assert names == list(DIAGNOSTIC_VARIATIONS[:len(names)]), "invalid launch diagnostic variations"
+    if diagnostic["status"] == "complete":
+        assert names == list(DIAGNOSTIC_VARIATIONS), "incomplete launch diagnostic"
+    for result in diagnostic["variations"]:
+        assert result["status"] in ("pass", "fail")
+        if result["status"] == "pass":
+            assert result["worker_resumed"] is False
+            trace = result["launch_trace"]
+            assert trace["profile_created_before_launch"] and trace["create_process_succeeded"]
+            token = result["token_before_resume"]
+            assert token == {"appcontainer": 1, "lpac": int(result["variation"] != "plain-appcontainer"), "capability_count": 0}
     if manifest["status"] == "pass":
+        assert diagnostic["status"] == "complete"
         assert counts["fail"] == counts["unrun"] == 0 and not manifest.get("setup_error") and not manifest.get("cleanup_error")
         assert manifest.get("worker_sha256") and manifest.get("source_sha")
 
@@ -270,6 +286,59 @@ class Endpoints:
         return None
 
 
+DIAGNOSTIC_VARIATIONS = (
+    "baseline", "null-environment", "expanded-environment", "null-directory",
+    "plain-appcontainer", "localappdata",
+)
+
+
+def launch_diagnostic(args, out, manifest, save):
+    """Vary one launch input from the original minimal LPAC baseline at a time.
+
+    No diagnostic worker is resumed, including the inherited-environment case.
+    Only API outcomes, environment key names and token/job readbacks are public.
+    """
+    diagnostic = manifest["launch_diagnostic"]
+    diagnostic.update(status="running", reason="single variations of original launch; no worker resumed")
+    save()
+    folder = out / "launch-diagnostic"
+    folder.mkdir()
+    request = folder / "request.json"
+    request.write_text("{}", encoding="utf-8")
+    attack = folder / "attack.txt"
+    attack.write_bytes(b"diagnostic unused handle")
+    for variation in DIAGNOSTIC_VARIATIONS:
+        scratch = folder / (variation + "-scratch")
+        scratch.mkdir()
+        result_path = folder / (variation + ".json")
+        try:
+            code = command([args.launcher.resolve(), args.worker.resolve(), "diagnostic-" + variation,
+                            request, result_path, scratch, attack], folder / (variation + ".log"))
+            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {
+                "status": "fail", "reason": "launcher produced no diagnostic result"}
+            result.update(variation=variation, launcher_exit=code)
+            if code != 0:
+                result["status"] = "fail"
+            diagnostic["variations"].append(result)
+        except Exception as error:
+            diagnostic["variations"].append({"variation": variation, "status": "fail",
+                                             "reason": "diagnostic orchestration exception: " + type(error).__name__})
+            (folder / (variation + "-exception.txt")).write_text(str(error), encoding="utf-8")
+        finally:
+            shutil.rmtree(scratch)
+            save()
+    outcomes = {result["variation"]: result for result in diagnostic["variations"]}
+    baseline = outcomes["baseline"].get("launch_trace", {})
+    fixed = outcomes["localappdata"]
+    diagnostic["finding"] = (
+        "Adding LOCALAPPDATA alone resolves baseline CreateProcessW error 203 with verified zero-capability LPAC"
+        if baseline.get("create_process_error_code") == 203 and fixed["status"] == "pass"
+        else "LOCALAPPDATA-only repair not established; inspect individual API outcomes; real launches still require LPAC"
+    )
+    diagnostic.update(status="complete", reason="observed suspended launch outcomes; no fallback selected")
+    save()
+
+
 def run_suite(args):
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
@@ -295,6 +364,8 @@ def run_suite(args):
                 manifest["source_sha"] = (out / "source-sha.log").read_text().strip()
         if args.pdfium:
             manifest["pdfium_sha256"] = digest(args.pdfium)
+        # First runtime experiment, before any positive control or confined probe.
+        launch_diagnostic(args, out, manifest, save)
         spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
         fixtures_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixtures_module)
@@ -406,6 +477,32 @@ def self_test():
     assert "response" not in public_result(parsed, True)
     manifest = initial_manifest()
     validate_manifest(manifest)
+    # Exercise durable collection after launch failure and malformed output,
+    # without requiring Windows or ever running a child with host environment.
+    from unittest.mock import patch
+    from types import SimpleNamespace
+    evidence = os.environ.get("KD_BRIDGE_JOB_EVIDENCE") or os.environ.get("OFFICE_EVIDENCE_DIR")
+    with tempfile.TemporaryDirectory(prefix="launch-diagnostic-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        saved = []
+        def fake_command(argv, log):
+            mode = argv[2].removeprefix("diagnostic-")
+            if mode == "null-environment":
+                Path(argv[4]).write_text("invalid JSON", encoding="utf-8")
+            else:
+                Path(argv[4]).write_text(json.dumps({"status": "fail", "launch_trace": {
+                    "profile_created_before_launch": True, "create_process_succeeded": False,
+                    "create_process_error_code": 203}}), encoding="utf-8")
+            return 1
+        with patch(__name__ + ".command", side_effect=fake_command) as mocked:
+            launch_diagnostic(SimpleNamespace(launcher=folder / "launcher.exe", worker=folder / "worker.exe"),
+                              folder, manifest, lambda: saved.append(json.loads(json.dumps(manifest))))
+        assert mocked.call_count == len(DIAGNOSTIC_VARIATIONS)
+        assert len(saved) >= len(DIAGNOSTIC_VARIATIONS) + 2
+        assert manifest["rows"] == initial_manifest()["rows"]
+        validate_manifest(manifest)
+        assert all(result["status"] == "fail" for result in manifest["launch_diagnostic"]["variations"])
+        assert manifest["launch_diagnostic"]["variations"][0]["launch_trace"]["create_process_error_code"] == 203
     manifest["rows"].pop()
     try:
         validate_manifest(manifest)

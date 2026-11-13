@@ -104,7 +104,7 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:OFFICE_EVIDENCE_DIR/build.log" -Tail 80
           exit $code
-      - name: Run Stage A and B probes with independent positive controls
+      - name: Run suspended launch diagnostic first, then Stage A and B probes
         timeout-minutes: 15
         run: |
           python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run" --pdfium "$env:OFFICE_EVIDENCE_DIR/assets/pdfium.dll" *> "$env:OFFICE_EVIDENCE_DIR/suite.log"
