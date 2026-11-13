@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 
@@ -71,6 +72,60 @@ def plan():
     for extension in ("txt", "md", "html", "docx", "xlsx", "pdf"):
         rows.append({"id": "format-" + extension, "format": extension, "expect": "equal"})
     return rows
+
+
+def initial_manifest():
+    specs = plan()
+    return {"schema_version": 1, "scope": "Windows C1 feasibility stage 1; not qualification",
+            "os": platform.system(), "os_build": platform.version(),
+            "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
+            "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
+            "sampler_enabled": False,
+            "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
+            "aggregate_scope": "active-process limit 1; independent job-ceiling diagnostic has one member, no multi-child aggregate claim",
+            "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
+            "counts": {"pass": 0, "fail": 0, "unrun": len(specs)}, "status": "fail"}
+
+
+def outside(path):
+    path = path.resolve()
+    if path == ROOT or ROOT in path.parents:
+        raise ValueError("private evidence root must be outside the repository")
+    return path
+
+
+def validate_manifest(manifest):
+    expected = {row["id"] for row in plan()}
+    rows = manifest["rows"]
+    assert len(rows) == len(expected) and {row["id"] for row in rows} == expected, "missing or duplicate probe rows"
+    for row in rows:
+        assert row["status"] in ("pass", "fail", "unrun") and row["reason"], "invalid status/reason"
+        if row["id"].startswith("format-"):
+            for mode in ("control", "confined"):
+                assert "response" not in row.get(mode, {}), "raw parser response in public manifest"
+    counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun")}
+    assert counts == manifest["counts"], "counts mismatch"
+    assert manifest["status"] in ("pass", "fail")
+    if manifest["status"] == "pass":
+        assert counts["fail"] == counts["unrun"] == 0 and not manifest.get("setup_error") and not manifest.get("cleanup_error")
+        assert manifest.get("worker_sha256") and manifest.get("source_sha")
+
+
+def fetch_pdfium(output):
+    output = outside(output)
+    output.mkdir(parents=True, exist_ok=False)
+    spec = importlib.util.spec_from_file_location("fetch_assets", ROOT / "scripts/fetch-assets.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    target, expected = module.PDFIUM["Windows"]
+    archive = output / "pdfium.tgz"
+    module.fetch(f"https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/8111/pdfium-{target}.tgz", expected, archive)
+    with tarfile.open(archive) as bundle:
+        bundle.extractall(output / "bundle", filter="data")
+    candidates = list((output / "bundle").rglob("pdfium.dll"))
+    if len(candidates) != 1:
+        raise ValueError("pinned Windows PDFium archive must have one DLL")
+    shutil.copyfile(candidates[0], output / "pdfium.dll")
 
 
 def evaluate(spec, control, confined):
@@ -216,19 +271,12 @@ class Endpoints:
 
 
 def run_suite(args):
-    out = args.out.resolve()
-    if out == ROOT or ROOT in out.parents:
-        raise ValueError("private evidence root must be outside the repository")
+    out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
     specs = plan()
-    manifest = {"schema_version": 1, "scope": "Windows C1 feasibility stage 1; not qualification",
-                "os": platform.system(), "os_build": platform.version(),
-                "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
-                "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
-                "sampler_enabled": False, "rows": [{"id": s["id"], "status": "unrun", "reason": "not attempted"} for s in specs],
-                "aggregate_scope": "active-process limit 1; independent job-ceiling diagnostic has one member, no multi-child aggregate claim",
-                "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"], "status": "fail"}
+    manifest = initial_manifest()
     def save():
+        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun")}
         target = out / "manifest.json"
         temporary = out / "manifest.json.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -358,6 +406,15 @@ def self_test():
     changed["response"]["pages"][0]["text"] += "changed"
     assert evaluate(fmt, parsed, changed)[0] == "fail"
     assert "response" not in public_result(parsed, True)
+    manifest = initial_manifest()
+    validate_manifest(manifest)
+    manifest["rows"].pop()
+    try:
+        validate_manifest(manifest)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("missing probe row accepted")
     print(f"self-test passed: {len(specs)} planned rows; false-positive and redaction checks")
 
 
@@ -368,12 +425,27 @@ def main():
     parser.add_argument("--launcher", type=Path, default=ROOT / "target/debug/vz-office-windows-launch.exe")
     parser.add_argument("--pdfium", type=Path)
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--initialize-only", action="store_true", help="write all-unrun manifest before CI build")
+    parser.add_argument("--validate-manifest", type=Path)
+    parser.add_argument("--fetch-pdfium", type=Path, help="fetch only the native-ci pinned Windows PDFium, no models")
     args = parser.parse_args()
     if args.self_test:
         self_test()
         return 0
+    if args.validate_manifest:
+        validate_manifest(json.loads(args.validate_manifest.read_text(encoding="utf-8-sig")))
+        print("complete redacted manifest validated")
+        return 0
+    if args.fetch_pdfium:
+        fetch_pdfium(args.fetch_pdfium)
+        return 0
     if args.out is None:
         parser.error("--out outside the checkout is required")
+    if args.initialize_only:
+        out = outside(args.out)
+        out.mkdir(parents=True, exist_ok=False)
+        (out / "manifest.json").write_text(json.dumps(initial_manifest(), indent=2) + "\n", encoding="utf-8")
+        return 0
     return run_suite(args)
 
 

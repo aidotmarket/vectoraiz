@@ -100,3 +100,30 @@ dependencies without the Windows SDK/MSVC headers on the Mac (`zstd-sys`:
 missing `stdlib.h`, `assert.h`). The standalone harness's Windows-target check
 and strict clippy succeed. Windows runtime/linking and actual-worker outcomes
 remain unobserved locally.
+
+Stage C
+-------
+
+`.github/workflows/office-feasibility-windows.yml` has one `windows-2022` job,
+pushes only on `build/office-web-c1-feasibility-s1927` with harness/worker paths,
+and `workflow_dispatch`. It reuses native CI's Python, MSVC, Vulkan, protoc,
+pinned Rust and restored-CMake setup. RTK v1.1.0 is a SHA256-verified Windows
+release. Only the existing pinned PDFium is fetched, without model/OCR assets.
+Checkout credentials are not persisted; permissions are read-only.
+
+The runner initializes every row as unrun **before the build**. The finalizer
+keeps the most recent manifest, including partially completed runs, and checks
+row completeness/status counts and format-response redaction even after a
+failure. Setup/build failure leaves the all-unrun manifest in place. Only that
+redacted JSON is uploaded; complete build/probe logs, raw frames/stderr and
+synthetic fixtures stay in the runner's private temporary evidence root.
+Capture exceeding the 32 MiB protocol/diagnostic budgets is marked as overflow
+and fails the invocation; all captured bytes are retained privately. Job commit
+peaks survive process exit; resident/private counters are also collected inside
+the worker while allocations remain held.
+
+No Windows CI outcome is asserted by this change. The operator reads the
+artifact; failed or unavailable rows remain blocking feasibility gaps. The job
+is expected to report literal socket success, unsupported API combinations,
+missing routes/brokers or startup/parse failures honestly, without changing the
+contract to make CI green.

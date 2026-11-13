@@ -603,7 +603,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         std::thread::spawn(move || {
             let mut bytes = Vec::new();
             file(handle)
-                .take(32 * 1024 * 1024 + 1)
+                .take(32 * 1024 * 1024 + 5)
                 .read_to_end(&mut bytes)?;
             Ok(bytes)
         })
@@ -660,6 +660,12 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
     let errors = errors
         .join()
         .map_err(|_| anyhow::anyhow!("stderr reader panic"))??;
+    // Keep exact captured bytes privately, including crashes and malformed frames.
+    // Only the bounded/redacted JSON result is eligible for artifact publication.
+    let result_path = Path::new(&args[3]);
+    std::fs::write(result_path.with_extension("stdout.bin"), &output)?;
+    std::fs::write(result_path.with_extension("stderr.log"), &errors)?;
+    let capture_overflow = output.len() > 32 * 1024 * 1024 + 4 || errors.len() > 32 * 1024 * 1024;
     let response = if output.len() >= 4 {
         let len = u32::from_le_bytes(output[..4].try_into()?) as usize;
         if len <= 32 * 1024 * 1024 && output.len() == len + 4 {
@@ -678,13 +684,14 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value> {
         profile.remove()?;
     }
     Ok(
-        json!({"status":if exit == 0 && !timed_out && response.is_some() {"pass"} else {"fail"},
+        json!({"status":if exit == 0 && !timed_out && !capture_overflow && write_error.is_none() && response.is_some() {"pass"} else {"fail"},
         "mode":args[1].to_string_lossy(),"exit_code":exit,"deadline_kill":timed_out,
         "elapsed_ms":start.elapsed().as_millis(),"job_before_resume":before,"job_after":after,
         "token_before_resume":token,"sampler_enabled":false,"memory_counters_available":counters_ok,
         "working_set_bytes":if counters_ok {Some(counters.WorkingSetSize)} else {None},
         "peak_working_set_bytes":if counters_ok {Some(counters.PeakWorkingSetSize)} else {None},
         "private_commit_bytes":if counters_ok {Some(counters.PrivateUsage)} else {None},
-        "stdin_error":write_error,"stderr_bytes":errors.len(),"response":response}),
+        "stdin_error":write_error,"stderr_bytes":errors.len(),"capture_overflow":capture_overflow,
+        "capture_limit_bytes":32 * 1024 * 1024,"response":response}),
     )
 }
