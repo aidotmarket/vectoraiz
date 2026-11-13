@@ -324,3 +324,7 @@ mod tests {
             .contains("ratio"));
     }
 }
+
+#[cfg(feature = "office-feasibility")]
+#[path = "office_bytes.rs"]
+pub mod office_bytes;

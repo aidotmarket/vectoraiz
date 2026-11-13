@@ -4,10 +4,15 @@
 #include <mach/mach_vm.h>
 #include <sandbox.h>
 #include <sys/mman.h>
+#define VZ_DESCRIPTOR_ONLY 1
 #define main vz_office_probe_main
 #include "../../../tests/office/fixtures/hostile-worker.c"
 #undef main
 
+static int supplied_input=-1, supplied_scratch=-1;
+int vz_office_scratch_fd(void) {return supplied_scratch;}
+int vz_office_input_fd(void) {return supplied_input;}
+void vz_office_supply_fds(int input,int scratch) {supplied_input=input;supplied_scratch=scratch;}
 static volatile char *reserved_baseline=NULL;
 int vz_office_reserve_baseline(void) {
     reserved_baseline=mmap(NULL,2ULL*1024*1024*1024,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
@@ -35,14 +40,35 @@ int vz_office_bootstrap(const char *profile) {
     if (rc || readback.rlim_cur!=limit.rlim_cur || readback.rlim_max!=limit.rlim_max) return 72;
     /* Do not inherit host files/sockets into the confined role. */
     int maxfd=getdtablesize();
-    for(int fd=3;fd<maxfd;fd++) close(fd);
+    for(int fd=3;fd<maxfd;fd++) if(fd!=supplied_input && fd!=supplied_scratch) close(fd);
     char *message=NULL;
     if (sandbox_init(profile,0,&message)) {
         fprintf(stderr,"sandbox init: %s\n",message ? message : "unknown");
         if(message) sandbox_free_error(message);
         return 73;
     }
+    struct rlimit zero={0,0}, actual={0};errno=0;
+    int nrc=setrlimit(RLIMIT_NOFILE,&zero),ne=errno;
+    if(getrlimit(RLIMIT_NOFILE,&actual)) return 76;
+    fprintf(stderr,"{\"nofile_soft\":%llu,\"nofile_hard\":%llu,\"set_rc\":%d,\"errno\":%d}\n",actual.rlim_cur,actual.rlim_max,nrc,ne);
+    if(nrc || actual.rlim_cur || actual.rlim_max) return 76;
     return 0;
+}
+/* Supporting rationale pinned to xnu-11417.101.15/bsd/kern/uipc_syscalls.c.
+ * No claim about transient kernel objects: observe descriptors and errno. */
+int vz_office_socket_checks(int close_fd) {
+    printf("{\"checks\":[");
+    for(int phase=0;phase<2;phase++) {
+        if(phase && close_fd>=0) close(close_fd);
+        for(int kind=0;kind<6;kind++) {
+            int pair[2]={-1,-1};errno=0;int fd=-1,rc=-1;
+            if(kind==5) {rc=socketpair(AF_UNIX,SOCK_STREAM,0,pair);}
+            else {int family=kind<2?AF_INET:kind<4?AF_INET6:AF_UNIX;fd=socket(family,kind%2?SOCK_DGRAM:SOCK_STREAM,0);rc=fd;}
+            int error=errno;int returned=fd>=0 || pair[0]>=0 || pair[1]>=0;
+            printf("%s{\"after_close\":%s,\"kind\":%d,\"rc\":%d,\"errno\":%d,\"descriptor_returned\":%s}",phase || kind?",":"",phase?"true":"false",kind,rc,error,returned?"true":"false");
+            if(fd>=0)close(fd);if(pair[0]>=0)close(pair[0]);if(pair[1]>=0)close(pair[1]);
+        }
+    }puts("]}");return 0;
 }
 
 int vz_office_memory_probe(const char *kind,const char *scratch) {

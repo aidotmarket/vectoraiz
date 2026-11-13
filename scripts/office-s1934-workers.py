@@ -89,7 +89,7 @@ def execute(argv, target, label, data=None, readiness=False, inherited=()):
     for line in (target / (label + '.stderr')).read_text(errors='replace').splitlines():
         try:
             entry = json.loads(line)
-            if 'baseline_mapped_bytes' in entry or 'writable_baseline_virtual_bytes' in entry:
+            if 'baseline_mapped_bytes' in entry or 'writable_baseline_virtual_bytes' in entry or 'nofile_soft' in entry:
                 result['bootstrap'].append(entry)
         except ValueError:
             pass

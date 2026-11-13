@@ -6,6 +6,8 @@ fn main() -> anyhow::Result<()> {
     use std::ffi::CString;
     unsafe extern "C" {
         fn vz_office_reserve_baseline() -> i32;
+        fn vz_office_supply_fds(input: i32, scratch: i32);
+        fn vz_office_socket_checks(close_fd: i32) -> i32;
         fn vz_office_bootstrap(profile: *const std::ffi::c_char) -> i32;
         fn vz_office_probe_main(argc: i32, argv: *mut *mut std::ffi::c_char) -> i32;
         fn vz_office_memory_probe(
@@ -27,9 +29,57 @@ fn main() -> anyhow::Result<()> {
             "baseline reservation"
         );
     }
-    let status = unsafe { vz_office_bootstrap(profile.as_ptr()) };
-    ensure!(status == 0, "bootstrap refused: {status}");
-    if args[2] == "probe" {
+    use std::os::fd::AsRawFd;
+    let real_role = matches!(
+        args[2].as_str(),
+        "ingest" | "render" | "control-ingest" | "control-render"
+    );
+    let mut input = if matches!(args[2].as_str(), "probe" | "control-probe")
+        && args.get(4).is_some_and(|p| p == "snapshot")
+    {
+        Some(std::fs::File::open(args.get(5).context("probe snapshot")?)?)
+    } else if real_role {
+        Some(std::fs::File::open(
+            args.get(4).context("exact supplied input")?,
+        )?)
+    } else {
+        None
+    };
+    let scratch = if let Some(path) = args.get(if real_role {
+        5
+    } else if args.get(4).is_some_and(|p| p == "scratch_create") {
+        6
+    } else {
+        99
+    }) {
+        Some(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(path)?,
+        )
+    } else {
+        None
+    };
+    let closing = std::fs::File::open("/dev/null")?;
+    unsafe {
+        vz_office_supply_fds(
+            input
+                .as_ref()
+                .map_or(closing.as_raw_fd(), |f| f.as_raw_fd()),
+            scratch.as_ref().map_or(-1, |f| f.as_raw_fd()),
+        );
+    }
+    // Independent positive controls never receive untrusted request bytes.
+    if args[2] != "control-probe" && !args[2].starts_with("control-") {
+        let status = unsafe { vz_office_bootstrap(profile.as_ptr()) };
+        ensure!(status == 0, "bootstrap refused: {status}");
+    }
+    if args[2] == "socket-checks" || args[2] == "control-sockets" {
+        std::process::exit(unsafe { vz_office_socket_checks(closing.as_raw_fd()) });
+    }
+    if matches!(args[2].as_str(), "probe" | "control-probe") {
         let strings: Vec<_> = args[4..]
             .iter()
             .map(|a| CString::new(a.as_str()))
@@ -46,22 +96,31 @@ fn main() -> anyhow::Result<()> {
         let scratch = CString::new(args.get(5).context("scratch")?.as_str())?;
         std::process::exit(unsafe { vz_office_memory_probe(kind.as_ptr(), scratch.as_ptr()) });
     }
-    ensure!(
-        matches!(args[2].as_str(), "ingest" | "render"),
-        "unknown role"
-    );
+    ensure!(real_role, "unknown role");
     vz_core::worker::write_frame(
         std::io::stdout().lock(),
         &serde_json::json!({"ready":true,"role":args[2]}),
     )?;
     let request: vz_core::worker::Request = vz_core::worker::read_frame(std::io::stdin().lock())?;
     ensure!(
+        request.path == std::path::Path::new(&args[4]),
+        "input identity mismatch"
+    );
+    ensure!(
         request.pdfium.as_deref() == Some(std::path::Path::new(&args[3])),
         "asset mismatch"
     );
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    input
+        .take()
+        .context("supplied descriptor")?
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 32 * 1024 * 1024, "input budget");
     let mut output = Vec::new();
     if request.path.extension().is_some_and(|e| e == "pdf") {
-        let document = pdfium.load_pdf_from_file(&request.path, None)?;
+        let document = pdfium.load_pdf_from_byte_slice(&bytes, None)?;
         for i in 0..document.pages().len() {
             let page = document.pages().get(i)?;
             let text = page.text()?.all();
@@ -82,7 +141,14 @@ fn main() -> anyhow::Result<()> {
             );
         }
     } else {
-        let pages = vz_core::parsers::parse(&request)?;
+        let pages = vz_core::parsers::office_bytes::parse(
+            request
+                .path
+                .extension()
+                .and_then(|e| e.to_str())
+                .context("extension")?,
+            &bytes,
+        )?;
         for page in pages {
             // Real, escaped full-text rendering. Images/style completeness is
             // explicitly unqualified; never treat parser text as original view.
