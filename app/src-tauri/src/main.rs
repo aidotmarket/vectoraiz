@@ -24,6 +24,10 @@ mod mcp_tools;
 #[cfg_attr(test, allow(dead_code))]
 mod models;
 mod notices;
+// No office module is compiled into the application, even with the spike flag.
+#[cfg(all(test, feature = "office-feasibility"))]
+#[path = "office/spikes.rs"]
+mod office_spikes;
 #[cfg_attr(test, allow(dead_code))]
 mod settings;
 

@@ -331,8 +331,14 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let filename = fixture["embedding"]["file"].as_str().unwrap();
         let search = dir.path().join(filename);
-        fs::copy(root.join(".assets").join(filename), &search)
-            .expect("fetch the fixture assets before Rust tests");
+        fs::copy(
+            std::env::var_os("VZ_TEST_ASSETS")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| root.join(".assets"))
+                .join(filename),
+            &search,
+        )
+        .expect("fetch the fixture assets before Rust tests");
         let pins = dir.path().join("pins.json");
         fs::write(
             &pins,

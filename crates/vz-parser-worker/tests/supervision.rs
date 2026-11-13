@@ -195,11 +195,14 @@ fn office_memory_cap_has_named_refusal() {
 #[test]
 fn pages_without_text_use_platform_ocr_policy() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let library = root.join(".assets").join(if cfg!(windows) {
-        "pdfium/bin/pdfium.dll"
-    } else {
-        "pdfium/lib/libpdfium.dylib"
-    });
+    let library = std::env::var_os("VZ_TEST_ASSETS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| root.join(".assets"))
+        .join(if cfg!(windows) {
+            "pdfium/bin/pdfium.dll"
+        } else {
+            "pdfium/lib/libpdfium.dylib"
+        });
     assert!(library.exists(), "fetch pinned PDFium before cargo test");
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("blank.pdf");

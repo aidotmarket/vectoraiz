@@ -6,6 +6,8 @@ license.workspace = true
 publish.workspace = true
 
 [features]
+# C1 spikes compile only with cfg(test); this never enables office sharing.
+office-feasibility = ["vz-core/office-feasibility"]
 smoke-test = []
 ui-test = ["dep:tauri-plugin-wdio-webdriver"]
 custom-protocol = ["tauri/custom-protocol"]

@@ -49,6 +49,10 @@ pub type CheckResults = std::collections::BTreeMap<String, (vz_core::verificatio
 pub struct OperationState<E> {
     lock: Arc<Mutex<EngineCache<E>>>,
     generation: AtomicU64,
+    #[cfg(all(test, feature = "office-feasibility"))]
+    office_run_epoch: AtomicU64,
+    #[cfg(all(test, feature = "office-feasibility"))]
+    office_run_generation: AtomicU64,
     cancel: std::sync::Mutex<watch::Sender<bool>>,
     transfer: Arc<Mutex<()>>,
     transfer_cancel: std::sync::Mutex<watch::Sender<bool>>,
@@ -63,6 +67,10 @@ impl<E> Default for OperationState<E> {
                 generation: 0,
             })),
             generation: AtomicU64::new(0),
+            #[cfg(all(test, feature = "office-feasibility"))]
+            office_run_epoch: AtomicU64::new(0),
+            #[cfg(all(test, feature = "office-feasibility"))]
+            office_run_generation: AtomicU64::new(0),
             cancel: std::sync::Mutex::new(watch::channel(false).0),
             transfer: Arc::new(Mutex::new(())),
             transfer_cancel: std::sync::Mutex::new(watch::channel(false).0),
@@ -100,7 +108,14 @@ impl<E: CachedEngine> OperationState<E> {
     // A fresh channel identifies this operation; successors cannot reset old receivers.
     pub fn start(&self) -> watch::Receiver<bool> {
         let (sender, receiver) = watch::channel(false);
-        *self.cancel.lock().unwrap() = sender;
+        let mut current = self.cancel.lock().unwrap();
+        #[cfg(all(test, feature = "office-feasibility"))]
+        {
+            self.office_run_epoch.fetch_add(1, Ordering::AcqRel);
+            self.office_run_generation
+                .store(self.generation.load(Ordering::Acquire), Ordering::Release);
+        }
+        *current = sender;
         receiver
     }
     pub fn promotion_lock(&self) -> Arc<Mutex<EngineCache<E>>> {
@@ -169,6 +184,35 @@ impl<E: CachedEngine> OperationState<E> {
         *self.target.write().unwrap() = None;
         changed();
         result
+    }
+    // Harness-only: capture the cancelled generation while signalling, then
+    // invalidate it after the fair generation lease drains. Never signal again.
+    #[cfg(all(test, feature = "office-feasibility"))]
+    pub fn office_cancel_generation(&self) -> (u64, u64) {
+        let current = self.cancel.lock().unwrap();
+        let stamp = (
+            self.office_run_generation.load(Ordering::Acquire),
+            self.office_run_epoch.load(Ordering::Acquire),
+        );
+        current.send_replace(true);
+        stamp
+    }
+    #[cfg(all(test, feature = "office-feasibility"))]
+    pub fn office_invalidate_generation(&self, cancelled: (u64, u64)) -> bool {
+        // Bind to both the engine generation and the run that was signalled.
+        // A successor can share an engine generation, but never its run epoch.
+        let _current = self.cancel.lock().unwrap();
+        if self.office_run_epoch.load(Ordering::Acquire) != cancelled.1 {
+            return false;
+        }
+        self.generation
+            .compare_exchange(
+                cancelled.0,
+                cancelled.0 + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
     pub fn cancel(&self) {
         self.checks.lock().unwrap().clear();
@@ -447,6 +491,12 @@ fn client_builder() -> reqwest::ClientBuilder {
         .retry(reqwest::retry::never())
 }
 
+// Only the C1 loopback transfer fixture may use cleartext HTTP. Production
+// callers keep the HTTPS-only builder and this symbol is absent outside tests.
+#[cfg(all(test, feature = "office-feasibility"))]
+pub fn office_loopback_client() -> Result<Client> {
+    Ok(client_builder().https_only(false).no_proxy().build()?)
+}
 pub fn client() -> Result<Client> {
     Ok(client_builder().build()?)
 }

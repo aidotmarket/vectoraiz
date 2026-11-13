@@ -342,6 +342,76 @@ impl Engines {
         }
         Ok(vector)
     }
+    #[cfg(feature = "office-feasibility")]
+    pub fn office_vector_timed(
+        &self,
+        text: &str,
+        query: bool,
+    ) -> Result<(Vec<f32>, serde_json::Value)> {
+        let total = std::time::Instant::now();
+        let _timer = PhaseTimer::new(if query {
+            "query_embedding"
+        } else {
+            "document_embedding"
+        });
+        let text = format!(
+            "{}{text}",
+            if query {
+                &self.recipe.query_prefix
+            } else {
+                &self.recipe.document_prefix
+            }
+        );
+        let mut tokens = self.embed.str_to_token(&text, AddBos::Always)?;
+        let pins = self
+            .pins
+            .read()
+            .map_err(|_| anyhow::anyhow!("pins lock poisoned"))?;
+        let append_eos = pin_bool(&pins, "embedding", "append_eos")?;
+        let eos = self.embed.token_eos();
+        // A vocab with add_eos_token already appended EOS in str_to_token; never
+        // end with two EOS tokens (CC Gate 3 LOW-1).
+        if append_eos && tokens.last() == Some(&eos) {
+            tokens.pop();
+        }
+        tokens.truncate(self.recipe.max_tokens - usize::from(append_eos));
+        if append_eos {
+            tokens.push(eos);
+        }
+        let max_tokens = self.recipe.max_tokens as u32;
+        let params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(max_tokens))
+            .with_n_batch(max_tokens)
+            .with_n_ubatch(max_tokens)
+            .with_embeddings(true)
+            .with_pooling_type(pooling(&self.recipe.pooling)?);
+        let context_start = std::time::Instant::now();
+        let mut ctx = self.embed.new_context(&self.backend, params)?;
+        let context_ms = context_start.elapsed().as_secs_f64() * 1000.0;
+        let inference_start = std::time::Instant::now();
+        let mut batch = LlamaBatch::new(self.recipe.max_tokens, 1);
+        batch.add_sequence(&tokens, 0, false)?;
+        if self.recipe.pooling == "last"
+            || self.embed.meta_val_str("general.architecture")? == "gemma-embedding"
+        {
+            ctx.decode(&mut batch)?;
+        } else {
+            ctx.encode(&mut batch)?;
+        }
+        let inference_ms = inference_start.elapsed().as_secs_f64() * 1000.0;
+        let mut vector = ctx.embeddings_seq_ith(0)?.to_vec();
+        let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm <= 0.0 {
+            bail!("invalid model embedding");
+        }
+        for value in &mut vector {
+            *value /= norm;
+        }
+        Ok((
+            vector,
+            serde_json::json!({"context_creation_ms":context_ms,"native_encode_ms":inference_ms,"total_ms":total.elapsed().as_secs_f64()*1000.0}),
+        ))
+    }
     pub fn stream(
         &self,
         question: &str,
@@ -385,6 +455,68 @@ pub struct ChatOnly {
     pins: serde_json::Value,
 }
 impl ChatOnly {
+    /// C1 experiment only: bounded native prefill/decode steps with cooperative
+    /// abort checks. No product caller, streaming output, cloud or key access.
+    /// A native step can still exceed 1s: the harness measures, never assumes,
+    /// the cancellation bound. This does not alter desktop Ask's generation.
+    #[cfg(feature = "office-feasibility")]
+    pub fn office_abort_probe(
+        &self,
+        cancelled: &std::sync::atomic::AtomicBool,
+        phase: &std::sync::atomic::AtomicU8,
+    ) -> Result<bool> {
+        use std::sync::atomic::Ordering;
+        let n_ctx = pin_u32(&self.pins, "chat", "n_ctx", 4096)?.min(4096);
+        let output = pin_u32(&self.pins, "chat", "max_output_tokens", 192)?.min(192);
+        let text = format!(
+            "{}\nList the reference numbers in order:",
+            "Synthetic office reference 1927. ".repeat(128)
+        );
+        let tokens = self.model.str_to_token(&text, AddBos::Always)?;
+        ensure!(
+            tokens.len() + output as usize + 16 < n_ctx as usize,
+            "probe context bound"
+        );
+        let mut ctx = self.model.new_context(
+            &self.backend,
+            LlamaContextParams::default()
+                .with_n_ctx(NonZeroU32::new(n_ctx))
+                .with_n_batch(32),
+        )?;
+        let mut batch = LlamaBatch::new(32, 1);
+        let start = std::time::Instant::now();
+        phase.store(1, Ordering::Release);
+        for (offset, part) in tokens.chunks(32).enumerate() {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(true);
+            }
+            ensure!(start.elapsed().as_secs() < 30, "probe 30s deadline");
+            batch.clear();
+            for (j, token) in part.iter().enumerate() {
+                let i = offset * 32 + j;
+                batch.add(*token, i as i32, &[0], i + 1 == tokens.len())?;
+            }
+            ctx.decode(&mut batch)?;
+        }
+        let mut sampler = LlamaSampler::greedy();
+        phase.store(2, Ordering::Release);
+        for i in 0..output as usize {
+            if cancelled.load(Ordering::Acquire) {
+                return Ok(true);
+            }
+            ensure!(start.elapsed().as_secs() < 30, "probe 30s deadline");
+            let token = sampler.sample(&ctx, batch.n_tokens() - 1);
+            sampler.accept(token);
+            if self.model.is_eog_token(token) {
+                return Ok(false);
+            }
+            batch.clear();
+            batch.add(token, (tokens.len() + i) as i32, &[0], true)?;
+            ctx.decode(&mut batch)?;
+        }
+        Ok(false)
+    }
+
     pub fn load(assets: &Path, pins: &Path, cpu: bool) -> Result<Self> {
         let pins = serde_json::from_slice(&std::fs::read(pins)?)?;
         let backend = backend()?;
@@ -612,7 +744,9 @@ fn engine_load_reuses_verification_record() {
 fn switching_chat_keeps_embedding_and_recipe_and_turn_off_is_typed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let engines = Engines::load_embedding(
-        &root.join(".assets"),
+        &std::env::var_os("VZ_TEST_ASSETS")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| root.join(".assets")),
         &root.join("spike/fixtures/models.json"),
         true,
     )
