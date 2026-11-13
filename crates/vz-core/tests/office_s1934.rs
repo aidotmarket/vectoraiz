@@ -201,17 +201,21 @@ fn s1934_refresh() -> Result<()> {
         let start=Instant::now();
         let next=Snapshot::open(&root.join("refresh"),&root.join("refresh.sqlite"),Candidate::Exact,54099).await?;
         let tx=db.transaction()?;
-        for id in &removed {tx.execute("DELETE FROM chunks WHERE id=?1",[id])?;}
+        {let mut delete=tx.prepare("DELETE FROM chunks WHERE id=?1")?;for id in &removed {delete.execute([id])?;}}
         {let mut insert=tx.prepare(harness::LOOKUP_INSERT)?;for chunk in &changed {harness::insert_lookup(&mut insert,chunk)?;}}
         tx.commit()?;drop(db);
+        let lookup_write_ms=start.elapsed().as_secs_f64()*1000.;let append=Instant::now();
         let filter=format!("chunk_id IN ({})",removed.iter().map(|id|format!("'{}'",id.replace('\'',"''"))).collect::<Vec<_>>().join(","));
         next.table.delete(&filter).await?;
         let batch=vz_core::storage::chunks_batch(&changed)?;
         let reader=arrow_array::RecordBatchIterator::new(vec![Ok(batch.clone())],batch.schema());
         next.table.add(Box::new(reader)).execute().await?;
+        let append_ms=append.elapsed().as_secs_f64()*1000.;
+        let fts=Instant::now();
         // N2: Exact has no vector index to update; optimize the selected
         // path's FTS index and refresh the bounded contiguous representation.
         next.table.optimize(lancedb::table::OptimizeAction::Index(Default::default())).await?;
+        let fts_update_ms=fts.elapsed().as_secs_f64()*1000.;
         // The selected Lance exact scan reads the new table version directly.
         // There is no vector index or contiguous-file representation to update.
         let update_ms=start.elapsed().as_secs_f64()*1000.;
@@ -221,7 +225,7 @@ fn s1934_refresh() -> Result<()> {
         let _=next.search("office reference",&vector,8).await?;
         let weak=Arc::downgrade(&old);let reader=old.clone();drop(old);
         assert!(weak.upgrade().is_some());let start=Instant::now();drop(reader);assert!(weak.upgrade().is_none());
-        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"fts_update_ms":update_ms,"fts_update_operation":"Lance OptimizeAction::Index: incremental tail indexing plus merge; not create_index full rebuild","post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
+        std::fs::write(root.join("refresh.json"),serde_json::to_vec_pretty(&json!({"candidate":"Exact","no_op_ms":noop_ms,"no_op_reuses_same_handle":true,"clone_ms":clone_ms,"changed_chunks":540,"updates":180,"adds":180,"deletes":180,"embedding_ms":embedding_ms,"lookup_write_ms":lookup_write_ms,"delete_append_ms":append_ms,"fts_update_ms":fts_update_ms,"fts_update_operation":"incremental new-data FTS indexing plus existing-postings merge via OptimizeAction::Index; no create_index full retokenization (pinned current-format InvertedIndex::update_criteria only_new_data)","post_embedding_preparation_ms":clone_ms+update_ms,"baseline_rss_bytes":baseline,"two_snapshot_rss_bytes":two_snapshot_rss,"aggregate_incremental_rss_bytes":two_snapshot_rss.saturating_sub(baseline),"retirement_ms":start.elapsed().as_secs_f64()*1000.,"vector_index_update":"not applicable to exact path (N2)","limits":"synthetic chunk mutations; source hash/extraction accounting and concurrent 25-way Refresh search not qualified; no product promotion"}))?)?;
         Ok::<_,anyhow::Error>(())
     })
 }
@@ -362,5 +366,52 @@ fn s1939_scifact_exact() -> Result<()> {
         }
         anyhow::ensure!(rows.len()==ids.len(),"complete SciFact held-out queries");
         std::fs::write(root.join("scifact-exact.json"),serde_json::to_vec_pretty(&json!({"rows":rows,"path":"Exact","scope":"read-only E4 combined E3-scale + SciFact index; query code rebuilt in release; extraction/index pins retained","index_rebuilt":false}))?)?;Ok::<_,anyhow::Error>(())
+    })
+}
+
+#[test]
+fn s1939_prepare_under_search() -> Result<()> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(root) = std::env::var_os("VZ_S1939_UNDER_SEARCH") else {
+        return Ok(());
+    };
+    let root = Path::new(&root);
+    let source = std::env::var_os("VZ_S1934_SOURCE").context("source")?;
+    let old = std::env::var_os("VZ_S1934_ROOT").context("old")?;
+    let old = Path::new(&old);
+    tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build()?.block_on(async {
+        let engine=Arc::new(tokio::sync::Mutex::new(vz_core::engine::Engines::load_embedding(Path::new(&std::env::var_os("VZ_OFFICE_ASSETS").context("assets")?),Path::new(&std::env::var_os("VZ_OFFICE_PINS").context("pins")?),false)?));
+        let snapshot=Arc::new(Snapshot::open(&old.join("exact"),&old.join("lookup.sqlite"),Candidate::Exact,54099).await?);
+        let queries:Vec<serde_json::Value>=serde_json::from_slice(&std::fs::read(old.join("queries.json"))?)?;
+        let done=Arc::new(AtomicBool::new(false));let barrier=Arc::new(tokio::sync::Barrier::new(26));let mut jobs=Vec::new();
+        for (identity,q) in queries.into_iter().take(25).enumerate() {
+            let engine=engine.clone();let snapshot=snapshot.clone();let done=done.clone();let barrier=barrier.clone();
+            jobs.push(tokio::spawn(async move {
+                barrier.wait().await;let mut samples=Vec::new();
+                while !done.load(Ordering::Relaxed) && samples.len()<1000 {
+                    let start=Instant::now();let text=q["query"].as_str().context("query")?;
+                    let guard=engine.lock().await;let vector=guard.vector(text,true)?;drop(guard);
+                    let(hits,phases,_)=snapshot.search(text,&vector,8).await?;
+                    samples.push(json!({"identity":identity,"latency_ms":start.elapsed().as_secs_f64()*1000.,"storage":phases,"extraction_regression_match":hits.iter().any(|h|h.chunk.text.starts_with(text))}));
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }Ok::<_,anyhow::Error>(samples)
+            }));
+        }
+        let baseline=rss();barrier.wait().await;
+        let prepared=if std::env::var_os("VZ_S1939_UNDER_SEARCH_E4").is_some() {
+            let start=Instant::now();
+            async {
+                let rows=harness::e4_spool(Path::new(&source),&root.join("lookup.sqlite"))?;
+                harness::write_vectors(&root.join("lookup.sqlite"))?;
+                let spool_ms=start.elapsed().as_secs_f64()*1000.;let fts=Instant::now();
+                harness::e4_prepare(&root.join("lookup.sqlite"),&root.join("base")).await?;
+                let lance_fts_ms=fts.elapsed().as_secs_f64()*1000.;
+                Ok::<_,anyhow::Error>(json!({"rows":rows,"spool_ms":spool_ms,"lance_fts_ms":lance_fts_ms,"preparation_busy_ms":spool_ms+lance_fts_ms,"owner_to_ready_ms":start.elapsed().as_secs_f64()*1000.,"owner_scope":"E4 recovery control on same pre-extracted/embedded corpus under 25-way queries; full extraction owner run not repeated"}))
+            }.await
+        } else {harness::prepare_streamed(Path::new(&source),&root.join("lookup.sqlite"),&root.join("base")).await};
+        done.store(true,Ordering::Relaxed);let mut samples=Vec::new();for job in jobs {samples.extend(job.await??);}
+        let result=prepared?;
+        std::fs::write(root.join("under-search.json"),serde_json::to_vec_pretty(&json!({"preparation":result,"identities":25,"samples":samples,"baseline_rss_bytes":baseline,"endpoint_rss_bytes":rss(),"scope":"25-way queries on retained old generation during private atomic successor build; extraction matching is not human relevance; no product generation swap"}))?)?;
+        Ok::<_,anyhow::Error>(())
     })
 }

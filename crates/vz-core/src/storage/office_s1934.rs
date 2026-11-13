@@ -199,7 +199,6 @@ pub async fn prepare_streamed(
             ))?;
         }
         flush(&mut pending)?;
-        drop(flush);
         drop(insert);
         tx.commit()?;
         Ok((count, (start.elapsed() - blocked).as_secs_f64() * 1000.))

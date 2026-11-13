@@ -59,12 +59,18 @@ def main(a):
             confined = w.execute(argv(role), target, 'confined-' + label, request, readiness=True)
             expected = baseline.pop('response', None); actual = confined.pop('response', None)
             complete_equal = expected is not None and expected == actual and baseline['exit_code'] == confined['exit_code'] == 0
+            differences = []
+            if expected and actual:
+                for i, (before, after) in enumerate(zip(expected.get('pages', []), actual.get('pages', []))):
+                    changed = [k for k in set(before) | set(after) if before.get(k) != after.get(k)]
+                    if changed: differences.append({'page_index': i, 'changed_fields': sorted(changed)})
+                if len(expected.get('pages', [])) != len(actual.get('pages', [])): differences.append({'page_count_changed': True})
             if fixture['expect_refusal']:
                 passed = baseline['exit_code'] != 0 and confined['exit_code'] != 0 and not confined['deadline_kill'] and actual is None
             else:
                 passed = complete_equal and not fixture['scanned']
             rows[label] = {**{k: str(v) if isinstance(v, Path) else v for k, v in fixture.items()},
-                'status': 'pass' if passed else 'fail', 'full_content_equal': complete_equal,
+                'status': 'pass' if passed else 'fail', 'full_content_equal': complete_equal, 'differences': differences,
                 'baseline': baseline, 'confined': confined, 'parent_discarded': fixture['scanned'] or not passed,
                 'refusal': 'Scanned pages cannot be read with the installed offline OCR.' if fixture['scanned'] else None,
                 'snapshot_promoted': False}

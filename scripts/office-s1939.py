@@ -44,6 +44,12 @@ def main(a):
             'release_graph': 'cargo test --release; default opt-level=3 for whole dependency graph',
             'cache': 'first-open/repeated filesystem cache; no OS cache flush', 'runtime_worker_threads': 4}
     (root / 'source-pins.json').write_text(json.dumps(pins, indent=2))
+    if a.loaded_control_reference:
+        measured = c.run(['/usr/bin/time', '-l', binary, '--exact', 's1939_prepare_under_search', '--nocapture'],
+                         root, 'loaded-e4-control', dict(env, VZ_S1934_ROOT=str(a.loaded_control_reference.resolve()),
+                         VZ_S1939_UNDER_SEARCH=str(root), VZ_S1939_UNDER_SEARCH_E4='1'), timeout=600)
+        (root / 'commands.json').write_text(json.dumps(measured, indent=2))
+        return
     matrix = {}
     for name, knobs, test in (
         ('e4-release-control', {}, 's1939_e4_control'),
@@ -77,6 +83,10 @@ def main(a):
     candidate = c.run(['/usr/bin/time', '-l', binary, '--exact', 's1934_candidate', '--nocapture'], trial, 'exact', selected_env, timeout=600)
     refresh = c.run(['/usr/bin/time', '-l', binary, '--exact', 's1934_refresh', '--nocapture'], trial, 'refresh',
                     dict(selected_env, VZ_S1934_REFRESH=str(trial)), timeout=600)
+    under = root / 'under-search'
+    under.mkdir(exist_ok=True)
+    under_command = c.run(['/usr/bin/time', '-l', binary, '--exact', 's1939_prepare_under_search', '--nocapture'],
+                          under, 'prepare-under-search', dict(selected_env, VZ_S1939_UNDER_SEARCH=str(under)), timeout=600)
     relevance = root / 'relevance'
     relevance.mkdir(exist_ok=True)
     relevance_env = dict(env, VZ_S1934_ROOT=str(relevance), VZ_S1939_SCIFACT=str(RELEVANCE))
@@ -103,11 +113,12 @@ def main(a):
             'status': 'pass' if all(scores[k] >= .98*prior[k] for k in scores) else 'fail',
             'scope': 'retained frozen E4 combined index; release query rerun; not re-extraction/index qualification',
             'pins': {str(p): c.digest(p) for p in [RELEVANCE / 'combined.sqlite', RELEVANCE / 'fixture-pins.json', RELEVANCE / 'scifact/qrels/test.tsv']}}, indent=2))
-    (root / 'commands.json').write_text(json.dumps({'exact': candidate, 'refresh': refresh, 'relevance': measured}, indent=2))
+    (root / 'commands.json').write_text(json.dumps({'exact': candidate, 'refresh': refresh, 'relevance': measured, 'under_search': under_command}, indent=2))
 
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--evidence', type=Path, required=True)
     p.add_argument('--target', type=Path, required=True)
+    p.add_argument('--loaded-control-reference', type=Path)
     main(p.parse_args())

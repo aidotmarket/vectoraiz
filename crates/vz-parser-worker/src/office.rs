@@ -6,7 +6,7 @@ fn main() -> anyhow::Result<()> {
     use std::ffi::CString;
     unsafe extern "C" {
         fn vz_office_reserve_baseline() -> i32;
-        fn vz_office_supply_fds(input: i32, scratch: i32);
+        fn vz_office_supply_fds(input: i32, scratch: i32, assets: i32);
         fn vz_office_socket_checks(close_fd: i32) -> i32;
         fn vz_office_bootstrap(profile: *const std::ffi::c_char) -> i32;
         fn vz_office_probe_main(argc: i32, argv: *mut *mut std::ffi::c_char) -> i32;
@@ -21,6 +21,7 @@ fn main() -> anyhow::Result<()> {
         "profile, role, pinned PDFium path required"
     );
     let profile = CString::new(std::fs::read_to_string(&args[1])?)?;
+    let asset = std::fs::File::open(&args[3])?;
     // Load required runtime assets before baseline, without accepting input.
     let pdfium = Pdfium::new(Pdfium::bind_to_library(&args[3])?);
     if args[2] == "memory" && args.get(4).is_some_and(|s| s == "reserved-dirty") {
@@ -45,7 +46,7 @@ fn main() -> anyhow::Result<()> {
     } else {
         None
     };
-    let scratch = if let Some(path) = args.get(if real_role {
+    let scratch = if let Some(path) = args.get(if real_role || args[2] == "memory" {
         5
     } else if args.get(4).is_some_and(|p| p == "scratch_create") {
         6
@@ -69,6 +70,7 @@ fn main() -> anyhow::Result<()> {
                 .as_ref()
                 .map_or(closing.as_raw_fd(), |f| f.as_raw_fd()),
             scratch.as_ref().map_or(-1, |f| f.as_raw_fd()),
+            asset.as_raw_fd(),
         );
     }
     // Independent positive controls never receive untrusted request bytes.

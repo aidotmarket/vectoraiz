@@ -9,10 +9,10 @@
 #include "../../../tests/office/fixtures/hostile-worker.c"
 #undef main
 
-static int supplied_input=-1, supplied_scratch=-1;
+static int supplied_input=-1, supplied_scratch=-1, supplied_assets=-1;
 int vz_office_scratch_fd(void) {return supplied_scratch;}
 int vz_office_input_fd(void) {return supplied_input;}
-void vz_office_supply_fds(int input,int scratch) {supplied_input=input;supplied_scratch=scratch;}
+void vz_office_supply_fds(int input,int scratch,int assets) {supplied_input=input;supplied_scratch=scratch;supplied_assets=assets;}
 static volatile char *reserved_baseline=NULL;
 int vz_office_reserve_baseline(void) {
     reserved_baseline=mmap(NULL,2ULL*1024*1024*1024,PROT_READ|PROT_WRITE,MAP_ANON|MAP_PRIVATE,-1,0);
@@ -42,7 +42,7 @@ int vz_office_bootstrap(const char *profile) {
     if(writable>budget) {fprintf(stderr,"dirtyable baseline exceeds role budget; refuse before input\n");return 77;}
     /* Do not inherit host files/sockets into the confined role. */
     int maxfd=getdtablesize();
-    for(int fd=3;fd<maxfd;fd++) if(fd!=supplied_input && fd!=supplied_scratch) close(fd);
+    for(int fd=3;fd<maxfd;fd++) if(fd!=supplied_input && fd!=supplied_scratch && fd!=supplied_assets) close(fd);
     char *message=NULL;
     if (sandbox_init(profile,0,&message)) {
         fprintf(stderr,"sandbox init: %s\n",message ? message : "unknown");
@@ -89,7 +89,7 @@ int vz_office_memory_probe(const char *kind,const char *scratch) {
         void *p=mmap(NULL,2ULL*1024*1024*1024,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANON,-1,0);
         rc=p==MAP_FAILED ? -1:0;error=errno;
     } else if(!strcmp(kind,"mapped-file")) {
-        int fd=open(scratch,O_RDWR|O_CREAT,0600);
+        int fd=supplied_scratch>=0 ? supplied_scratch : open(scratch,O_RDWR|O_CREAT,0600);
         if(fd<0) {fprintf(stderr,"scratch setup failed\n");return 74;}
         if(ftruncate(fd,2ULL*1024*1024*1024)) return 74;
         void *p=mmap(NULL,2ULL*1024*1024*1024,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);

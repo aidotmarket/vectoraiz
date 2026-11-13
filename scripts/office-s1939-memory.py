@@ -49,8 +49,40 @@ def main(a):
         results['roles'][role] = rows
         (root / 'memory.json').write_text(json.dumps(results, indent=2) + '\n')
 
+    if a.target:
+        worker = a.target.resolve() / 'release/vz-office-worker'
+        actual = {}
+        for role in ('ingest', 'render', 'ocr'):
+            target = root / ('actual-' + role)
+            target.mkdir(exist_ok=True)
+            profile = target / 'profile.sb'
+            profile.write_text(w.profile(worker, worker, a.pdfium.resolve(), target))
+            rows = {}
+            for kind in ('anonymous', 'mapped-file', 'mach', 'many-small', 'malloc', 'burst', 'raise', 'reserved-dirty'):
+                if role == 'ocr':
+                    rows[kind] = {'status': 'blocked', 'reason': 'offline OCR executable/assets unavailable'}; continue
+                row = w.execute([worker, profile, 'memory', a.pdfium.resolve(), kind, target / (kind + '.map')], target, kind)
+                setup = next((x for x in row['bootstrap'] if 'baseline_mapped_bytes' in x), {})
+                valid = (setup.get('set_rc') == 0 and setup.get('requested_limit') == setup.get('soft') == setup.get('hard')
+                         and setup.get('requested_limit', 0) == setup.get('baseline_mapped_bytes', 0) + setup.get('remaining_budget_bytes', 0)
+                         and setup.get('dirtyable_baseline_bytes', 2**64) + setup.get('remaining_budget_bytes', 0) == 1536*1024*1024)
+                probe = row.get('probe', {})
+                refused = valid and row['exit_code'] == 0 and probe.get('rc') == -1 and (probe.get('errno') in (1, 12) or probe.get('mach_error') == 3)
+                if kind in ('anonymous', 'many-small', 'malloc', 'mach') and not probe.get('cumulative_new_bytes', 0): refused = False
+                row.update(status='pass' if refused else 'fail', setup_valid=valid, kernel_refusal=refused)
+                if kind == 'reserved-dirty':
+                    row.update(status='pass' if row['exit_code'] == 1 and setup.get('dirtyable_baseline_bytes', 0) > 1536*1024*1024 else 'fail',
+                               case='startup rejects over-budget dirtyable baseline before readiness/input')
+                rows[kind] = row
+            rows['replacement'] = {'status': 'unrun', 'reason': 'dedicated-helper replacement already violates resident budget; no qualification claim for actual role'}
+            actual[role] = rows
+        results['actual_worker_sha256'] = w.common.digest(worker)
+        results['actual_workers'] = actual
+        (root / 'memory.json').write_text(json.dumps(results, indent=2) + '\n')
+
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(description=__doc__)
     for key in ('evidence', 'pdfium'): p.add_argument('--' + key, type=Path, required=True)
+    p.add_argument('--target', type=Path)
     main(p.parse_args())
