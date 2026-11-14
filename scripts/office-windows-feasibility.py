@@ -29,6 +29,37 @@ ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 1_610_612_736
 WS_SLACK = 65_536
 FAMILIES = {"ipv4": 2, "ipv6": 23, "unix": 1, "hyperv": 34}
+
+
+class Status:
+    """Public status vocabulary shared by emitters and manifest validation."""
+    PASS = 'pass'
+    FAIL = 'fail'
+    UNRUN = 'unrun'
+    NOT_APPLICABLE = 'not-applicable'
+    COMPLETE = 'complete'
+    RUNNING = 'running'
+    CONTROL_INCONCLUSIVE = 'inconclusive: control did not succeed'
+    ROUTE_INCONCLUSIVE = 'inconclusive: direct route not calibrated'
+    EXPECTED_FAILURE_RECORDED = 'complete: expected-failure control recorded'
+    LITERAL_STATUS_MISSING = 'inconclusive: literal status missing'
+    CALIBRATED = 'calibrated'
+    UNCALIBRATED = 'uncalibrated'
+    NOT_MET = 'NOT MET'
+    ERROR = "error"
+
+
+ROW_STATUSES = (Status.PASS, Status.FAIL, Status.UNRUN, Status.NOT_APPLICABLE)
+OUTCOME_STATUSES = (Status.PASS, Status.FAIL)
+DIAGNOSTIC_STATUSES = (Status.UNRUN, Status.COMPLETE, Status.ERROR,
+                       Status.CONTROL_INCONCLUSIVE, Status.ROUTE_INCONCLUSIVE)
+MALFORMED_STATUSES = (Status.UNRUN, Status.ERROR, Status.EXPECTED_FAILURE_RECORDED,
+                      Status.LITERAL_STATUS_MISSING)
+LAUNCH_STATUSES = (Status.UNRUN, Status.RUNNING, Status.COMPLETE, Status.CONTROL_INCONCLUSIVE)
+UNIX_NAMESPACES = ("filesystem", "abstract")
+NAMESPACE_STATUSES = (Status.CALIBRATED, Status.UNCALIBRATED)
+
+
 # Only these probes can be observations rather than delta 6 outcome judgments.
 NOT_APPLICABLE_IDS = frozenset({
     f"network-{family}-{scope}-udp-listen"
@@ -233,17 +264,17 @@ def initial_manifest():
             "os": platform.system(), "os_build": platform.version(),
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
-            "windows_11_client_requirement": {"status": "NOT MET", "reason": "client host not established"},
+            "windows_11_client_requirement": {"status": Status.NOT_MET, "reason": "client host not established"},
             "sampler_enabled": True, "sampler_scope": "section-sampler variants only; all other rows disabled",
-            "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
-            "diagnostics": [{"id": s["id"], "diagnostic_only": True, "status": "unrun"} for s in diagnostic_plan()],
-            "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed",
+            "launch_diagnostic": {"status": Status.UNRUN, "reason": "launcher not built or diagnostic not completed", "variations": []},
+            "diagnostics": [{"id": s["id"], "diagnostic_only": True, "status": Status.UNRUN} for s in diagnostic_plan()],
+            "rows": [{"id": s["id"], "status": Status.UNRUN, "reason": "prerequisites or probe not completed",
                       **({"peak_excess_bytes": None, "kernel_working_set_cap_bytes": LIMIT}
                          if s.get("request", {}).get("op") == "memory" and s["request"].get("kind") in
                          ("mapping", "mapping-reserve", "mapping-file", "self-ws") else {})} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
             "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
-            "counts": {"pass": 0, "fail": 0, "unrun": len(specs), "not-applicable": 0}, "status": "fail"}
+            "counts": {Status.PASS: 0, Status.FAIL: 0, Status.UNRUN: len(specs), Status.NOT_APPLICABLE: 0}, "status": Status.FAIL}
 
 
 def outside(path):
@@ -278,8 +309,8 @@ def validate_manifest(manifest):
     rows = manifest["rows"]
     assert len(rows) == len(expected) and {row["id"] for row in rows} == expected, "missing or duplicate probe rows"
     for row in rows:
-        assert row["status"] in ("pass", "fail", "unrun", "not-applicable") and row["reason"], "invalid status/reason"
-        if row["status"] == "not-applicable":
+        assert row["status"] in ROW_STATUSES and row["reason"], "invalid status/reason"
+        if row["status"] == Status.NOT_APPLICABLE:
             assert row["id"] in NOT_APPLICABLE_IDS, "unexpected not-applicable probe"
         for mode in ("control", "confined", "plain_appcontainer"):
             result = row.get(mode, {})
@@ -303,31 +334,41 @@ def validate_manifest(manifest):
             peak = repetition.get("confined", {}).get("parent_peak_working_set_bytes")
             assert repetition.get("peak_excess_bytes") == (max(0, peak - LIMIT) if isinstance(peak, int) else None)
             if isinstance(peak, int) and peak > LIMIT + WS_SLACK:
-                assert repetition["status"] == "fail"
+                assert repetition["status"] == Status.FAIL
         request = planned[row["id"]].get("request", {})
         repeated = request.get("op") == "shell" or request.get("op") == "memory" and request.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws")
-        if repeated and row["status"] == "pass":
-            assert len(repetitions) == 3 and all(r["status"] == "pass" for r in repetitions)
-    counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun", "not-applicable")}
+        if repeated and row["status"] == Status.PASS:
+            assert len(repetitions) == 3 and all(r["status"] == Status.PASS for r in repetitions)
+    counts = {status: sum(row["status"] == status for row in rows) for status in ROW_STATUSES}
     assert counts == manifest["counts"], "counts mismatch"
-    assert manifest["status"] in ("pass", "fail")
+    assert manifest["status"] in OUTCOME_STATUSES
     diagnostics = manifest["diagnostics"]
     assert [row["id"] for row in diagnostics] == [s["id"] for s in diagnostic_plan()]
     for row in diagnostics:
-        assert row["diagnostic_only"] is True and row["status"] in ("unrun", "complete", "error", "inconclusive: control did not succeed", "inconclusive: direct route not calibrated")
+        assert row["diagnostic_only"] is True
+        if row["id"] == "af-unix-outcomes":
+            if "namespace_status" in row:
+                joined = joined_namespace_status(row["namespace_status"])
+                assert row["status"] in (Status.ERROR, joined), "invalid AF_UNIX diagnostic status"
+            else:
+                assert row["status"] in (Status.UNRUN, Status.ERROR), "missing AF_UNIX namespace statuses"
+        elif row["id"] == "malformed-family-comparison":
+            assert row["status"] in MALFORMED_STATUSES, "invalid malformed-family diagnostic status"
+        else:
+            assert row["status"] in DIAGNOSTIC_STATUSES, "invalid diagnostic status"
         if row["id"] == "reachability-inventory" and "table" in row:
             assert len(row["table"]) <= 5013
             for endpoint in row["table"]:
                 assert all(mode in endpoint for mode in ("control", "plain_appcontainer", "lpac"))
     diagnostic = manifest["launch_diagnostic"]
-    assert diagnostic["status"] in ("unrun", "running", "complete", "inconclusive: control did not succeed") and diagnostic["reason"]
+    assert diagnostic["status"] in LAUNCH_STATUSES and diagnostic["reason"]
     names = [result["variation"] for result in diagnostic["variations"]]
     assert names == list(DIAGNOSTIC_VARIATIONS[:len(names)]), "invalid launch diagnostic variations"
-    if diagnostic["status"] == "complete":
+    if diagnostic["status"] == Status.COMPLETE:
         assert names == list(DIAGNOSTIC_VARIATIONS), "incomplete launch diagnostic"
     for result in diagnostic["variations"]:
-        assert result["status"] in ("pass", "fail")
-        if result["status"] == "pass":
+        assert result["status"] in OUTCOME_STATUSES
+        if result["status"] == Status.PASS:
             assert result["worker_resumed"] is False
             trace = result["launch_trace"]
             assert trace["profile_created_before_launch"] and trace["create_process_succeeded"]
@@ -337,8 +378,8 @@ def validate_manifest(manifest):
             assert token["lpac_verification"] in (
                 "TokenIsLessPrivilegedAppContainer",
                 "AccessCheck: container SID allowed; ALL APPLICATION PACKAGES isolation checked")
-    if manifest["status"] == "pass":
-        assert counts["fail"] == counts["unrun"] == 0 and not manifest.get("setup_error") and not manifest.get("cleanup_error")
+    if manifest["status"] == Status.PASS:
+        assert counts[Status.FAIL] == counts[Status.UNRUN] == 0 and not manifest.get("setup_error") and not manifest.get("cleanup_error")
         assert manifest.get("worker_sha256") and manifest.get("source_sha")
 
 
@@ -362,14 +403,14 @@ def fetch_pdfium(output):
 def evaluate(spec, control, confined, evidence_rows=()):
     """Never turn launch failure, missing controls or generic errors into passes."""
     if confined.get("launch_trace", {}).get("lpac_verification") == "unverified":
-        return "fail", "LPAC could not be verified; confined worker was not resumed"
-    if control.get("status") != "pass":
-        return "fail", "positive-control worker did not complete successfully"
+        return Status.FAIL, "LPAC could not be verified; confined worker was not resumed"
+    if control.get("status") != Status.PASS:
+        return Status.FAIL, "positive-control worker did not complete successfully"
     if spec.get("experiment") == "sampler":
         kill = confined.get("sampler_kill") or {}
         control_probe = control.get("response", {}).get("probe", {})
         if not control_probe.get("touch_completed"):
-            return "fail", "sampler control did not complete section touch"
+            return Status.FAIL, "sampler control did not complete section touch"
         if (confined.get("exit_code") == 137 and confined.get("launch_trace", {}).get("grants_restored") is True
                 and confined.get("sampler_enabled") is True and kill.get("terminated_job") is True
                 and kill.get("over_budget") is True and kill.get("exit_observed") is True
@@ -381,68 +422,68 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 and isinstance(kill.get("detected_after_ms"), int)
                 and isinstance(kill.get("kill_completed_after_ms"), int)
                 and kill["kill_completed_after_ms"] >= kill["detected_after_ms"]):
-            return "pass", (("logical scratch-file budget kill; not resident memory" if spec["request"]["kind"] == "mapping-file"
+            return Status.PASS, (("logical scratch-file budget kill; not resident memory" if spec["request"]["kind"] == "mapping-file"
                              else "parent killed over-budget job") + "; firing signal: " + kill["signal"] +
                             "; overshoot and latency recorded; responsiveness is launcher loop proxy (best effort)")
-        return "fail", "sampler did not establish over-budget job kill and responsive launcher"
+        return Status.FAIL, "sampler did not establish over-budget job kill and responsive launcher"
     if confined.get("exit_code") == 0xC0000008:
-        return "fail", "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
-    if confined.get("status") != "pass":
-        return "fail", "confined worker did not complete successfully"
+        return Status.FAIL, "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
+    if confined.get("status") != Status.PASS:
+        return Status.FAIL, "confined worker did not complete successfully"
     before = control.get("response", {})
     after = confined.get("response", {})
     if spec["expect"] == "equal":
         if before.get("error") is not None or not before.get("pages"):
-            return "fail", "positive-control parse failed or produced no pages"
+            return Status.FAIL, "positive-control parse failed or produced no pages"
         text = "\n".join(page.get("text", "") for page in before["pages"])
         if "C1 synthetic office control" not in text:
-            return "fail", "synthetic content oracle missing from positive control"
+            return Status.FAIL, "synthetic content oracle missing from positive control"
         if spec["format"] in ("pdf", "xlsx") and len(before["pages"]) < 2:
-            return "fail", "positive control omitted a page or sheet"
-        return ("pass", "all serialized parser response fields equal") if before == after else ("fail", "parser response content differs")
+            return Status.FAIL, "positive control omitted a page or sheet"
+        return (Status.PASS, "all serialized parser response fields equal") if before == after else (Status.FAIL, "parser response content differs")
     positive = before.get("probe", {})
     negative = after.get("probe", {})
     op = spec["request"]["op"]
     if spec["id"] in NOT_APPLICABLE_IDS and op in ("network", "afd") and spec["request"].get("family") in (1, 34) and spec["request"].get("operation", "create") == "create":
         if positive.get("descriptor_returned") is not True:
-            return "unrun", "non-IP endpoint control unavailable; no creation-denial claim"
+            return Status.UNRUN, "non-IP endpoint control unavailable; no creation-denial claim"
         if negative.get("descriptor_returned") is True:
-            return "not-applicable", "non-IP endpoint creation observed; reachability is judged only by delta 6 outcome rows"
+            return Status.NOT_APPLICABLE, "non-IP endpoint creation observed; reachability is judged only by delta 6 outcome rows"
         if isinstance(negative.get("error_code"), int):
-            return "not-applicable", "non-IP constructor literal failure recorded; no reachability or creation-denial claim"
-        return "unrun", "non-IP constructor literal outcome missing"
+            return Status.NOT_APPLICABLE, "non-IP constructor literal failure recorded; no reachability or creation-denial claim"
+        return Status.UNRUN, "non-IP constructor literal outcome missing"
     if op == "shell":
         if confined.get("shell_listener", {}).get("get_received") or confined.get("process_capture", {}).get("nonce_record_ids"):
-            return "fail", "confined link opened: nonce listener or Security 4688 match"
+            return Status.FAIL, "confined link opened: nonce listener or Security 4688 match"
         cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
         http = spec["request"].get("target_kind") != "file"
         if not positive.get("success") or (http and not control.get("shell_listener", {}).get("get_received")):
-            return "unrun", "link positive control did not succeed"
+            return Status.UNRUN, "link positive control did not succeed"
         if not contiguous_capture(cp, np) or not cp.get("nonce_record_ids"):
-            return "unrun", "same Security 4688 capture lacks successful control nonce record or complete confined window"
+            return Status.UNRUN, "same Security 4688 capture lacks successful control nonce record or complete confined window"
         if confined.get("windows_11_client") is not True:
-            return "unrun", "server runner only; Windows 11 interactive client requirement NOT MET"
-        return "pass", "no confined nonce GET or process start; positive control in same 4688 capture"
+            return Status.UNRUN, "server runner only; Windows 11 interactive client requirement NOT MET"
+        return Status.PASS, "no confined nonce GET or process start; positive control in same 4688 capture"
     if spec["id"] in NOT_APPLICABLE_IDS and op == "rpc-alpc":
         if not positive.get("success"):
-            return "unrun", "mapper ALPC connection control failed"
+            return Status.UNRUN, "mapper ALPC connection control failed"
         if negative.get("success"):
-            return "not-applicable", "reviewed mapper connection reachable; lookup and activation judged in separate outcome row"
+            return Status.NOT_APPLICABLE, "reviewed mapper connection reachable; lookup and activation judged in separate outcome row"
         if negative.get("explicit_denial"):
-            return "not-applicable", "mapper connection explicitly refused on this build"
-        return "unrun", "mapper connection outcome uncalibrated"
+            return Status.NOT_APPLICABLE, "mapper connection explicitly refused on this build"
+        return Status.UNRUN, "mapper connection outcome uncalibrated"
     if op == "mapper-activation":
         if confined.get("process_capture", {}).get("target_record_ids") or negative.get("activation", {}).get("success"):
-            return "fail", "confined mapper activation launched or activated target server"
+            return Status.FAIL, "confined mapper activation launched or activated target server"
         if control.get("target_was_running") is not False or confined.get("target_was_running") is not False:
-            return "unrun", "target server was already running or absence could not be established"
+            return Status.UNRUN, "target server was already running or absence could not be established"
         cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
         if not contiguous_capture(cp, np) or not cp.get("target_record_ids"):
-            return "unrun", "same Security 4688 capture lacks control server start or complete confined window"
+            return Status.UNRUN, "same Security 4688 capture lacks control server start or complete confined window"
         if not positive.get("lookup", {}).get("success") or not positive.get("activation", {}).get("success"):
-            return "unrun", "mapper lookup or activation control failed; literal replies retained"
+            return Status.UNRUN, "mapper lookup or activation control failed; literal replies retained"
         if not positive.get("same_mapper_connection") or not negative.get("same_mapper_connection"):
-            return "unrun", "direct lookup-to-activation connection not established; COM runtime probe is supplementary"
+            return Status.UNRUN, "direct lookup-to-activation connection not established; COM runtime probe is supplementary"
         lookup, activation = negative.get("lookup", {}), negative.get("activation", {})
         if (lookup.get("direct_request_reply") is True and isinstance(lookup.get("return_code"), int)
                 and lookup.get("api", "").startswith("direct mapper")
@@ -453,106 +494,106 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 and isinstance(activation.get("return_code"), int)
                 and activation.get("error_code") in (5, 0x80070005, 0xC0000022)
                 and activation.get("explicit_denial") is True):
-            return "pass", "mapper activation refused with no target server start; successful control in same capture"
-        return "unrun", "activation refusal not calibrated"
+            return Status.PASS, "mapper activation refused with no target server start; successful control in same capture"
+        return Status.UNRUN, "activation refusal not calibrated"
     if op == "network":
         creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
         if spec["request"]["operation"] == "create":
             if creation.get("success") or creation.get("descriptor_returned"):
-                return "fail", "confined socket creation returned a descriptor"
+                return Status.FAIL, "confined socket creation returned a descriptor"
             if (creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False
                     or not isinstance(creation.get("error_code"), int) or not positive.get("success")
                     or positive.get("descriptor_returned") is not True):
-                return "fail", "missing literal INVALID_SOCKET/no-descriptor/error evidence or successful control"
+                return Status.FAIL, "missing literal INVALID_SOCKET/no-descriptor/error evidence or successful control"
             family = next(name for name, number in FAMILIES.items() if number == spec["request"]["family"])
             afd_id = f"afd-{family}-{spec['request']['transport']}"
             required = [afd_id, *["winsock-registry-" + key for key in ("parameters", "protocol", "namespace")]]
             rows = {r["id"]: r for r in evidence_rows}
-            if all(rows.get(key, {}).get("status") == "pass" for key in required):
-                return "pass", "literal creation failed without descriptor; policy attribution: " + ", ".join(required)
-            return "fail", "literal creation failed without descriptor; policy attribution incomplete: " + ", ".join(required)
+            if all(rows.get(key, {}).get("status") == Status.PASS for key in required):
+                return Status.PASS, "literal creation failed without descriptor; policy attribution: " + ", ".join(required)
+            return Status.FAIL, "literal creation failed without descriptor; policy attribution incomplete: " + ", ".join(required)
         elif creation.get("descriptor_returned") is not True:
-            return "unrun", "not exercisable: no socket obtainable by any tested route"
+            return Status.UNRUN, "not exercisable: no socket obtainable by any tested route"
     if op in ("dns", "dns-query"):
         if not positive.get("success"):
-            return "unrun", "same-run www.example.com positive control did not resolve"
+            return Status.UNRUN, "same-run www.example.com positive control did not resolve"
         if negative.get("success"):
-            return "fail", "confined worker resolved external name www.example.com"
+            return Status.FAIL, "confined worker resolved external name www.example.com"
         if not isinstance(negative.get("error_code"), int):
-            return "unrun", "DNS literal status unavailable"
+            return Status.UNRUN, "DNS literal status unavailable"
         inventory = next((r for r in evidence_rows if r["id"] == "inventory-outcome"), {})
-        if inventory.get("status") != "pass":
-            return "unrun", "DNS prerequisite/status recorded; scoped inventory backstop incomplete"
-        return "pass", f"www.example.com did not resolve; literal status {negative['error_code']}; prerequisite and DNS endpoint inventory backstop recorded"
+        if inventory.get("status") != Status.PASS:
+            return Status.UNRUN, "DNS prerequisite/status recorded; scoped inventory backstop incomplete"
+        return Status.PASS, f"www.example.com did not resolve; literal status {negative['error_code']}; prerequisite and DNS endpoint inventory backstop recorded"
     if op == "afd" and (positive.get("success") is not True or positive.get("descriptor_returned") is not True):
-        return "unrun", "direct AFD control did not return a successful handle"
+        return Status.UNRUN, "direct AFD control did not return a successful handle"
     if not positive.get("success"):
-        return "unrun", "positive-control API unavailable or unsuccessful; no denial established"
+        return Status.UNRUN, "positive-control API unavailable or unsuccessful; no denial established"
     if op == "memory" and spec["request"]["kind"] in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
         cap = confined.get("working_set_cap_before_resume") or {}
         job = confined.get("job_before_resume") or {}
         if (cap.get("maximum_bytes") != LIMIT or cap.get("readback_verified") is not True
                 or job.get("max_working_set_bytes") != LIMIT or not job.get("flags", 0) & 1):
-            return "fail", "missing pre-resume working-set job cap readback"
+            return Status.FAIL, "missing pre-resume working-set job cap readback"
         peak = confined.get("parent_peak_working_set_bytes")
         if not isinstance(peak, int) or peak <= 0 or peak > LIMIT + WS_SLACK:
-            return "fail", f"parent-read kernel peak working set missing or above cap plus 64 KiB: peak={peak!r}, ceiling={LIMIT + WS_SLACK}"
+            return Status.FAIL, f"parent-read kernel peak working set missing or above cap plus 64 KiB: peak={peak!r}, ceiling={LIMIT + WS_SLACK}"
         sections = [negative]
         if spec["request"]["kind"] == "self-ws":
             attempts = negative.get("attempts", [])
             if [a.get("attempt") for a in attempts] != ["raise", "disable"]:
-                return "fail", "missing self-raise/disable attempts"
+                return Status.FAIL, "missing self-raise/disable attempts"
             if any(not a.get("after", {}).get("available") or "return_code" not in a.get("call", {}) for a in attempts):
-                return "fail", "working-set mutation call or readback missing"
+                return Status.FAIL, "working-set mutation call or readback missing"
             if any(a["after"].get("effective_job_cap", {}).get("available") is not True
                    or a["after"]["effective_job_cap"].get("max_working_set_bytes") != LIMIT
                    or not a["after"]["effective_job_cap"].get("flags", 0) & 1 for a in attempts):
-                return "fail", "self-mutation effective job cap readback missing or changed"
+                return Status.FAIL, "self-mutation effective job cap readback missing or changed"
             if any(a["after"].get("maximum_bytes") != LIMIT or a["after"].get("flags", 0) & 6 != 6 for a in attempts):
-                return "fail", "self-mutation process maximum or hard-limit flags changed"
+                return Status.FAIL, "self-mutation process maximum or hard-limit flags changed"
             if any(not a.get("before", {}).get("available") or any(
                     not isinstance(a["before"].get(key), int) or
                     a["before"].get(key) != a["after"].get(key)
                     for key in ("minimum_bytes", "maximum_bytes", "flags")) for a in attempts):
-                return "fail", "self-mutation readbacks missing or changed"
+                return Status.FAIL, "self-mutation readbacks missing or changed"
             if any(a["call"].get("success") is not True and not (
                     a["call"].get("success") is False and a["call"].get("return_code") == 0
                     and a["call"].get("error_code") in (5, 1314)
                     and a["call"].get("explicit_denial") is True) for a in attempts):
-                return "fail", "self-mutation unexplained error; no attributable refusal"
+                return Status.FAIL, "self-mutation unexplained error; no attributable refusal"
             sections = [a.get("section", {}) for a in attempts]
         for section in sections:
             if not section.get("touch_completed") and not (section.get("allocation_refused") and section.get("allocation_limit_error")):
-                return "fail", "section exercise neither completed nor kernel-refused"
+                return Status.FAIL, "section exercise neither completed nor kernel-refused"
             for phase in ("before", "at_peak"):
                 system = section.get(phase, {}).get("system", {})
                 if system.get("available") is not True or any(not isinstance(system.get(key), int) for key in ("commit_total_bytes", "physical_available_bytes", "physical_total_bytes")):
-                    return "fail", "section system commit/physical-memory evidence missing"
+                    return Status.FAIL, "section system commit/physical-memory evidence missing"
         if spec["request"]["kind"] == "mapping-file" and negative.get("scratch_file_size_bytes") != 2 * 1024 ** 3:
-            return "fail", "scratch-file view size not established"
+            return Status.FAIL, "scratch-file view size not established"
         if spec["request"]["kind"] == "self-ws":
             outcomes = "; ".join(a["attempt"] + (": reported success but had no effect" if a["call"]["success"]
                 else ": attributable refusal with unchanged readbacks") for a in attempts)
-            return "pass", outcomes + "; valid section evidence and parent peak within cap plus 64 KiB; combined job/process cap"
-        return "pass", "parent-read kernel peak within cap plus 64 KiB; completed section touch is documented paging residual"
+            return Status.PASS, outcomes + "; valid section evidence and parent peak within cap plus 64 KiB; combined job/process cap"
+        return Status.PASS, "parent-read kernel peak within cap plus 64 KiB; completed section touch is documented paging residual"
     if spec["id"] == "inherited":
         if not positive.get("identity_match"):
-            return "fail", "inherited-handle positive control identity mismatch"
+            return Status.FAIL, "inherited-handle positive control identity mismatch"
         if negative.get("enumeration_succeeded") and negative.get("present") is False:
-            return "pass", "own handle table omits parent attack handle; no invalid handle accessed"
-        return "fail", "omitted handle absence not established; inspect presence and identity"
+            return Status.PASS, "own handle table omits parent attack handle; no invalid handle accessed"
+        return Status.FAIL, "omitted handle absence not established; inspect presence and identity"
     if spec["expect"] == "allow":
-        return ("pass", "permitted scratch operations succeeded") if negative.get("success") else ("fail", "permitted scratch operations refused")
+        return (Status.PASS, "permitted scratch operations succeeded") if negative.get("success") else (Status.FAIL, "permitted scratch operations refused")
     if negative.get("success"):
-        return "fail", "confined API succeeded"
+        return Status.FAIL, "confined API succeeded"
     if op == "afd" and (negative.get("descriptor_returned") is not False or negative.get("error_code") != 0xC0000022):
-        return "fail", "direct AFD creation lacks explicit STATUS_ACCESS_DENIED without handle"
+        return Status.FAIL, "direct AFD creation lacks explicit STATUS_ACCESS_DENIED without handle"
     if not negative.get("explicit_denial"):
         if op in ("rpc", "dns", "dns-query", "rpc-alpc"):
             code = negative.get("error_code")
             literal = f"{code} (0x{code:08X})" if isinstance(code, int) else repr(code)
-            return "fail", f"{negative.get('api')}: {negative.get('error_namespace')} status {literal} is not explicit denial evidence"
-        return "fail", "generic or unexplained error is not explicit denial evidence"
+            return Status.FAIL, f"{negative.get('api')}: {negative.get('error_namespace')} status {literal} is not explicit denial evidence"
+        return Status.FAIL, "generic or unexplained error is not explicit denial evidence"
     prerequisites = {
         "ReadFile": {"CreateFileW"}, "WriteFile": {"CreateFileW"},
         "connect+WSAPoll+SO_ERROR": {"connect"},
@@ -562,14 +603,14 @@ def evaluate(spec, control, confined, evidence_rows=()):
     }
     api, control_api = negative.get("api"), positive.get("api")
     if not api or not control_api or (api != control_api and api not in prerequisites.get(control_api, set())):
-        return "fail", "denial API is neither the control API nor a named prerequisite"
+        return Status.FAIL, "denial API is neither the control API nor a named prerequisite"
     if spec["request"]["op"] == "memory":
         if not negative.get("allocation_refused") or not negative.get("allocation_limit_error"):
-            return "fail", "allocation target reached without kernel refusal"
+            return Status.FAIL, "allocation target reached without kernel refusal"
         if positive.get("successfully_held_bytes") != 2 * 1024 ** 3:
-            return "fail", "memory positive control did not reach the 2 GiB target"
+            return Status.FAIL, "memory positive control did not reach the 2 GiB target"
         if spec["request"]["kind"] != "burst" and negative.get("successfully_held_bytes", 0) < 64 * 1024 ** 2:
-            return "fail", "small confined allocation failed before memory-pressure exercise"
+            return Status.FAIL, "small confined allocation failed before memory-pressure exercise"
         job = confined.get("job_after") or {}
         before_job = confined.get("job_before_resume") or {}
         # Independent ceiling readback prevents one limit masking the other.
@@ -577,12 +618,12 @@ def evaluate(spec, control, confined, evidence_rows=()):
         process_limit = LIMIT * 2 if scope == "job" else LIMIT
         job_limit = LIMIT * 2 if scope == "process" else LIMIT
         if (before_job.get("process_commit_limit_bytes"), before_job.get("job_commit_limit_bytes")) != (process_limit, job_limit):
-            return "fail", "memory diagnostic limits do not match requested scope"
+            return Status.FAIL, "memory diagnostic limits do not match requested scope"
         if job.get("peak_process_commit_bytes", 0) <= 0 or job.get("peak_job_commit_bytes", 0) <= 0:
-            return "fail", "missing job peak committed-memory evidence"
+            return Status.FAIL, "missing job peak committed-memory evidence"
         if negative.get("successfully_held_bytes", LIMIT + 1) > min(process_limit, job_limit):
-            return "fail", "successfully held memory exceeded configured ceiling"
-    return "pass", f"positive control succeeded; denied at {api}" + (f"; {control_api} not exercised (named prerequisite)" if api != control_api else "")
+            return Status.FAIL, "successfully held memory exceeded configured ceiling"
+    return Status.PASS, f"positive control succeeded; denied at {api}" + (f"; {control_api} not exercised (named prerequisite)" if api != control_api else "")
 
 
 def parser_diff_summary(control, confined):
@@ -696,22 +737,22 @@ def contiguous_capture(control, confined):
 
 def inventory_verdict(diagnostic):
     table = diagnostic.get("table", [])
-    if diagnostic.get("status") != "complete" or not table or "enumeration complete; attempts complete" not in diagnostic.get("summary", ""):
-        return "unrun", "scoped inventory incomplete"
+    if diagnostic.get("status") != Status.COMPLETE or not table or "enumeration complete; attempts complete" not in diagnostic.get("summary", ""):
+        return Status.UNRUN, "scoped inventory incomplete"
     allowed = {"RPC Control/epmapper": "reviewed mapper; activation outcome separately tested",
                "Device/Afd/Endpoint": "reviewed AFD endpoint; family outcomes separately tested"}
     for endpoint in table:
         cell = endpoint.get("lpac", {})
         if cell.get("success") and endpoint["endpoint"] not in allowed:
-            return "fail", "new reachable endpoint outside reviewed per-build list"
+            return Status.FAIL, "new reachable endpoint outside reviewed per-build list"
     dns = next((e.get("lpac", {}) for e in table if e.get("endpoint") == "RPC Control/DNSResolver"), None)
     if dns is None:
         dns_status = "DNSResolver absent from enumerated RPC Control namespace"
     elif not dns.get("attempted", True) or not isinstance(dns.get("error_code"), int):
-        return "unrun", "DNSResolver LPAC status unavailable"
+        return Status.UNRUN, "DNSResolver LPAC status unavailable"
     else:
         dns_status = f"DNSResolver LPAC status 0x{dns['error_code']:08X} (success={dns.get('success')})"
-    return "pass", "RPC Control and seeded devices complete; only reviewed endpoints reachable; " + dns_status
+    return Status.PASS, "RPC Control and seeded devices complete; only reviewed endpoints reachable; " + dns_status
 
 
 def unix_exit(diagnostic, label):
@@ -721,38 +762,46 @@ def unix_exit(diagnostic, label):
         listener = confined.get("inside_scratch_bind", {}).get("listener", {})
         wait = listener.get("wait") or {}
         if wait.get("success"):
-            return "fail", "a connection reached the worker-bound listener"
+            return Status.FAIL, "a connection reached the worker-bound listener"
         processes = diagnostic.get("vectoraiz_capture", {})
         if processes.get("running_before") is not False or not processes.get("success") or processes.get("filtered_query_success") is not True or processes.get("target_record_ids") or not isinstance(processes.get("after"), int) or not isinstance(processes.get("through"), int) or processes["through"] < processes["after"]:
-            return "unrun", "vectorAIz process absence during listener window not established"
+            return Status.UNRUN, "vectorAIz process absence during listener window not established"
         if processes.get("scope") != "entire harness run" or listener.get("covers_entire_run") is not True:
-            return "unrun", "run-wide process capture recorded; worker listener does not cover the entire run"
+            return Status.UNRUN, "run-wide process capture recorded; worker listener does not cover the entire run"
         if listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120":
-            return "pass", "no pending connection during entire harness run; no vectorAIz process or start in capture"
-        return "unrun", "worker listener or bounded connection observation unavailable"
+            return Status.PASS, "no pending connection during entire harness run; no vectorAIz process or start in capture"
+        return Status.UNRUN, "worker listener or bounded connection observation unavailable"
     name = {"2a": "host_listener_connect", "2b": "outside_scratch_bind", "2d": "abstract_connect"}[label]
     direct = modes["control"].get("control_direct", {})
     positive = direct.get(name, {}).get("operation", {})
     negative = confined.get(name, {}).get("operation", {})
     if label == "2d" and not positive.get("success"):
         # EINVAL alone cannot establish platform unavailability independently.
-        return "unrun", "abstract control route unavailable; invalid arguments are not platform-unavailability proof"
+        return Status.UNRUN, "abstract control route unavailable; invalid arguments are not platform-unavailability proof"
     calibrated = confined.get("inside_scratch_bind", {}).get("operation", {}).get("success") is True
     if label != "2d" and not calibrated:
-        return "unrun", "LPAC same-route bind inside scratch did not calibrate; plain AppContainer cannot pass"
+        return Status.UNRUN, "LPAC same-route bind inside scratch did not calibrate; plain AppContainer cannot pass"
     if not positive.get("success"):
-        return "unrun", "connect or bind positive control did not succeed"
+        return Status.UNRUN, "connect or bind positive control did not succeed"
     if negative.get("success"):
-        return "fail", "confined local socket operation succeeded"
+        return Status.FAIL, "confined local socket operation succeeded"
     if negative.get("explicit_denial"):
-        return "pass", "calibrated LPAC route refused operation outside scratch"
-    return "unrun", "literal refusal unavailable or connect prerequisite failed"
+        return Status.PASS, "calibrated LPAC route refused operation outside scratch"
+    return Status.UNRUN, "literal refusal unavailable or connect prerequisite failed"
+
+
+def joined_namespace_status(namespaces):
+    """Canonical AF_UNIX status; never accept an arbitrary diagnostic string."""
+    assert set(namespaces) == set(UNIX_NAMESPACES), "invalid AF_UNIX namespaces"
+    for value in namespaces.values():
+        assert value["status"] in NAMESPACE_STATUSES, "invalid AF_UNIX namespace status"
+    return "; ".join(f"{name}: {namespaces[name]['status']}" for name in UNIX_NAMESPACES)
 
 
 def unix_namespace_status(diagnostic):
     probe = diagnostic.get("confined", {}).get("response", {}).get("probe", {})
     outcomes = probe.get("outcomes", {})
-    return {namespace: {"status": "calibrated" if probe.get("calibrated_variants", {}).get(namespace) else "uncalibrated",
+    return {namespace: {"status": Status.CALIBRATED if probe.get("calibrated_variants", {}).get(namespace) else Status.UNCALIBRATED,
                         "calibrated_variant": probe.get("calibrated_variants", {}).get(namespace),
                         "bind_success": outcomes.get(bind, {}).get("operation", {}).get("success"),
                         "connect_attempted": "return_code" in outcomes.get(connect, {}).get("operation", {}),
@@ -832,20 +881,20 @@ def inventory_table(results):
 
 
 def diagnostic_status(results, op):
-    if not all(results.get(mode, {}).get("status") == "pass"
+    if not all(results.get(mode, {}).get("status") == Status.PASS
                for mode in ("control", "plain_appcontainer", "confined")):
-        return "error"
+        return Status.ERROR
     probe = results["control"].get("response", {}).get("probe", {})
     outcomes = probe.get("outcomes", [])
     if op == "unix-outcomes":
         if not any(value.get("operation", {}).get("success") is True for value in outcomes.values()):
-            return "inconclusive: control did not succeed"
+            return Status.CONTROL_INCONCLUSIVE
         selected = probe.get("calibrated_variants") or {}
         if any(not selected.get(key) for key in ("filesystem", "abstract")):
-            return "inconclusive: direct route not calibrated"
+            return Status.ROUTE_INCONCLUSIVE
     elif not (probe.get("success") is True or any(value.get("success") is True for value in outcomes)):
-        return "inconclusive: control did not succeed"
-    return "complete"
+        return Status.CONTROL_INCONCLUSIVE
+    return Status.COMPLETE
 
 
 def family_sweep_table(results):
@@ -992,7 +1041,7 @@ def launch_diagnostic(args, out, manifest, save):
     Only API outcomes, environment key names and token/job readbacks are public.
     """
     diagnostic = manifest["launch_diagnostic"]
-    diagnostic.update(status="running", reason="single variations of original launch; no worker resumed")
+    diagnostic.update(status=Status.RUNNING, reason="single variations of original launch; no worker resumed")
     save()
     folder = out / "launch-diagnostic"
     folder.mkdir()
@@ -1008,13 +1057,13 @@ def launch_diagnostic(args, out, manifest, save):
             code = command([args.launcher.resolve(), args.worker.resolve(), "diagnostic-" + variation,
                             request, result_path, scratch, attack, *getattr(args, "loader_dlls", [])], folder / (variation + ".log"))
             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {
-                "status": "fail", "reason": "launcher produced no diagnostic result"}
+                "status": Status.FAIL, "reason": "launcher produced no diagnostic result"}
             result.update(variation=variation, launcher_exit=code)
             if code != 0:
-                result["status"] = "fail"
+                result["status"] = Status.FAIL
             diagnostic["variations"].append(result)
         except Exception as error:
-            diagnostic["variations"].append({"variation": variation, "status": "fail",
+            diagnostic["variations"].append({"variation": variation, "status": Status.FAIL,
                                              "reason": "diagnostic orchestration exception: " + type(error).__name__})
             (folder / (variation + "-exception.txt")).write_text(str(error), encoding="utf-8")
         finally:
@@ -1025,11 +1074,118 @@ def launch_diagnostic(args, out, manifest, save):
     fixed = outcomes["localappdata"]
     diagnostic["finding"] = (
         "Adding LOCALAPPDATA alone resolves baseline CreateProcessW error 203 with verified zero-capability LPAC"
-        if baseline.get("create_process_error_code") == 203 and fixed["status"] == "pass"
+        if baseline.get("create_process_error_code") == 203 and fixed["status"] == Status.PASS
         else "LOCALAPPDATA-only repair not established; inspect individual API outcomes; real launches still require LPAC"
     )
-    diagnostic.update(status="complete" if any(result.get("status") == "pass" for result in outcomes.values()) else "inconclusive: control did not succeed", reason="observed suspended launch outcomes; no fallback selected")
+    diagnostic.update(status=Status.COMPLETE if any(result.get("status") == Status.PASS for result in outcomes.values()) else Status.CONTROL_INCONCLUSIVE, reason="observed suspended launch outcomes; no fallback selected")
     save()
+
+
+def configured_status(reason):
+    return Status.NOT_APPLICABLE if reason.startswith("not-applicable:") else Status.UNRUN
+
+
+def assemble_probe_result(manifest, item, entry, results, probe, repetitions=1, repetition=1):
+    """Assemble real probe observations into public rows and diagnostics."""
+    if item.get("diagnostic_only"):
+        entry.update(status=Status.ERROR if entry.get("cleanup_error") else diagnostic_status(results, probe["op"]),
+            reason="diagnostic only; excluded from verdict counts and qualification")
+        if probe.get("op") == "unix-outcomes":
+            entry["namespace_status"] = unix_namespace_status(entry)
+            if entry["status"] != Status.ERROR:
+                entry["status"] = joined_namespace_status(entry["namespace_status"])
+        if item["id"] == "malformed-family-comparison" and entry["status"] != Status.ERROR:
+            entry["status"] = Status.EXPECTED_FAILURE_RECORDED if all(isinstance(r.get("response", {}).get("probe", {}).get("error_code"), int) for r in results.values()) else Status.LITERAL_STATUS_MISSING
+        if probe.get("op") == "afd-family-sweep":
+            entry["table"] = family_sweep_table(results)
+        if probe.get("op") == "reachability-inventory":
+            entry["table"] = inventory_table(results)
+            enumeration = results.get("control", {}).get("response", {}).get("probe", {}).get("enumeration") or {}
+            complete = enumeration.get("enumeration_complete") is True
+            attempted = all(cell.get("attempted") is True for row in entry["table"] for cell in (row["control"], row["plain_appcontainer"], row["lpac"]))
+            entry["summary"] = f"{len(entry['table'])} candidates; enumeration {Status.COMPLETE if complete else 'truncated/query failed'}; attempts {Status.COMPLETE if attempted else 'truncated/unavailable'}"
+            entry["reason"] += "; " + entry["summary"]
+            entry["attempt_budget_ms"] = 18000
+            entry["budget_scope"] = "three modes at six seconds each; launch/cleanup excluded"
+        return
+    if probe.get("op") == "network" and probe.get("operation") != "create":
+        # Creation routes were all exercised earlier. Never infer a global
+        # absence from only this operation's constructor.
+        creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-ipv", "afd-ipv"))]
+        routes_complete = all(r.get("confined", {}).get("status") == Status.PASS and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
+        any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
+        socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
+        if not socket_exists and (not routes_complete or any_descriptor):
+            entry.update(status=Status.UNRUN, reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
+            return
+    status, reason = evaluate(item, results["control"], results["confined"], manifest["rows"])
+    if item["id"].startswith("socket-"):
+        entry["token_context"] = {"kind": "zero-capability LPAC", "os_build": manifest["os_build"],
+                                  "readback": results["confined"].get("token_before_resume")}
+        creation = results["confined"].get("response", {}).get("probe", {})
+        entry["literal_creation"] = {key: creation.get(key) for key in ("return_code", "descriptor_returned", "error_code", "startup")}
+        entry["literal_creation"]["status"] = Status.PASS if (
+            creation.get("success") is False and creation.get("return_code") == -1
+            and creation.get("descriptor_returned") is False and isinstance(creation.get("error_code"), int)
+            and results["control"].get("response", {}).get("probe", {}).get("descriptor_returned") is True
+            and results["control"].get("status") == Status.PASS
+            and results["control"].get("response", {}).get("probe", {}).get("success") is True
+            and results["confined"].get("status") == Status.PASS) else Status.FAIL
+        entry["policy_attribution"] = {"status": status, "reason": reason}
+    if item["id"] == "afd-unix-tcp":
+        reason = "AF_UNIX stream: " + reason
+        entry["transport"] = "stream"
+    entry.update(status=status, reason=reason,
+                 control=public_result(results["control"], "format" in item),
+                 confined=public_result(results["confined"], "format" in item))
+    if probe.get("op") == "memory" and probe.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
+        peak = results["confined"].get("parent_peak_working_set_bytes")
+        entry["peak_excess_bytes"] = max(0, peak - LIMIT) if isinstance(peak, int) else None
+        entry["kernel_working_set_cap_bytes"] = LIMIT
+    if entry.get("cleanup_error"):
+        entry.update(status=Status.FAIL, reason="scratch cleanup failed; completed probe evidence retained")
+    if item.get("format") == "pdf":
+        entry["diff_summary"] = parser_diff_summary(results["control"], results["confined"])
+    if item.get("memory_scope"):
+        entry["memory_scope"] = item["memory_scope"]
+    if repetitions == 3:
+        entry["representative_repetition"] = repetition
+        entry["representative_scope"] = "top-level control/confined are from this repetition" + ("; peak excess is maximum" if probe.get("op") == "memory" else "")
+        entry.setdefault("repetitions", []).append({"repetition": repetition,
+            **{key: entry.get(key) for key in ("status", "reason", "control", "confined", "peak_excess_bytes")}})
+        if repetition < 3:
+            entry.update(status=Status.UNRUN, reason="three repetitions not yet complete")
+        if repetition == 3:
+            failed = [row for row in entry["repetitions"] if row["status"] != Status.PASS]
+            entry["status"] = (Status.FAIL if any(r["status"] == Status.FAIL for r in failed) else Status.UNRUN) if failed else Status.PASS
+            entry["reason"] = (failed[0]["reason"] if failed else ("all three repetitions passed with 64 KiB working-set slack" if probe.get("op") == "memory" else "all three repetitions passed link-opening rule"))
+            peaks = [row["peak_excess_bytes"] for row in entry["repetitions"] if isinstance(row["peak_excess_bytes"], int)]
+            if probe.get("op") == "memory":
+                entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
+
+
+def refresh_sockets(manifest):
+    for spec in plan():
+        if spec["id"].startswith("socket-"):
+            row = next(r for r in manifest["rows"] if r["id"] == spec["id"])
+            if "control" in row and "confined" in row and not row.get("cleanup_error"):
+                status, reason = evaluate(spec, row["control"], row["confined"], manifest["rows"])
+                row.update(status=status, reason=reason)
+                row["policy_attribution"] = {"status": status, "reason": reason}
+
+
+def assemble_manifest(manifest):
+    """Refresh dependent rows and counts before every durable save."""
+    malformed = next((row for row in manifest["diagnostics"] if row["id"] == "malformed-family-comparison"), {})
+    for row in manifest["rows"]:
+        if row["id"].startswith("afd-"):
+            row["malformed_family_comparison"] = {"diagnostic_only": True,
+                "reason": "malformed-family comparison; no inference about valid untested families",
+                **{mode: malformed.get(mode, {}).get("response", {}).get("probe")
+                   for mode in ("control", "plain_appcontainer", "confined")}}
+    refresh_sockets(manifest)
+    manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"])
+                          for status in ROW_STATUSES}
 
 
 def run_suite(args):
@@ -1037,24 +1193,8 @@ def run_suite(args):
     out.mkdir(parents=True, exist_ok=False)
     specs = diagnostic_plan() + sorted(plan(), key=lambda row: row["id"] != "inventory-outcome")
     manifest = initial_manifest()
-    def refresh_sockets():
-        for spec in specs:
-            if spec["id"].startswith("socket-"):
-                row = next(r for r in manifest["rows"] if r["id"] == spec["id"])
-                if "control" in row and "confined" in row and not row.get("cleanup_error"):
-                    status, reason = evaluate(spec, row["control"], row["confined"], manifest["rows"])
-                    row.update(status=status, reason=reason)
-                    row["policy_attribution"] = {"status": status, "reason": reason}
     def save():
-        malformed = next((row for row in manifest["diagnostics"] if row["id"] == "malformed-family-comparison"), {})
-        for row in manifest["rows"]:
-            if row["id"].startswith("afd-"):
-                row["malformed_family_comparison"] = {"diagnostic_only": True,
-                    "reason": "malformed-family comparison; no inference about valid untested families",
-                    **{mode: malformed.get(mode, {}).get("response", {}).get("probe")
-                       for mode in ("control", "plain_appcontainer", "confined")}}
-        refresh_sockets()
-        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
+        assemble_manifest(manifest)
         target = out / "manifest.json"
         temporary = out / "manifest.json.tmp"
         temporary.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -1096,7 +1236,7 @@ def run_suite(args):
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
         client = host.get("success") and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000
-        manifest["windows_11_client_requirement"] = {"status": "NOT MET", "reason": "interactive session not verified" if client else "server runner only"}
+        manifest["windows_11_client_requirement"] = {"status": Status.NOT_MET, "reason": "interactive session not verified" if client else "server runner only"}
         endpoints = Endpoints()
         for item in specs:
             collection = manifest["diagnostics"] if item.get("diagnostic_only") else manifest["rows"]
@@ -1106,7 +1246,7 @@ def run_suite(args):
             unix_listeners = None
             try:
                 if item.get("format") == "pdf" and not args.pdfium:
-                    entry.update(status="unrun", reason="pinned PDFium path not supplied")
+                    entry.update(status=Status.UNRUN, reason="pinned PDFium path not supplied")
                     continue
                 probe = dict(item.get("request", {}))
                 if probe.get("op") in ("inventory-outcome", "unix-exit"):
@@ -1117,11 +1257,11 @@ def run_suite(args):
                 if probe.get("op") == "hyperv-outcome":
                     features = host.get("features") or []
                     absent = host.get("success") and not host.get("utility_vms") and not any(str(f.get("State")) in ("Enabled", "2") for f in features)
-                    entry.update(status="unrun", reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED", host_evidence=manifest["host_features"])
+                    entry.update(status=Status.UNRUN, reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED", host_evidence=manifest["host_features"])
                     continue
                 reason = endpoints.configure(probe) if probe else None
                 if reason:
-                    entry.update(status="not-applicable" if reason.startswith("not-applicable:") else "unrun", reason=reason)
+                    entry.update(status=configured_status(reason), reason=reason)
                     continue
                 if probe.get("op") == "network":
                     entry["requested_scope"] = probe.get("scope")
@@ -1192,11 +1332,11 @@ def run_suite(args):
                             call_started_utc = datetime.now(timezone.utc).isoformat()
                             code = command([args.launcher.resolve(), args.worker.resolve(), launch_mode,
                                             request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
-                            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": "fail", "reason": "launcher produced no result"}
+                            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": Status.FAIL, "reason": "launcher produced no result"}
                             result["call_started_utc"] = call_started_utc
                             result["launcher_exit"] = code
                             if code != 0:
-                                result["status"] = "fail"
+                                result["status"] = Status.FAIL
                             if listener:
                                 result["shell_listener"] = listener.finish()
                                 listener = None
@@ -1217,7 +1357,7 @@ def run_suite(args):
                             if probe.get("op") == "reachability-inventory" and mode == "control":
                                 candidates = result.get("response", {}).get("probe", {}).get("candidates")
                                 if not isinstance(candidates, list):
-                                    entry.update(status="error", reason="control candidate enumeration unavailable")
+                                    entry.update(status=Status.ERROR, reason="control candidate enumeration unavailable")
                                     break
                                 probe["candidates"] = candidates
                         finally:
@@ -1232,84 +1372,10 @@ def run_suite(args):
                                 except OSError as error:
                                     entry["cleanup_error"] = type(error).__name__
                                     (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
-                    if item.get("diagnostic_only"):
-                        entry.update(status="error" if entry.get("cleanup_error") else diagnostic_status(results, probe["op"]),
-                            reason="diagnostic only; excluded from verdict counts and qualification")
-                        if probe.get("op") == "unix-outcomes":
-                            entry["namespace_status"] = unix_namespace_status(entry)
-                            if entry["status"] != "error":
-                                entry["status"] = "; ".join(f"{name}: {value['status']}" for name, value in entry["namespace_status"].items())
-                        if item["id"] == "malformed-family-comparison" and entry["status"] != "error":
-                            entry["status"] = "complete: expected-failure control recorded" if all(isinstance(r.get("response", {}).get("probe", {}).get("error_code"), int) for r in results.values()) else "inconclusive: literal status missing"
-                        if probe.get("op") == "afd-family-sweep":
-                            entry["table"] = family_sweep_table(results)
-                        if probe.get("op") == "reachability-inventory":
-                            entry["table"] = inventory_table(results)
-                            enumeration = results.get("control", {}).get("response", {}).get("probe", {}).get("enumeration") or {}
-                            complete = enumeration.get("enumeration_complete") is True
-                            attempted = all(cell.get("attempted") is True for row in entry["table"] for cell in (row["control"], row["plain_appcontainer"], row["lpac"]))
-                            entry["summary"] = f"{len(entry['table'])} candidates; enumeration {'complete' if complete else 'truncated/query failed'}; attempts {'complete' if attempted else 'truncated/unavailable'}"
-                            entry["reason"] += "; " + entry["summary"]
-                            entry["attempt_budget_ms"] = 18000
-                            entry["budget_scope"] = "three modes at six seconds each; launch/cleanup excluded"
-                        continue
-                    if probe.get("op") == "network" and probe.get("operation") != "create":
-                        # Creation routes were all exercised earlier. Never infer a global
-                        # absence from only this operation's constructor.
-                        creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-ipv", "afd-ipv"))]
-                        routes_complete = all(r.get("confined", {}).get("status") == "pass" and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
-                        any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
-                        socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
-                        if not socket_exists and (not routes_complete or any_descriptor):
-                            entry.update(status="unrun", reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
-                            continue
-                    status, reason = evaluate(item, results["control"], results["confined"], manifest["rows"])
-                    if item["id"].startswith("socket-"):
-                        entry["token_context"] = {"kind": "zero-capability LPAC", "os_build": manifest["os_build"],
-                                                  "readback": results["confined"].get("token_before_resume")}
-                        creation = results["confined"].get("response", {}).get("probe", {})
-                        entry["literal_creation"] = {key: creation.get(key) for key in ("return_code", "descriptor_returned", "error_code", "startup")}
-                        entry["literal_creation"]["status"] = "pass" if (
-                            creation.get("success") is False and creation.get("return_code") == -1
-                            and creation.get("descriptor_returned") is False and isinstance(creation.get("error_code"), int)
-                            and results["control"].get("response", {}).get("probe", {}).get("descriptor_returned") is True
-                            and results["control"].get("status") == "pass"
-                            and results["control"].get("response", {}).get("probe", {}).get("success") is True
-                            and results["confined"].get("status") == "pass") else "fail"
-                        entry["policy_attribution"] = {"status": status, "reason": reason}
-                    if item["id"] == "afd-unix-tcp":
-                        reason = "AF_UNIX stream: " + reason
-                        entry["transport"] = "stream"
-                    entry.update(status=status, reason=reason,
-                                 control=public_result(results["control"], "format" in item),
-                                 confined=public_result(results["confined"], "format" in item))
-                    if probe.get("op") == "memory" and probe.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
-                        peak = results["confined"].get("parent_peak_working_set_bytes")
-                        entry["peak_excess_bytes"] = max(0, peak - LIMIT) if isinstance(peak, int) else None
-                        entry["kernel_working_set_cap_bytes"] = LIMIT
-                    if entry.get("cleanup_error"):
-                        entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
-                    if item.get("format") == "pdf":
-                        entry["diff_summary"] = parser_diff_summary(results["control"], results["confined"])
-                    if item.get("memory_scope"):
-                        entry["memory_scope"] = item["memory_scope"]
-                    if repetitions == 3:
-                        entry["representative_repetition"] = repetition
-                        entry["representative_scope"] = "top-level control/confined are from this repetition" + ("; peak excess is maximum" if probe.get("op") == "memory" else "")
-                        entry.setdefault("repetitions", []).append({"repetition": repetition,
-                            **{key: entry.get(key) for key in ("status", "reason", "control", "confined", "peak_excess_bytes")}})
-                        if repetition < 3:
-                            entry.update(status="unrun", reason="three repetitions not yet complete")
-                        if repetition == 3:
-                            failed = [row for row in entry["repetitions"] if row["status"] != "pass"]
-                            entry["status"] = ("fail" if any(r["status"] == "fail" for r in failed) else "unrun") if failed else "pass"
-                            entry["reason"] = (failed[0]["reason"] if failed else ("all three repetitions passed with 64 KiB working-set slack" if probe.get("op") == "memory" else "all three repetitions passed link-opening rule"))
-                            peaks = [row["peak_excess_bytes"] for row in entry["repetitions"] if isinstance(row["peak_excess_bytes"], int)]
-                            if probe.get("op") == "memory":
-                                entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
-                        save()
+                    assemble_probe_result(manifest, item, entry, results, probe, repetitions, repetition)
+                    save()
             except Exception as error:
-                entry.update(status="error" if item.get("diagnostic_only") else "fail", reason="probe orchestration exception: " + type(error).__name__)
+                entry.update(status=Status.ERROR if item.get("diagnostic_only") else Status.FAIL, reason="probe orchestration exception: " + type(error).__name__)
                 (folder / "exception.txt").write_text(str(error), encoding="utf-8")
             finally:
                 if unix_listeners:
@@ -1335,17 +1401,169 @@ def run_suite(args):
                 "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
                 "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
             row = next(r for r in manifest["rows"] if r["id"] == "unix-2c")
-            if row["status"] != "fail" and not row.get("cleanup_error"):
+            if row["status"] != Status.FAIL and not row.get("cleanup_error"):
                 row["status"], row["reason"] = unix_exit(diagnostic, "2c")
-        refresh_sockets()
-        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
-        manifest["status"] = "pass" if all(row["status"] in ("pass", "not-applicable") for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else "fail"
+        refresh_sockets(manifest)
+        manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ROW_STATUSES}
+        manifest["status"] = Status.PASS if all(row["status"] in (Status.PASS, Status.NOT_APPLICABLE) for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else Status.FAIL
         save()
     print(json.dumps({"status": manifest["status"], "counts": manifest["counts"]}))
-    return 0 if manifest["status"] == "pass" else 1
+    return 0 if manifest["status"] == Status.PASS else 1
+
+
+def assembly_self_test():
+    """Exercise the production post-probe path, not hand-written final statuses."""
+    from copy import deepcopy
+    from itertools import product
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    manifest = initial_manifest()
+    seen_rows = set()
+    seen_diagnostics = {spec["id"]: set() for spec in diagnostic_plan()}
+
+    def check():
+        assemble_manifest(manifest)
+        # Include the JSON boundary used by the artifact validator.
+        validate_manifest(json.loads(json.dumps(manifest)))
+        seen_rows.update(row["status"] for row in manifest["rows"])
+        for row in manifest["diagnostics"]:
+            seen_diagnostics[row["id"]].add(row["status"])
+
+    def response(**probe):
+        return {"status": Status.PASS, "response": {"probe": probe}}
+
+    def emit(spec, results, **kwargs):
+        collection = manifest["diagnostics"] if spec.get("diagnostic_only") else manifest["rows"]
+        entry = next(row for row in collection if row["id"] == spec["id"])
+        for mode, result in results.items():
+            entry[mode] = public_result(result, "format" in spec)
+        assemble_probe_result(manifest, spec, entry, results, spec.get("request", {}), **kwargs)
+        check()
+        return entry
+
+    check()  # Includes initial unrun rows, diagnostics and launch diagnostic.
+    for spec in diagnostic_plan():
+        modes = ("control", "plain_appcontainer", "confined")
+        for worker_ok, control_ok in ((False, False), (True, False), (True, True)):
+            results = {mode: response(success=control_ok, error_code=0,
+                        outcomes={} if spec["id"] == "af-unix-outcomes" else []) for mode in modes}
+            if not worker_ok:
+                results["confined"]["status"] = Status.FAIL
+            emit(spec, results)
+        if spec["id"] == "malformed-family-comparison":
+            del results["confined"]["response"]["probe"]["error_code"]
+            emit(spec, results)
+        if spec["id"] == "af-unix-outcomes":
+            for filesystem, abstract in product((None, "synthetic-variant"), repeat=2):
+                results = {mode: response(outcomes={"inside_scratch_bind": {"operation": {"success": True}}},
+                           calibrated_variants={"filesystem": filesystem, "abstract": abstract}) for mode in modes}
+                emit(spec, results)
+        entry = next(row for row in manifest["diagnostics"] if row["id"] == spec["id"])
+        entry["cleanup_error"] = "PermissionError"
+        assert emit(spec, results)["status"] == Status.ERROR
+        del entry["cleanup_error"]
+        emit(spec, results)
+
+    # Both calibration branches remain covered even when the public UNIX status
+    # is the more precise per-namespace summary.
+    unix = {mode: response(outcomes={}) for mode in modes}
+    assert diagnostic_status(unix, "unix-outcomes") == Status.CONTROL_INCONCLUSIVE
+    unix["control"] = response(outcomes={"bind": {"operation": {"success": True}}})
+    assert diagnostic_status(unix, "unix-outcomes") == Status.ROUTE_INCONCLUSIVE
+    unix["control"]["response"]["probe"]["calibrated_variants"] = dict.fromkeys(UNIX_NAMESPACES, "variant")
+    assert diagnostic_status(unix, "unix-outcomes") == Status.COMPLETE
+
+    for spec in diagnostic_plan():
+        observed = seen_diagnostics[spec["id"]]
+        if spec["id"] == "af-unix-outcomes":
+            expected = {Status.UNRUN, Status.ERROR} | {
+                joined_namespace_status(dict(zip(UNIX_NAMESPACES, ({"status": a}, {"status": b}))))
+                for a, b in product(NAMESPACE_STATUSES, repeat=2)}
+        elif spec["id"] == "malformed-family-comparison":
+            expected = set(MALFORMED_STATUSES)
+        else:
+            expected = set(DIAGNOSTIC_STATUSES) - {Status.ROUTE_INCONCLUSIVE}
+        assert observed == expected, (spec["id"], observed, expected)
+
+    specs = {spec["id"]: spec for spec in plan()}
+    read = specs["file-read"]
+    positive = response(success=True, api="ReadFile")
+    denied = response(success=False, explicit_denial=True, error_code=5, api="CreateFileW")
+    for control, confined, expected in ((positive, denied, Status.PASS),
+                                       (positive, positive, Status.FAIL),
+                                       (response(success=False), denied, Status.UNRUN)):
+        assert emit(read, {"control": control, "confined": confined})["status"] == expected
+
+    endpoints = Endpoints.__new__(Endpoints)
+    for label in NOT_APPLICABLE_IDS:
+        spec = specs[label]
+        if label.endswith("udp-listen"):
+            # configure() returns before consulting the host for UDP listen.
+            reason = endpoints.configure(dict(spec["request"]))
+            entry = next(row for row in manifest["rows"] if row["id"] == label)
+            entry.update(status=configured_status(reason), reason=reason)
+            check()
+        else:
+            emit(spec, {"control": response(success=True, descriptor_returned=True),
+                        "confined": response(success=True, descriptor_returned=True)})
+        assert next(row for row in manifest["rows"] if row["id"] == label)["status"] == Status.NOT_APPLICABLE
+    assert seen_rows == set(ROW_STATUSES)
+    assert manifest["counts"][Status.NOT_APPLICABLE] == len(NOT_APPLICABLE_IDS)
+
+    # Run the real suspended-launch emitter, validating every partial save.
+    seen_launch = {manifest["launch_diagnostic"]["status"]}
+    def save():
+        check()
+        seen_launch.add(manifest["launch_diagnostic"]["status"])
+    evidence = os.environ.get("OFFICE_EVIDENCE_DIR")
+    with tempfile.TemporaryDirectory(prefix="assembly-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        for succeed in (False, True):
+            out = folder / str(succeed)
+            out.mkdir()
+            def fake_command(argv, log):
+                variation = argv[2].removeprefix("diagnostic-")
+                result = {"status": Status.PASS if succeed else Status.FAIL,
+                          "worker_resumed": False,
+                          "launch_trace": {"profile_created_before_launch": True, "create_process_succeeded": succeed},
+                          "token_before_resume": {"appcontainer": 1, "capability_count": 0,
+                              "lpac": int(variation != "plain-appcontainer"),
+                              "lpac_verification": "TokenIsLessPrivilegedAppContainer"}}
+                Path(argv[4]).write_text(json.dumps(result), encoding="utf-8")
+                return 0 if succeed else 1
+            manifest["launch_diagnostic"] = initial_manifest()["launch_diagnostic"]
+            with patch(__name__ + ".command", side_effect=fake_command):
+                launch_diagnostic(SimpleNamespace(launcher=folder / "launcher.exe", worker=folder / "worker.exe"),
+                                  out, manifest, save)
+    assert seen_launch == set(LAUNCH_STATUSES)
+
+    def rejected(mutator, message):
+        invalid = deepcopy(manifest)
+        mutator(invalid)
+        try:
+            validate_manifest(invalid)
+        except AssertionError:
+            return
+        raise AssertionError(message)
+
+    rejected(lambda m: m["diagnostics"][1].update(status="unknown diagnostic status"),
+             "unknown diagnostic status accepted")
+    def unix_row(m):
+        return next(row for row in m["diagnostics"] if row["id"] == "af-unix-outcomes")
+    rejected(lambda m: unix_row(m)["namespace_status"]["filesystem"].update(status="unknown"),
+             "unknown namespace status accepted")
+    rejected(lambda m: unix_row(m).update(status="filesystem: arbitrary; abstract: arbitrary"),
+             "arbitrary namespace summary accepted")
+    rejected(lambda m: unix_row(m).update(status=joined_namespace_status(
+        dict.fromkeys(UNIX_NAMESPACES, {"status": Status.UNCALIBRATED}))),
+        "mismatched namespace summary accepted")
+    rejected(lambda m: unix_row(m)["namespace_status"].pop("abstract"), "missing namespace accepted")
+    print("assembly self-test passed: all row/diagnostic/namespace/launch statuses; unknown statuses rejected")
 
 
 def self_test():
+    assembly_self_test()
     specs = plan()
     assert len({row["id"] for row in specs}) == len(specs)
     deny = {"id": "read", "request": {"op": "read"}, "expect": "deny"}
