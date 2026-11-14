@@ -65,6 +65,7 @@ fn qname(
     ns: &str,
     local: &str,
     attribute: bool,
+    source_prefix: Option<&str>,
     source: &Bindings,
     bindings: &mut Bindings,
 ) -> String {
@@ -79,8 +80,12 @@ fn qname(
         bindings.insert(String::new(), ns.into());
         return local.into();
     }
-    if let Some((prefix, _)) = source.iter().chain(bindings.iter()).find(|(p, uri)| {
-        uri.as_str() == ns && (!attribute || !p.is_empty()) && bindings.get(*p) == Some(*uri)
+    // Aliases can coexist for one URI. Only the prefix on this source name
+    // takes precedence over convention (not the first alias in the map).
+    if let Some(prefix) = source_prefix.filter(|p| {
+        (!attribute || !p.is_empty())
+            && source.get(*p).is_some_and(|uri| uri == ns)
+            && bindings.get(*p).is_some_and(|uri| uri == ns)
     }) {
         return if prefix.is_empty() {
             local.into()
@@ -95,7 +100,7 @@ fn qname(
         return local.into();
     }
     let prefix = conventional(ns)
-        .filter(|p| !bindings.contains_key(*p))
+        .filter(|p| bindings.get(*p).is_none_or(|uri| uri == ns))
         .map(str::to_owned)
         .unwrap_or_else(|| {
             (0..)
@@ -114,24 +119,52 @@ pub(super) fn serialize(n: &Node) -> Result<Vec<u8>> {
         if n.ns.is_empty() {
             bindings.insert(String::new(), String::new());
         }
-        let name = qname(&n.ns, &n.local, false, &n.bindings, &mut bindings);
+        let name = qname(
+            &n.ns,
+            &n.local,
+            false,
+            n.prefix.as_deref(),
+            &n.bindings,
+            &mut bindings,
+        );
         let mut attrs = Vec::new();
-        for ((ns, key), value) in &n.attrs {
+        for (expanded_name, value) in &n.attrs {
+            let (ns, key) = expanded_name;
             let value = if n.ns == MC && n.local == "Choice" && ns.is_empty() && key == "Requires" {
                 // The parser stores URIs here for AlternateContent selection.
                 value
                     .split_ascii_whitespace()
                     .map(|uri| {
-                        qname(uri, "_", true, &n.bindings, &mut bindings)
-                            .trim_end_matches(":_")
-                            .to_owned()
+                        qname(
+                            uri,
+                            "_",
+                            true,
+                            n.bindings
+                                .iter()
+                                .find(|(p, bound)| !p.is_empty() && bound.as_str() == uri)
+                                .map(|(p, _)| p.as_str()),
+                            &n.bindings,
+                            &mut bindings,
+                        )
+                        .trim_end_matches(":_")
+                        .to_owned()
                     })
                     .collect::<Vec<_>>()
                     .join(" ")
             } else {
                 value.clone()
             };
-            attrs.push((qname(ns, key, true, &n.bindings, &mut bindings), value));
+            attrs.push((
+                qname(
+                    ns,
+                    key,
+                    true,
+                    n.attr_prefixes.get(expanded_name).map(String::as_str),
+                    &n.bindings,
+                    &mut bindings,
+                ),
+                value,
+            ));
         }
         for (prefix, uri) in &bindings {
             if prefix == "xml"
@@ -221,6 +254,44 @@ mod tests {
         assert_eq!(n.children[0].children[0].ns, "urn:scoped");
         assert_eq!(n.children[1].attr("Requires"), Some(ext));
         assert_eq!(n.children[1].bindings["feature"], ext);
+    }
+    #[test]
+    fn each_element_and_attribute_keeps_its_actual_alias_in_scope() {
+        let (out, _) = roundtrip(&format!(
+            r#"<z:document xmlns:a="{W}" xmlns:z="{W}" xmlns:b="{R}" xmlns:r="{R}" r:id="one" b:embed="two"><a:body><z:p xmlns:z="urn:scoped" z:flag="yes"/></a:body><z:p/></z:document>"#
+        ));
+        for lexical in [
+            "<z:document",
+            "<a:body",
+            "<z:p",
+            "r:id=\"one\"",
+            "b:embed=\"two\"",
+            "z:flag=\"yes\"",
+        ] {
+            assert!(out.contains(lexical), "{out}");
+        }
+        let (_, n) = roundtrip(&out);
+        assert_eq!(n.children[0].children[0].ns, "urn:scoped");
+        assert_eq!(n.children[1].ns, W);
+    }
+    #[test]
+    fn missing_source_prefix_uses_convention_before_other_aliases() {
+        let mut n = parse(
+            format!(r#"<root xmlns:a="{R}" xmlns:r="{R}" a:id="one"/>"#).as_bytes(),
+            "fixture",
+        )
+        .unwrap();
+        n.attr_prefixes.clear();
+        let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
+        assert!(out.contains("r:id=\"one\""), "{out}");
+        // A conventional prefix bound to another URI must never be reused.
+        std::sync::Arc::make_mut(&mut n.bindings).insert("r".into(), "urn:other".into());
+        let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
+        assert!(out.contains("n0:id=\"one\""), "{out}");
+        assert_eq!(
+            parse(out.as_bytes(), "out").unwrap().attr_ns(R, "id"),
+            Some("one")
+        );
     }
     #[test]
     fn conventional_then_generated_prefixes_for_synthesized_nodes() {

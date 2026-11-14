@@ -124,6 +124,9 @@ struct Node {
     ns: String,
     local: String,
     attrs: BTreeMap<(String, String), String>,
+    // Lexical source prefixes, checked against in-scope bindings at serialization.
+    prefix: Option<String>,
+    attr_prefixes: BTreeMap<(String, String), String>,
     children: Vec<Node>,
     text: String,
     ignorable: std::sync::Arc<BTreeSet<String>>,
@@ -237,6 +240,14 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     ns: namespace(ns)?,
                     local: std::str::from_utf8(local.as_ref())?.into(),
                     attrs: BTreeMap::new(),
+                    prefix: Some(
+                        e.name()
+                            .prefix()
+                            .map(|p| std::str::from_utf8(p.as_ref()).map(str::to_owned))
+                            .transpose()?
+                            .unwrap_or_default(),
+                    ),
+                    attr_prefixes: BTreeMap::new(),
                     children: vec![],
                     text: String::new(),
                     bindings: stack.last().map(|n| n.bindings.clone()).unwrap_or_default(),
@@ -259,6 +270,10 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     }
                     let (ns, local) = reader.resolve_attribute(a.key);
                     let key = (namespace(ns)?, std::str::from_utf8(local.as_ref())?.into());
+                    if let Some(prefix) = a.key.prefix() {
+                        n.attr_prefixes
+                            .insert(key.clone(), std::str::from_utf8(prefix.as_ref())?.into());
+                    }
                     ensure!(
                         n.attrs
                             .insert(
@@ -1033,6 +1048,8 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                     ns: c.ns.clone(),
                     local: c.local.clone(),
                     attrs: c.attrs.clone(),
+                    prefix: c.prefix.clone(),
+                    attr_prefixes: c.attr_prefixes.clone(),
                     children: properties.clone(),
                     text: c.text.clone(),
                     source_cell: c.source_cell.clone(),
@@ -1623,6 +1640,8 @@ fn walk(
         ns: n.ns.clone(),
         local: n.local.clone(),
         attrs: n.attrs.clone(),
+        prefix: n.prefix.clone(),
+        attr_prefixes: n.attr_prefixes.clone(),
         children: Vec::with_capacity(n.children.len()),
         text: n.text.clone(),
         source_cell: n.source_cell.clone(),
@@ -2200,6 +2219,8 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
                 source_cell: None,
                 ignorable: Default::default(),
                 bindings: Default::default(),
+                prefix: None,
+                attr_prefixes: BTreeMap::new(),
             })?)?,
         );
     }
@@ -2923,6 +2944,8 @@ fn rebuild_inner(
         source_cell: None,
         ignorable: Default::default(),
         bindings: Default::default(),
+        prefix: None,
+        attr_prefixes: BTreeMap::new(),
     };
     for (part, bytes) in &rewritten {
         let ty = if part.ends_with(".png") {
@@ -2944,6 +2967,8 @@ fn rebuild_inner(
             source_cell: None,
             ignorable: Default::default(),
             bindings: Default::default(),
+            prefix: None,
+            attr_prefixes: BTreeMap::new(),
         });
     }
     rewritten.insert("[Content_Types].xml".into(), serialize(&new_ct)?);

@@ -77,6 +77,56 @@ fn rebuild(ext: &str, p: &BTreeMap<String, Vec<u8>>) -> (Vec<u8>, office::Report
     office::rebuild(&format!("document.{ext}"), &archive(p), &BTreeMap::new()).unwrap()
 }
 #[test]
+fn relationship_aliases_reopen_through_production_parsers() {
+    let dir = tempfile::tempdir().unwrap();
+    for ext in ["xlsx", "docx", "pptx"] {
+        let mut parts = fixture(ext);
+        let main = match ext {
+            "xlsx" => "xl/workbook.xml",
+            "docx" => "word/document.xml",
+            _ => "ppt/presentation.xml",
+        };
+        let xml = String::from_utf8(parts[main].clone()).unwrap();
+        // Alphabetically first alias must not replace the source's r:id.
+        let xml = if ext == "docx" {
+            xml.replace(
+                "<w:document ",
+                &format!("<w:document xmlns:a=\"{R}\" xmlns:r=\"{R}\" "),
+            )
+        } else {
+            xml.replace("xmlns:r=", &format!("xmlns:a=\"{R}\" xmlns:r="))
+        };
+        parts.insert(main.into(), xml.into_bytes());
+        let path = dir.path().join(format!("document.{ext}"));
+        let request = vz_core::worker::Request {
+            path: path.clone(),
+            pdfium: None,
+            office: None,
+        };
+        std::fs::write(&path, archive(&parts)).unwrap();
+        let before = vz_core::parsers::parse(&request).unwrap();
+        let (bytes, _) = rebuild(ext, &parts);
+        if ext == "xlsx" {
+            let output = members(&bytes);
+            let workbook = std::str::from_utf8(&output[main]).unwrap();
+            assert!(workbook.contains("r:id=\""), "{workbook}");
+            assert!(!workbook.contains("a:id=\""), "{workbook}");
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let after = vz_core::parsers::parse(&request).unwrap();
+        assert!(!after.is_empty(), "{ext}");
+        assert!(
+            after[0].text.contains("Project ORION retained body"),
+            "{ext}"
+        );
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap(),
+            "{ext}"
+        );
+    }
+}
+#[test]
 fn office_benign_roundtrip() {
     for ext in ["docx", "xlsx", "pptx"] {
         let p = fixture(ext);
@@ -92,7 +142,10 @@ fn office_benign_roundtrip() {
             if part.ends_with(".xml") || part.ends_with(".rels") {
                 let xml = String::from_utf8(xml).unwrap();
                 let declaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
-                assert!(xml.starts_with(declaration), "{part}: missing XML declaration");
+                assert!(
+                    xml.starts_with(declaration),
+                    "{part}: missing XML declaration"
+                );
                 if part == "[Content_Types].xml" || part.ends_with(".rels") {
                     let (root, ns) = if part.ends_with(".rels") {
                         ("Relationships", REL)
