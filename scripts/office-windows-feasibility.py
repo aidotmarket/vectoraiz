@@ -29,6 +29,15 @@ ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 1_610_612_736
 WS_SLACK = 65_536
 FAMILIES = {"ipv4": 2, "ipv6": 23, "unix": 1, "hyperv": 34}
+# Only these probes can be observations rather than delta 6 outcome judgments.
+NOT_APPLICABLE_IDS = frozenset({
+    f"network-{family}-{scope}-udp-listen"
+    for family in ("ipv4", "ipv6") for scope in ("loopback", "lan", "internet")
+} | {
+    "socket-unix-tcp-socket", "socket-unix-tcp-WSASocketW",
+    "socket-hyperv-tcp-socket", "socket-hyperv-tcp-WSASocketW",
+    "afd-unix-tcp", "afd-hyperv-tcp", "rpc-alpc",
+})
 
 
 def digest(path):
@@ -271,8 +280,7 @@ def validate_manifest(manifest):
     for row in rows:
         assert row["status"] in ("pass", "fail", "unrun", "not-applicable") and row["reason"], "invalid status/reason"
         if row["status"] == "not-applicable":
-            probe = planned[row["id"]].get("request", {})
-            assert probe.get("op") == "network" and probe.get("transport") == "udp" and probe.get("operation") == "listen"
+            assert row["id"] in NOT_APPLICABLE_IDS, "unexpected not-applicable probe"
         for mode in ("control", "confined", "plain_appcontainer"):
             result = row.get(mode, {})
             if result.get("stderr_capture_available"):
@@ -395,7 +403,7 @@ def evaluate(spec, control, confined, evidence_rows=()):
     positive = before.get("probe", {})
     negative = after.get("probe", {})
     op = spec["request"]["op"]
-    if op in ("network", "afd") and spec["request"].get("family") in (1, 34) and spec["request"].get("operation", "create") == "create":
+    if spec["id"] in NOT_APPLICABLE_IDS and op in ("network", "afd") and spec["request"].get("family") in (1, 34) and spec["request"].get("operation", "create") == "create":
         if positive.get("descriptor_returned") is not True:
             return "unrun", "non-IP endpoint control unavailable; no creation-denial claim"
         if negative.get("descriptor_returned") is True:
@@ -415,7 +423,7 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if confined.get("windows_11_client") is not True:
             return "unrun", "server runner only; Windows 11 interactive client requirement NOT MET"
         return "pass", "no confined nonce GET or process start; positive control in same 4688 capture"
-    if op == "rpc-alpc":
+    if spec["id"] in NOT_APPLICABLE_IDS and op == "rpc-alpc":
         if not positive.get("success"):
             return "unrun", "mapper ALPC connection control failed"
         if negative.get("success"):
@@ -1512,8 +1520,9 @@ def self_test():
     assert "DNSResolver LPAC status 0xC0000022" in inventory_verdict(dns_inventory)[1]
     assert inventory_verdict({**inv, "table":inv["table"] + [{"endpoint":"RPC Control/DNSResolver", "lpac":{}}]})[0] == "unrun"
     assert "absent from enumerated" in inventory_verdict(inv)[1]
-    observation_ids = ("socket-unix-tcp-socket", "socket-unix-tcp-WSASocketW", "socket-hyperv-tcp-socket", "socket-hyperv-tcp-WSASocketW", "afd-unix-tcp", "afd-hyperv-tcp", "rpc-alpc")
-    for row_id in observation_ids:
+    for row_id in sorted(NOT_APPLICABLE_IDS):
+        if row_id.startswith("network-"):
+            continue
         spec = next(s for s in specs if s["id"] == row_id)
         control = response(success=True, descriptor_returned=True)
         for observed in (response(success=True, descriptor_returned=True),
@@ -1646,6 +1655,29 @@ def self_test():
     assert endpoints.configure(probe) is None and probe["port"] == 12346 and probe["endpoint_scope"] == "loopback"
     manifest = initial_manifest()
     validate_manifest(manifest)
+    # Fold 13: all thirteen observation rows must survive artifact validation.
+    applicable = initial_manifest()
+    assert len(NOT_APPLICABLE_IDS) == 13
+    assert NOT_APPLICABLE_IDS <= {s["id"] for s in specs}
+    for row in applicable["rows"]:
+        if row["id"] in NOT_APPLICABLE_IDS:
+            row.update(status="not-applicable", reason="synthetic observation")
+    applicable["counts"].update(unrun=len(specs) - 13, **{"not-applicable": 13})
+    validate_manifest(applicable)
+    # Keep every other planned row fail-closed, with otherwise valid counts.
+    for row in applicable["rows"]:
+        if row["id"] in NOT_APPLICABLE_IDS:
+            continue
+        row.update(status="not-applicable", reason="synthetic invalid observation")
+        applicable["counts"].update(unrun=len(specs) - 14, **{"not-applicable": 14})
+        try:
+            validate_manifest(applicable)
+        except AssertionError as error:
+            assert str(error) == "unexpected not-applicable probe"
+        else:
+            raise AssertionError("unexpected not-applicable probe accepted: " + row["id"])
+        row.update(status="unrun", reason="prerequisites or probe not completed")
+        applicable["counts"].update(unrun=len(specs) - 13, **{"not-applicable": 13})
     for leak in ("C:\\private\\file", "C:/private/file", "127.0.0.1", "::1", "2606:4700:4700::1111", r"\\server\share", "/Users/private/file", r"DOMAIN\private", "username=private"):
         invalid = initial_manifest()
         invalid["leak_test"] = leak
