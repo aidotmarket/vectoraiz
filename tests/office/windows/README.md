@@ -192,3 +192,23 @@ is accepted only after a successful control and the existing API/prerequisite
 check. Other failures print their codes and stay FAIL. The prior run's catalog
 8, RPC 14 and DNS 10093 are not access denials. Socket creation and shell row
 classification are unchanged. These harness changes make no qualification claim.
+
+Fold 9 keeps literal socket creation and policy attribution separate: constructor
+rows require a matching passing AFD control/denial and all three catalog registry
+denials. Evidence applies only to the recorded OS build and zero-capability LPAC.
+The invalid-family AFD comparison tests denial before packet validation; it does
+not substitute for missing successful per-family controls. Catalog enumeration is
+a diagnostic on the protocol-registry row. RPC runtime errors remain literal
+failures; ALPC epmapper and DNSAPI have separate controls.
+
+All three section modes have sampler experiments. The trigger is working set or
+system commit growth at or above the cap; system growth includes unrelated work.
+Detection time is captured before termination; kill completion is separate.
+Responsiveness measures only a launcher loop proxy. Self-mutation rows exercise
+the combined job and process caps, not an independent per-process defense.
+
+Cleanup limitation: if Python kills the launcher at its 70-second deadline, Rust
+destructors cannot run: temporary package ACEs and the AppContainer profile can
+remain. Preserve private evidence and restore original ACLs/remove that profile
+before reusing a persistent runner. Reverse grant unwinding covers ordinary early
+errors, but does not solve forced launcher termination. No qualification claimed.

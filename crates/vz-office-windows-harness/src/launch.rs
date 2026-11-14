@@ -92,6 +92,29 @@ impl Drop for Profile {
     }
 }
 
+// Vec drops elements in forward order; ACL snapshots must unwind in reverse,
+// including when grant construction or any later launch step fails.
+#[derive(Default)]
+struct Grants(Vec<Grant>);
+impl std::ops::Deref for Grants {
+    type Target = Vec<Grant>;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+impl std::ops::DerefMut for Grants {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+impl Drop for Grants {
+    fn drop(&mut self) {
+        while let Some(grant) = self.0.pop() {
+            drop(grant);
+        }
+    }
+}
+
 /// Save the original DACL, add only this package SID, restore before profile deletion.
 struct Grant {
     path: Vec<u16>,
@@ -577,6 +600,32 @@ fn token_readback(process: HANDLE, sid: PSID, lpac: bool, trace: &mut Value) -> 
                 value == u32::from(lpac),
                 "effective TokenIsLessPrivilegedAppContainer={value}, expected={lpac}"
             );
+            let mut bytes = 0;
+            unsafe {
+                GetTokenInformation(token.0, TokenAppContainerSid, null_mut(), 0, &mut bytes)
+            };
+            ensure!(
+                bytes as usize >= size_of::<TOKEN_APPCONTAINER_INFORMATION>(),
+                "package SID query size"
+            );
+            let mut buffer = vec![0usize; (bytes as usize).div_ceil(size_of::<usize>())];
+            check(
+                unsafe {
+                    GetTokenInformation(
+                        token.0,
+                        TokenAppContainerSid,
+                        buffer.as_mut_ptr().cast(),
+                        bytes,
+                        &mut bytes,
+                    )
+                },
+                "TokenAppContainerSid",
+            )?;
+            let package = unsafe { &*buffer.as_ptr().cast::<TOKEN_APPCONTAINER_INFORMATION>() };
+            let matches = !package.TokenAppContainer.is_null()
+                && unsafe { EqualSid(package.TokenAppContainer, sid) } != 0;
+            trace["package_sid_matches_profile"] = json!(matches);
+            ensure!(matches, "package SID differs from created profile SID");
             "TokenIsLessPrivilegedAppContainer"
         }
         Err(error) => {
@@ -717,7 +766,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         trace["profile_api"] = json!("CreateAppContainerProfile");
         trace["profile_capability_count"] = json!(0);
     }
-    let mut grants = Vec::new();
+    let mut grants = Grants::default();
     if let Some(profile) = &profile {
         low_scratch(&scratch)?;
         grants.push(Grant::new(
@@ -1213,9 +1262,14 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         if available {
             parent_peak_ws = parent_peak_ws.max(memory.PeakWorkingSetSize);
         }
-        let measured = (memory.PrivateUsage as u64)
-            .max(memory.WorkingSetSize as u64)
-            .max(growth.unwrap_or(0));
+        let measured = (memory.WorkingSetSize as u64).max(growth.unwrap_or(0));
+        let signal = if !available || system["available"] != true {
+            "measurement unavailable"
+        } else if memory.WorkingSetSize >= MEMORY {
+            "worker working set"
+        } else {
+            "system commit growth (includes concurrent activity)"
+        };
         max_overshoot = max_overshoot.max(measured.saturating_sub(MEMORY as u64));
         samples.push(
             json!({"elapsed_ms":start.elapsed().as_millis(),"process_available":available,
@@ -1224,16 +1278,18 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
             "run_system_commit_growth_bytes":growth}),
         );
         if sampler_enabled
-            && (!available || system["available"] != true || measured > MEMORY as u64)
+            && (!available || system["available"] != true || measured >= MEMORY as u64)
         {
             let detected = Instant::now();
+            let detected_after_ms = start.elapsed().as_millis();
             check(
                 unsafe { TerminateJobObject(job.as_ref().context("sampler job")?.0, 137) },
                 "sampler job termination",
             )?;
             let waited = unsafe { WaitForSingleObject(process_handle.0, 5000) };
-            sampler_kill = json!({"terminated_job":true,"over_budget":available && system["available"] == true && measured > MEMORY as u64,
-                "threshold_bytes":MEMORY,"detected_after_ms":start.elapsed().as_millis(),
+            sampler_kill = json!({"terminated_job":true,"over_budget":available && system["available"] == true && measured >= MEMORY as u64,
+                "threshold_bytes":MEMORY,"detected_after_ms":detected_after_ms,"signal":signal,
+                "kill_completed_after_ms":start.elapsed().as_millis(),
                 "time_to_kill_ms":detected.elapsed().as_millis(),"exit_observed":waited == WAIT_OBJECT_0,
                 "overshoot_bytes":max_overshoot});
             break;
@@ -1411,7 +1467,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         "job_members_before_resume":job_members_before,"observed_job_members":observed_job_members,"completion_port_notifications":notifications,
         "limit_violation_notification_received":if notification_port.is_some() {Some(notifications.iter().any(|n| n["limit_violation"] == true))} else {None},
         "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":sampler_enabled,"sampler_kill":sampler_kill,
-        "launcher_responsive":max_loop_gap_ms <= 1000,"max_parent_loop_gap_ms":max_loop_gap_ms,
+        "responsiveness_scope":"launcher loop proxy","launcher_responsive":max_loop_gap_ms <= 1000,"max_parent_loop_gap_ms":max_loop_gap_ms,
         "parent_memory_samples":samples,"parent_peak_working_set_bytes":if parent_peak_ws > 0 {Some(parent_peak_ws)} else {None},
         "system_before_resume":system_before,"system_after":crate::probes::system_memory(),
         "system_commit_attribution":"before/after delta during isolated single-worker row; concurrent host activity included, not causal attribution",

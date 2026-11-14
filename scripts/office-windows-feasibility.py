@@ -150,9 +150,12 @@ def plan():
                 add(f"socket-{family}-{transport}-{constructor}", op="network", family=FAMILIES[family],
                     transport=transport, operation="create", constructor=constructor)
                 rows[-1]["plain_appcontainer_comparison"] = True
-    for family in ("ipv4", "ipv6"):
-        for transport in ("tcp", "udp"):
+    for family in FAMILIES:
+        for transport in (("tcp", "udp") if family in ("ipv4", "ipv6") else ("tcp",)):
             add(f"afd-{family}-{transport}", op="afd", family=FAMILIES[family], transport=transport)
+            rows[-1]["plain_appcontainer_comparison"] = True
+    add("afd-family-independence", op="afd", family=9999, transport="tcp")
+    rows[-1]["plain_appcontainer_comparison"] = True
     for family in ("ipv4", "ipv6"):
         for scope in ("loopback", "lan", "internet"):
             for transport in ("tcp", "udp"):
@@ -170,9 +173,10 @@ def plan():
     for catalog in ("parameters", "protocol", "namespace"):
         add("winsock-registry-" + catalog, op="winsock-registry", catalog=catalog)
         rows[-1]["plain_appcontainer_comparison"] = True
-    add("winsock-catalog", op="winsock-catalog")
-    rows[-1]["plain_appcontainer_comparison"] = True
     add("rpc", op="rpc")
+    rows[-1]["plain_appcontainer_comparison"] = True
+    add("rpc-alpc", op="rpc-alpc")
+    add("dns-query", op="dns-query")
     for scope in ("both", "process", "job"):
         for kind in ("virtual", "mapping", "mapping-reserve", "mapping-file", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
@@ -184,8 +188,9 @@ def plan():
     for variant in ("job-ws", "hard-ws"):
         add(f"section-{variant}-self-ws", op="memory", kind="self-ws")
         rows[-1]["experiment"] = variant
-    add("section-sampler", op="memory", kind="mapping")
-    rows[-1]["experiment"] = "sampler"
+    for kind in ("mapping", "mapping-reserve", "mapping-file"):
+        add("section-sampler" + ("" if kind == "mapping" else "-" + kind), op="memory", kind=kind)
+        rows[-1]["experiment"] = "sampler"
     add("scratch-control", op="scratch")
     rows[-1]["expect"] = "allow"
     for extension in ("txt", "md", "html", "docx", "xlsx", "pdf"):
@@ -199,7 +204,7 @@ def initial_manifest():
             "os": platform.system(), "os_build": platform.version(),
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
-            "sampler_enabled": True, "sampler_scope": "section-sampler only; all other rows disabled",
+            "sampler_enabled": True, "sampler_scope": "section-sampler variants only; all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
@@ -219,6 +224,7 @@ def validate_manifest(manifest):
     def guard(value):
         if isinstance(value, str):
             assert not re.search(r"[A-Za-z]:[\\/]|(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])", value), "public manifest contains a drive path or IP literal"
+            assert not re.search(r"\\\\[^\\\s]+\\|//[^/\s]+/|(?i:users|home)[\\/][^\\/\s]+|(?i:username|user_name)\s*[:=]\s*\S+|\b[A-Za-z0-9_.-]+\\[A-Za-z0-9_.-]+\b", value), "public manifest contains UNC path or user name"
             for candidate in re.findall(r"(?<![\w:])[0-9A-Fa-f]*:[0-9A-Fa-f:.%]+(?![\w:])", value):
                 try:
                     ipaddress.IPv6Address(candidate)
@@ -299,7 +305,7 @@ def fetch_pdfium(output):
     shutil.copyfile(candidates[0], output / "pdfium.dll")
 
 
-def evaluate(spec, control, confined):
+def evaluate(spec, control, confined, evidence_rows=()):
     """Never turn launch failure, missing controls or generic errors into passes."""
     if confined.get("launch_trace", {}).get("lpac_verification") == "unverified":
         return "fail", "LPAC could not be verified; confined worker was not resumed"
@@ -314,8 +320,12 @@ def evaluate(spec, control, confined):
                 and confined.get("sampler_enabled") is True and kill.get("terminated_job") is True
                 and kill.get("over_budget") is True and kill.get("exit_observed") is True
                 and confined.get("launcher_responsive") is True and not confined.get("deadline_kill")
-                and isinstance(kill.get("overshoot_bytes"), int) and isinstance(kill.get("time_to_kill_ms"), int)):
-            return "pass", "parent killed over-budget job; overshoot and latency recorded; launcher remained responsive (best effort)"
+                and isinstance(kill.get("overshoot_bytes"), int) and isinstance(kill.get("time_to_kill_ms"), int)
+                and kill.get("signal") in ("worker working set", "system commit growth (includes concurrent activity)")
+                and isinstance(kill.get("detected_after_ms"), int)
+                and isinstance(kill.get("kill_completed_after_ms"), int)
+                and kill["kill_completed_after_ms"] >= kill["detected_after_ms"]):
+            return "pass", "parent killed over-budget job; overshoot and latency recorded; responsiveness is launcher loop proxy (best effort)"
         return "fail", "sampler did not establish over-budget job kill and responsive launcher"
     if confined.get("exit_code") == 0xC0000008:
         return "fail", "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
@@ -338,7 +348,7 @@ def evaluate(spec, control, confined):
     if op == "shell":
         if confined.get("shell_listener", {}).get("get_received"):
             return "fail", "confined shell dispatch reached nonce-correlated local listener"
-        if negative.get("success") or negative.get("shell_execute_ex", {}).get("return_code"):
+        if negative.get("success"):
             return "fail", "confined ShellExecute API reported success; no explicit broker denial"
         if not control.get("shell_listener", {}).get("get_received"):
             return "unrun", "shell control listener did not receive nonce-correlated GET"
@@ -347,12 +357,31 @@ def evaluate(spec, control, confined):
         if spec["request"]["operation"] == "create":
             if creation.get("success") or creation.get("descriptor_returned"):
                 return "fail", "confined socket creation returned a descriptor"
-            if creation.get("startup", {}).get("success") is not True or creation.get("error_code") in (10107, 10093):
-                return "fail", "socket creation unproven: Winsock initialization failed or cause unexplained"
-            if creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False:
-                return "fail", "missing literal INVALID_SOCKET creation evidence"
+            if (creation.get("return_code") != -1 or creation.get("descriptor_returned") is not False
+                    or not isinstance(creation.get("error_code"), int) or not positive.get("success")
+                    or positive.get("descriptor_returned") is not True):
+                return "fail", "missing literal INVALID_SOCKET/no-descriptor/error evidence or successful control"
+            family = next(name for name, number in FAMILIES.items() if number == spec["request"]["family"])
+            afd_id = f"afd-{family}-{spec['request']['transport']}"
+            required = [afd_id, *["winsock-registry-" + key for key in ("parameters", "protocol", "namespace")]]
+            rows = {r["id"]: r for r in evidence_rows}
+            if all(rows.get(key, {}).get("status") == "pass" for key in required):
+                return "pass", "literal creation failed without descriptor; policy attribution: " + ", ".join(required)
+            return "fail", "literal creation failed without descriptor; policy attribution incomplete: " + ", ".join(required)
         elif creation.get("descriptor_returned") is not True:
             return "unrun", "not exercisable: no socket obtainable by any tested route"
+    if op == "dns" and (negative.get("startup", {}).get("success") is not True or negative.get("error_code") == 10093):
+        return "unrun", "not exercisable: Winsock unavailable"
+    if spec["id"] == "afd-family-independence":
+        # Only a literal invalid-parameter control establishes the parsing contrast.
+        if positive.get("error_code") not in (0xC000000D, 0xC0000030) or positive.get("descriptor_returned") is not False:
+            return "unrun", "invalid-family control did not return a parameter error without handle"
+        if negative.get("error_code") == 0xC0000022 and negative.get("descriptor_returned") is False:
+            return "pass", "control parameter error; confined STATUS_ACCESS_DENIED precedes family parsing"
+        return "fail", "family-independent access denial not established"
+    if op == "dns-query" and negative.get("error_code") != 5:
+        code = negative.get("error_code")
+        return "fail", f"DnsQuery_W literal status {code!r} is not ERROR_ACCESS_DENIED"
     if op == "afd" and (positive.get("success") is not True or positive.get("descriptor_returned") is not True):
         return "unrun", "direct AFD control did not return a successful handle"
     if not positive.get("success"):
@@ -377,6 +406,10 @@ def evaluate(spec, control, confined):
                    or a["after"]["effective_job_cap"].get("max_working_set_bytes") != LIMIT
                    or not a["after"]["effective_job_cap"].get("flags", 0) & 1 for a in attempts):
                 return "fail", "self-mutation effective job cap readback missing or changed"
+            if any(a["after"].get("maximum_bytes") != LIMIT or a["after"].get("flags", 0) & 6 != 6 for a in attempts):
+                return "fail", "self-mutation process maximum or hard-limit flags changed"
+            if any(a["call"].get("success") is not True for a in attempts):
+                return "fail", "self-mutation call did not report success; inspect literal outcome"
             sections = [a.get("section", {}) for a in attempts]
         for section in sections:
             if not section.get("touch_completed") and not (section.get("allocation_refused") and section.get("allocation_limit_error")):
@@ -387,6 +420,8 @@ def evaluate(spec, control, confined):
                     return "fail", "section system commit/physical-memory evidence missing"
         if spec["request"]["kind"] == "mapping-file" and negative.get("scratch_file_size_bytes") != 2 * 1024 ** 3:
             return "fail", "scratch-file view size not established"
+        if spec["request"]["kind"] == "self-ws":
+            return "pass", "raise and disable calls reported success but had no effect on process/job readbacks; parent peak within cap plus one page; job plus per-process cap, not an independent per-process defense"
         return "pass", "parent-read kernel peak within cap plus one page; completed section touch is documented paging residual"
     if spec["id"] == "inherited":
         if not positive.get("identity_match"):
@@ -401,7 +436,7 @@ def evaluate(spec, control, confined):
     if op == "afd" and (negative.get("descriptor_returned") is not False or negative.get("error_code") != 0xC0000022):
         return "fail", "direct AFD creation lacks explicit STATUS_ACCESS_DENIED without handle"
     if not negative.get("explicit_denial"):
-        if op in ("winsock-catalog", "rpc", "dns"):
+        if op in ("rpc", "dns", "dns-query", "rpc-alpc"):
             code = negative.get("error_code")
             literal = f"{code} (0x{code:08X})" if isinstance(code, int) else repr(code)
             return "fail", f"{negative.get('api')}: {negative.get('error_namespace')} status {literal} is not explicit denial evidence"
@@ -686,7 +721,16 @@ def run_suite(args):
     out.mkdir(parents=True, exist_ok=False)
     specs = plan()
     manifest = initial_manifest()
+    def refresh_sockets():
+        for spec in specs:
+            if spec["id"].startswith("socket-"):
+                row = next(r for r in manifest["rows"] if r["id"] == spec["id"])
+                if "control" in row and "confined" in row and not row.get("cleanup_error"):
+                    status, reason = evaluate(spec, row["control"], row["confined"], manifest["rows"])
+                    row.update(status=status, reason=reason)
+                    row["policy_attribution"] = {"status": status, "reason": reason}
     def save():
+        refresh_sockets()
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
         target = out / "manifest.json"
         temporary = out / "manifest.json.tmp"
@@ -803,7 +847,20 @@ def run_suite(args):
                     if not socket_exists and (not routes_complete or any_descriptor):
                         entry.update(status="unrun", reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
                         continue
-                status, reason = evaluate(item, results["control"], results["confined"])
+                status, reason = evaluate(item, results["control"], results["confined"], manifest["rows"])
+                if item["id"].startswith("socket-"):
+                    entry["token_context"] = {"kind": "zero-capability LPAC", "os_build": manifest["os_build"],
+                                              "readback": results["confined"].get("token_before_resume")}
+                    creation = results["confined"].get("response", {}).get("probe", {})
+                    entry["literal_creation"] = {key: creation.get(key) for key in ("return_code", "descriptor_returned", "error_code", "startup")}
+                    entry["literal_creation"]["status"] = "pass" if (
+                        creation.get("success") is False and creation.get("return_code") == -1
+                        and creation.get("descriptor_returned") is False and isinstance(creation.get("error_code"), int)
+                        and results["control"].get("response", {}).get("probe", {}).get("descriptor_returned") is True
+                        and results["control"].get("status") == "pass"
+                        and results["control"].get("response", {}).get("probe", {}).get("success") is True
+                        and results["confined"].get("status") == "pass") else "fail"
+                    entry["policy_attribution"] = {"status": status, "reason": reason}
                 entry.update(status=status, reason=reason,
                              control=public_result(results["control"], "format" in item),
                              confined=public_result(results["confined"], "format" in item))
@@ -830,6 +887,7 @@ def run_suite(args):
                 shutil.rmtree(sentinel_root)
             except OSError as error:
                 manifest["cleanup_error"] = type(error).__name__
+        refresh_sockets()
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
         manifest["status"] = "pass" if all(row["status"] in ("pass", "not-applicable") for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else "fail"
         save()
@@ -884,6 +942,22 @@ def self_test():
     assert evaluate(net, positive, refused) == ("unrun", "not exercisable: no socket obtainable by any tested route")
     constructor = next(row for row in specs if row["id"].startswith("socket-"))
     assert evaluate(constructor, positive, response(success=False, return_code=-1, descriptor_returned=False, error_code=10093))[0] == "fail"
+    socket_control = response(success=True, descriptor_returned=True)
+    required = ["afd-ipv4-tcp", "winsock-registry-parameters", "winsock-registry-protocol", "winsock-registry-namespace"]
+    dependencies = [{"id": key, "status": "pass"} for key in required]
+    constructor = next(s for s in specs if s["id"] == "socket-ipv4-tcp-socket")
+    failed_creation = response(success=False, return_code=-1, descriptor_returned=False, error_code=10093)
+    assert evaluate(constructor, socket_control, failed_creation, dependencies)[0] == "pass"
+    for dependency in dependencies:
+        dependency["status"] = "fail"
+        assert evaluate(constructor, socket_control, failed_creation, dependencies)[0] == "fail"
+        dependency["status"] = "pass"
+    assert evaluate(constructor, socket_control, socket_control, dependencies)[0] == "fail"
+    dns_spec = next(s for s in specs if s["id"] == "dns")
+    assert evaluate(dns_spec, positive, failed_creation) == ("unrun", "not exercisable: Winsock unavailable")
+    independence = next(s for s in specs if s["id"] == "afd-family-independence")
+    assert evaluate(independence, response(success=False, descriptor_returned=False, error_code=0xC000000D),
+                    response(success=False, descriptor_returned=False, error_code=0xC0000022))[0] == "pass"
     shell = next(row for row in specs if row["id"] == "shell")
     assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True, shell_execute_ex={"return_code":1}))[0] == "fail"
     com = next(row for row in specs if row["id"] == "com")
@@ -898,9 +972,7 @@ def self_test():
     assert evaluate(afd_spec, afd_control, afd_denied)[0] == "fail"
     assert evaluate(afd_spec, response(success=True, api="NtCreateFile(AFD endpoint)", descriptor_returned=False), afd_denied)[0] == "unrun"
     assert evaluate(afd_spec, response(success=True, api="NtCreateFile(AFD endpoint)", descriptor_returned=False), afd_control)[0] == "unrun"
-    for op, api, code in (("winsock-catalog", "WSCEnumProtocols", 8),
-                          ("rpc", "RpcBindingFromStringBindingW(ncalrpc epmapper)", 14),
-                          ("dns", "GetAddrInfoW", 10093)):
+    for op, api, code in (("rpc", "RpcBindingFromStringBindingW(ncalrpc epmapper)", 14),):
         spec = next(s for s in specs if s["id"] == op)
         control = response(success=True, api=api)
         failure = response(success=False, api=api, error_code=code,
@@ -931,8 +1003,8 @@ def self_test():
     assert evaluate(memory_spec, memory_control, memory_confined)[0] == "pass"
     memory_confined["response"]["probe"]["successfully_held_bytes"] = LIMIT + 1
     assert evaluate(memory_spec, memory_control, memory_confined)[0] == "fail"
-    assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 6
-    assert len([s for s in specs if s.get("experiment")]) == 9
+    assert sum(row.get("request", {}).get("kind") == "mapping-reserve" for row in specs) == 7
+    assert len([s for s in specs if s.get("experiment")]) == 11
     assert evaluate(next(s for s in specs if s.get("experiment")), positive, positive)[0] == "fail"
     section_spec = next(s for s in specs if s["id"] == "memory-both-mapping")
     system = {"available": True, "commit_total_bytes": 3 * LIMIT, "physical_available_bytes": LIMIT, "physical_total_bytes": 8 * LIMIT}
@@ -954,11 +1026,36 @@ def self_test():
     section["response"]["probe"]["scratch_file_size_bytes"] = 0
     section["parent_peak_working_set_bytes"] = LIMIT
     assert evaluate(file_spec, section, section)[0] == "fail"
+    from copy import deepcopy
+    self_spec = next(s for s in specs if s["id"] == "section-hard-ws-self-ws")
+    self_result = deepcopy(section)
+    readback = {"available": True, "maximum_bytes": LIMIT, "flags": 6,
+                "effective_job_cap": {"available": True, "max_working_set_bytes": LIMIT, "flags": 1}}
+    self_result["response"]["probe"]["attempts"] = [
+        {"attempt": name, "call": {"success": True, "return_code": 1}, "after": deepcopy(readback),
+         "section": deepcopy(section["response"]["probe"])} for name in ("raise", "disable")]
+    assert "reported success but had no effect" in evaluate(self_spec, section, self_result)[1]
+    for key, changed in (("maximum_bytes", LIMIT * 2), ("flags", 0)):
+        tampered = deepcopy(self_result)
+        tampered["response"]["probe"]["attempts"][0]["after"][key] = changed
+        assert evaluate(self_spec, section, tampered)[0] == "fail"
+    for family in ("unix", "hyperv"):
+        afd_family = next(s for s in specs if s["id"] == f"afd-{family}-tcp")
+        assert afd_family["plain_appcontainer_comparison"] is True
+        assert evaluate(afd_family, afd_control, response(success=False, api="NtCreateFile(AFD endpoint)",
+            descriptor_returned=False, error_code=0xC0000022, explicit_denial=True))[0] == "pass"
+    dns_query = next(s for s in specs if s["id"] == "dns-query")
+    for code, expected in ((5, "pass"), (14, "fail"), (10093, "fail"), (1314, "fail")):
+        assert evaluate(dns_query, response(success=True, api="DnsQuery_W"),
+            response(success=False, api="DnsQuery_W", error_code=code, explicit_denial=True))[0] == expected
     sampler_spec = next(s for s in specs if s["id"] == "section-sampler")
     killed = {"status": "fail", "exit_code": 137, "launch_trace": {"grants_restored": True},
               "sampler_enabled": True, "launcher_responsive": True,
-              "sampler_kill": {"terminated_job": True, "over_budget": True, "exit_observed": True, "overshoot_bytes": 123, "time_to_kill_ms": 2}}
+              "sampler_kill": {"terminated_job": True, "over_budget": True, "exit_observed": True, "overshoot_bytes": 123, "time_to_kill_ms": 2, "signal": "worker working set", "detected_after_ms": 5, "kill_completed_after_ms": 7}}
     assert evaluate(sampler_spec, section, killed)[0] == "pass"
+    killed["sampler_kill"]["kill_completed_after_ms"] = 4
+    assert evaluate(sampler_spec, section, killed)[0] == "fail"
+    killed["sampler_kill"]["kill_completed_after_ms"] = 7
     killed["sampler_kill"]["over_budget"] = False
     assert evaluate(sampler_spec, section, killed)[0] == "fail"
     error = public_result({"response": {"error": "PDFium load failed: C:\\private\\pdfium.dll", "pages": []}}, True)
@@ -980,7 +1077,7 @@ def self_test():
     assert endpoints.configure(probe) is None and probe["port"] == 12346 and probe["endpoint_scope"] == "loopback"
     manifest = initial_manifest()
     validate_manifest(manifest)
-    for leak in ("C:\\private\\file", "C:/private/file", "127.0.0.1", "::1", "2606:4700:4700::1111"):
+    for leak in ("C:\\private\\file", "C:/private/file", "127.0.0.1", "::1", "2606:4700:4700::1111", r"\\server\share", "/Users/private/file", r"DOMAIN\private", "username=private"):
         invalid = initial_manifest()
         invalid["leak_test"] = leak
         try:

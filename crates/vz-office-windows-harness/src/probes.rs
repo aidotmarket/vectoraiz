@@ -11,6 +11,7 @@ use windows_sys::{
     core::GUID,
     Win32::{
         Foundation::*,
+        NetworkManagement::Dns::*,
         Networking::WinSock::*,
         Storage::FileSystem::*,
         System::{
@@ -71,6 +72,8 @@ pub fn run(v: &Value) -> Result<Value> {
         "read" | "metadata" | "write" | "create" | "rename" | "delete" | "list" => files(v, op)?,
         "network" => network(v)?,
         "dns" => dns(),
+        "dns-query" => dns_query(),
+        "rpc-alpc" => alpc(),
         "shell" => shell(v)?,
         "com" | "pipe" => broker(op),
         "winsock-registry" => winsock_registry(v)?,
@@ -457,6 +460,26 @@ fn dns() -> Value {
     result
 }
 
+// DNSAPI reaches the resolver without WSAStartup. Free all returned records.
+fn dns_query() -> Value {
+    let mut records = null_mut();
+    let rc = unsafe {
+        DnsQuery_W(
+            wide("example.com").as_ptr(),
+            1,
+            0,
+            null_mut(),
+            &mut records,
+            null_mut(),
+        )
+    };
+    if !records.is_null() {
+        unsafe { DnsFree(records.cast(), DnsFreeRecordList) };
+    }
+    // Only DNS_ERROR/Win32 ERROR_ACCESS_DENIED is accepted here.
+    row("DnsQuery_W", rc as i64, rc == 0, rc, "win32")
+}
+
 fn shell(v: &Value) -> Result<Value> {
     let url = wide(arg(v, "url")?);
     let verb = wide("open");
@@ -529,6 +552,10 @@ fn winsock_registry(v: &Value) -> Result<Value> {
     );
     if status == 0 {
         unsafe { RegCloseKey(key) };
+    }
+    if v["catalog"] == "protocol" {
+        result["catalog_diagnostic"] =
+            json!({"scope":"consequence of catalog registry denial", "result":winsock_catalog()});
     }
     result["catalog"] = v["catalog"].clone();
     result["startup"] = Winsock::new().evidence();
@@ -603,6 +630,62 @@ unsafe extern "system" {
         ea_length: u32,
     ) -> i32;
 }
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtAlpcConnectPort(
+        handle: *mut HANDLE,
+        name: *mut NativeString,
+        attributes: *mut ObjectAttributes,
+        port_attributes: *mut std::ffi::c_void,
+        flags: u32,
+        required_sid: *mut std::ffi::c_void,
+        message: *mut std::ffi::c_void,
+        length: *mut usize,
+        out_attributes: *mut std::ffi::c_void,
+        in_attributes: *mut std::ffi::c_void,
+        timeout: *const i64,
+    ) -> i32;
+}
+fn alpc() -> Value {
+    let mut name = wide(r"\RPC Control\epmapper");
+    let mut string = NativeString {
+        length: ((name.len() - 1) * 2) as u16,
+        maximum_length: (name.len() * 2) as u16,
+        buffer: name.as_mut_ptr(),
+    };
+    let mut handle = null_mut();
+    let timeout = -50_000_000i64; // bounded relative five-second connect
+    let rc = unsafe {
+        NtAlpcConnectPort(
+            &mut handle,
+            &mut string,
+            null_mut(),
+            null_mut(),
+            0,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            &timeout,
+        )
+    };
+    let returned = !handle.is_null() && handle != INVALID_HANDLE_VALUE;
+    let mut result = residual_status(
+        "NtAlpcConnectPort(epmapper)",
+        rc as i64,
+        rc >= 0 && returned,
+        rc as u32,
+        "ntstatus",
+    );
+    result["descriptor_returned"] = json!(returned);
+    result["explicit_denial"] = json!(rc as u32 == 0xC0000022 && !returned);
+    if returned {
+        unsafe { CloseHandle(handle) };
+    }
+    result
+}
+
 // Layout from phnt/include/ntafd.h: six 32-bit fields followed by WCHAR[1]
 // and C tail padding (28 bytes on x64). No transport device name is supplied.
 #[repr(C)]
@@ -644,7 +727,13 @@ fn afd(v: &Value) -> Result<Value> {
     ea.packet.endpoint_flags = if udp { 0x11 } else { 0 };
     ea.packet.address_family = family;
     ea.packet.socket_type = if udp { SOCK_DGRAM } else { SOCK_STREAM };
-    ea.packet.protocol = if udp { IPPROTO_UDP } else { IPPROTO_TCP };
+    ea.packet.protocol = if family == 1 || family == 34 {
+        0
+    } else if udp {
+        IPPROTO_UDP
+    } else {
+        IPPROTO_TCP
+    };
     let ea_length = std::mem::offset_of!(AfdOpenEa, packet) + size_of::<AfdOpenPacket>();
     let mut name = wide(r"\Device\Afd\Endpoint");
     let mut string = NativeString {
