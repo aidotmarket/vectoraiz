@@ -17,6 +17,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import struct
@@ -78,15 +79,116 @@ def digest(path):
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def command(argv, log, timeout=70):
-    # Logs are durable and complete, including failures and timeout output.
-    with log.open("wb") as stream:
-        try:
-            return subprocess.run(list(map(str, argv)), stdout=stream,
-                                  stderr=subprocess.STDOUT, timeout=timeout, check=False).returncode
-        except subprocess.TimeoutExpired:
-            stream.write(b"\nHARNESS SUBPROCESS DEADLINE EXCEEDED\n")
-            return 124
+RESOURCE_OUT = None
+LAUNCHER = None
+
+
+def child_options(argv):
+    options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {}
+    root = None
+    if RESOURCE_OUT is not None and Path(argv[0]).resolve() == LAUNCHER and "--recover" not in argv:
+        root = RESOURCE_OUT / ("native-" + secrets.token_hex(12))
+        root.mkdir()
+        options["env"] = {**os.environ, "OFFICE_RESOURCE_JOURNAL": str(root)}
+    return options, root
+
+
+def stop_child(process):
+    if process.poll() is not None:
+        return
+    try:
+        if sys.platform == "win32":
+            process.send_signal(signal.CTRL_BREAK_EVENT)
+        else:
+            process.terminate()
+    except OSError:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+        return
+    try:
+        process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def recover_resources(launcher, out):
+    success = True
+    for root in sorted(out.glob("native-*")):
+        if (root / "resource-journal").is_dir():
+            try:
+                code, _ = command([launcher, "--recover", "--out", root], root / "recovery.log",
+                                  allow_no_log=True)
+                success = code == 0 and success
+            except Exception:
+                success = False
+    return {"success": success}
+
+
+def command(argv, log, timeout=70, allow_no_log=False):
+    # Restoration must run even if private evidence storage has failed.
+    try:
+        stream = log.open("wb")
+    except OSError:
+        if not allow_no_log:
+            raise
+        stream = None
+    try:
+        options, root = child_options(argv)
+        with subprocess.Popen(list(map(str, argv)), stdout=stream if stream else subprocess.PIPE,
+                              stderr=subprocess.STDOUT, **options) as process:
+            try:
+                output, _ = process.communicate(timeout=timeout)
+                return (process.returncode, output) if allow_no_log else process.returncode
+            except (subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+                stop_child(process)
+                if root is not None:
+                    recovery, _ = command([argv[0], "--recover", "--out", root], root / "recovery.log",
+                                          allow_no_log=True)
+                    if recovery != 0:
+                        raise RuntimeError("native timeout/cancellation recovery failed") from error
+                if isinstance(error, KeyboardInterrupt):
+                    raise
+                if stream:
+                    stream.write(b"\nHARNESS SUBPROCESS DEADLINE EXCEEDED\n")
+                return (124, None) if allow_no_log else 124
+    finally:
+        if stream:
+            stream.close()
+
+
+def restore_audit(out):
+    state = out / "audit-before.clixml"
+    marker = out / "audit-restored.json"
+    if not state.exists() or marker.exists():
+        return {"success": True}
+    try:
+        result = audit_call("restore", out, State=state)
+    except Exception as error:
+        result = {"success": False, "reason": type(error).__name__}
+    outcome = {"success": result.get("success") is True}
+    try:
+        (out / "audit-restoration-result.json").write_text(json.dumps(outcome))
+        if outcome["success"]:
+            marker.write_text(json.dumps(outcome))
+    except OSError:
+        pass
+    # stdout is an independent outcome channel if all evidence writes fail.
+    try:
+        print(json.dumps({"audit_restoration": outcome}), flush=True)
+    except OSError:
+        pass
+    return outcome
+
+
+def recover_run(launcher, out):
+    try:
+        resources = recover_resources(launcher, out)
+    finally:
+        audit = restore_audit(out)
+    return {"success": resources["success"] and audit["success"],
+            "resources": resources, "audit_restoration": audit}
 
 
 def pe_imports(path):
@@ -864,9 +966,13 @@ def audit_call(mode, folder, **arguments):
     for key, value in arguments.items():
         argv.extend(["-" + key, str(value)])
     log = folder / ("audit-" + mode + "-" + secrets.token_hex(4) + ".json")
-    code = command(argv, log, timeout=30)
     try:
-        result = json.loads(log.read_text(encoding="utf-8-sig"))
+        if mode == "restore":
+            code, output = command(argv, log, timeout=30, allow_no_log=True)
+        else:
+            code, output = command(argv, log, timeout=30), None
+        result = json.loads(output.decode("utf-8-sig") if output is not None
+                            else log.read_text(encoding="utf-8-sig"))
         if code:
             result["success"] = False
         if nonce:
@@ -1066,25 +1172,38 @@ class RunUnixListener:
             "op": "unix-run-listener", "scratch": str(self.scratch),
             "abstract_name": "vz-run-" + secrets.token_hex(12)}}))
         self.log = (self.folder / "launcher.log").open("wb")
+        argv = [args.launcher.resolve(), args.worker.resolve(), "confined", request,
+                self.result_path, self.scratch, attack, *args.loader_dlls]
+        options, self.resource_root = child_options(argv)
+        self.launcher = args.launcher.resolve()
         try:
-            self.process = subprocess.Popen(list(map(str, [args.launcher.resolve(), args.worker.resolve(),
-                "confined", request, self.result_path, self.scratch, attack, *args.loader_dlls])),
-                stdout=self.log, stderr=subprocess.STDOUT)
+            self.process = subprocess.Popen(list(map(str, argv)),
+                stdout=self.log, stderr=subprocess.STDOUT, **options)
         except Exception:
             self.log.close()
             cleanup_scratch(self.scratch, self.folder / "cleanup.json")
             raise
-        deadline = time.monotonic() + 20
-        self.ready = False
-        while self.process.poll() is None and time.monotonic() < deadline:
+        try:
+            deadline = time.monotonic() + 20
+            self.ready = False
+            while self.process.poll() is None and time.monotonic() < deadline:
+                try:
+                    self.ready = json.loads((self.scratch / "ready.json").read_text()).get("success") is True
+                except (OSError, ValueError):
+                    pass
+                if self.ready:
+                    break
+                time.sleep(0.05)
+            self.started = time.monotonic()
+        except BaseException:
             try:
-                self.ready = json.loads((self.scratch / "ready.json").read_text()).get("success") is True
-            except (OSError, ValueError):
-                pass
-            if self.ready:
-                break
-            time.sleep(0.05)
-        self.started = time.monotonic()
+                stop_child(self.process)
+            finally:
+                self.log.close()
+                if self.resource_root is not None:
+                    command([self.launcher, "--recover", "--out", self.resource_root],
+                            self.resource_root / "recovery.log", allow_no_log=True)
+            raise
 
     def finish(self):
         alive_after_probes = self.process.poll() is None
@@ -1093,11 +1212,15 @@ class RunUnixListener:
         stopped_normally = True
         try:
             code = self.process.wait(timeout=8)
-        except subprocess.TimeoutExpired:
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
             stopped_normally = False
-            # Closing the launcher also closes its kill-on-close worker job.
-            self.process.kill()
-            code = self.process.wait(timeout=5)
+            # Request launcher cleanup before falling back to kill-on-close.
+            stop_child(self.process)
+            code = self.process.returncode
+            if self.resource_root is not None:
+                if command([self.launcher, "--recover", "--out", self.resource_root],
+                           self.resource_root / "recovery.log", allow_no_log=True)[0] != 0:
+                    raise RuntimeError("listener recovery failed")
         finally:
             self.log.close()
         try:
@@ -1446,8 +1569,12 @@ def assemble_manifest(manifest):
 
 
 def run_suite(args):
+    global RESOURCE_OUT, LAUNCHER
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
+    RESOURCE_OUT, LAUNCHER = out, args.launcher.resolve()
+    if not recover_run(args.launcher, out)["success"]:
+        raise RuntimeError("startup recovery failed")
     selected = selected_rows(getattr(args, "rows", None))
     specs = [s for s in diagnostic_plan() + sorted(plan(), key=lambda row: row["id"] != "inventory-outcome")
              if s["id"] in selected]
@@ -1674,36 +1801,50 @@ def run_suite(args):
         manifest["setup_error"] = type(error).__name__ + ": " + str(error) if isinstance(error, RuntimeError) else type(error).__name__
         (out / "setup-error.txt").write_text(str(error), encoding="utf-8")
     finally:
-        diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
-        if run_listener is not None and diagnostic is not None:
+        try:
+            diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
+            if run_listener is not None and diagnostic is not None:
+                try:
+                    diagnostic["run_listener"] = run_listener.finish()
+                except Exception as error:
+                    diagnostic["run_listener"] = {"status": Status.FAIL, "covers_entire_run": False,
+                                                  "reason": type(error).__name__}
+                    manifest["cleanup_error"] = "run listener cleanup failed: " + type(error).__name__
+            if endpoints:
+                try:
+                    endpoints.close()
+                except Exception as error:
+                    manifest["cleanup_error"] = "endpoint cleanup failed: " + type(error).__name__
+            if sentinel_root:
+                try:
+                    shutil.rmtree(sentinel_root)
+                except OSError as error:
+                    manifest["cleanup_error"] = type(error).__name__
+            diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
+            if run_cursor is not None and diagnostic is not None:
+                captured = audit_call("capture", out, After=run_cursor.get("record_id", 0), Target="vectoraiz.exe")
+                diagnostic["vectoraiz_capture"] = {
+                    **{key: captured.get(key) for key in ("after", "through", "target_record_ids", "filtered_query_success")},
+                    "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
+                    "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
+                row = next((r for r in manifest["rows"] if r["id"] == "unix-2c" and r["id"] in selected), None)
+                if row is not None and row["status"] != Status.FAIL and not row.get("cleanup_error") and not audit_setup.get("elevation_required"):
+                    row["status"], row["reason"] = unix_exit(diagnostic, "2c")
+        except Exception as error:
+            manifest["cleanup_error"] = "final cleanup/capture failed: " + type(error).__name__
+        finally:
+            # Independently protected: capture/report/log failures cannot skip audit restore.
             try:
-                diagnostic["run_listener"] = run_listener.finish()
+                manifest["resource_recovery"] = recover_resources(args.launcher, out)
+                if not manifest["resource_recovery"]["success"]:
+                    manifest["cleanup_error"] = "native resource recovery failed"
             except Exception as error:
-                diagnostic["run_listener"] = {"status": Status.FAIL, "covers_entire_run": False,
-                                              "reason": type(error).__name__}
-                (out / "listener-finish-error.txt").write_text(str(error))
-        if endpoints:
-            endpoints.close()
-        if sentinel_root:
-            try:
-                shutil.rmtree(sentinel_root)
-            except OSError as error:
-                manifest["cleanup_error"] = type(error).__name__
-        diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
-        if run_cursor is not None and diagnostic is not None:
-            captured = audit_call("capture", out, After=run_cursor.get("record_id", 0), Target="vectoraiz.exe")
-            diagnostic["vectoraiz_capture"] = {
-                **{key: captured.get(key) for key in ("after", "through", "target_record_ids", "filtered_query_success")},
-                "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
-                "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
-            row = next((r for r in manifest["rows"] if r["id"] == "unix-2c" and r["id"] in selected), None)
-            if row is not None and row["status"] != Status.FAIL and not row.get("cleanup_error") and not audit_setup.get("elevation_required"):
-                row["status"], row["reason"] = unix_exit(diagnostic, "2c")
-        if audit_state.exists():
-            restored = audit_call("restore", out, State=audit_state)
-            manifest["audit_restoration"] = {"success": restored.get("success")}
-            if not restored.get("success"):
-                manifest["cleanup_error"] = "audit policy restoration failed; use saved private state"
+                manifest["cleanup_error"] = "native resource recovery failed: " + type(error).__name__
+            finally:
+                if audit_state.exists():
+                    manifest["audit_restoration"] = restore_audit(out)
+                    if not manifest["audit_restoration"]["success"]:
+                        manifest["cleanup_error"] = "audit policy restoration failed; use saved private state"
         refresh_sockets(manifest)
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ROW_STATUSES}
         manifest["status"] = Status.PASS if all(row["status"] in (Status.PASS, Status.NOT_APPLICABLE) for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else Status.FAIL
@@ -1779,6 +1920,94 @@ def assembly_self_test():
             assert modes == ["setup", "restore"]
             assert observed["audit_restoration"]["success"] is restored_ok
             assert bool(observed.get("cleanup_error")) is not restored_ok
+
+    global RESOURCE_OUT, LAUNCHER
+    RESOURCE_OUT = LAUNCHER = None
+
+    # Final capture and failure-report writes are both allowed to fail; neither
+    # may prevent the independent audit restoration action and outcome record.
+    for failure in ("capture", "report"):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+            root = outside(Path(temporary))
+            worker = root / "worker.exe"
+            worker.write_bytes(b"synthetic")
+            args = SimpleNamespace(out=root / "run", worker=worker, launcher=worker,
+                                   pdfium=None, kit_dir=root, rows="shell")
+            modes = []
+            def failing_final_capture(mode, unused, **kw):
+                modes.append(mode)
+                if mode == "setup":
+                    kw["State"].write_text("backup")
+                if mode == "capture":
+                    raise OSError("injected final capture failure")
+                return {"success": True, "record_id": 1}
+            original_write = Path.write_text
+            def write(path, *a, **kw):
+                if failure == "report" and path.name == "setup-error.txt":
+                    raise OSError("injected failure-report creation error")
+                return original_write(path, *a, **kw)
+            with patch.object(sys, "platform", "win32"), \
+                 patch.object(Path, "home", return_value=root), \
+                 patch.object(Path, "write_text", new=write), \
+                 patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+                 patch(__name__ + ".audit_call", side_effect=failing_final_capture), \
+                 patch(__name__ + ".launch_diagnostic", side_effect=RuntimeError("injected probe failure")):
+                try:
+                    assert run_suite(args) == 1
+                except OSError:
+                    assert failure == "report"
+            assert modes[-1] == "restore" and "capture" in modes
+            assert json.loads((args.out / "audit-restoration-result.json").read_text())["success"]
+            # Recovery must not restore an already restored audit backup again.
+            with patch(__name__ + ".audit_call") as audit:
+                assert recover_run(worker, args.out)["success"]
+                audit.assert_not_called()
+    RESOURCE_OUT = LAUNCHER = None
+
+    # Exercise the actual no-log fallback through command and audit_call.
+    with tempfile.TemporaryDirectory(dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+        folder = outside(Path(temporary))
+        from unittest.mock import MagicMock
+        child = MagicMock()
+        child.__enter__.return_value = child
+        child.returncode = 0
+        child.communicate.return_value = (b'{"success":true}', None)
+        with patch.object(Path, "open", side_effect=OSError("injected log creation failure")), \
+             patch.object(subprocess, "Popen", return_value=child) as popen:
+            assert audit_call("restore", folder, State=folder / "audit-before.clixml")["success"]
+            assert popen.call_args.kwargs["stdout"] == subprocess.PIPE
+
+    # Timeout and Ctrl+C request a console break, wait, then recover just the
+    # interrupted invocation (the run-wide listener's journal stays untouched).
+    for interrupt in (False, True):
+        with tempfile.TemporaryDirectory(dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+            root = outside(Path(temporary))
+            RESOURCE_OUT, LAUNCHER = root, (root / "launcher.exe").resolve()
+            child = MagicMock()
+            child.__enter__.return_value = child
+            child.poll.return_value = None
+            child.communicate.side_effect = KeyboardInterrupt() if interrupt else subprocess.TimeoutExpired("launcher", 1)
+            recovery = MagicMock()
+            recovery.__enter__.return_value = recovery
+            recovery.returncode = 0
+            recovery.communicate.return_value = (None, None)
+            with patch.object(sys, "platform", "win32"), \
+                 patch.object(subprocess, "CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                 patch.object(signal, "CTRL_BREAK_EVENT", 1, create=True), \
+                 patch.object(subprocess, "Popen", side_effect=[child, recovery]) as popen:
+                try:
+                    assert command([LAUNCHER, "worker"], root / "launch.log", timeout=1) == 124
+                    assert not interrupt
+                except KeyboardInterrupt:
+                    assert interrupt
+                child.send_signal.assert_called_once_with(1)
+                child.wait.assert_called_once_with(timeout=15)
+                child.kill.assert_not_called()
+                calls = popen.call_args_list
+                assert calls[0].kwargs["creationflags"] == 512
+                journal_root = Path(calls[0].kwargs["env"]["OFFICE_RESOURCE_JOURNAL"])
+                assert calls[1].args[0] == [str(LAUNCHER), "--recover", "--out", str(journal_root)]
+    RESOURCE_OUT = LAUNCHER = None
 
     manifest = initial_manifest()
     seen_rows = set()
@@ -1989,6 +2218,7 @@ def assembly_self_test():
             class ListenerProcess:
                 def __init__(self, argv, **kwargs):
                     self.killed = False
+                    self.returncode = None
                     self.root = Path(argv[5])
                     self.result = Path(argv[4])
                     if case != "early-exit":
@@ -2005,8 +2235,11 @@ def assembly_self_test():
                     self.result.write_text(json.dumps(response(stop_observed=case != "missing-stop",
                         observation_seconds=10)))
                     return 1 if case in ("failed-launch", "early-exit", "stop-timeout") else 0
+                def terminate(self):
+                    pass
                 def kill(self):
                     self.killed = True
+                    self.returncode = 1
             with patch.object(subprocess, "Popen", side_effect=ListenerProcess):
                 listener = RunUnixListener(SimpleNamespace(launcher=folder / "launcher",worker=folder / "worker",loader_dlls=[]),
                                            folder, folder / "attack")
@@ -2767,6 +3000,7 @@ def main():
     parser.add_argument("--write-kit-requirements", type=Path, help="inventory actual kit PE imports")
     parser.add_argument("--rows", help="comma-separated row IDs or client-outcomes")
     parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("--recover", action="store_true", help="restore journaled native resources and saved audit settings")
     parser.add_argument("--initialize-only", action="store_true", help="write all-unrun manifest before CI build")
     parser.add_argument("--validate-manifest", type=Path)
     parser.add_argument("--fetch-pdfium", type=Path, help="fetch only the native-ci pinned Windows PDFium, no models")
@@ -2797,6 +3031,10 @@ def main():
         return 0
     if args.out is None:
         parser.error("--out outside the checkout is required")
+    if args.recover:
+        result = recover_run(args.launcher, outside(args.out))
+        print(json.dumps(result))
+        return 0 if result["success"] else 1
     if args.initialize_only:
         out = outside(args.out)
         out.mkdir(parents=True, exist_ok=False)

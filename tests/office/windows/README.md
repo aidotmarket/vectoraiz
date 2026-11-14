@@ -56,7 +56,7 @@ an interactive signed-in desktop with a working default HTTP browser, Python
 3.12 x64, and an **elevated PowerShell** (Start → PowerShell → Run as
 administrator). Microsoft Office, Visual Studio, Rust, models and OCR assets
 are not needed. The kit includes the pinned PDFium; CI checks the native loader
-closure and builds with the static MSVC runtime. Only the kit download requires
+closure and builds with the dynamic MSVC runtime (Microsoft Visual C++ x64). Only the kit download requires
 network access; the selected shell controls use a disposable loopback HTTP
 listener, and the file control opens a synthetic `.cmd` file, not an Office file.
 Do not run another harness or change audit settings during the measurement.
@@ -137,14 +137,17 @@ PowerShell **before deleting evidence** (set `$kit` and `$out` to the same folde
 if reopening the terminal):
 
 ```powershell
-powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$kit/scripts/office-windows-audit.ps1" -Mode restore -State "$out/audit-before.clixml"
+python "$kit/scripts/office-windows-feasibility.py" --kit-dir "$kit" --recover --out "$out"
 ```
 
-This restores the saved audit-policy backup and the prior registry value. Use it
-only if `audit-before.clixml` exists; a run refused for lack of elevation made no
-audit changes. A forced kill can bypass native ACL/profile cleanup; retain the
-private launcher/cleanup logs and resolve their recorded leftover resources
-before deleting them. Normal cleanup failures are recorded rather than hidden.
+Recovery removes the journaled package SID ACEs and AppContainer profiles and
+restores the saved audit-policy backup and prior registry value if not already
+restored. It is idempotent: retry after resolving any reported failure. Keep the
+private resource journals and audit backups until recovery reports success.
+The runner also performs recovery at the start and end of each run and after a
+launcher timeout. Ctrl+C requests native cancellation and waits for cleanup;
+a forced kill requires the recovery command above. Normal cleanup failures are
+recorded rather than hidden.
 After inspection, delete the extracted kit and `$out` to remove downloads,
 private logs and audit backups. There is no installed service or persistent
 listener to uninstall. This run makes no Windows/C1 qualification claim and does

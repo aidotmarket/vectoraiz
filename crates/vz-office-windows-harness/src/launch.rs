@@ -9,6 +9,7 @@ use std::{
     os::windows::{ffi::OsStrExt, io::FromRawHandle},
     path::{Path, PathBuf},
     ptr::{null, null_mut},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
@@ -16,7 +17,7 @@ use windows_sys::Win32::{
     Security::{Authorization::*, Isolation::*, *},
     Storage::FileSystem::*,
     System::{
-        Diagnostics::ToolHelp::*, JobObjects::*, Memory::*, Pipes::*, ProcessStatus::*,
+        Console::*, Diagnostics::ToolHelp::*, JobObjects::*, Memory::*, Pipes::*, ProcessStatus::*,
         RemoteDesktop::ProcessIdToSessionId, SystemServices::JOB_OBJECT_MSG_NOTIFICATION_LIMIT,
         Threading::*, IO::*,
     },
@@ -41,6 +42,174 @@ impl Drop for Handle {
 // Owns handles, not shared with any caller.
 unsafe impl Send for Handle {}
 
+// The console handler only requests cancellation; the owning thread unwinds normally.
+static STOP: AtomicBool = AtomicBool::new(false);
+unsafe extern "system" fn console_stop(event: u32) -> i32 {
+    if event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT {
+        STOP.store(true, Ordering::SeqCst);
+        1
+    } else {
+        0
+    }
+}
+fn cancelled() -> Result<()> {
+    ensure!(
+        !STOP.load(Ordering::SeqCst),
+        "launcher cancelled; restoring resources"
+    );
+    Ok(())
+}
+
+fn journal(record: Value) -> Result<()> {
+    let root = std::env::var_os("OFFICE_RESOURCE_JOURNAL")
+        .or_else(|| std::env::var_os("OFFICE_EVIDENCE_DIR"))
+        .context("external resource journal directory required")?;
+    let directory = PathBuf::from(root).join("resource-journal");
+    std::fs::create_dir_all(&directory)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join(format!("{}.jsonl", std::process::id())))?;
+    let mut bytes = serde_json::to_vec(&record)?;
+    bytes.push(b'\n');
+    file.write_all(&bytes)?;
+    file.sync_all()?; // No mutation until the intent is durable.
+    cancelled()
+}
+
+fn sid_string(sid: PSID) -> Result<String> {
+    let mut text = null_mut();
+    check(
+        unsafe { ConvertSidToStringSidW(sid, &mut text) },
+        "SID journal",
+    )?;
+    let mut len = 0;
+    unsafe {
+        while *text.add(len) != 0 {
+            len += 1;
+        }
+    }
+    let result = unsafe { String::from_utf16(std::slice::from_raw_parts(text, len)) };
+    unsafe { LocalFree(text.cast()) };
+    Ok(result?)
+}
+
+fn recover_record(record: &Value) -> Result<()> {
+    match record["kind"].as_str() {
+        Some("profile") => {
+            let name = record["name"].as_str().context("profile name")?;
+            ensure!(name.starts_with("vectoraiz.C1."), "unexpected profile name");
+            let hr = unsafe { DeleteAppContainerProfile(wide(name).as_ptr()) };
+            // HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND): already deleted.
+            ensure!(
+                hr >= 0 || hr as u32 == 0x80070002,
+                "profile recovery HRESULT={hr:#x}"
+            );
+        }
+        Some("ace") => {
+            let path = wide(record["path"].as_str().context("ACE path")?);
+            let sid_text = record["sid"].as_str().context("ACE SID")?;
+            ensure!(sid_text.starts_with("S-1-15-2-"), "unexpected package SID");
+            let mut sid = null_mut();
+            check(
+                unsafe { ConvertStringSidToSidW(wide(sid_text).as_ptr(), &mut sid) },
+                "recovery SID",
+            )?;
+            let mut descriptor = null_mut();
+            let mut old = null_mut();
+            let status = unsafe {
+                GetNamedSecurityInfoW(
+                    path.as_ptr(),
+                    SE_FILE_OBJECT,
+                    DACL_SECURITY_INFORMATION,
+                    null_mut(),
+                    null_mut(),
+                    &mut old,
+                    null_mut(),
+                    &mut descriptor,
+                )
+            };
+            if status == ERROR_FILE_NOT_FOUND || status == ERROR_PATH_NOT_FOUND {
+                unsafe { LocalFree(sid) };
+                return Ok(());
+            }
+            if status != 0 {
+                unsafe { LocalFree(sid) };
+                bail!("recovery GetNamedSecurityInfoW={status}");
+            }
+            // A NULL DACL has no package ACE to remove; preserve its semantics.
+            let mut acl = null_mut();
+            let mut status = 0;
+            if !old.is_null() {
+                let entry = EXPLICIT_ACCESS_W {
+                    grfAccessPermissions: 0,
+                    grfAccessMode: REVOKE_ACCESS,
+                    grfInheritance: 0,
+                    Trustee: TRUSTEE_W {
+                        pMultipleTrustee: null_mut(),
+                        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                        TrusteeForm: TRUSTEE_IS_SID,
+                        TrusteeType: TRUSTEE_IS_UNKNOWN,
+                        ptstrName: sid.cast(),
+                    },
+                };
+                status = unsafe { SetEntriesInAclW(1, &entry, old, &mut acl) };
+                if status == 0 {
+                    status = unsafe {
+                        SetNamedSecurityInfoW(
+                            path.as_ptr(),
+                            SE_FILE_OBJECT,
+                            DACL_SECURITY_INFORMATION,
+                            null_mut(),
+                            null_mut(),
+                            acl,
+                            null(),
+                        )
+                    };
+                }
+            }
+            unsafe {
+                LocalFree(acl.cast());
+                LocalFree(descriptor);
+                LocalFree(sid);
+            }
+            ensure!(status == 0, "ACE recovery={status}");
+        }
+        _ => bail!("unknown resource record"),
+    }
+    Ok(())
+}
+
+fn recover_with(out: &Path, mut apply: impl FnMut(&Value) -> Result<()>) -> Result<()> {
+    let directory = out.join("resource-journal");
+    if !directory.exists() {
+        return Ok(());
+    }
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|e| e != "jsonl") {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)?;
+        // Grants unwind before profiles, including across interrupted setup.
+        for line in content.lines().rev() {
+            let result = serde_json::from_str(line)
+                .map_err(anyhow::Error::from)
+                .and_then(|v| apply(&v));
+            if let Err(error) = result {
+                failures.push(format!("{error:#}"));
+            }
+        }
+    }
+    ensure!(
+        failures.is_empty(),
+        "resource recovery failed: {}",
+        failures.join("; ")
+    );
+    Ok(())
+}
+
 struct Profile {
     name: Vec<u16>,
     sid: PSID,
@@ -55,6 +224,7 @@ impl Profile {
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos()
         ));
+        journal(json!({"kind":"profile", "name":String::from_utf16(&name[..name.len()-1])?}))?;
         let mut sid = null_mut();
         let hr = unsafe {
             CreateAppContainerProfile(
@@ -123,6 +293,10 @@ struct Grant {
 }
 impl Grant {
     fn new(path: &Path, sid: PSID, mask: u32, inherit: u32) -> Result<Self> {
+        journal(
+            json!({"kind":"ace", "path":path.to_str().context("journal path UTF-8")?,
+            "sid":sid_string(sid)?}),
+        )?;
         let path = wide(path);
         let mut descriptor = null_mut();
         let mut old = null_mut();
@@ -693,6 +867,17 @@ fn minimal_environment(
 /// Arguments are fixed paths; never forward arbitrary command strings to CreateProcess.
 pub fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|a| a == "--recover") {
+        ensure!(
+            args.len() == 3 && args[1] == "--out",
+            "--recover --out directory"
+        );
+        return recover_with(Path::new(&args[2]), recover_record);
+    }
+    check(
+        unsafe { SetConsoleCtrlHandler(Some(console_stop), 1) },
+        "console stop handler",
+    )?;
     ensure!(
         args.len() >= 6,
         "worker mode request.json result.json scratch attack-file [exact-input ...]"
@@ -711,6 +896,7 @@ pub fn main() -> Result<()> {
 }
 
 fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
+    cancelled()?;
     let mode = args[1].to_str().context("mode")?;
     let diagnostic = mode.starts_with("diagnostic-");
     ensure!(
@@ -1042,6 +1228,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         }
     }
     let kill = Kill(process_handle.0);
+    cancelled()?;
     if let Some(job) = &job {
         check(
             unsafe { AssignProcessToJobObject(job.0, process_handle.0) },
@@ -1251,6 +1438,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let mut previous_sample = Instant::now();
     let mut max_loop_gap_ms = 0u128;
     loop {
+        cancelled()?;
         let now = Instant::now();
         max_loop_gap_ms = max_loop_gap_ms.max(now.duration_since(previous_sample).as_millis());
         previous_sample = now;
@@ -1508,6 +1696,45 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn journal_recovery_is_reverse_order_idempotent_and_continues_after_failure() -> Result<()> {
+        let root = PathBuf::from(
+            std::env::var_os("OFFICE_EVIDENCE_DIR")
+                .context("external evidence directory required")?,
+        )
+        .join("journal-recovery-test");
+        let directory = root.join("resource-journal");
+        std::fs::create_dir_all(&directory)?;
+        std::fs::write(
+            directory.join("mock.jsonl"),
+            concat!(
+                "{\"kind\":\"profile\",\"name\":\"vectoraiz.C1.mock\"}\n",
+                "{\"kind\":\"ace\",\"path\":\"mock-file\",\"sid\":\"S-1-15-2-123\"}\n"
+            ),
+        )?;
+        let mut remaining = std::collections::HashSet::from(["profile", "ace"]);
+        let mut order = Vec::new();
+        for _ in 0..2 {
+            recover_with(&root, |record| {
+                let kind = record["kind"].as_str().unwrap();
+                order.push(kind.to_string());
+                remaining.remove(kind);
+                Ok(())
+            })?;
+            assert!(remaining.is_empty());
+        }
+        assert_eq!(order, ["ace", "profile", "ace", "profile"]);
+        let mut attempted = Vec::new();
+        assert!(recover_with(&root, |record| {
+            attempted.push(record["kind"].as_str().unwrap().to_string());
+            bail!("injected Win32 failure")
+        })
+        .is_err());
+        assert_eq!(attempted, ["ace", "profile"]);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn real_environment_uses_only_scratch_and_system_root() -> Result<()> {
