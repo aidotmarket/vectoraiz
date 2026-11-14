@@ -2237,13 +2237,18 @@ def assembly_self_test():
                     return 1 if case in ("failed-launch", "early-exit", "stop-timeout") else 0
                 def terminate(self):
                     pass
+                def send_signal(self, event):
+                    assert event == signal.CTRL_BREAK_EVENT
                 def kill(self):
                     self.killed = True
                     self.returncode = 1
             with patch.object(subprocess, "Popen", side_effect=ListenerProcess):
                 listener = RunUnixListener(SimpleNamespace(launcher=folder / "launcher",worker=folder / "worker",loader_dlls=[]),
                                            folder, folder / "attack")
-                observation = listener.finish()
+                # Exercise Windows console cancellation even on a Unix host.
+                with patch.object(sys, "platform", "win32"), \
+                     patch.object(signal, "CTRL_BREAK_EVENT", 1, create=True):
+                    observation = listener.finish()
             assert observation["covers_entire_run"] is (case == "complete"), case
 
     # Run the real suspended-launch emitter, validating every partial save.
