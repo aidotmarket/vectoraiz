@@ -68,16 +68,16 @@ Do not run another harness or change audit settings during the measurement.
    Server runner manifest; it is not the client measurement. Extract the ZIP to
    a fresh folder, for example `$HOME\Downloads\office-windows-run-kit`.
 2. In elevated PowerShell, set the extracted folder and verify the **exact** file
-   set and all five hashes before running any kit code:
+   set and all six hashes before running any kit code:
 
    ```powershell
    $ErrorActionPreference = 'Stop'
    $kit = (Resolve-Path "$HOME\Downloads\office-windows-run-kit").Path
-   $expected = @('vz-parser-worker.exe', 'vz-office-windows-launch.exe', 'pdfium.dll', 'scripts/office-windows-feasibility.py', 'scripts/office-windows-audit.ps1')
+   $expected = @('REQUIREMENTS.txt', 'vz-parser-worker.exe', 'vz-office-windows-launch.exe', 'pdfium.dll', 'scripts/office-windows-feasibility.py', 'scripts/office-windows-audit.ps1')
    $actual = @(Get-ChildItem $kit -Recurse -File | ForEach-Object { $_.FullName.Substring($kit.Length + 1).Replace('\','/') })
    if (Compare-Object ($expected + 'SHA256SUMS' | Sort-Object) ($actual | Sort-Object)) { throw 'Unexpected kit files' }
    $sums = @(Get-Content "$kit/SHA256SUMS")
-   if ($sums.Count -ne 5) { throw 'Expected five checksums' }
+   if ($sums.Count -ne 6) { throw 'Expected six checksums' }
    $seen = @()
    foreach ($line in $sums) {
      if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'Invalid checksum line' }
@@ -88,6 +88,16 @@ Do not run another harness or change audit settings during the measurement.
    }
    python --version  # Must be Python 3.12.x
    ```
+
+   The kit uses the **Microsoft Visual C++ x64 runtime**. It is expected to be
+   present on Max's PC with vectorAIz 0.0.25 installed. `REQUIREMENTS.txt` lists
+   the actual non-system normal and delay imports for each executable and PDFium;
+   no Microsoft redistributables are bundled. Before any probe, the runner checks
+   that this inventory matches the binaries and that each external DLL loads
+   from Windows System32. Success prints `run kit preflight passed: required
+   non-system DLLs resolve (VC++ x64 runtime)`. Failure stops before probes with
+   `run kit preflight failed: missing or unloadable DLLs: <names>`; install or
+   repair the Microsoft Visual C++ x64 runtime, then retry.
 
 3. Run this exact command from that PowerShell. Keep the desktop signed in and
    allow the control browser windows to open. The evidence folder must be fresh

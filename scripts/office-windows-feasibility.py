@@ -151,6 +151,59 @@ def pe_imports(path):
     return names
 
 
+# Windows inbox libraries; VC++ redistributable DLLs deliberately excluded.
+SYSTEM_DLLS = frozenset("""
+    kernel32.dll kernelbase.dll advapi32.dll gdi32.dll user32.dll
+    bcrypt.dll bcryptprimitives.dll ntdll.dll ole32.dll oleaut32.dll
+    shell32.dll shlwapi.dll ws2_32.dll mswsock.dll dnsapi.dll iphlpapi.dll
+    propsys.dll secur32.dll crypt32.dll cryptbase.dll userenv.dll
+    msvcrt.dll ucrtbase.dll rpcrt4.dll psapi.dll powrprof.dll setupapi.dll
+    normaliz.dll winmm.dll version.dll dbghelp.dll dbgcore.dll imm32.dll
+    comdlg32.dll comctl32.dll wtsapi32.dll netapi32.dll cfgmgr32.dll
+    windows.storage.dll wintrust.dll dwrite.dll d2d1.dll d3d11.dll
+    dxgi.dll windowscodecs.dll winhttp.dll wininet.dll urlmon.dll oleacc.dll usp10.dll
+""".split())
+KIT_IMAGES = ("vz-parser-worker.exe", "vz-office-windows-launch.exe", "pdfium.dll")
+
+
+def kit_requirements(kit):
+    """Record actual normal/delay imports per shipped image, without a compiler."""
+    return {
+        "prerequisite": "Microsoft Visual C++ x64 runtime; no redistributables bundled",
+        "non_system_imports": {
+            image: sorted({name.lower() for name in pe_imports(kit / image)
+                           if name.lower() not in SYSTEM_DLLS and
+                           not name.lower().startswith(("api-ms-win-", "ext-ms-win-"))})
+            for image in KIT_IMAGES
+        },
+    }
+
+
+def kit_preflight(kit):
+    """Verify the inventory and load external imports before any probe starts."""
+    import ctypes
+    recorded = json.loads((kit / "REQUIREMENTS.txt").read_text(encoding="utf-8"))
+    actual = kit_requirements(kit)
+    if recorded != actual:
+        raise RuntimeError("run kit preflight failed: REQUIREMENTS.txt differs from PE imports")
+    missing = []
+    loaded = []
+    for name in sorted({name for names in actual["non_system_imports"].values() for name in names}):
+        if name in {image.lower() for image in KIT_IMAGES}:
+            continue
+        try:
+            # Same System32 resolution as the portable loader closure. Loading
+            # also verifies the runtime's own dependencies and x64 architecture.
+            loaded.append(ctypes.WinDLL(str(Path(os.environ["SystemRoot"]) / "System32" / name),
+                                        winmode=0x00000800))
+        except OSError:
+            missing.append(name)
+    if missing:
+        raise RuntimeError("run kit preflight failed: missing or unloadable DLLs: " +
+                           ", ".join(missing) + "; install/repair the Microsoft Visual C++ x64 runtime before retrying")
+    print("run kit preflight passed: required non-system DLLs resolve (VC++ x64 runtime)")
+
+
 def loader_files(worker, pdfium, out, portable=False):
     """Exact local loader closure; system DLL ACLs are never changed.
 
@@ -199,7 +252,7 @@ def loader_files(worker, pdfium, out, portable=False):
                     pending.append(sibling.resolve(strict=True))
                 elif not (name.lower().startswith(("api-ms-win-", "ext-ms-win-")) or
                           (Path(os.environ["SystemRoot"]) / "System32" / name).is_file()):
-                    raise RuntimeError("loader dependency absent from kit and Windows system directory")
+                    raise RuntimeError("loader dependency absent from kit and Windows system directory: " + name)
         else:
             log = out / ("loader-" + str(len(inspected)) + ".log")
             if command(["dumpbin", "/nologo", "/dependents", image], log) != 0:
@@ -2453,6 +2506,40 @@ def self_test():
                 pass
             else:
                 raise AssertionError("missing dependency accepted")
+        # Inventory includes both executables, PDFium and delay imports; the
+        # preflight must stop on missing runtimes or a stale inventory.
+        shutil.copyfile(worker, folder / KIT_IMAGES[0])
+        image(folder / KIT_IMAGES[1], ("vcruntime140.dll",), ("vcruntime140_1.dll",))
+        requirements = kit_requirements(folder)
+        assert requirements["non_system_imports"][KIT_IMAGES[0]] == ["delay.dll", "runtime.dll"]
+        assert requirements["non_system_imports"][KIT_IMAGES[1]] == ["vcruntime140.dll", "vcruntime140_1.dll"]
+        inventory = folder / "REQUIREMENTS.txt"
+        inventory.write_text(json.dumps(requirements), encoding="utf-8")
+        with patch.dict(os.environ, {"SystemRoot": str(folder)}), patch("ctypes.WinDLL", create=True) as load:
+            kit_preflight(folder)
+            assert {Path(call.args[0]).name for call in load.call_args_list} == {
+                "runtime.dll", "delay.dll", "vcruntime140.dll", "vcruntime140_1.dll"}
+            assert all(call.kwargs["winmode"] == 0x800 for call in load.call_args_list)
+            def missing(name, **kwargs):
+                if Path(name).name in {"vcruntime140.dll", "vcruntime140_1.dll"}:
+                    raise OSError("missing runtime")
+                return object()
+            load.side_effect = missing
+            try:
+                kit_preflight(folder)
+            except RuntimeError as error:
+                assert "vcruntime140.dll, vcruntime140_1.dll" in str(error)
+            else:
+                raise AssertionError("missing runtime accepted")
+            inventory.write_text("{}", encoding="utf-8")
+            load.reset_mock()
+            try:
+                kit_preflight(folder)
+            except RuntimeError as error:
+                assert "differs from PE imports" in str(error)
+            else:
+                raise AssertionError("stale inventory accepted")
+            load.assert_not_called()
         worker.write_bytes(b"invalid image")
         try:
             pe_imports(worker)
@@ -2677,6 +2764,7 @@ def main():
     parser.add_argument("--pdfium", type=Path)
     parser.add_argument("--audit", type=Path)
     parser.add_argument("--kit-dir", type=Path, help="offline extracted run kit")
+    parser.add_argument("--write-kit-requirements", type=Path, help="inventory actual kit PE imports")
     parser.add_argument("--rows", help="comma-separated row IDs or client-outcomes")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--initialize-only", action="store_true", help="write all-unrun manifest before CI build")
@@ -2702,6 +2790,11 @@ def main():
     if args.fetch_pdfium:
         fetch_pdfium(args.fetch_pdfium)
         return 0
+    if args.write_kit_requirements:
+        kit = args.write_kit_requirements
+        (kit / "REQUIREMENTS.txt").write_text(json.dumps(kit_requirements(kit), indent=2) + "\n",
+                                               encoding="utf-8")
+        return 0
     if args.out is None:
         parser.error("--out outside the checkout is required")
     if args.initialize_only:
@@ -2712,6 +2805,12 @@ def main():
             apply_selection(manifest, selected_rows(args.rows))
         (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         return 0
+    if args.kit_dir:
+        try:
+            kit_preflight(args.kit_dir.resolve())
+        except (OSError, ValueError, RuntimeError, struct.error) as error:
+            print(str(error), file=sys.stderr)
+            return 1
     return run_suite(args)
 
 

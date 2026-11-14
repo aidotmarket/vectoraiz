@@ -2221,8 +2221,7 @@ fn mapping(reserve: bool, v: &Value, file_backed: bool) -> Result<Value> {
     Ok(result)
 }
 
-#[cfg_attr(target_feature = "crt-static", link(name = "libucrt"))]
-#[cfg_attr(not(target_feature = "crt-static"), link(name = "ucrt"))]
+#[link(name = "ucrt")]
 unsafe extern "C" {
     fn malloc(size: usize) -> *mut std::ffi::c_void;
     fn free(ptr: *mut std::ffi::c_void);
