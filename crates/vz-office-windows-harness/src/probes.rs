@@ -75,13 +75,15 @@ pub fn run(v: &Value) -> Result<Value> {
         "dns-query" => dns_query(),
         "rpc-alpc" => alpc(),
         "shell" => shell(v)?,
-        "com" | "pipe" => broker(op),
+        "com" | "pipe" => broker(op, v),
         "winsock-registry" => winsock_registry(v)?,
         "reachability-inventory" => reachability_inventory(v)?,
         "unix-outcomes" => unix_outcomes(v)?,
         "afd-family-sweep" => afd_family_sweep()?,
         "afd" => afd(v)?,
         "rpc" => rpc(),
+        "mapper-activation" => mapper_activation(),
+        "hyperv-outcome" => hyperv_outcome(),
         "child" | "escape" => child(op == "escape")?,
         "inherited" => inherited(v)?,
         "memory" => memory(arg(v, "kind")?, v)?,
@@ -451,7 +453,14 @@ fn network(v: &Value) -> Result<Value> {
 fn dns() -> Value {
     let winsock = Winsock::new();
     let mut address = null_mut();
-    let rc = unsafe { GetAddrInfoW(wide("example.com").as_ptr(), null(), null(), &mut address) };
+    let rc = unsafe {
+        GetAddrInfoW(
+            wide("www.example.com").as_ptr(),
+            null(),
+            null(),
+            &mut address,
+        )
+    };
     let error = unsafe { WSAGetLastError() };
     if !address.is_null() {
         unsafe { FreeAddrInfoW(address) };
@@ -467,7 +476,7 @@ fn dns_query() -> Value {
     let mut records = null_mut();
     let rc = unsafe {
         DnsQuery_W(
-            wide("example.com").as_ptr(),
+            wide("www.example.com").as_ptr(),
             1,
             0,
             null_mut(),
@@ -798,6 +807,8 @@ fn afd_open(v: &Value) -> Result<(Value, Option<Handle>)> {
     result["ea_buffer_bytes"] = json!(ea_length);
     result["ea_buffer_alignment"] = json!(std::mem::align_of::<AfdOpenEa>());
     result["protocol"] = json!(ea.packet.protocol);
+    result["socket_type"] = json!(ea.packet.socket_type);
+    result["endpoint_flags"] = json!(ea.packet.endpoint_flags);
     result["literal_status_hex"] = json!(format!("0x{:08X}", status as u32));
     Ok((result, returned.then_some(Handle(handle))))
 }
@@ -805,9 +816,13 @@ fn afd_open(v: &Value) -> Result<(Value, Option<Handle>)> {
 fn afd_family_sweep() -> Result<Value> {
     let mut outcomes = Vec::new();
     for family in 0..=40 {
-        for protocol in if family == 34 { vec![0, 1] } else { vec![0] } {
+        for protocol in match family {
+            2 | 23 => vec![6, 17],
+            34 => vec![0, 1],
+            _ => vec![0],
+        } {
             outcomes.push(afd(
-                &json!({"family":family,"protocol":protocol,"transport":"stream"}),
+                &json!({"family":family,"protocol":protocol,"transport":if protocol == 17 { "udp" } else { "stream" }}),
             )?);
         }
     }
@@ -1021,6 +1036,12 @@ struct UnixBind {
     address: UnixAddress,
 }
 #[repr(C)]
+struct UnixListen {
+    san: u8,
+    backlog: u32,
+    delayed: u8,
+}
+#[repr(C)]
 struct UnixConnect {
     san: u8,
     root: HANDLE,
@@ -1102,10 +1123,11 @@ fn afd_ioctl<T>(
         rc as u32
     };
     let mut result = residual_status(
-        if code == 0x12003 {
-            "NtDeviceIoControlFile(AFD_BIND)"
-        } else {
-            "NtDeviceIoControlFile(AFD_CONNECT)"
+        match code {
+            0x12003 => "NtDeviceIoControlFile(AFD_BIND)",
+            0x1200B => "NtDeviceIoControlFile(AFD_START_LISTEN)",
+            0x1200C => "NtDeviceIoControlFile(AFD_WAIT_FOR_LISTEN)",
+            _ => "NtDeviceIoControlFile(AFD_CONNECT)",
         },
         status as i32 as i64,
         status == 0 && !timed_out,
@@ -1159,15 +1181,12 @@ fn unix_direct(
         Ok((address, length))
     };
     let (address, target_length) = encode(path, abstract_name)?;
-    let output = if variant["output"] == true {
-        size_of::<UnixAddress>()
-    } else {
-        0
-    };
+    let output = variant["output"].as_u64().unwrap_or(0) as usize;
     let mut prerequisite = Value::Null;
+    let mut listener = Value::Null;
     let operation = if let Some(handle) = handle {
         if let Some(local) = local {
-            let (local_address, length) = encode(local, false)?;
+            let (local_address, length) = encode(local, abstract_name)?;
             prerequisite = afd_ioctl(
                 handle.0,
                 0x12003,
@@ -1195,19 +1214,31 @@ fn unix_direct(
                 json!({"attempted":false,"reason":"local AFD bind prerequisite failed"})
             }
         } else {
-            afd_ioctl(
+            let bound = afd_ioctl(
                 handle.0,
                 0x12003,
                 &UnixBind { share: 0, address },
                 4 + target_length,
                 output,
-            )?
+            )?;
+            if bound["success"] == true && variant["observe"] == true {
+                let mut info: UnixListen = unsafe { zeroed() };
+                info.backlog = 8;
+                let listen = afd_ioctl(handle.0, 0x1200B, &info, size_of::<UnixListen>(), 0)?;
+                let wait = if listen["success"] == true {
+                    afd_ioctl(handle.0, 0x1200C, &0u8, 0, 256)?
+                } else {
+                    Value::Null
+                };
+                listener = json!({"listen":listen,"wait":wait,"observation_ms":1000});
+            }
+            bound
         }
     } else {
         json!({"attempted":false,"reason":"AFD creation failed"})
     };
     Ok(
-        json!({"creation":creation,"route":"direct AFD TLI IOCTL","local_bind":prerequisite,"operation":operation,"variant":variant}),
+        json!({"creation":creation,"route":"direct AFD TLI IOCTL","local_bind":prerequisite,"operation":operation,"listener":listener,"variant":variant}),
     )
 }
 fn unix_winsock(path: &[u8], connect_to: bool, abstract_name: bool) -> Result<Value> {
@@ -1262,7 +1293,7 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
             };
             for short in [false, true] {
                 for nt_path in [false, true] {
-                    for output in [false, true] {
+                    for output in [0, 110, 128, 256] {
                         let variant = json!({"short":short,"nt_path":nt_path,"output":output});
                         let index = calibration.len();
                         let path = if abstract_name {
@@ -1316,7 +1347,35 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
         ),
     ];
     let mut outcomes = json!({});
+    let mut control_direct = json!({});
     for (index, (label, path, connect_to, abstract_name)) in targets.into_iter().enumerate() {
+        let key = if abstract_name {
+            "abstract"
+        } else {
+            "filesystem"
+        };
+        if v["route"] == "control" && !selected[key].is_null() {
+            let direct_path = if connect_to {
+                path.clone()
+            } else {
+                format!("{path}.direct")
+            };
+            let local = if abstract_name {
+                format!("{}-control-{index}", arg(v, "abstract_name")?)
+            } else {
+                scratch
+                    .join(format!("d{index}.sock"))
+                    .to_str()
+                    .context("direct control local")?
+                    .to_owned()
+            };
+            control_direct[label] = unix_direct(
+                direct_path.as_bytes(),
+                connect_to.then_some(local.as_bytes()),
+                abstract_name,
+                &selected[key],
+            )?;
+        }
         outcomes[label] = if v["route"] != "confined" {
             unix_winsock(path.as_bytes(), connect_to, abstract_name)?
         } else {
@@ -1328,13 +1387,19 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
             if selected[key].is_null() {
                 json!({"attempted":false,"reason":"inconclusive: direct route not calibrated"})
             } else {
-                let local = scratch.join(format!("l{index}.sock"));
-                let local = local.to_str().context("local encoding")?;
+                let local_path = scratch.join(format!("l{index}.sock"));
+                let local = if abstract_name {
+                    format!("{}-local-{index}", arg(v, "abstract_name")?)
+                } else {
+                    local_path.to_str().context("local encoding")?.to_owned()
+                };
+                let mut variant = selected[key].clone();
+                variant["observe"] = json!(label == "inside_scratch_bind");
                 let mut result = unix_direct(
                     path.as_bytes(),
                     connect_to.then_some(local.as_bytes()),
                     abstract_name,
-                    &selected[key],
+                    &variant,
                 )?;
                 if result["operation"]["success"] != true {
                     result["fallback"] = unix_winsock(path.as_bytes(), connect_to, abstract_name)?;
@@ -1348,8 +1413,53 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
     }
     Ok(
         json!({"diagnostic_only":true,"startup":startup,"outcomes":outcomes,
-        "calibration":calibration,"calibrated_variants":selected,"messages_sent":0}),
+        "calibration":calibration,"calibrated_variants":selected,"control_direct":control_direct,"messages_sent":0}),
     )
+}
+
+fn mapper_activation() -> Value {
+    let lookup = rpc();
+    unsafe {
+        let init = CoInitializeEx(null(), COINIT_MULTITHREADED as u32);
+        let mut activation = row(
+            "CoInitializeEx",
+            init as i64,
+            init >= 0,
+            init as u32,
+            "hresult",
+        );
+        if init >= 0 {
+            // MMC20.Application: an out-of-process server normally absent on a clean runner.
+            let class = GUID::from_u128(0x49b2791a_b1ae_4c90_9b8e_e860ba07f889);
+            let iid = GUID::from_u128(0x00000000_0000_0000_c000_000000000046);
+            let mut object = null_mut();
+            let hr = CoCreateInstance(&class, null_mut(), CLSCTX_LOCAL_SERVER, &iid, &mut object);
+            activation = residual_status(
+                "CoCreateInstance(MMC20.Application)",
+                hr as i64,
+                hr >= 0,
+                hr as u32,
+                "hresult",
+            );
+            if !object.is_null() {
+                let table = *(object as *const *const *const std::ffi::c_void);
+                let release: unsafe extern "system" fn(*mut std::ffi::c_void) -> u32 =
+                    std::mem::transmute(*table.add(2));
+                release(object);
+            }
+            CoUninitialize();
+        }
+        json!({"lookup":lookup,"activation":activation,
+            "same_mapper_connection":false,
+            "limitation":"COM runtime activation does not prove activation over the measured direct mapper connection"})
+    }
+}
+
+fn hyperv_outcome() -> Value {
+    // The host must provide an independently listening utility-VM service before
+    // a refusal can be attributed. Do not invent a service GUID or treat a missing
+    // service as isolation. Inventory determines NOT EXERCISABLE on server hosts.
+    json!({"attempted":false,"reason":"no calibrated Hyper-V utility-VM service supplied"})
 }
 
 fn rpc_status(api: &str, status: i32) -> Value {
@@ -1402,13 +1512,19 @@ fn rpc() -> Value {
     }
 }
 
-fn broker(op: &str) -> Value {
+fn broker(op: &str, v: &Value) -> Value {
     unsafe {
         SetLastError(0);
         match op {
             "pipe" => {
                 let handle = CreateFileW(
-                    wide(r"\\.\pipe\lsarpc").as_ptr(),
+                    wide(match v["pipe_name"].as_str().unwrap_or("lsarpc") {
+                        "samr" => r"\\.\pipe\samr",
+                        "svcctl" => r"\\.\pipe\svcctl",
+                        "epmapper" => r"\\.\pipe\epmapper",
+                        _ => r"\\.\pipe\lsarpc",
+                    })
+                    .as_ptr(),
                     GENERIC_READ | GENERIC_WRITE,
                     FILE_SHARE_READ | FILE_SHARE_WRITE,
                     null(),
@@ -1417,7 +1533,7 @@ fn broker(op: &str) -> Value {
                     null_mut(),
                 );
                 let result = win(
-                    "CreateFileW(system lsarpc pipe)",
+                    "CreateFileW(tested system pipe)",
                     handle as i64,
                     handle != INVALID_HANDLE_VALUE,
                 );

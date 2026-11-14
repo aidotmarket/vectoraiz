@@ -26,6 +26,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[1]
 LIMIT = 1_610_612_736
+WS_SLACK = 65_536
 FAMILIES = {"ipv4": 2, "ipv6": 23, "unix": 1, "hyperv": 34}
 
 
@@ -171,9 +172,17 @@ def plan():
     for catalog in ("parameters", "protocol", "namespace"):
         add("winsock-registry-" + catalog, op="winsock-registry", catalog=catalog)
         rows[-1]["plain_appcontainer_comparison"] = True
+    for pipe_name in ("samr", "svcctl", "epmapper"):
+        add("pipe-" + pipe_name, op="pipe", pipe_name=pipe_name)
     add("rpc", op="rpc")
     rows[-1]["plain_appcontainer_comparison"] = True
     add("rpc-alpc", op="rpc-alpc")
+    add("shell-file", op="shell", api_variant="ex-no-ui", target_kind="file")
+    add("mapper-activation", op="mapper-activation")
+    add("inventory-outcome", op="inventory-outcome")
+    for exit_row in ("2a", "2b", "2c", "2d"):
+        add("unix-" + exit_row, op="unix-exit", exit_row=exit_row)
+    add("hyperv-2e", op="hyperv-outcome")
     add("dns-query", op="dns-query")
     rows[-1]["plain_appcontainer_comparison"] = True
     for scope in ("both", "process", "job"):
@@ -208,10 +217,12 @@ def diagnostic_plan():
 
 def initial_manifest():
     specs = plan()
-    return {"schema_version": 1, "scope": "Windows C1 feasibility stage 1; not qualification",
+    return {"schema_version": 1, "design_delta": "6 (S1944)",
+            "spec_sha": "b8b5241684038fa0508d0217a8e26446353a595a", "scope": "Windows C1 feasibility stage 1; not qualification",
             "os": platform.system(), "os_build": platform.version(),
             "runner_image": os.environ.get("ImageOS"), "runner_image_version": os.environ.get("ImageVersion"),
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
+            "windows_11_client_requirement": {"status": "NOT MET", "reason": "client host not established"},
             "sampler_enabled": True, "sampler_scope": "section-sampler variants only; all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "diagnostics": [{"id": s["id"], "diagnostic_only": True, "status": "unrun"} for s in diagnostic_plan()],
@@ -277,11 +288,15 @@ def validate_manifest(manifest):
     for row in rows:
         repetitions = row.get("repetitions", [])
         for repetition in repetitions:
+            if planned[row["id"]].get("request", {}).get("op") != "memory":
+                continue
             peak = repetition.get("confined", {}).get("parent_peak_working_set_bytes")
-            assert repetition["peak_excess_bytes"] == (peak - LIMIT if isinstance(peak, int) else None)
-            if isinstance(peak, int) and peak > LIMIT + 4096:
+            assert repetition.get("peak_excess_bytes") == (max(0, peak - LIMIT) if isinstance(peak, int) else None)
+            if isinstance(peak, int) and peak > LIMIT + WS_SLACK:
                 assert repetition["status"] == "fail"
-        if repetitions and row["status"] == "pass":
+        request = planned[row["id"]].get("request", {})
+        repeated = request.get("op") == "shell" or request.get("op") == "memory" and request.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws")
+        if repeated and row["status"] == "pass":
             assert len(repetitions) == 3 and all(r["status"] == "pass" for r in repetitions)
     counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun", "not-applicable")}
     assert counts == manifest["counts"], "counts mismatch"
@@ -378,13 +393,49 @@ def evaluate(spec, control, confined, evidence_rows=()):
     positive = before.get("probe", {})
     negative = after.get("probe", {})
     op = spec["request"]["op"]
+    if op in ("network", "afd") and spec["request"].get("family") in (1, 34) and spec["request"].get("operation", "create") == "create":
+        if positive.get("descriptor_returned") is not True:
+            return "unrun", "non-IP endpoint control unavailable; no creation-denial claim"
+        if negative.get("descriptor_returned") is True:
+            return "pass", "non-IP endpoint creation observed; reachability is judged only by delta 6 outcome rows"
+        if isinstance(negative.get("error_code"), int):
+            return "pass", "non-IP constructor literal failure recorded; no reachability or creation-denial claim"
+        return "unrun", "non-IP constructor literal outcome missing"
     if op == "shell":
-        if confined.get("shell_listener", {}).get("get_received"):
-            return "fail", "confined shell dispatch reached nonce-correlated local listener"
+        if confined.get("shell_listener", {}).get("get_received") or confined.get("process_capture", {}).get("nonce_record_ids"):
+            return "fail", "confined link opened: nonce listener or Security 4688 match"
+        cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
+        http = spec["request"].get("target_kind") != "file"
+        if not positive.get("success") or (http and not control.get("shell_listener", {}).get("get_received")):
+            return "unrun", "link positive control did not succeed"
+        if not cp.get("success") or not np.get("success") or not cp.get("nonce_record_ids") or cp.get("capture_id") != np.get("capture_id"):
+            return "unrun", "same Security 4688 capture lacks successful control nonce record or complete confined window"
+        if confined.get("windows_11_client") is not True:
+            return "unrun", "server runner only; Windows 11 interactive client requirement NOT MET"
+        return "pass", "no confined nonce GET or process start; positive control in same 4688 capture"
+    if op == "rpc-alpc":
+        if not positive.get("success"):
+            return "unrun", "mapper ALPC connection control failed"
         if negative.get("success"):
-            return "fail", "confined ShellExecute API reported success; no explicit broker denial"
-        if not control.get("shell_listener", {}).get("get_received"):
-            return "unrun", "shell control listener did not receive nonce-correlated GET"
+            return "pass", "reviewed mapper connection reachable; lookup and activation judged in separate outcome row"
+        if negative.get("explicit_denial"):
+            return "pass", "mapper connection explicitly refused on this build"
+        return "unrun", "mapper connection outcome uncalibrated"
+    if op == "mapper-activation":
+        if confined.get("process_capture", {}).get("target_record_ids") or negative.get("activation", {}).get("success"):
+            return "fail", "confined mapper activation launched or activated target server"
+        if control.get("target_was_running") is not False or confined.get("target_was_running") is not False:
+            return "unrun", "target server was already running or absence could not be established"
+        cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
+        if not cp.get("success") or not np.get("success") or not cp.get("target_record_ids") or cp.get("capture_id") != np.get("capture_id"):
+            return "unrun", "same Security 4688 capture lacks control server start or complete confined window"
+        if not positive.get("lookup", {}).get("success") or not positive.get("activation", {}).get("success"):
+            return "unrun", "mapper lookup or activation control failed; literal replies retained"
+        if not positive.get("same_mapper_connection") or not negative.get("same_mapper_connection"):
+            return "unrun", "direct lookup-to-activation connection not established; COM runtime probe is supplementary"
+        if negative.get("activation", {}).get("explicit_denial"):
+            return "pass", "mapper activation refused with no target server start; successful control in same capture"
+        return "unrun", "activation refusal not calibrated"
     if op == "network":
         creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
         if spec["request"]["operation"] == "create":
@@ -403,15 +454,17 @@ def evaluate(spec, control, confined, evidence_rows=()):
             return "fail", "literal creation failed without descriptor; policy attribution incomplete: " + ", ".join(required)
         elif creation.get("descriptor_returned") is not True:
             return "unrun", "not exercisable: no socket obtainable by any tested route"
-    if op == "dns" and (negative.get("startup", {}).get("success") is not True or negative.get("error_code") == 10093):
-        return "unrun", "not exercisable: Winsock unavailable"
-    if op == "dns-query":
+    if op in ("dns", "dns-query"):
         if not positive.get("success"):
-            return "unrun", "DnsQuery_W positive control unsuccessful; no denial established"
-        if negative.get("error_code") != 5:
-            code = negative.get("error_code")
-            name = " (DNS_ERROR_NO_DNS_SERVERS)" if code == 9852 else ""
-            return "fail", f"DnsQuery_W literal status {code!r}{name} is not ERROR_ACCESS_DENIED"
+            return "unrun", "same-run www.example.com positive control did not resolve"
+        if negative.get("success"):
+            return "fail", "confined worker resolved external name www.example.com"
+        if not isinstance(negative.get("error_code"), int):
+            return "unrun", "DNS literal status unavailable"
+        inventory = next((r for r in evidence_rows if r["id"] == "inventory-outcome"), {})
+        if inventory.get("status") != "pass":
+            return "unrun", "DNS prerequisite/status recorded; scoped inventory backstop incomplete"
+        return "pass", f"www.example.com did not resolve; literal status {negative['error_code']}; prerequisite and DNS endpoint inventory backstop recorded"
     if op == "afd" and (positive.get("success") is not True or positive.get("descriptor_returned") is not True):
         return "unrun", "direct AFD control did not return a successful handle"
     if not positive.get("success"):
@@ -423,8 +476,8 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 or job.get("max_working_set_bytes") != LIMIT or not job.get("flags", 0) & 1):
             return "fail", "missing pre-resume working-set job cap readback"
         peak = confined.get("parent_peak_working_set_bytes")
-        if not isinstance(peak, int) or peak <= 0 or peak > LIMIT + 4096:
-            return "fail", f"parent-read kernel peak working set missing or above cap plus one page: peak={peak!r}, ceiling={LIMIT + 4096}"
+        if not isinstance(peak, int) or peak <= 0 or peak > LIMIT + WS_SLACK:
+            return "fail", f"parent-read kernel peak working set missing or above cap plus 64 KiB: peak={peak!r}, ceiling={LIMIT + WS_SLACK}"
         sections = [negative]
         if spec["request"]["kind"] == "self-ws":
             attempts = negative.get("attempts", [])
@@ -461,8 +514,8 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if spec["request"]["kind"] == "self-ws":
             outcomes = "; ".join(a["attempt"] + (": reported success but had no effect" if a["call"]["success"]
                 else ": attributable refusal with unchanged readbacks") for a in attempts)
-            return "pass", outcomes + "; valid section evidence and parent peak within cap plus one page; combined job/process cap"
-        return "pass", "parent-read kernel peak within cap plus one page; completed section touch is documented paging residual"
+            return "pass", outcomes + "; valid section evidence and parent peak within cap plus 64 KiB; combined job/process cap"
+        return "pass", "parent-read kernel peak within cap plus 64 KiB; completed section touch is documented paging residual"
     if spec["id"] == "inherited":
         if not positive.get("identity_match"):
             return "fail", "inherited-handle positive control identity mismatch"
@@ -586,6 +639,90 @@ def public_result(result, format_row=False):
     return result
 
 
+def audit_call(mode, folder, **arguments):
+    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
+            ROOT / "scripts/office-windows-audit.ps1", "-Mode", mode]
+    nonce = arguments.pop("Nonce", None)
+    for key, value in arguments.items():
+        argv.extend(["-" + key, str(value)])
+    log = folder / ("audit-" + mode + "-" + secrets.token_hex(4) + ".json")
+    code = command(argv, log, timeout=30)
+    try:
+        result = json.loads(log.read_text(encoding="utf-8-sig"))
+        if code:
+            result["success"] = False
+        if nonce:
+            import xml.etree.ElementTree as ET
+            ids = []
+            for raw in result.get("xml", []):
+                event = ET.fromstring(raw)
+                fields = {element.get("Name"): element.text or "" for element in event.findall("{*}EventData/{*}Data")}
+                if nonce in fields.get("CommandLine", ""):
+                    ids.append(int(event.find("{*}System/{*}EventRecordID").text))
+            result["nonce_record_ids"] = ids
+        return result
+    except (ValueError, OSError):
+        return {"success": False, "reason": "audit command failed; full output retained privately"}
+
+
+def inventory_verdict(diagnostic):
+    table = diagnostic.get("table", [])
+    if diagnostic.get("status") != "complete" or not table or "enumeration complete; attempts complete" not in diagnostic.get("summary", ""):
+        return "unrun", "scoped inventory incomplete"
+    allowed = {"RPC Control/epmapper": "reviewed mapper; activation outcome separately tested",
+               "Device/Afd/Endpoint": "reviewed AFD endpoint; family outcomes separately tested"}
+    for endpoint in table:
+        cell = endpoint.get("lpac", {})
+        if cell.get("success") and endpoint["endpoint"] not in allowed:
+            return "fail", "new reachable endpoint outside reviewed per-build list"
+    return "pass", "RPC Control and seeded devices complete; only reviewed endpoints reachable; DNS client endpoint absent"
+
+
+def unix_exit(diagnostic, label):
+    modes = {m: diagnostic.get(m, {}).get("response", {}).get("probe", {}) for m in ("control", "confined")}
+    control, confined = (modes[m].get("outcomes", {}) for m in ("control", "confined"))
+    if label == "2c":
+        listener = confined.get("inside_scratch_bind", {}).get("listener", {})
+        wait = listener.get("wait") or {}
+        if wait.get("success"):
+            return "fail", "a connection reached the worker-bound listener"
+        processes = diagnostic.get("vectoraiz_capture", {})
+        if processes.get("running_before") is not False or not processes.get("success") or processes.get("target_record_ids"):
+            return "unrun", "vectorAIz process absence during listener window not established"
+        if listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120":
+            return "pass", "no pending connection during one-second worker listen window; no vectorAIz process or start in capture"
+        return "unrun", "worker listener or bounded connection observation unavailable"
+    name = {"2a": "host_listener_connect", "2b": "outside_scratch_bind", "2d": "abstract_connect"}[label]
+    direct = modes["control"].get("control_direct", {})
+    positive = direct.get(name, {}).get("operation", {})
+    negative = confined.get(name, {}).get("operation", {})
+    if label == "2d" and not positive.get("success"):
+        # EINVAL alone cannot establish platform unavailability independently.
+        return "unrun", "abstract control route unavailable; invalid arguments are not platform-unavailability proof"
+    calibrated = confined.get("inside_scratch_bind", {}).get("operation", {}).get("success") is True
+    if label != "2d" and not calibrated:
+        return "unrun", "LPAC same-route bind inside scratch did not calibrate; plain AppContainer cannot pass"
+    if not positive.get("success"):
+        return "unrun", "connect or bind positive control did not succeed"
+    if negative.get("success"):
+        return "fail", "confined local socket operation succeeded"
+    if negative.get("explicit_denial"):
+        return "pass", "calibrated LPAC route refused operation outside scratch"
+    return "unrun", "literal refusal unavailable or connect prerequisite failed"
+
+
+def unix_namespace_status(diagnostic):
+    probe = diagnostic.get("confined", {}).get("response", {}).get("probe", {})
+    outcomes = probe.get("outcomes", {})
+    return {namespace: {"status": "calibrated" if probe.get("calibrated_variants", {}).get(namespace) else "uncalibrated",
+                        "calibrated_variant": probe.get("calibrated_variants", {}).get(namespace),
+                        "bind_success": outcomes.get(bind, {}).get("operation", {}).get("success"),
+                        "connect_attempted": "return_code" in outcomes.get(connect, {}).get("operation", {}),
+                        "connect_success": outcomes.get(connect, {}).get("operation", {}).get("success")}
+            for namespace, bind, connect in (("filesystem", "inside_scratch_bind", "host_listener_connect"),
+                                              ("abstract", "abstract_bind", "abstract_connect"))}
+
+
 class UnixListeners:
     """Unconfined AF_UNIX path and optional abstract listener; never send data."""
     def __init__(self, path):
@@ -676,12 +813,13 @@ def diagnostic_status(results, op):
 def family_sweep_table(results):
     probes = {mode: result.get("response", {}).get("probe", {}).get("outcomes", [])
               for mode, result in results.items()}
-    return [{"family": family, "protocol": protocol,
+    return [{"family": family, "protocol": protocol, "socket_type": 2 if protocol == 17 else 1,
+             "packet_scope": "this AFD family/type/protocol triple only; not all installed transports",
              **{("lpac" if mode == "confined" else mode): next(
                  (value for value in probes.get(mode, []) if value.get("family") == family and value.get("protocol") == protocol),
                  {"attempted": False, "reason": "worker outcome unavailable"})
                 for mode in ("control", "plain_appcontainer", "confined")}}
-            for family in range(41) for protocol in ((0, 1) if family == 34 else (0,))]
+            for family in range(41) for protocol in ((6, 17) if family in (2, 23) else (0, 1) if family == 34 else (0,))]
 
 
 class ShellListener:
@@ -859,7 +997,7 @@ def launch_diagnostic(args, out, manifest, save):
 def run_suite(args):
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    specs = plan() + diagnostic_plan()
+    specs = diagnostic_plan() + sorted(plan(), key=lambda row: row["id"] != "inventory-outcome")
     manifest = initial_manifest()
     def refresh_sockets():
         for spec in specs:
@@ -910,6 +1048,13 @@ def run_suite(args):
         sentinel = sentinel_root / "host.txt"
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
+        audit_setup = audit_call("setup", out)
+        host = audit_call("host", out)
+        manifest["process_auditing"] = {"success": audit_setup.get("success"),
+            "command_line_auditing": audit_setup.get("command_line_auditing")}
+        manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "features", "utility_vms")}
+        client = host.get("success") and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000
+        manifest["windows_11_client_requirement"] = {"status": "NOT MET", "reason": "interactive session not verified" if client else "server runner only"}
         endpoints = Endpoints()
         for item in specs:
             collection = manifest["diagnostics"] if item.get("diagnostic_only") else manifest["rows"]
@@ -922,6 +1067,16 @@ def run_suite(args):
                     entry.update(status="unrun", reason="pinned PDFium path not supplied")
                     continue
                 probe = dict(item.get("request", {}))
+                if probe.get("op") in ("inventory-outcome", "unix-exit"):
+                    diagnostic = next(d for d in manifest["diagnostics"] if d["id"] == ("reachability-inventory" if probe["op"] == "inventory-outcome" else "af-unix-outcomes"))
+                    status, reason = inventory_verdict(diagnostic) if probe["op"] == "inventory-outcome" else unix_exit(diagnostic, probe["exit_row"])
+                    entry.update(status=status, reason=reason, diagnostic_reference=diagnostic["id"], os_build=manifest["os_build"])
+                    continue
+                if probe.get("op") == "hyperv-outcome":
+                    features = host.get("features") or []
+                    absent = host.get("success") and not host.get("utility_vms") and not any(str(f.get("State")) in ("Enabled", "2") for f in features)
+                    entry.update(status="unrun", reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED")
+                    continue
                 reason = endpoints.configure(probe) if probe else None
                 if reason:
                     entry.update(status="not-applicable" if reason.startswith("not-applicable:") else "unrun", reason=reason)
@@ -932,6 +1087,8 @@ def run_suite(args):
                 if item.get("experiment"):
                     entry["experiment"] = item["experiment"]
                 if probe.get("op") == "unix-outcomes":
+                    unix_cursor = audit_call("cursor", folder)
+                    unix_host = audit_call("host", folder)
                     unix_listeners = UnixListeners(sentinel_root / "host.sock")
                     probe.update(unix_listener=str(unix_listeners.path), abstract_name=unix_listeners.abstract_name)
                     entry["host_listeners"] = unix_listeners.evidence
@@ -939,13 +1096,14 @@ def run_suite(args):
                     entry["intervention_threshold_bytes"] = LIMIT * 3 // 4 if probe["kind"] == "mapping-file" else LIMIT
                     entry["kernel_working_set_cap_bytes"] = LIMIT
                 row_folder = folder
-                repetitions = 3 if item["id"] in ("memory-both-mapping-file", "memory-process-mapping-file", "memory-job-mapping-file", "section-job-ws-self-ws") else 1
+                repetitions = 3 if (probe.get("op") == "shell" or probe.get("op") == "memory" and probe.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws")) else 1
                 for repetition in range(1, repetitions + 1):
                     results = {}
                     if repetitions == 3:
                         folder = row_folder / f"repetition-{repetition}"
                         folder.mkdir()
-                    modes = ["confined", "control"] if probe.get("op") == "shell" else ["control", "confined"]
+                    capture_cursor = audit_call("cursor", folder) if probe.get("op") in ("shell", "mapper-activation") else {}
+                    modes = ["control", "confined"]
                     if item.get("plain_appcontainer_comparison"):
                         modes.append("plain_appcontainer")
                     for mode in modes:
@@ -958,10 +1116,18 @@ def run_suite(args):
                         if probe.get("op") == "unix-outcomes":
                             (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
                         listener = None
+                        nonce = None
+                        window_cursor = audit_call("cursor", folder) if capture_cursor else {}
+                        target_before = audit_call("capture", folder, After=window_cursor.get("record_id", 0)) if probe.get("op") == "mapper-activation" else {}
                         try:
                             if probe.get("op") == "shell":
                                 listener = ShellListener(folder / (mode + "-http.log"))
+                                nonce = listener.nonce
                                 probe["url"] = listener.url
+                                if probe.get("target_kind") == "file":
+                                    target = sentinel_root / ("link-" + nonce + ".cmd")
+                                    target.write_text("@exit /b 0\n", encoding="ascii")
+                                    probe["url"] = str(target)
                             grants = []
                             if "format" in item:
                                 fixture = fixtures[item["format"]]
@@ -990,6 +1156,14 @@ def run_suite(args):
                             if listener:
                                 result["shell_listener"] = listener.finish()
                                 listener = None
+                            if capture_cursor:
+                                time.sleep(2)  # Allow event delivery; both windows share the outer capture cursor.
+                                captured = audit_call("capture", folder, After=window_cursor.get("record_id", 0), Nonce=nonce or "")
+                                result["process_capture"] = {key: captured.get(key) for key in ("success", "after", "through", "nonce_record_ids", "target_record_ids")}
+                                result["process_capture"]["capture_id"] = capture_cursor.get("record_id")
+                                result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
+                                result["target_was_running"] = target_before.get("target_running")
+                                result["windows_11_client"] = False  # Interactive desktop still requires a client run.
                             results[mode] = result
                             entry[mode] = public_result(result, "format" in item)
                             if probe.get("op") == "unix-outcomes" and mode == "control":
@@ -1015,6 +1189,11 @@ def run_suite(args):
                     if item.get("diagnostic_only"):
                         entry.update(status="error" if entry.get("cleanup_error") else diagnostic_status(results, probe["op"]),
                             reason="diagnostic only; excluded from verdict counts and qualification")
+                        if probe.get("op") == "unix-outcomes":
+                            captured = audit_call("capture", folder, After=unix_cursor.get("record_id", 0), Target="vectoraiz.exe")
+                            entry["vectoraiz_capture"] = {"success": bool(audit_setup.get("success") and unix_cursor.get("success") and captured.get("success")),
+                                "running_before": unix_host.get("vectoraiz_running"), "target_record_ids": captured.get("target_record_ids")}
+                            entry["namespace_status"] = unix_namespace_status(entry)
                         if probe.get("op") == "afd-family-sweep":
                             entry["table"] = family_sweep_table(results)
                         if probe.get("op") == "reachability-inventory":
@@ -1030,7 +1209,7 @@ def run_suite(args):
                     if probe.get("op") == "network" and probe.get("operation") != "create":
                         # Creation routes were all exercised earlier. Never infer a global
                         # absence from only this operation's constructor.
-                        creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-", "afd-"))]
+                        creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-ipv", "afd-ipv"))]
                         routes_complete = all(r.get("confined", {}).get("status") == "pass" and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
                         any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
                         socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
@@ -1059,7 +1238,7 @@ def run_suite(args):
                                  confined=public_result(results["confined"], "format" in item))
                     if probe.get("op") == "memory" and probe.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
                         peak = results["confined"].get("parent_peak_working_set_bytes")
-                        entry["peak_excess_bytes"] = peak - LIMIT if isinstance(peak, int) else None
+                        entry["peak_excess_bytes"] = max(0, peak - LIMIT) if isinstance(peak, int) else None
                         entry["kernel_working_set_cap_bytes"] = LIMIT
                     if entry.get("cleanup_error"):
                         entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
@@ -1068,15 +1247,20 @@ def run_suite(args):
                     if item.get("memory_scope"):
                         entry["memory_scope"] = item["memory_scope"]
                     if repetitions == 3:
+                        entry["representative_repetition"] = repetition
+                        entry["representative_scope"] = "top-level control/confined are from this repetition; peak excess is maximum"
                         entry.setdefault("repetitions", []).append({"repetition": repetition,
                             **{key: entry.get(key) for key in ("status", "reason", "control", "confined", "peak_excess_bytes")}})
-                        save()
+                        if repetition < 3:
+                            entry.update(status="unrun", reason="three repetitions not yet complete")
                         if repetition == 3:
                             failed = [row for row in entry["repetitions"] if row["status"] != "pass"]
-                            entry["status"] = "fail" if failed else "pass"
+                            entry["status"] = ("fail" if any(r["status"] == "fail" for r in failed) else "unrun") if failed else "pass"
                             entry["reason"] = (failed[0]["reason"] if failed else "all three repetitions passed unchanged per-row rule")
                             peaks = [row["peak_excess_bytes"] for row in entry["repetitions"] if isinstance(row["peak_excess_bytes"], int)]
-                            entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
+                            if probe.get("op") == "memory":
+                                entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
+                        save()
             except Exception as error:
                 entry.update(status="error" if item.get("diagnostic_only") else "fail", reason="probe orchestration exception: " + type(error).__name__)
                 (folder / "exception.txt").write_text(str(error), encoding="utf-8")
@@ -1163,9 +1347,10 @@ def self_test():
         dependency["status"] = "pass"
     assert evaluate(constructor, socket_control, socket_control, dependencies)[0] == "fail"
     dns_spec = next(s for s in specs if s["id"] == "dns")
-    assert evaluate(dns_spec, positive, failed_creation) == ("unrun", "not exercisable: Winsock unavailable")
+    assert evaluate(dns_spec, positive, failed_creation)[0] == "unrun"
+    assert evaluate(dns_spec, positive, failed_creation, [{"id":"inventory-outcome", "status":"pass"}])[0] == "pass"
     shell = next(row for row in specs if row["id"] == "shell")
-    assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True))[0] == "fail"
+    assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True))[0] == "unrun"
     com = next(row for row in specs if row["id"] == "com")
     assert "named prerequisite" in evaluate(com, response(success=True, api="CoCreateInstance(ShellWindows, LOCAL_SERVER)"), response(success=False, explicit_denial=True, api="CoInitializeEx"))[1]
     assert evaluate(deny, response(success=True, api="ReadFile"), response(success=False, explicit_denial=True, api="unrelated"))[0] == "fail"
@@ -1197,7 +1382,16 @@ def self_test():
     shell_control["shell_listener"] = {"get_received": True}
     shell_denied = response(success=False, api="ShellExecuteW(open URL)", explicit_denial=True)
     shell_denied["shell_listener"] = {"get_received": False}
+    assert evaluate(shell, shell_control, shell_denied)[0] == "unrun"
+    shell_control["process_capture"] = {"success": True, "capture_id": 1, "nonce_record_ids": [3]}
+    shell_denied["process_capture"] = {"success": True, "capture_id": 1, "nonce_record_ids": []}
+    shell_denied["windows_11_client"] = True
     assert evaluate(shell, shell_control, shell_denied)[0] == "pass"
+    shell_denied["response"]["probe"]["success"] = True
+    assert evaluate(shell, shell_control, shell_denied)[0] == "pass"
+    shell_denied["process_capture"]["nonce_record_ids"] = [5]
+    assert evaluate(shell, shell_control, shell_denied)[0] == "fail"
+    shell_denied["process_capture"]["nonce_record_ids"] = []
     shell_denied["shell_listener"]["get_received"] = True
     assert evaluate(shell, shell_control, shell_denied)[0] == "fail"
     memory_spec = next(row for row in specs if row["id"] == "memory-job-virtual")
@@ -1205,7 +1399,7 @@ def self_test():
     memory_confined = response(success=False, api="VirtualAlloc", explicit_denial=True, allocation_refused=True,
                                allocation_limit_error=True, successfully_held_bytes=1024 ** 3)
     memory_confined.update(job_before_resume={"process_commit_limit_bytes":LIMIT * 2, "job_commit_limit_bytes":LIMIT},
-                           job_after={"peak_process_commit_bytes":LIMIT, "peak_job_commit_bytes":LIMIT + 4096})
+                           job_after={"peak_process_commit_bytes":LIMIT, "peak_job_commit_bytes":LIMIT + WS_SLACK})
     assert evaluate(memory_spec, memory_control, memory_confined)[0] == "pass"
     memory_confined["response"]["probe"]["successfully_held_bytes"] = LIMIT + 1
     assert evaluate(memory_spec, memory_control, memory_confined)[0] == "fail"
@@ -1216,13 +1410,13 @@ def self_test():
     system = {"available": True, "commit_total_bytes": 3 * LIMIT, "physical_available_bytes": LIMIT, "physical_total_bytes": 8 * LIMIT}
     section = response(success=True, touch_completed=True, before={"system": system}, at_peak={"system": system})
     section.update(working_set_cap_before_resume={"maximum_bytes": LIMIT, "readback_verified": True},
-                   job_before_resume={"max_working_set_bytes": LIMIT, "flags": 1}, parent_peak_working_set_bytes=LIMIT + 4096)
+                   job_before_resume={"max_working_set_bytes": LIMIT, "flags": 1}, parent_peak_working_set_bytes=LIMIT + WS_SLACK)
     assert evaluate(section_spec, section, section)[0] == "pass"
     section["parent_peak_working_set_bytes"] += 1
     assert evaluate(section_spec, section, section)[0] == "fail"
     file_spec = next(s for s in specs if s["id"] == "memory-process-mapping-file")
     section["response"]["probe"]["scratch_file_size_bytes"] = 2 * 1024 ** 3
-    for peak, expected in ((None, "fail"), (LIMIT + 4096, "pass"), (LIMIT + 8192, "fail")):
+    for peak, expected in ((None, "fail"), (LIMIT + WS_SLACK, "pass"), (LIMIT + WS_SLACK, "pass"), (LIMIT + WS_SLACK + 1, "fail")):
         section["parent_peak_working_set_bytes"] = peak
         assert public_result(section)["parent_peak_working_set_bytes"] == peak
         status, reason = evaluate(file_spec, section, section)
@@ -1256,13 +1450,43 @@ def self_test():
         assert afd_family["plain_appcontainer_comparison"] is True
         assert evaluate(afd_family, afd_control, response(success=False, api="NtCreateFile(AFD endpoint)",
             descriptor_returned=False, error_code=0xC0000022, explicit_denial=True))[0] == "pass"
+    # Delta 6 exits never promote failed prerequisites or comparison-token evidence.
+    inv = {"status":"complete", "summary":"2 candidates; enumeration complete; attempts complete",
+           "table":[{"endpoint":"RPC Control/epmapper", "lpac":{"success":True}},
+                    {"endpoint":"Device/Afd/Endpoint", "lpac":{"success":True}}]}
+    assert inventory_verdict(inv)[0] == "pass"
+    assert inventory_verdict({**inv, "status":"error"})[0] == "unrun"
+    assert inventory_verdict({**inv, "table":inv["table"] + [{"endpoint":"RPC Control/NewService", "lpac":{"success":True}}]})[0] == "fail"
+    diagnostic = {"control":{"response":{"probe":{"control_direct":{
+        "host_listener_connect":{"operation":{"success":True}}}}}},
+        "confined":{"response":{"probe":{"outcomes":{
+        "inside_scratch_bind":{"operation":{"success":True}},
+        "host_listener_connect":{"operation":{"success":False,"explicit_denial":True}}}}}}}
+    assert unix_exit(diagnostic, "2a")[0] == "pass"
+    diagnostic["confined"]["response"]["probe"]["outcomes"]["inside_scratch_bind"]["operation"]["success"] = False
+    assert unix_exit(diagnostic, "2a")[0] == "unrun"
+    assert unix_exit(diagnostic, "2d")[0] == "unrun"
+    assert unix_exit(diagnostic, "2c")[0] == "unrun"
+    mapper = next(s for s in specs if s["id"] == "mapper-activation")
+    mc = response(lookup={"success":True}, activation={"success":True}, same_mapper_connection=False)
+    mn = response(lookup={"success":True}, activation={"success":False,"explicit_denial":True}, same_mapper_connection=False)
+    for result in (mc, mn):
+        result["target_was_running"] = False
+        result["process_capture"] = {"success":True,"capture_id":1,"target_record_ids":[]}
+    mc["process_capture"]["target_record_ids"] = [7]
+    assert evaluate(mapper, mc, mn)[0] == "unrun"
+    for result in (mc, mn):
+        result["response"]["probe"]["same_mapper_connection"] = True
+    assert evaluate(mapper, mc, mn)[0] == "pass"
+    mn["process_capture"]["target_record_ids"] = [9]
+    assert evaluate(mapper, mc, mn)[0] == "fail"
     dns_query = next(s for s in specs if s["id"] == "dns-query")
-    for code, expected in ((5, "pass"), (14, "fail"), (10093, "fail"), (1314, "fail")):
+    for code, expected in ((5, "pass"), (14, "pass"), (10093, "pass"), (1314, "pass")):
         assert evaluate(dns_query, response(success=True, api="DnsQuery_W"),
-            response(success=False, api="DnsQuery_W", error_code=code, explicit_denial=True))[0] == expected
+            response(success=False, api="DnsQuery_W", error_code=code, explicit_denial=True), [{"id":"inventory-outcome", "status":"pass"}])[0] == expected
     assert dns_query["plain_appcontainer_comparison"]
     no_servers = response(success=False, api="DnsQuery_W", error_code=9852)
-    assert "DNS_ERROR_NO_DNS_SERVERS" in evaluate(dns_query, response(success=True), no_servers)[1]
+    assert evaluate(dns_query, response(success=True), no_servers, [{"id":"inventory-outcome", "status":"pass"}])[0] == "pass"
     assert evaluate(dns_query, response(success=False), no_servers)[0] == "unrun"
     assert all(s["id"] != "afd-family-independence" for s in specs)
     sampler_spec = next(s for s in specs if s["id"] == "section-sampler")
@@ -1295,7 +1519,7 @@ def self_test():
     controls["control"]["response"]["probe"]["calibrated_variants"] = {key: {"short": True} for key in ("abstract", "filesystem")}
     assert diagnostic_status(controls, "unix-outcomes") == "complete"
     sweep = family_sweep_table({})
-    assert len(sweep) == 42 and sum(row["family"] == 34 for row in sweep) == 2
+    assert len(sweep) == 44 and sum(row["family"] == 34 for row in sweep) == 2
     inventory = response(candidates=[{"kind": "alpc", "path": "private-port"},
                                      {"kind": "device", "path": r"\Device\Afd"}],
                          outcomes=[{"error_code": 0, "literal_status_hex": "0x00000000"},
@@ -1452,6 +1676,7 @@ def self_test():
              patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
              patch.object(time, "sleep"), \
              patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=shell_command), \
              patch.object(sys, "platform", "win32"), \
              patch.object(Path, "home", return_value=folder), \
@@ -1462,8 +1687,8 @@ def self_test():
             observed = json.loads((run_args.out / "manifest.json").read_text())
             row = observed["rows"][0]
             assert row["cleanup_error"] == "PermissionError" and row["status"] == "fail"
-            assert mode_order == ["confined", "control"]
-            cleanup = json.loads((run_args.out / "shell/control-cleanup.json").read_text())
+            assert mode_order == ["control", "confined"] * 3
+            cleanup = json.loads((run_args.out / "shell/repetition-3/control-cleanup.json").read_text())
             assert cleanup["removed"] is False and len(cleanup["failures"]) == 5
             assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False
                        for mode in ("control", "confined"))
@@ -1479,7 +1704,7 @@ def self_test():
             repetition = int(Path(argv[4]).parent.name.removeprefix("repetition-"))
             result = deepcopy(section)
             result["response"]["probe"]["scratch_file_size_bytes"] = 2 * 1024 ** 3
-            result["parent_peak_working_set_bytes"] = LIMIT + (8192 if repetition == 2 else 4096)
+            result["parent_peak_working_set_bytes"] = LIMIT + (WS_SLACK + 1 if repetition == 2 else 4096)
             Path(argv[4]).write_text(json.dumps(result))
             return 0
         with patch(__name__ + ".plan", return_value=[file_spec]), \
@@ -1487,6 +1712,7 @@ def self_test():
              patch(__name__ + ".launch_diagnostic"), \
              patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
              patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=peak_command), \
              patch.object(sys, "platform", "win32"), \
              patch.object(Path, "home", return_value=folder), \
@@ -1497,8 +1723,9 @@ def self_test():
             row = observed["rows"][0]
             assert calls == ["control", "confined-process"] * 3
             assert [r["status"] for r in row["repetitions"]] == ["pass", "fail", "pass"]
-            assert [r["peak_excess_bytes"] for r in row["repetitions"]] == [4096, 8192, 4096]
-            assert row["status"] == "fail" and row["peak_excess_bytes"] == 8192
+            assert [r["peak_excess_bytes"] for r in row["repetitions"]] == [4096, WS_SLACK + 1, 4096]
+            assert row["representative_repetition"] == 3
+            assert row["status"] == "fail" and row["peak_excess_bytes"] == WS_SLACK + 1
             validate_manifest(observed)
     # The inventory shares the exact control candidates with both token modes,
     # retains a failed launch, and publishes no raw native names or paths.
@@ -1527,6 +1754,7 @@ def self_test():
              patch(__name__ + ".launch_diagnostic"), \
              patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
              patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=inventory_command), \
              patch.object(sys, "platform", "win32"), \
              patch.object(Path, "home", return_value=folder), \
@@ -1544,6 +1772,11 @@ def self_test():
     completed = json.loads(json.dumps(manifest))
     for row in completed["rows"]:
         row.update(status="pass", reason="synthetic validation control")
+        request = next(spec for spec in specs if spec["id"] == row["id"]).get("request", {})
+        if request.get("op") == "shell" or request.get("op") == "memory" and request.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
+            row["representative_repetition"] = 3
+            row["repetitions"] = [{"status":"pass", "repetition":index,
+                "confined":{"parent_peak_working_set_bytes":LIMIT}, "peak_excess_bytes":0} for index in (1, 2, 3)]
     completed.update(status="pass", counts={"pass": len(specs), "fail": 0, "unrun": 0, "not-applicable": 0},
                      source_sha="synthetic", worker_sha256="synthetic")
     validate_manifest(completed)

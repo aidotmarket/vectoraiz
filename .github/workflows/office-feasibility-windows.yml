@@ -8,6 +8,7 @@ on:
       - 'crates/vz-office-windows-harness/**'
       - 'crates/vz-parser-worker/**'
       - 'scripts/office-windows-feasibility.py'
+      - 'scripts/office-windows-audit.ps1'
       - 'scripts/fetch-assets.py'
       - 'tests/office/windows/**'
       - 'tests/office/fixtures/windows_synthetic.py'
@@ -110,8 +111,8 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:OFFICE_EVIDENCE_DIR/build.log" -Tail 80
           exit $code
-      - name: Run suspended launch diagnostic first, then all fold 11 probes and peak repetitions
-        timeout-minutes: 15
+      - name: Run suspended launch diagnostic first, then delta 6 outcome probes and repetitions
+        timeout-minutes: 25
         run: |
           python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run" --pdfium "$env:OFFICE_EVIDENCE_DIR/assets/pdfium.dll" *> "$env:OFFICE_EVIDENCE_DIR/suite.log"
           $code = $LASTEXITCODE
