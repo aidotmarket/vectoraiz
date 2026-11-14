@@ -744,18 +744,23 @@ def unix_exit(diagnostic, label):
         observation = diagnostic.get("run_listener", {})
         listener = observation.get("response", {}).get("probe", {})
         wait = listener.get("wait") or {}
+        namespace = listener.get("namespace", "unavailable")
+        scope = f"observed listener namespace: {namespace}; "
         if wait.get("success") or listener.get("connection_observed"):
-            return Status.FAIL, "a connection reached the worker-bound listener"
+            return Status.FAIL, scope + "a connection reached the worker-bound listener"
         processes = diagnostic.get("vectoraiz_capture", {})
         if processes.get("running_before") is not False or not processes.get("success") or processes.get("filtered_query_success") is not True or processes.get("target_record_ids") or not isinstance(processes.get("after"), int) or not isinstance(processes.get("through"), int) or processes["through"] < processes["after"]:
-            return Status.UNRUN, "vectorAIz process absence during listener window not established"
+            return Status.UNRUN, scope + "vectorAIz process absence during listener window not established"
         if processes.get("scope") != "entire harness run" or observation.get("covers_entire_run") is not True:
-            return Status.UNRUN, "run-wide process capture recorded; worker listener does not cover the entire run"
+            return Status.UNRUN, scope + "run-wide process capture recorded; worker listener does not cover the entire run"
         if (observation.get("status") == Status.PASS and listener.get("stop_observed") is True
                 and listener.get("all_waits_cancelled") is True and listener.get("wait_count", 0) > 0
+                and listener.get("bind", {}).get("success") is True and namespace == "abstract"
                 and listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120"):
-            return Status.PASS, "no pending connection during entire harness run; no vectorAIz process or start in capture"
-        return Status.UNRUN, "worker listener or bounded connection observation unavailable"
+            return Status.UNRUN, (scope + "abstract-namespace listener only; no connect route to it established on this build (see 2d); "
+                                  "listen-wait detector has no positive control; filesystem listener unmeasured; "
+                                  "no vectorAIz process on the runner; future PASS requires a control-mode connect to the same listener construction that completes the wait")
+        return Status.UNRUN, scope + "worker listener or bounded connection observation unavailable"
     if any(diagnostic.get(mode, {}).get("status") != Status.PASS for mode in ("control", "confined")):
         return Status.UNRUN, "socket control or confined worker did not complete successfully"
     name = {"2a": "host_listener_connect", "2b": "outside_scratch_bind", "2d": "abstract_connect"}[label]
@@ -778,7 +783,8 @@ def unix_exit(diagnostic, label):
                                for c in modes["control"].get("calibration", []) if c.get("namespace") == "filesystem"})
         alt = modes["confined"].get("alternative", {}).get("inside_scratch_bind", {})
         code = alt.get("operation", {}).get("error_code", alt.get("creation", {}).get("error_code"))
-        return Status.UNRUN, f"LPAC same-route scratch bind uncalibrated; direct control statuses {','.join(direct_codes) or 'unavailable'}; explicit protocol status {code}"
+        startup = modes["confined"].get("startup", {}).get("error_code", "unavailable")
+        return Status.UNRUN, f"LPAC WSAStartup status {startup}; explicit protocol constructor/operation status {code}; same-route scratch bind uncalibrated; unconfined direct-bind statuses {','.join(direct_codes) or 'unavailable'}"
     if not positive.get("success"):
         return Status.UNRUN, "connect or bind positive control did not succeed"
     if negative.get("success"):
@@ -807,6 +813,7 @@ def unix_namespace_status(diagnostic):
         calibrated = outcomes.get(bind, {}).get("operation", {}).get("success") is True
         route = "direct AFD TLI IOCTL"
         if namespace == "filesystem":
+            control_ok = control.get("control_direct", {}).get(bind, {}).get("operation", {}).get("success") is True
             alternative_control = control.get("alternative", {}).get(bind, {}).get("operation", {}).get("success") is True
             control_ok = control_ok or alternative_control
             if not calibrated and alternative_control and probe.get("alternative", {}).get(bind, {}).get("operation", {}).get("success") is True:
@@ -962,14 +969,11 @@ def diagnostic_status(results, op):
                for mode in ("control", "plain_appcontainer", "confined")):
         return Status.ERROR
     probe = results["control"].get("response", {}).get("probe", {})
-    outcomes = probe.get("outcomes", [])
     if op == "unix-outcomes":
-        if not any(value.get("operation", {}).get("success") is True for value in outcomes.values()):
-            return Status.CONTROL_INCONCLUSIVE
-        selected = probe.get("calibrated_variants") or {}
-        if any(not selected.get(key) for key in ("filesystem", "abstract")):
-            return Status.ROUTE_INCONCLUSIVE
-    elif not (probe.get("success") is True or any(value.get("success") is True for value in outcomes)):
+        # Assembly publishes the per-namespace result; no intermediate route status.
+        return Status.COMPLETE
+    outcomes = probe.get("outcomes", [])
+    if not (probe.get("success") is True or any(value.get("success") is True for value in outcomes)):
         return Status.CONTROL_INCONCLUSIVE
     return Status.COMPLETE
 
@@ -1549,7 +1553,8 @@ def assembly_self_test():
             for filesystem, abstract in product(NAMESPACE_STATUSES, repeat=2):
                 results = {mode: response(outcomes={bind: {"operation": {"success":
                            status != Status.CONTROL_INCONCLUSIVE if mode == "control" else status == Status.CALIBRATED}}
-                           for bind, status in (("inside_scratch_bind", filesystem), ("abstract_bind", abstract))}) for mode in modes}
+                           for bind, status in (("inside_scratch_bind", filesystem), ("abstract_bind", abstract))},
+                           control_direct={"inside_scratch_bind": {"operation": {"success": filesystem != Status.CONTROL_INCONCLUSIVE}}}) for mode in modes}
                 emit(spec, results)
         entry = next(row for row in manifest["diagnostics"] if row["id"] == spec["id"])
         entry["cleanup_error"] = "PermissionError"
@@ -1557,12 +1562,11 @@ def assembly_self_test():
         del entry["cleanup_error"]
         emit(spec, results)
 
-    # Both calibration branches remain covered even when the public UNIX status
-    # is the more precise per-namespace summary.
+    # UNIX completion is only worker completion; assembly publishes namespaces.
     unix = {mode: response(outcomes={}) for mode in modes}
-    assert diagnostic_status(unix, "unix-outcomes") == Status.CONTROL_INCONCLUSIVE
+    assert diagnostic_status(unix, "unix-outcomes") == Status.COMPLETE
     unix["control"] = response(outcomes={"bind": {"operation": {"success": True}}})
-    assert diagnostic_status(unix, "unix-outcomes") == Status.ROUTE_INCONCLUSIVE
+    assert diagnostic_status(unix, "unix-outcomes") == Status.COMPLETE
     unix["control"]["response"]["probe"]["calibrated_variants"] = dict.fromkeys(UNIX_NAMESPACES, "variant")
     assert diagnostic_status(unix, "unix-outcomes") == Status.COMPLETE
 
@@ -1624,18 +1628,54 @@ def assembly_self_test():
             row.update(status=status, reason=reason)
         check()
 
+    # A Winsock filesystem bind cannot hide a failed direct AFD control.
+    for direct_ok, alternative_control, alternative_confined, expected in (
+            (False, False, False, Status.CONTROL_INCONCLUSIVE),
+            (True, False, False, Status.UNCALIBRATED),
+            (False, True, False, Status.UNCALIBRATED),
+            (False, True, True, Status.CALIBRATED)):
+        results = {mode: response(startup={"error_code":10107},
+            outcomes={"inside_scratch_bind":{"operation":{"success":mode == "control"}}},
+            control_direct={"inside_scratch_bind":{"operation":{"success":direct_ok}}},
+            calibration=[{"namespace":"filesystem","result":{"operation":{"literal_status_hex":code}}}
+                         for code in ("0xC000000D", "0xC0000141")],
+            alternative={"inside_scratch_bind":{"creation":{"error_code":10093},
+                "operation":{"success":alternative_control if mode == "control" else alternative_confined}}})
+            for mode in modes}
+        diagnostic = emit(unix_spec, results)
+        assert diagnostic["namespace_status"]["filesystem"]["status"] == expected
+        if not alternative_confined:
+            for label in ("2a", "2b"):
+                status, reason = unix_exit(diagnostic, label)
+                assert status == Status.UNRUN
+                assert reason.startswith("LPAC WSAStartup status 10107; explicit protocol constructor/operation status 10093;")
+                assert "unconfined direct-bind statuses 0xC000000D,0xC0000141" in reason
+
     # Listener outcome must survive assembly; no observation flag can replace
     # successful waits, an orderly stop, or the run-wide 4688 capture.
     diagnostic = next(row for row in manifest["diagnostics"] if row["id"] == "af-unix-outcomes")
-    for case, expected in (("complete", Status.PASS), ("connected", Status.FAIL),
-                           ("early-exit", Status.UNRUN), ("capture-failed", Status.UNRUN)):
-        diagnostic["run_listener"] = response(listen={"success":True}, wait={"timed_out":True,"io_status_hex":"0xC0000120"},
+    for case, expected in (("complete", Status.UNRUN), ("connected", Status.FAIL),
+                           ("early-exit", Status.UNRUN), ("capture-failed", Status.UNRUN),
+                           ("bind-failed", Status.UNRUN), ("bind-missing", Status.UNRUN),
+                           ("filesystem", Status.UNRUN), ("namespace-missing", Status.UNRUN)):
+        diagnostic["run_listener"] = response(namespace="filesystem" if case == "filesystem" else "abstract",
+            bind={"success":case != "bind-failed"}, listen={"success":True}, wait={"timed_out":True,"io_status_hex":"0xC0000120"},
             wait_count=3, all_waits_cancelled=True, stop_observed=True, connection_observed=case == "connected")
         diagnostic["run_listener"]["covers_entire_run"] = case != "early-exit"
         diagnostic["vectoraiz_capture"] = {"success":case != "capture-failed", "filtered_query_success":True,
             "running_before":False,"scope":"entire harness run","after":1,"through":3,"target_record_ids":[]}
+        listener = diagnostic["run_listener"]["response"]["probe"]
+        if case == "bind-missing":
+            del listener["bind"]
+        if case == "namespace-missing":
+            del listener["namespace"]
         status, reason = unix_exit(diagnostic,"2c")
         assert status == expected
+        assert f"observed listener namespace: {listener.get('namespace', 'unavailable')}" in reason
+        if case == "complete":
+            assert "no positive control" in reason and "control-mode connect" in reason
+        if case in ("bind-failed", "bind-missing", "filesystem", "namespace-missing"):
+            assert "bounded connection observation unavailable" in reason
         next(row for row in manifest["rows"] if row["id"] == "unix-2c").update(status=status,reason=reason)
         check()
 
@@ -1961,14 +2001,14 @@ def self_test():
         b["shell_listener"] = {"get_received":False}
         b["process_capture"]["after"] = 999
         assert evaluate(spec, control, b)[0] != "pass"
-    listener_probe = {"listen":{"success":True}, "wait":{"timed_out":True,"io_status_hex":"0xC0000120"},
+    listener_probe = {"namespace":"abstract", "bind":{"success":True}, "listen":{"success":True}, "wait":{"timed_out":True,"io_status_hex":"0xC0000120"},
                       "stop_observed":True,"all_waits_cancelled":True,"wait_count":2}
     full_listener = {"run_listener": {"status":"pass", "covers_entire_run":True,
                      "response":{"probe":listener_probe}},
         "vectoraiz_capture":{**failed_capture, "scope":"entire harness run", "running_before":False}}
     assert unix_exit(full_listener, "2c")[0] == "unrun"
     full_listener["vectoraiz_capture"].update(success=True, filtered_query_success=True)
-    assert unix_exit(full_listener, "2c")[0] == "pass"
+    assert unix_exit(full_listener, "2c")[0] == "unrun"
     for key, value in (("stop_observed",False),("all_waits_cancelled",False),("wait_count",0)):
         changed = deepcopy(full_listener)
         changed["run_listener"]["response"]["probe"][key] = value
@@ -2013,9 +2053,9 @@ def self_test():
         controls["control"] = response(outcomes=[{"success": True}])
         assert diagnostic_status(controls, op) == "complete"
     controls = {mode: response(outcomes={"bind": {"operation": {"success": False}}}) for mode in ("control", "plain_appcontainer", "confined")}
-    assert diagnostic_status(controls, "unix-outcomes") == "inconclusive: control did not succeed"
+    assert diagnostic_status(controls, "unix-outcomes") == "complete"
     controls["control"]["response"]["probe"]["outcomes"]["bind"]["operation"]["success"] = True
-    assert diagnostic_status(controls, "unix-outcomes") == "inconclusive: direct route not calibrated"
+    assert diagnostic_status(controls, "unix-outcomes") == "complete"
     controls["control"]["response"]["probe"]["calibrated_variants"] = {key: {"short": True} for key in ("abstract", "filesystem")}
     assert diagnostic_status(controls, "unix-outcomes") == "complete"
     sweep = family_sweep_table({})

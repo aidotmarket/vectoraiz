@@ -320,11 +320,20 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   waits until the parent requests stop after the final probe. The launcher grants
   this operation a 1,530-second deadline; the listener's own bound is 1,500 seconds.
   The parent derives coverage from readiness, liveness after the probes, measured
-  duration, successful launch/collection and orderly stop. Row 2c also requires
-  successful listen, completed waits, no observed connection, run-wide listener coverage,
-  absence of a vectorAIz process before the run and no vectorAIz start in the
-  capture spanning all harness calls. An early listener exit, a failed wait or a
-  missing ready/stop observation leaves the row unrun. A connection fails it.
+  duration, successful launch/collection and orderly stop. Row 2c checks the
+  listener's own bind and listen success and records its observed namespace.
+  It remains `unrun`: the observation is an abstract-namespace listener only;
+  no connect route to it is established on this build (see 2d); the listen-wait
+  detector has no positive control; the filesystem listener is unmeasured; and
+  there is no vectorAIz process on the runner. Listener and run-wide process
+  capture evidence remain in the manifest. A future PASS needs a control-mode
+  connect to the same listener construction that completes the wait. An observed
+  connection still fails the row. These limitations do not change the delta 6
+  judgement rule. Rows 2a/2b and filesystem calibration remain open per the
+  delta 6 Open item: LPAC WSAStartup fails with 10107 before the explicit-protocol
+  constructor fails with 10093, and unconfined direct filesystem binds fail with
+  `0xC000000D` / `0xC0000141`. None establishes filesystem policy denial or
+  platform unavailability.
   Hyper-V/WSL/Sandbox feature and VM
   inventory records why 2e is NOT EXERCISABLE on an unequipped host. On an equipped
   host, a calibrated utility-VM service is still required; absence of that control
