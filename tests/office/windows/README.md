@@ -1,4 +1,4 @@
-Windows C1 feasibility harness (S1940, fold 7)
+Windows C1 feasibility harness (S1944, fold 10)
 =============================================
 
 This default-off harness measures the actual parser worker. It does not change
@@ -21,11 +21,10 @@ cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features
 python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run-1" --pdfium C:/exact/pinned/pdfium.dll
 ```
 
-The runner plans 125 rows, including six UDP-listen not-applicable rows. It
+The runner plans 130 judged rows and three diagnostic groups, including six UDP-listen not-applicable rows. It
 creates a sentinel under the user's profile, disposable loopback/LAN TCP/UDP
-controls and synthetic TXT/Markdown/HTML/DOCX/XLSX/PDF fixtures. Every row has a
-separate unconfined control and confined worker. Winsock catalog and socket
-creation rows also record a plain zero-capability AppContainer comparison;
+controls and synthetic TXT/Markdown/HTML/DOCX/XLSX/PDF fixtures. Every judged row has a
+separate unconfined control and confined worker. AFD, Winsock registry, socket creation, RPC and DNSAPI rows also record a plain zero-capability AppContainer comparison;
 that comparison never substitutes for the LPAC result. Shell rows run the
 confined worker before the control, with separate listeners/nonces per API/mode.
 
@@ -49,8 +48,9 @@ Stage A — verdicts and public evidence
 -------------------------------------
 
 Socket creation rows judge only creation. A descriptor is a strict-creation
-FAIL; 10107/10093 startup/creation results remain FAIL (unproven), never explained
-network-policy denials. Operation rows run only with a usable socket. If every
+FAIL. Literal 10107/10093 startup/creation failures can pass only with the
+family-specific AFD and registry attribution described below; those codes alone
+never establish policy denial. Operation rows run only with a usable socket. If every
 tested constructor/AFD route returned no socket, they are unrun with reason
 "not exercisable: no socket obtainable by any tested route". Incomplete routes
 or an available alternative are identified separately. Operations on an invalid
@@ -160,8 +160,11 @@ remain under the private evidence root. Only manifest.json is uploaded: parser
 responses become hashes and bounded error excerpts, with paths redacted. Complete
 streams spool privately even beyond the 32 MiB in-memory capture budget; overflow
 fails the invocation. Bounded setup/build/token/suite log tails appear in CI logs.
-Manifest validation scans decoded strings and keys recursively for drive paths
-and IP literals and validates completeness/counts. Artifact upload requires that
+Manifest validation scans decoded strings and keys recursively for drive paths,
+IP literals, UNC paths, home/user paths and user-name patterns, and validates
+completeness/counts. The backslash pattern deliberately remains fail-closed: even
+a harmless reason containing word-backslash-word is rejected. Use plain prose
+or slash-separated logical device labels; native paths stay private. Artifact upload requires that
 validation step to succeed; a leak or malformed manifest fails closed.
 
 Portable verification: `python scripts/office-windows-feasibility.py --self-test`.
@@ -196,13 +199,20 @@ classification are unchanged. These harness changes make no qualification claim.
 Fold 9 keeps literal socket creation and policy attribution separate: constructor
 rows require a matching passing AFD control/denial and all three catalog registry
 denials. Evidence applies only to the recorded OS build and zero-capability LPAC.
-The invalid-family AFD comparison tests denial before packet validation; it does
-not substitute for missing successful per-family controls. Catalog enumeration is
+The malformed-family comparison is diagnostic only. It establishes neither
+internal check ordering nor denial for an untested valid family, and does not
+substitute for successful per-family controls. Catalog enumeration is
 a diagnostic on the protocol-registry row. RPC runtime errors remain literal
 failures; ALPC epmapper and DNSAPI have separate controls.
 
-All three section modes have sampler experiments. The trigger is working set or
-system commit growth at or above the cap; system growth includes unrelated work.
+All three section modes have sampler experiments. Pagefile-backed modes trigger
+on working set or system commit growth at or above the cap. The file-backed
+experiment uses a 1,207,959,552-byte role intervention budget (three quarters of
+the cap) and also samples logical scratch backing-file size. File sizing can
+trigger before mapping/touch: this is a disk-budget signal, not measured resident
+memory or proof of a hard total-memory ceiling. Each row records its threshold,
+cap, samples and firing signal; a missed trigger stays FAIL. System growth
+includes unrelated work.
 Detection time is captured before termination; kill completion is separate.
 Responsiveness measures only a launcher loop proxy. Self-mutation rows exercise
 the combined job and process caps, not an independent per-process defense.
@@ -212,3 +222,46 @@ destructors cannot run: temporary package ACEs and the AppContainer profile can
 remain. Preserve private evidence and restore original ACLs/remove that profile
 before reusing a persistent runner. Reverse grant unwinding covers ordinary early
 errors, but does not solve forced launcher termination. No qualification claimed.
+
+Fold 10 diagnostics and evaluator corrections
+--------------------------------------------
+
+AF_HYPERV direct opens use protocol 1, matching Winsock; a control without a
+handle keeps the row unrun. `afd-unix-tcp` retains its historical id but records
+transport `stream` and an AF_UNIX stream reason. The malformed-family comparison
+is attached to each AFD row and excluded from counts. No malformed result can
+qualify an untested valid family. DNSAPI checks its control first, records a
+plain-AppContainer comparison, and keeps 9852 (`DNS_ERROR_NO_DNS_SERVERS`) FAIL.
+Self-raise/disable accepts explicit access/privilege refusal with unchanged
+before/after readbacks and valid section evidence, or successful calls with no
+effect; reasons distinguish each attempt. Changed limits and unexplained errors
+fail. These are combined job/process-cap experiments.
+
+The reachability diagnostic enumerates at most 200 entries under RPC Control
+and connects to ALPC port candidates, then opens Device/Afd, Device/Tcp,
+Device/Udp, Device/Mup and NamedPipe/{epmapper,lsarpc,samr,srvsvc}. The same
+control-discovered candidate list is attempted from the control, plain
+AppContainer and LPAC. The manifest table has those three literal-outcome
+columns, including unattempted/deadline outcomes. ALPC names are SHA-256 identities
+correlated to native names in private requests/results; device labels use slashes.
+Enumeration/query statuses and truncation/budget evidence are retained. Limits
+are six seconds per mode (18 seconds aggregate attempt budget, excluding launch
+and cleanup), 20 ms per ALPC connect, and 200 candidate ports plus eight devices.
+A successful connection is closed; no ALPC message or device I/O is sent. This
+inventory neither enumerates every Windows IPC route nor changes `rpc-alpc`'s
+strict-denial evaluator. Reachable epmapper continues to fail that judged row.
+
+AF_UNIX outcome diagnostics create an unconfined host listener at a non-granted
+path and try confined connect to it, bind outside scratch, bind inside granted
+scratch, abstract bind and connect to a separate host abstract listener if
+supported. Host startup/bind/listen statuses are public without addresses.
+The direct AFD route uses TLI bind/connect layouts from
+[phnt/ntafd.h](https://github.com/winsiderss/phnt/blob/master/ntafd.h), with
+same-route control outcomes required to interpret the private ABI. Connect first
+binds its local endpoint inside scratch. Pending operations wait at most one
+second before cancellation; failed cancellation aborts the worker rather than
+releasing buffers still owned by the kernel. A Winsock fallback is attempted if
+no AFD handle is obtained. All literal statuses, prerequisites and route choices
+remain diagnostic; unsupported namespaces or unsuccessful controls establish no
+policy denial. No socket payload is sent. `afd-unix-tcp`, `rpc-alpc` and shell
+judgment rules are unchanged. No qualification is claimed.

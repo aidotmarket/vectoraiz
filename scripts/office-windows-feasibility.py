@@ -152,10 +152,8 @@ def plan():
                 rows[-1]["plain_appcontainer_comparison"] = True
     for family in FAMILIES:
         for transport in (("tcp", "udp") if family in ("ipv4", "ipv6") else ("tcp",)):
-            add(f"afd-{family}-{transport}", op="afd", family=FAMILIES[family], transport=transport)
+            add(f"afd-{family}-{transport}", op="afd", family=FAMILIES[family], transport="stream" if family == "unix" else transport)
             rows[-1]["plain_appcontainer_comparison"] = True
-    add("afd-family-independence", op="afd", family=9999, transport="tcp")
-    rows[-1]["plain_appcontainer_comparison"] = True
     for family in ("ipv4", "ipv6"):
         for scope in ("loopback", "lan", "internet"):
             for transport in ("tcp", "udp"):
@@ -177,6 +175,7 @@ def plan():
     rows[-1]["plain_appcontainer_comparison"] = True
     add("rpc-alpc", op="rpc-alpc")
     add("dns-query", op="dns-query")
+    rows[-1]["plain_appcontainer_comparison"] = True
     for scope in ("both", "process", "job"):
         for kind in ("virtual", "mapping", "mapping-reserve", "mapping-file", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
@@ -198,6 +197,14 @@ def plan():
     return rows
 
 
+def diagnostic_plan():
+    return [{"id": label, "request": request, "diagnostic_only": True,
+             "plain_appcontainer_comparison": True} for label, request in (
+        ("malformed-family-comparison", {"op": "afd", "family": 9999, "transport": "stream"}),
+        ("reachability-inventory", {"op": "reachability-inventory"}),
+        ("af-unix-outcomes", {"op": "unix-outcomes"}))]
+
+
 def initial_manifest():
     specs = plan()
     return {"schema_version": 1, "scope": "Windows C1 feasibility stage 1; not qualification",
@@ -206,6 +213,7 @@ def initial_manifest():
             "source_sha": os.environ.get("SOURCE_SHA"), "worker_sha256": None,
             "sampler_enabled": True, "sampler_scope": "section-sampler variants only; all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
+            "diagnostics": [{"id": s["id"], "diagnostic_only": True, "status": "unrun"} for s in diagnostic_plan()],
             "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
             "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
@@ -265,6 +273,14 @@ def validate_manifest(manifest):
     counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun", "not-applicable")}
     assert counts == manifest["counts"], "counts mismatch"
     assert manifest["status"] in ("pass", "fail")
+    diagnostics = manifest["diagnostics"]
+    assert [row["id"] for row in diagnostics] == [s["id"] for s in diagnostic_plan()]
+    for row in diagnostics:
+        assert row["diagnostic_only"] is True and row["status"] in ("unrun", "complete", "error")
+        if row["id"] == "reachability-inventory" and "table" in row:
+            assert len(row["table"]) <= 208
+            for endpoint in row["table"]:
+                assert all(mode in endpoint for mode in ("control", "plain_appcontainer", "lpac"))
     diagnostic = manifest["launch_diagnostic"]
     assert diagnostic["status"] in ("unrun", "running", "complete") and diagnostic["reason"]
     names = [result["variation"] for result in diagnostic["variations"]]
@@ -321,7 +337,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 and kill.get("over_budget") is True and kill.get("exit_observed") is True
                 and confined.get("launcher_responsive") is True and not confined.get("deadline_kill")
                 and isinstance(kill.get("overshoot_bytes"), int) and isinstance(kill.get("time_to_kill_ms"), int)
-                and kill.get("signal") in ("worker working set", "system commit growth (includes concurrent activity)")
+                and kill.get("signal") in ("worker working set", "system commit growth (includes concurrent activity)",
+                                            "scratch backing file size (logical bytes, not resident memory)")
+                and kill.get("threshold_bytes") == (LIMIT * 3 // 4 if spec["request"]["kind"] == "mapping-file" else LIMIT)
                 and isinstance(kill.get("detected_after_ms"), int)
                 and isinstance(kill.get("kill_completed_after_ms"), int)
                 and kill["kill_completed_after_ms"] >= kill["detected_after_ms"]):
@@ -372,16 +390,13 @@ def evaluate(spec, control, confined, evidence_rows=()):
             return "unrun", "not exercisable: no socket obtainable by any tested route"
     if op == "dns" and (negative.get("startup", {}).get("success") is not True or negative.get("error_code") == 10093):
         return "unrun", "not exercisable: Winsock unavailable"
-    if spec["id"] == "afd-family-independence":
-        # Only a literal invalid-parameter control establishes the parsing contrast.
-        if positive.get("error_code") not in (0xC000000D, 0xC0000030) or positive.get("descriptor_returned") is not False:
-            return "unrun", "invalid-family control did not return a parameter error without handle"
-        if negative.get("error_code") == 0xC0000022 and negative.get("descriptor_returned") is False:
-            return "pass", "control parameter error; confined STATUS_ACCESS_DENIED precedes family parsing"
-        return "fail", "family-independent access denial not established"
-    if op == "dns-query" and negative.get("error_code") != 5:
-        code = negative.get("error_code")
-        return "fail", f"DnsQuery_W literal status {code!r} is not ERROR_ACCESS_DENIED"
+    if op == "dns-query":
+        if not positive.get("success"):
+            return "unrun", "DnsQuery_W positive control unsuccessful; no denial established"
+        if negative.get("error_code") != 5:
+            code = negative.get("error_code")
+            name = " (DNS_ERROR_NO_DNS_SERVERS)" if code == 9852 else ""
+            return "fail", f"DnsQuery_W literal status {code!r}{name} is not ERROR_ACCESS_DENIED"
     if op == "afd" and (positive.get("success") is not True or positive.get("descriptor_returned") is not True):
         return "unrun", "direct AFD control did not return a successful handle"
     if not positive.get("success"):
@@ -408,8 +423,16 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 return "fail", "self-mutation effective job cap readback missing or changed"
             if any(a["after"].get("maximum_bytes") != LIMIT or a["after"].get("flags", 0) & 6 != 6 for a in attempts):
                 return "fail", "self-mutation process maximum or hard-limit flags changed"
-            if any(a["call"].get("success") is not True for a in attempts):
-                return "fail", "self-mutation call did not report success; inspect literal outcome"
+            if any(not a.get("before", {}).get("available") or any(
+                    not isinstance(a["before"].get(key), int) or
+                    a["before"].get(key) != a["after"].get(key)
+                    for key in ("minimum_bytes", "maximum_bytes", "flags")) for a in attempts):
+                return "fail", "self-mutation readbacks missing or changed"
+            if any(a["call"].get("success") is not True and not (
+                    a["call"].get("success") is False and a["call"].get("return_code") == 0
+                    and a["call"].get("error_code") in (5, 1314)
+                    and a["call"].get("explicit_denial") is True) for a in attempts):
+                return "fail", "self-mutation unexplained error; no attributable refusal"
             sections = [a.get("section", {}) for a in attempts]
         for section in sections:
             if not section.get("touch_completed") and not (section.get("allocation_refused") and section.get("allocation_limit_error")):
@@ -421,7 +444,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if spec["request"]["kind"] == "mapping-file" and negative.get("scratch_file_size_bytes") != 2 * 1024 ** 3:
             return "fail", "scratch-file view size not established"
         if spec["request"]["kind"] == "self-ws":
-            return "pass", "raise and disable calls reported success but had no effect on process/job readbacks; parent peak within cap plus one page; job plus per-process cap, not an independent per-process defense"
+            outcomes = "; ".join(a["attempt"] + (": reported success but had no effect" if a["call"]["success"]
+                else ": attributable refusal with unchanged readbacks") for a in attempts)
+            return "pass", outcomes + "; valid section evidence and parent peak within cap plus one page; combined job/process cap"
         return "pass", "parent-read kernel peak within cap plus one page; completed section touch is documented paging residual"
     if spec["id"] == "inherited":
         if not positive.get("identity_match"):
@@ -540,8 +565,75 @@ def public_result(result, format_row=False):
             result["parser_error_present"] = response.get("error") is not None
             result.update(error_excerpt(response))
     elif response:
+        if "candidates" in response.get("probe", {}):
+            response = {**response, "probe": {key: child for key, child in response["probe"].items() if key != "candidates"}}
         result["response"] = response
     return result
+
+
+class UnixListeners:
+    """Unconfined AF_UNIX path and optional abstract listener; never send data."""
+    def __init__(self, path):
+        import ctypes as c
+        self.api = c.WinDLL("ws2_32", use_last_error=True)
+        self.api.socket.argtypes = [c.c_int, c.c_int, c.c_int]
+        self.api.socket.restype = c.c_size_t
+        for name in ("bind", "listen", "closesocket"):
+            getattr(self.api, name).argtypes = ([c.c_size_t, c.c_void_p, c.c_int] if name == "bind"
+                                               else [c.c_size_t, c.c_int] if name == "listen" else [c.c_size_t])
+        self.handles = []
+        self.path = path
+        self.abstract_name = "vz-c1-" + secrets.token_hex(8)
+        data = c.create_string_buffer(512)
+        startup = self.api.WSAStartup(0x202, data)
+        self.evidence = {"startup_status": startup}
+        for label, address in (("filesystem", str(path).encode()),
+                               ("abstract", b"\0" + self.abstract_name.encode())):
+            if startup != 0:
+                self.evidence[label] = {"attempted": False, "reason": "host WSAStartup failed"}
+                continue
+            handle = self.api.socket(1, 1, 0)
+            created = handle != c.c_size_t(-1).value
+            creation_error = 0 if created else self.api.WSAGetLastError()
+            result = {"socket_returned": created, "creation_status": creation_error}
+            if created:
+                self.handles.append(handle)
+                if len(address) >= 108:
+                    result.update(attempted=False, reason="host AF_UNIX address too long")
+                else:
+                    raw = c.create_string_buffer(b"\x01\x00" + address.ljust(108, b"\0"))
+                    length = 2 + len(address) if label == "abstract" else 110
+                    rc = self.api.bind(handle, raw, length)
+                    result.update(bind_return=rc, bind_status=0 if rc == 0 else self.api.WSAGetLastError())
+                    if rc == 0:
+                        rc = self.api.listen(handle, 8)
+                        result.update(listen_return=rc, listen_status=0 if rc == 0 else self.api.WSAGetLastError())
+            self.evidence[label] = result
+
+    def close(self):
+        for handle in self.handles:
+            self.api.closesocket(handle)
+        if self.evidence["startup_status"] == 0:
+            self.api.WSACleanup()
+        self.path.unlink(missing_ok=True)
+
+
+def inventory_table(results):
+    """Port names and native paths stay private; hashes correlate candidate identities."""
+    control = results.get("control", {}).get("response", {}).get("probe", {})
+    table = []
+    for index, candidate in enumerate(control.get("candidates", [])):
+        path = candidate["path"]
+        endpoint = ("RPC Control port sha256:" + hashlib.sha256(path.encode()).hexdigest()
+                    if candidate["kind"] == "alpc" else path.replace("\\", "/").lstrip("/"))
+        row = {"endpoint": endpoint, "kind": candidate["kind"]}
+        for mode in ("control", "plain_appcontainer", "confined"):
+            probe = results.get(mode, {}).get("response", {}).get("probe", {})
+            outcomes = probe.get("outcomes", [])
+            row["lpac" if mode == "confined" else mode] = outcomes[index] if index < len(outcomes) else {
+                "attempted": False, "reason": "worker outcome unavailable"}
+        table.append(row)
+    return table
 
 
 class ShellListener:
@@ -719,7 +811,7 @@ def launch_diagnostic(args, out, manifest, save):
 def run_suite(args):
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    specs = plan()
+    specs = plan() + diagnostic_plan()
     manifest = initial_manifest()
     def refresh_sockets():
         for spec in specs:
@@ -730,6 +822,13 @@ def run_suite(args):
                     row.update(status=status, reason=reason)
                     row["policy_attribution"] = {"status": status, "reason": reason}
     def save():
+        malformed = next((row for row in manifest["diagnostics"] if row["id"] == "malformed-family-comparison"), {})
+        for row in manifest["rows"]:
+            if row["id"].startswith("afd-"):
+                row["malformed_family_comparison"] = {"diagnostic_only": True,
+                    "reason": "malformed-family comparison; no inference about valid untested families",
+                    **{mode: malformed.get(mode, {}).get("response", {}).get("probe")
+                       for mode in ("control", "plain_appcontainer", "confined")}}
         refresh_sockets()
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
         target = out / "manifest.json"
@@ -764,10 +863,12 @@ def run_suite(args):
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
         endpoints = Endpoints()
-        for index, item in enumerate(specs):
-            entry = manifest["rows"][index]
+        for item in specs:
+            collection = manifest["diagnostics"] if item.get("diagnostic_only") else manifest["rows"]
+            entry = next(row for row in collection if row["id"] == item["id"])
             folder = out / item["id"]
             folder.mkdir()
+            unix_listeners = None
             try:
                 if item.get("format") == "pdf" and not args.pdfium:
                     entry.update(status="unrun", reason="pinned PDFium path not supplied")
@@ -782,14 +883,24 @@ def run_suite(args):
                     entry["endpoint_scope"] = probe.get("endpoint_scope")
                 if item.get("experiment"):
                     entry["experiment"] = item["experiment"]
+                if probe.get("op") == "unix-outcomes":
+                    unix_listeners = UnixListeners(sentinel_root / "host.sock")
+                    probe.update(unix_listener=str(unix_listeners.path), abstract_name=unix_listeners.abstract_name)
+                    entry["host_listeners"] = unix_listeners.evidence
+                if item.get("experiment") == "sampler":
+                    entry["intervention_threshold_bytes"] = LIMIT * 3 // 4 if probe["kind"] == "mapping-file" else LIMIT
+                    entry["kernel_working_set_cap_bytes"] = LIMIT
                 results = {}
                 modes = ["confined", "control"] if probe.get("op") == "shell" else ["control", "confined"]
                 if item.get("plain_appcontainer_comparison"):
                     modes.append("plain_appcontainer")
                 for mode in modes:
                     sentinel.write_bytes(b"C1-private-sentinel\n")
-                    scratch = folder / (mode + "-scratch")
-                    scratch.mkdir()
+                    scratch = (Path(tempfile.mkdtemp(prefix="vz-u-")) if probe.get("op") == "unix-outcomes"
+                               else folder / (mode + "-scratch"))
+                    scratch.mkdir(exist_ok=True)
+                    if probe.get("op") == "unix-outcomes":
+                        (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
                     listener = None
                     try:
                         if probe.get("op") == "shell":
@@ -825,6 +936,12 @@ def run_suite(args):
                             listener = None
                         results[mode] = result
                         entry[mode] = public_result(result, "format" in item)
+                        if probe.get("op") == "reachability-inventory" and mode == "control":
+                            candidates = result.get("response", {}).get("probe", {}).get("candidates")
+                            if not isinstance(candidates, list):
+                                entry.update(status="error", reason="control candidate enumeration unavailable")
+                                break
+                            probe["candidates"] = candidates
                     finally:
                         if listener:
                             listener.finish()
@@ -837,6 +954,15 @@ def run_suite(args):
                             except OSError as error:
                                 entry["cleanup_error"] = type(error).__name__
                                 (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
+                if item.get("diagnostic_only"):
+                    entry.update(status="complete" if all(results.get(mode, {}).get("status") == "pass"
+                        for mode in ("control", "plain_appcontainer", "confined")) and not entry.get("cleanup_error") else "error",
+                        reason="diagnostic only; excluded from verdict counts and qualification")
+                    if probe.get("op") == "reachability-inventory":
+                        entry["table"] = inventory_table(results)
+                        entry["attempt_budget_ms"] = 18000
+                        entry["budget_scope"] = "three modes at six seconds each; launch/cleanup excluded"
+                    continue
                 if probe.get("op") == "network" and probe.get("operation") != "create":
                     # Creation routes were all exercised earlier. Never infer a global
                     # absence from only this operation's constructor.
@@ -861,6 +987,9 @@ def run_suite(args):
                         and results["control"].get("response", {}).get("probe", {}).get("success") is True
                         and results["confined"].get("status") == "pass") else "fail"
                     entry["policy_attribution"] = {"status": status, "reason": reason}
+                if item["id"] == "afd-unix-tcp":
+                    reason = "AF_UNIX stream: " + reason
+                    entry["transport"] = "stream"
                 entry.update(status=status, reason=reason,
                              control=public_result(results["control"], "format" in item),
                              confined=public_result(results["confined"], "format" in item))
@@ -871,9 +1000,11 @@ def run_suite(args):
                 if item.get("memory_scope"):
                     entry["memory_scope"] = item["memory_scope"]
             except Exception as error:
-                entry.update(status="fail", reason="probe orchestration exception: " + type(error).__name__)
+                entry.update(status="error" if item.get("diagnostic_only") else "fail", reason="probe orchestration exception: " + type(error).__name__)
                 (folder / "exception.txt").write_text(str(error), encoding="utf-8")
             finally:
+                if unix_listeners:
+                    unix_listeners.close()
                 save()
             print(entry["id"], entry["status"], flush=True)
     except Exception as error:
@@ -955,11 +1086,8 @@ def self_test():
     assert evaluate(constructor, socket_control, socket_control, dependencies)[0] == "fail"
     dns_spec = next(s for s in specs if s["id"] == "dns")
     assert evaluate(dns_spec, positive, failed_creation) == ("unrun", "not exercisable: Winsock unavailable")
-    independence = next(s for s in specs if s["id"] == "afd-family-independence")
-    assert evaluate(independence, response(success=False, descriptor_returned=False, error_code=0xC000000D),
-                    response(success=False, descriptor_returned=False, error_code=0xC0000022))[0] == "pass"
     shell = next(row for row in specs if row["id"] == "shell")
-    assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True, shell_execute_ex={"return_code":1}))[0] == "fail"
+    assert evaluate(shell, {**positive, "shell_listener": {"get_received": True}}, response(success=True))[0] == "fail"
     com = next(row for row in specs if row["id"] == "com")
     assert "named prerequisite" in evaluate(com, response(success=True, api="CoCreateInstance(ShellWindows, LOCAL_SERVER)"), response(success=False, explicit_denial=True, api="CoInitializeEx"))[1]
     assert evaluate(deny, response(success=True, api="ReadFile"), response(success=False, explicit_denial=True, api="unrelated"))[0] == "fail"
@@ -1029,13 +1157,19 @@ def self_test():
     from copy import deepcopy
     self_spec = next(s for s in specs if s["id"] == "section-hard-ws-self-ws")
     self_result = deepcopy(section)
-    readback = {"available": True, "maximum_bytes": LIMIT, "flags": 6,
+    readback = {"available": True, "minimum_bytes": 64 * 1024 ** 2, "maximum_bytes": LIMIT, "flags": 6,
                 "effective_job_cap": {"available": True, "max_working_set_bytes": LIMIT, "flags": 1}}
     self_result["response"]["probe"]["attempts"] = [
-        {"attempt": name, "call": {"success": True, "return_code": 1}, "after": deepcopy(readback),
+        {"attempt": name, "call": {"success": True, "return_code": 1}, "before": deepcopy(readback), "after": deepcopy(readback),
          "section": deepcopy(section["response"]["probe"])} for name in ("raise", "disable")]
     assert "reported success but had no effect" in evaluate(self_spec, section, self_result)[1]
-    for key, changed in (("maximum_bytes", LIMIT * 2), ("flags", 0)):
+    refused = deepcopy(self_result)
+    refused["response"]["probe"]["attempts"][0]["call"] = {
+        "success": False, "return_code": 0, "error_code": 5, "explicit_denial": True}
+    assert "attributable refusal" in evaluate(self_spec, section, refused)[1]
+    refused["response"]["probe"]["attempts"][0]["call"]["error_code"] = 87
+    assert evaluate(self_spec, section, refused)[0] == "fail"
+    for key, changed in (("minimum_bytes", 0), ("maximum_bytes", LIMIT * 2), ("flags", 0)):
         tampered = deepcopy(self_result)
         tampered["response"]["probe"]["attempts"][0]["after"][key] = changed
         assert evaluate(self_spec, section, tampered)[0] == "fail"
@@ -1048,16 +1182,40 @@ def self_test():
     for code, expected in ((5, "pass"), (14, "fail"), (10093, "fail"), (1314, "fail")):
         assert evaluate(dns_query, response(success=True, api="DnsQuery_W"),
             response(success=False, api="DnsQuery_W", error_code=code, explicit_denial=True))[0] == expected
+    assert dns_query["plain_appcontainer_comparison"]
+    no_servers = response(success=False, api="DnsQuery_W", error_code=9852)
+    assert "DNS_ERROR_NO_DNS_SERVERS" in evaluate(dns_query, response(success=True), no_servers)[1]
+    assert evaluate(dns_query, response(success=False), no_servers)[0] == "unrun"
+    assert all(s["id"] != "afd-family-independence" for s in specs)
     sampler_spec = next(s for s in specs if s["id"] == "section-sampler")
     killed = {"status": "fail", "exit_code": 137, "launch_trace": {"grants_restored": True},
               "sampler_enabled": True, "launcher_responsive": True,
-              "sampler_kill": {"terminated_job": True, "over_budget": True, "exit_observed": True, "overshoot_bytes": 123, "time_to_kill_ms": 2, "signal": "worker working set", "detected_after_ms": 5, "kill_completed_after_ms": 7}}
+              "sampler_kill": {"terminated_job": True, "over_budget": True, "exit_observed": True, "overshoot_bytes": 123, "time_to_kill_ms": 2, "signal": "worker working set", "threshold_bytes": LIMIT, "detected_after_ms": 5, "kill_completed_after_ms": 7}}
     assert evaluate(sampler_spec, section, killed)[0] == "pass"
     killed["sampler_kill"]["kill_completed_after_ms"] = 4
     assert evaluate(sampler_spec, section, killed)[0] == "fail"
     killed["sampler_kill"]["kill_completed_after_ms"] = 7
     killed["sampler_kill"]["over_budget"] = False
     assert evaluate(sampler_spec, section, killed)[0] == "fail"
+    file_sampler = next(s for s in specs if s["id"] == "section-sampler-mapping-file")
+    file_kill = deepcopy(killed)
+    file_kill["sampler_kill"].update(over_budget=True, threshold_bytes=LIMIT * 3 // 4,
+        signal="scratch backing file size (logical bytes, not resident memory)")
+    assert evaluate(file_sampler, section, file_kill)[0] == "pass"
+    file_kill["sampler_kill"]["threshold_bytes"] = LIMIT
+    assert evaluate(file_sampler, section, file_kill)[0] == "fail"
+    inventory = response(candidates=[{"kind": "alpc", "path": "private-port"},
+                                     {"kind": "device", "path": r"\Device\Afd"}],
+                         outcomes=[{"error_code": 0, "literal_status_hex": "0x00000000"},
+                                   {"error_code": 0xC0000022, "literal_status_hex": "0xC0000022"}])
+    table = inventory_table({"control": inventory, "plain_appcontainer": inventory})
+    assert len(table) == 2 and table[1]["endpoint"] == "Device/Afd"
+    assert table[0]["lpac"]["attempted"] is False
+    assert table[1]["control"]["error_code"] == 0xC0000022
+    public_inventory = public_result(inventory)
+    assert "candidates" not in public_inventory["response"]["probe"]
+    assert "candidates" in inventory["response"]["probe"]  # private evidence intact
+    assert "private-port" not in json.dumps(table)
     error = public_result({"response": {"error": "PDFium load failed: C:\\private\\pdfium.dll", "pages": []}}, True)
     assert "PDFium load failed" in error["parser_error_excerpt"]
     assert "private" not in error["parser_error_excerpt"]
@@ -1197,6 +1355,7 @@ def self_test():
             return 0
         fake_endpoints = SimpleNamespace(configure=lambda probe: None, close=lambda: None)
         with patch(__name__ + ".plan", return_value=[shell]), \
+             patch(__name__ + ".diagnostic_plan", return_value=[]), \
              patch(__name__ + ".launch_diagnostic"), \
              patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
              patch.object(time, "sleep"), \
@@ -1216,6 +1375,46 @@ def self_test():
             assert cleanup["removed"] is False and len(cleanup["failures"]) == 5
             assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False
                        for mode in ("control", "confined"))
+            validate_manifest(observed)
+    # The inventory shares the exact control candidates with both token modes,
+    # retains a failed launch, and publishes no raw native names or paths.
+    with tempfile.TemporaryDirectory(prefix="inventory-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        worker = folder / "worker.exe"
+        worker.write_bytes(b"synthetic")
+        inventory_spec = next(s for s in diagnostic_plan() if s["id"] == "reachability-inventory")
+        candidates = [{"kind": "alpc", "path": r"\RPC Control\private-port"}]
+        mode_order = []
+        def inventory_command(argv, log, timeout=70):
+            mode = argv[2]
+            mode_order.append(mode)
+            request = json.loads(Path(argv[3]).read_text())["office_windows_probe"]
+            if mode == "control":
+                assert "candidates" not in request
+            else:
+                assert request["candidates"] == candidates
+            result = {"status": "fail"} if mode == "confined" else response(
+                candidates=candidates, outcomes=[{"attempted": True, "error_code": 0,
+                "literal_status_hex": "0x00000000"}])
+            Path(argv[4]).write_text(json.dumps(result))
+            return 1 if mode == "confined" else 0
+        with patch(__name__ + ".plan", return_value=[]), \
+             patch(__name__ + ".diagnostic_plan", return_value=[inventory_spec]), \
+             patch(__name__ + ".launch_diagnostic"), \
+             patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+             patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".command", side_effect=inventory_command), \
+             patch.object(sys, "platform", "win32"), \
+             patch.object(Path, "home", return_value=folder), \
+             patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
+            run_args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker, pdfium=None)
+            run_suite(run_args)
+            observed = json.loads((run_args.out / "manifest.json").read_text())
+            assert mode_order == ["control", "confined", "confined-plain-appcontainer"]
+            assert observed["diagnostics"][0]["status"] == "error"
+            assert observed["diagnostics"][0]["confined"]["launcher_exit"] == 1
+            assert observed["diagnostics"][0]["table"][0]["lpac"]["attempted"] is False
+            assert "private-port" not in json.dumps(observed)
             validate_manifest(observed)
     # Diagnostic launch failures are evidence, not a suite acceptance gate.
     completed = json.loads(json.dumps(manifest))

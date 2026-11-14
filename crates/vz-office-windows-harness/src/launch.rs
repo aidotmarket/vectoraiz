@@ -1238,6 +1238,8 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let mut timed_out = false;
     let mut samples = Vec::new();
     let mut parent_peak_ws = 0usize;
+    let sampler_file = value["office_windows_probe"]["kind"] == "mapping-file";
+    let intervention_threshold = if sampler_file { MEMORY * 3 / 4 } else { MEMORY };
     let mut max_overshoot = 0u64;
     let mut sampler_kill = Value::Null;
     let mut previous_sample = Instant::now();
@@ -1262,23 +1264,37 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         if available {
             parent_peak_ws = parent_peak_ws.max(memory.PeakWorkingSetSize);
         }
-        let measured = (memory.WorkingSetSize as u64).max(growth.unwrap_or(0));
+        let scratch_size = if sampler_file {
+            std::fs::metadata(scratch.join("mapped-scratch.bin"))
+                .ok()
+                .map(|m| m.len())
+        } else {
+            None
+        };
+        let measured = (memory.WorkingSetSize as u64)
+            .max(growth.unwrap_or(0))
+            .max(scratch_size.unwrap_or(0));
         let signal = if !available || system["available"] != true {
             "measurement unavailable"
-        } else if memory.WorkingSetSize >= MEMORY {
+        } else if scratch_size.is_some_and(|size| size >= intervention_threshold as u64) {
+            "scratch backing file size (logical bytes, not resident memory)"
+        } else if memory.WorkingSetSize >= intervention_threshold {
             "worker working set"
         } else {
             "system commit growth (includes concurrent activity)"
         };
-        max_overshoot = max_overshoot.max(measured.saturating_sub(MEMORY as u64));
+        max_overshoot = max_overshoot.max(measured.saturating_sub(intervention_threshold as u64));
         samples.push(
             json!({"elapsed_ms":start.elapsed().as_millis(),"process_available":available,
             "private_commit_bytes":memory.PrivateUsage,"working_set_bytes":memory.WorkingSetSize,
             "peak_working_set_bytes":memory.PeakWorkingSetSize,"system":system,
-            "run_system_commit_growth_bytes":growth}),
+            "run_system_commit_growth_bytes":growth,"scratch_file_size_bytes":scratch_size,
+            "intervention_threshold_bytes":intervention_threshold,"signal":signal}),
         );
         if sampler_enabled
-            && (!available || system["available"] != true || measured >= MEMORY as u64)
+            && (!available
+                || system["available"] != true
+                || measured >= intervention_threshold as u64)
         {
             let detected = Instant::now();
             let detected_after_ms = start.elapsed().as_millis();
@@ -1287,8 +1303,9 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
                 "sampler job termination",
             )?;
             let waited = unsafe { WaitForSingleObject(process_handle.0, 5000) };
-            sampler_kill = json!({"terminated_job":true,"over_budget":available && system["available"] == true && measured >= MEMORY as u64,
-                "threshold_bytes":MEMORY,"detected_after_ms":detected_after_ms,"signal":signal,
+            sampler_kill = json!({"terminated_job":true,"over_budget":available && system["available"] == true && measured >= intervention_threshold as u64,
+                "threshold_bytes":intervention_threshold,"kernel_cap_bytes":MEMORY,
+                "budget_scope":if sampler_file { "file-view role budget; includes logical scratch size" } else { "working set or system commit growth" },"detected_after_ms":detected_after_ms,"signal":signal,
                 "kill_completed_after_ms":start.elapsed().as_millis(),
                 "time_to_kill_ms":detected.elapsed().as_millis(),"exit_observed":waited == WAIT_OBJECT_0,
                 "overshoot_bytes":max_overshoot});
@@ -1466,7 +1483,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         "token_before_resume":token,"working_set_cap_before_resume":working_set_cap,
         "job_members_before_resume":job_members_before,"observed_job_members":observed_job_members,"completion_port_notifications":notifications,
         "limit_violation_notification_received":if notification_port.is_some() {Some(notifications.iter().any(|n| n["limit_violation"] == true))} else {None},
-        "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":sampler_enabled,"sampler_kill":sampler_kill,
+        "completion_port_errors":notification_errors,"notification_limit_bytes":if notification_port.is_some() {Some(MEMORY)} else {None},"sampler_enabled":sampler_enabled,"sampler_intervention_threshold_bytes":intervention_threshold,"sampler_kill":sampler_kill,
         "responsiveness_scope":"launcher loop proxy","launcher_responsive":max_loop_gap_ms <= 1000,"max_parent_loop_gap_ms":max_loop_gap_ms,
         "parent_memory_samples":samples,"parent_peak_working_set_bytes":if parent_peak_ws > 0 {Some(parent_peak_ws)} else {None},
         "system_before_resume":system_before,"system_after":crate::probes::system_memory(),

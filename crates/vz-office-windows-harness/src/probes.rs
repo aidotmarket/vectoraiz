@@ -77,7 +77,8 @@ pub fn run(v: &Value) -> Result<Value> {
         "shell" => shell(v)?,
         "com" | "pipe" => broker(op),
         "winsock-registry" => winsock_registry(v)?,
-        "winsock-catalog" => winsock_catalog(),
+        "reachability-inventory" => reachability_inventory(v)?,
+        "unix-outcomes" => unix_outcomes(v)?,
         "afd" => afd(v)?,
         "rpc" => rpc(),
         "child" | "escape" => child(op == "escape")?,
@@ -647,14 +648,16 @@ unsafe extern "system" {
     ) -> i32;
 }
 fn alpc() -> Value {
-    let mut name = wide(r"\RPC Control\epmapper");
+    alpc_connect(r"\RPC Control\epmapper", -50_000_000)
+}
+fn alpc_connect(path: &str, timeout: i64) -> Value {
+    let mut name = wide(path);
     let mut string = NativeString {
         length: ((name.len() - 1) * 2) as u16,
         maximum_length: (name.len() * 2) as u16,
         buffer: name.as_mut_ptr(),
     };
     let mut handle = null_mut();
-    let timeout = -50_000_000i64; // bounded relative five-second connect
     let rc = unsafe {
         NtAlpcConnectPort(
             &mut handle,
@@ -672,7 +675,7 @@ fn alpc() -> Value {
     };
     let returned = !handle.is_null() && handle != INVALID_HANDLE_VALUE;
     let mut result = residual_status(
-        "NtAlpcConnectPort(epmapper)",
+        "NtAlpcConnectPort(no message)",
         rc as i64,
         rc >= 0 && returned,
         rc as u32,
@@ -717,6 +720,9 @@ const _: () = {
 };
 
 fn afd(v: &Value) -> Result<Value> {
+    Ok(afd_open(v)?.0)
+}
+fn afd_open(v: &Value) -> Result<(Value, Option<Handle>)> {
     let family = v["family"].as_u64().context("AFD family")? as i32;
     let udp = v["transport"] == "udp";
     // This private ABI is validated only by a succeeding same-build control.
@@ -727,7 +733,9 @@ fn afd(v: &Value) -> Result<Value> {
     ea.packet.endpoint_flags = if udp { 0x11 } else { 0 };
     ea.packet.address_family = family;
     ea.packet.socket_type = if udp { SOCK_DGRAM } else { SOCK_STREAM };
-    ea.packet.protocol = if family == 1 || family == 34 {
+    ea.packet.protocol = if family == 34 {
+        1
+    } else if family == 1 {
         0
     } else if udp {
         IPPROTO_UDP
@@ -786,10 +794,406 @@ fn afd(v: &Value) -> Result<Value> {
     result["ea_value_bytes"] = json!(ea.ea_value_length);
     result["ea_buffer_bytes"] = json!(ea_length);
     result["ea_buffer_alignment"] = json!(std::mem::align_of::<AfdOpenEa>());
-    if returned {
-        unsafe { CloseHandle(handle) };
+    result["protocol"] = json!(ea.packet.protocol);
+    Ok((result, returned.then_some(Handle(handle))))
+}
+
+#[repr(C)]
+struct DirectoryEntry {
+    name: NativeString,
+    kind: NativeString,
+}
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtOpenDirectoryObject(
+        handle: *mut HANDLE,
+        access: u32,
+        attributes: *mut ObjectAttributes,
+    ) -> i32;
+    fn NtQueryDirectoryObject(
+        handle: HANDLE,
+        buffer: *mut std::ffi::c_void,
+        length: u32,
+        single: u8,
+        restart: u8,
+        context: *mut u32,
+        returned: *mut u32,
+    ) -> i32;
+}
+fn native_attributes(name: &mut NativeString) -> ObjectAttributes {
+    ObjectAttributes {
+        length: size_of::<ObjectAttributes>() as u32,
+        root: null_mut(),
+        name,
+        attributes: 0x40,
+        security_descriptor: null_mut(),
+        security_quality: null_mut(),
     }
+}
+fn native_string(name: &mut [u16]) -> NativeString {
+    NativeString {
+        length: ((name.len() - 1) * 2) as u16,
+        maximum_length: (name.len() * 2) as u16,
+        buffer: name.as_mut_ptr(),
+    }
+}
+fn reachability_inventory(v: &Value) -> Result<Value> {
+    let start = std::time::Instant::now();
+    let mut candidates = v["candidates"].as_array().cloned().unwrap_or_default();
+    let mut enumeration = Value::Null;
+    if v.get("candidates").is_none() {
+        let mut path = wide(r"\RPC Control");
+        let mut name = native_string(&mut path);
+        let mut attrs = native_attributes(&mut name);
+        let mut directory = null_mut();
+        let rc = unsafe { NtOpenDirectoryObject(&mut directory, 1, &mut attrs) };
+        enumeration = residual_status(
+            "NtOpenDirectoryObject(RPC Control)",
+            rc as i64,
+            rc >= 0 && !directory.is_null(),
+            rc as u32,
+            "ntstatus",
+        );
+        if rc >= 0 && !directory.is_null() {
+            let directory = Handle(directory);
+            let mut context = 0;
+            let mut statuses = Vec::new();
+            let mut reached_end = false;
+            // Single entries in an aligned buffer; names are copied before reuse.
+            for index in 0..200 {
+                if start.elapsed().as_secs() >= 6 {
+                    break;
+                }
+                let mut buffer = vec![0usize; 4096];
+                let mut returned = 0;
+                let rc = unsafe {
+                    NtQueryDirectoryObject(
+                        directory.0,
+                        buffer.as_mut_ptr().cast(),
+                        (buffer.len() * size_of::<usize>()) as u32,
+                        1,
+                        u8::from(index == 0),
+                        &mut context,
+                        &mut returned,
+                    )
+                };
+                statuses.push(format!("0x{:08X}", rc as u32));
+                if rc < 0 {
+                    reached_end = rc as u32 == 0x8000001A; // STATUS_NO_MORE_ENTRIES
+                    break;
+                }
+                let entry = unsafe { &*buffer.as_ptr().cast::<DirectoryEntry>() };
+                let text = |n: &NativeString| unsafe {
+                    String::from_utf16_lossy(std::slice::from_raw_parts(
+                        n.buffer,
+                        n.length as usize / 2,
+                    ))
+                };
+                if text(&entry.kind) == "ALPC Port" {
+                    candidates.push(json!({"kind":"alpc", "path":format!(r"\RPC Control\{}", text(&entry.name))}));
+                }
+            }
+            enumeration["query_statuses"] = json!(statuses);
+            enumeration["enumeration_limit_entries"] = json!(200);
+            enumeration["enumeration_complete"] = json!(reached_end);
+            enumeration["truncated_or_query_failed"] = json!(!reached_end);
+        }
+        for path in [
+            r"\Device\Afd",
+            r"\Device\Tcp",
+            r"\Device\Udp",
+            r"\Device\NamedPipe\epmapper",
+            r"\Device\NamedPipe\lsarpc",
+            r"\Device\NamedPipe\samr",
+            r"\Device\NamedPipe\srvsvc",
+            r"\Device\Mup",
+        ] {
+            candidates.push(json!({"kind":"device", "path":path}));
+        }
+    }
+    anyhow::ensure!(candidates.len() <= 208, "inventory candidate cap");
+    let mut outcomes = Vec::new();
+    for candidate in &candidates {
+        if start.elapsed().as_secs() >= 6 {
+            outcomes.push(json!({"attempted":false,"reason":"six-second mode budget exhausted"}));
+            continue;
+        }
+        let path = candidate["path"].as_str().context("inventory path")?;
+        let mut result = if candidate["kind"] == "alpc" {
+            // Null connection message and no send/receive API, even on success.
+            alpc_connect(path, -200_000) // 20 ms per port
+        } else {
+            let mut path = wide(path);
+            let mut name = native_string(&mut path);
+            let mut attrs = native_attributes(&mut name);
+            let mut iosb = IoStatus {
+                status: 0,
+                information: 0,
+            };
+            let mut handle = null_mut();
+            let rc = unsafe {
+                NtCreateFile(
+                    &mut handle,
+                    GENERIC_READ | GENERIC_WRITE,
+                    &mut attrs,
+                    &mut iosb,
+                    null(),
+                    0,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    1,
+                    0,
+                    null(),
+                    0,
+                )
+            };
+            let returned = !handle.is_null() && handle != INVALID_HANDLE_VALUE;
+            let mut result = residual_status(
+                "NtCreateFile(device; no I/O)",
+                rc as i64,
+                rc == 0 && returned,
+                rc as u32,
+                "ntstatus",
+            );
+            result["descriptor_returned"] = json!(returned);
+            result["io_status"] = json!(iosb.status);
+            if returned {
+                unsafe { CloseHandle(handle) };
+            }
+            result
+        };
+        result["attempted"] = json!(true);
+        outcomes.push(result);
+    }
+    Ok(
+        json!({"diagnostic_only":true,"candidates":candidates,"outcomes":outcomes,
+        "enumeration":enumeration,"elapsed_ms":start.elapsed().as_millis(),
+        "mode_budget_ms":6000,"messages_sent":0}),
+    )
+}
+
+// Direct AFD TLI bind/connect layouts follow phnt/ntafd.h. Same-route control
+// outcomes validate this private ABI; errors never qualify a judged row.
+#[repr(C)]
+struct UnixAddress {
+    family: u16,
+    path: [u8; 108],
+}
+#[repr(C)]
+struct UnixBind {
+    share: u32,
+    address: UnixAddress,
+}
+#[repr(C)]
+struct UnixConnect {
+    san: u8,
+    root: HANDLE,
+    endpoint: HANDLE,
+    address: UnixAddress,
+}
+const _: () = {
+    assert!(std::mem::offset_of!(UnixBind, address) == 4);
+    assert!(std::mem::offset_of!(UnixConnect, address) == 24);
+};
+#[link(name = "ntdll")]
+unsafe extern "system" {
+    fn NtDeviceIoControlFile(
+        file: HANDLE,
+        event: HANDLE,
+        apc: *mut std::ffi::c_void,
+        context: *mut std::ffi::c_void,
+        iosb: *mut IoStatus,
+        code: u32,
+        input: *const std::ffi::c_void,
+        input_length: u32,
+        output: *mut std::ffi::c_void,
+        output_length: u32,
+    ) -> i32;
+    fn NtCancelIoFileEx(file: HANDLE, request: *mut IoStatus, iosb: *mut IoStatus) -> i32;
+}
+fn afd_ioctl<T>(handle: HANDLE, code: u32, input: &T, length: usize) -> Result<Value> {
+    let event = unsafe { CreateEventW(null(), 1, 0, null()) };
+    anyhow::ensure!(!event.is_null(), "AFD operation event");
+    let event = Handle(event);
+    let mut iosb = IoStatus {
+        status: 0x103,
+        information: 0,
+    };
+    let mut output = [0u8; 256];
+    let rc = unsafe {
+        NtDeviceIoControlFile(
+            handle,
+            event.0,
+            null_mut(),
+            null_mut(),
+            &mut iosb,
+            code,
+            (input as *const T).cast(),
+            length as u32,
+            output.as_mut_ptr().cast(),
+            output.len() as u32,
+        )
+    };
+    let mut timed_out = false;
+    let mut cancellation = None;
+    if rc == 0x103 && unsafe { WaitForSingleObject(event.0, 1000) } != WAIT_OBJECT_0 {
+        timed_out = true;
+        let mut cancel = IoStatus {
+            status: 0,
+            information: 0,
+        };
+        cancellation = Some(unsafe { NtCancelIoFileEx(handle, &mut iosb, &mut cancel) } as u32);
+        if unsafe { WaitForSingleObject(event.0, 1000) } != WAIT_OBJECT_0 {
+            // A METHOD_NEITHER request may still reference stack buffers. Never
+            // return/free them while the kernel has an outstanding request.
+            eprintln!("AFD diagnostic cancellation did not complete; aborting worker");
+            std::process::abort();
+        }
+    }
+    let status = if rc == 0x103 {
+        iosb.status as u32
+    } else {
+        rc as u32
+    };
+    let mut result = residual_status(
+        if code == 0x12003 {
+            "NtDeviceIoControlFile(AFD_BIND)"
+        } else {
+            "NtDeviceIoControlFile(AFD_CONNECT)"
+        },
+        status as i32 as i64,
+        status == 0 && !timed_out,
+        status,
+        "ntstatus",
+    );
+    result["submission_status_hex"] = json!(format!("0x{:08X}", rc as u32));
+    result["io_status_hex"] = json!(format!("0x{:08X}", iosb.status as u32));
+    result["timed_out"] = json!(timed_out);
+    result["cancellation_status"] = json!(cancellation);
+    result["input_bytes"] = json!(length);
     Ok(result)
+}
+fn unix_address(path: &[u8], abstract_name: bool) -> Result<(UnixAddress, usize)> {
+    let mut address = UnixAddress {
+        family: 1,
+        path: [0; 108],
+    };
+    anyhow::ensure!(
+        path.len() < if abstract_name { 107 } else { 108 },
+        "unix address length"
+    );
+    let offset = usize::from(abstract_name);
+    address.path[offset..offset + path.len()].copy_from_slice(path);
+    let length = if abstract_name {
+        2 + offset + path.len()
+    } else {
+        size_of::<UnixAddress>()
+    };
+    Ok((address, length))
+}
+fn unix_operation(path: &[u8], local: Option<&[u8]>, abstract_name: bool) -> Result<Value> {
+    let (creation, handle) = afd_open(&json!({"family":1,"transport":"stream"}))?;
+    let (address, length) = unix_address(path, abstract_name)?;
+    if let Some(handle) = handle {
+        let mut prerequisite = Value::Null;
+        let operation = if let Some(local) = local {
+            let (local_address, local_length) = unix_address(local, false)?;
+            let bind = UnixBind {
+                share: 0,
+                address: local_address,
+            };
+            prerequisite = afd_ioctl(handle.0, 0x12003, &bind, 4 + local_length)?;
+            if prerequisite["success"] == true {
+                let connect = UnixConnect {
+                    san: 0,
+                    root: null_mut(),
+                    endpoint: null_mut(),
+                    address,
+                };
+                afd_ioctl(handle.0, 0x12007, &connect, 24 + length)?
+            } else {
+                json!({"attempted":false,"reason":"local AFD bind prerequisite failed"})
+            }
+        } else {
+            let bind = UnixBind { share: 0, address };
+            afd_ioctl(handle.0, 0x12003, &bind, 4 + length)?
+        };
+        return Ok(json!({"creation":creation,"route":"direct AFD TLI IOCTL",
+            "local_bind":prerequisite,"operation":operation,"abstract_namespace":abstract_name}));
+    }
+    // Winsock fallback is useful on builds where this private open packet fails.
+    let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
+    let socket_creation = wsa(
+        "socket(AF_UNIX fallback)",
+        socket as i64,
+        socket != INVALID_SOCKET,
+    );
+    if socket == INVALID_SOCKET {
+        return Ok(
+            json!({"creation":creation,"route":"Winsock fallback","socket_creation":socket_creation}),
+        );
+    }
+    let mut nonblocking = 1;
+    let rc = unsafe { ioctlsocket(socket, FIONBIO, &mut nonblocking) };
+    let mode = wsa("ioctlsocket(FIONBIO)", rc as i64, rc == 0);
+    let operation = if local.is_some() && rc != 0 {
+        json!({"attempted":false,"reason":"nonblocking setup failed"})
+    } else {
+        let rc = unsafe {
+            if local.is_some() {
+                connect(
+                    socket,
+                    (&address as *const UnixAddress).cast(),
+                    length as i32,
+                )
+            } else {
+                bind(
+                    socket,
+                    (&address as *const UnixAddress).cast(),
+                    length as i32,
+                )
+            }
+        };
+        wsa(
+            if local.is_some() {
+                "connect(AF_UNIX)"
+            } else {
+                "bind(AF_UNIX)"
+            },
+            rc as i64,
+            rc == 0,
+        )
+    };
+    unsafe { closesocket(socket) };
+    Ok(
+        json!({"creation":creation,"route":"Winsock fallback","socket_creation":socket_creation,
+        "nonblocking":mode,"operation":operation,"abstract_namespace":abstract_name}),
+    )
+}
+fn unix_outcomes(v: &Value) -> Result<Value> {
+    let mut data = unsafe { zeroed() };
+    let rc = unsafe { WSAStartup(0x202, &mut data) };
+    let startup = row("WSAStartup", rc as i64, rc == 0, rc as u32, "winsock");
+    let inside = std::path::Path::new(arg(v, "scratch")?).join("unix-bind.sock");
+    let outside = std::path::Path::new(arg(v, "directory")?).join("unix-outside.sock");
+    let listener = arg(v, "unix_listener")?;
+    let abstract_name = arg(v, "abstract_name")?;
+    let host_client = inside.with_file_name("client-host.sock");
+    let abstract_client = inside.with_file_name("client-abstract.sock");
+    let bind_name = format!("{abstract_name}-bind");
+    let results = json!({
+        "host_listener_connect":unix_operation(listener.as_bytes(), Some(host_client.to_str().context("unix client encoding")?.as_bytes()), false)?,
+        "outside_scratch_bind":unix_operation(outside.to_str().context("unix outside encoding")?.as_bytes(), None, false)?,
+        "inside_scratch_bind":unix_operation(inside.to_str().context("unix scratch encoding")?.as_bytes(), None, false)?,
+        "abstract_bind":unix_operation(bind_name.as_bytes(), None, true)?,
+        "abstract_connect":unix_operation(abstract_name.as_bytes(), Some(abstract_client.to_str().context("unix client encoding")?.as_bytes()), true)?});
+    if rc == 0 {
+        unsafe { WSACleanup() };
+    }
+    Ok(
+        json!({"diagnostic_only":true,"startup":startup,"outcomes":results,
+        "abstract_note":"literal errors retained; unsupported namespace or provider failure is not denial evidence",
+        "messages_sent":0}),
+    )
 }
 
 fn rpc_status(api: &str, status: i32) -> Value {
