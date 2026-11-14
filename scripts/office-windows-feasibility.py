@@ -19,6 +19,7 @@ import re
 import shutil
 import socket
 import subprocess
+import struct
 import sys
 import tarfile
 import tempfile
@@ -26,6 +27,7 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
+AUDIT_SCRIPT = ROOT / "scripts/office-windows-audit.ps1"
 LIMIT = 1_610_612_736
 WS_SLACK = 65_536
 FAMILIES = {"ipv4": 2, "ipv6": 23, "unix": 1, "hyperv": 34}
@@ -87,11 +89,74 @@ def command(argv, log, timeout=70):
             return 124
 
 
-def loader_files(worker, pdfium, out):
+def pe_imports(path):
+    """Read normal and delay imports without a compiler or external tools.
+
+    Reject malformed/unsupported images rather than guessing a loader closure.
+    """
+    data = path.read_bytes()
+    def unpack(fmt, offset):
+        return struct.unpack_from(fmt, data, offset)
+    if data[:2] != b"MZ":
+        raise ValueError("not a PE image")
+    pe, = unpack("<I", 0x3c)
+    if data[pe:pe + 4] != b"PE\0\0":
+        raise ValueError("missing PE signature")
+    machine, sections, _, _, _, optional_size, _ = unpack("<HHIIIHH", pe + 4)
+    optional = pe + 24
+    if machine != 0x8664 or unpack("<H", optional)[0] != 0x20b or optional_size < 240:
+        raise ValueError("kit requires a PE32+ x64 image")
+    image_base, = unpack("<Q", optional + 24)
+    if unpack("<I", optional + 108)[0] < 14:
+        raise ValueError("missing import directory entries")
+    table = optional + optional_size
+    mappings = [unpack("<IIII", table + i * 40 + 8) for i in range(sections)]
+    def offset(rva):
+        for virtual_size, address, size, raw in mappings:
+            if address <= rva < address + max(virtual_size, size):
+                delta = rva - address
+                if delta >= size or raw + delta >= len(data):
+                    break
+                return raw + delta
+        raise ValueError("unmapped PE import RVA")
+    def name(rva):
+        start = offset(rva)
+        end = data.find(b"\0", start, min(start + 260, len(data)))
+        if end < 0:
+            raise ValueError("unterminated PE import name")
+        result = data[start:end].decode("ascii")
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+\.[dD][lL][lL]", result):
+            raise ValueError("invalid PE import name")
+        return result
+    names = []
+    for index, width, field in ((1, 20, 12), (13, 32, 4)):
+        rva, size = unpack("<II", optional + 112 + index * 8)
+        if not rva and not size:
+            continue
+        if not rva or size < width:
+            raise ValueError("invalid PE import directory")
+        for step in range(min(size // width, 4096)):
+            start = offset(rva + step * width)
+            descriptor = data[start:start + width]
+            if len(descriptor) != width:
+                raise ValueError("truncated PE import descriptor")
+            if not any(descriptor):
+                break
+            value, = unpack("<I", start + field)
+            if index == 13 and not unpack("<I", start)[0] & 1:
+                value -= image_base
+            names.append(name(value))
+        else:
+            raise ValueError("unterminated PE import directory")
+    return names
+
+
+def loader_files(worker, pdfium, out, portable=False):
     """Exact local loader closure; system DLL ACLs are never changed.
 
-    MSVC dumpbin reports normal and delay-load dependencies. Keep its full output
-    private and fail closed if dependency inspection fails.
+    MSVC dumpbin (repository runs) or the Python PE reader (offline kit)
+    reports normal and delay-load dependencies. Keep inspection output private
+    and fail closed if dependency inspection fails.
     """
     worker = worker.resolve(strict=True)
     if pdfium:
@@ -124,23 +189,35 @@ def loader_files(worker, pdfium, out):
             if image.parent != worker.parent:
                 raise RuntimeError("loader grant escapes worker directory")
             dlls.add(image)
-        log = out / ("loader-" + str(len(inspected)) + ".log")
-        if command(["dumpbin", "/nologo", "/dependents", image], log) != 0:
-            raise RuntimeError("DLL dependency inspection failed")
-        output = log.read_text(encoding="utf-8", errors="replace")
-        if not any(kind in output for kind in ("File Type: EXECUTABLE IMAGE", "File Type: DLL")):
-            raise RuntimeError("unrecognized DLL dependency inspection output")
-        dependencies = False
-        for line in output.splitlines():
-            name = line.strip()
-            if name.startswith("Image has the following") and name.endswith("dependencies:"):
-                dependencies = True
-            if dependencies and line.startswith("    ") and name.lower().endswith(".dll"):
-                if Path(name).name != name or "/" in name or "\\" in name:
-                    raise RuntimeError("unexpected DLL dependency path")
+        if portable:
+            imports = pe_imports(image)
+            (out / ("loader-" + str(len(inspected)) + ".json")).write_text(
+                json.dumps(imports), encoding="utf-8")
+            for name in imports:
                 sibling = siblings.get(name.lower())
                 if sibling:
                     pending.append(sibling.resolve(strict=True))
+                elif not (name.lower().startswith(("api-ms-win-", "ext-ms-win-")) or
+                          (Path(os.environ["SystemRoot"]) / "System32" / name).is_file()):
+                    raise RuntimeError("loader dependency absent from kit and Windows system directory")
+        else:
+            log = out / ("loader-" + str(len(inspected)) + ".log")
+            if command(["dumpbin", "/nologo", "/dependents", image], log) != 0:
+                raise RuntimeError("DLL dependency inspection failed")
+            output = log.read_text(encoding="utf-8", errors="replace")
+            if not any(kind in output for kind in ("File Type: EXECUTABLE IMAGE", "File Type: DLL")):
+                raise RuntimeError("unrecognized DLL dependency inspection output")
+            dependencies = False
+            for line in output.splitlines():
+                name = line.strip()
+                if name.startswith("Image has the following") and name.endswith("dependencies:"):
+                    dependencies = True
+                if dependencies and line.startswith("    ") and name.lower().endswith(".dll"):
+                    if Path(name).name != name or "/" in name or "\\" in name:
+                        raise RuntimeError("unexpected DLL dependency path")
+                    sibling = siblings.get(name.lower())
+                    if sibling:
+                        pending.append(sibling.resolve(strict=True))
     paths = sorted(dlls)
     records = [{"path": str(p), "sha256": digest(p), "access": "read-execute"}
                for p in [worker, *paths]]
@@ -257,6 +334,46 @@ def diagnostic_plan():
         ("afd-family-sweep", {"op": "afd-family-sweep"}))]
 
 
+SHELL_ROWS = frozenset({"shell", "shell-ex-no-ui", "shell-ex-ui", "shell-file"})
+CLIENT_OUTCOMES = SHELL_ROWS | {"unix-2a", "unix-2b", "unix-2c", "unix-2d",
+    "af-unix-outcomes", "socket-unix-tcp-socket", "socket-unix-tcp-WSASocketW",
+    "afd-unix-tcp", "malformed-family-comparison", "winsock-registry-parameters",
+    "winsock-registry-protocol", "winsock-registry-namespace", "scratch-control"}
+NOT_SELECTED = "not selected in by-hand run"
+
+
+def selected_rows(value):
+    known = {s["id"] for s in plan() + diagnostic_plan()}
+    if value is None:
+        return known
+    selected = set()
+    for label in value.split(","):
+        selected.update(CLIENT_OUTCOMES if label == "client-outcomes" else {label})
+    if not selected or selected - known:
+        raise ValueError("unknown or empty row selection: " + ", ".join(sorted(selected - known)))
+    # Exit rows consume the same-run diagnostic, including its control modes.
+    if any(label.startswith("unix-2") for label in selected):
+        selected.add("af-unix-outcomes")
+    return selected
+
+
+def apply_selection(manifest, selected):
+    manifest["selected_rows"] = sorted(selected)
+    for row in manifest["rows"] + manifest["diagnostics"]:
+        if row["id"] not in selected:
+            row.update(status=Status.UNRUN, reason=NOT_SELECTED)
+
+
+def client_requirement(host):
+    try:
+        met = host.get("success") is True and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000 and host.get("interactive_session") is True
+    except (ValueError, TypeError):
+        met = False
+    return {"status": "MET" if met else Status.NOT_MET,
+            "reason": "Windows 11 client SKU, build and interactive session verified" if met else "Windows 11 interactive client SKU/build not established",
+            **{key: host.get(key) for key in ("product_type", "build", "edition", "interactive_session")}}
+
+
 def initial_manifest():
     specs = plan()
     return {"schema_version": 1, "design_delta": "6 (S1944)",
@@ -308,6 +425,12 @@ def validate_manifest(manifest):
     expected = set(planned)
     rows = manifest["rows"]
     assert len(rows) == len(expected) and {row["id"] for row in rows} == expected, "missing or duplicate probe rows"
+    if "selected_rows" in manifest:
+        selected = set(manifest["selected_rows"])
+        assert selected <= expected | {s["id"] for s in diagnostic_plan()}
+        for row in rows + manifest["diagnostics"]:
+            if row["id"] not in selected:
+                assert row["status"] == Status.UNRUN and row["reason"] == NOT_SELECTED
     for row in rows:
         assert row["status"] in ROW_STATUSES and row["reason"], "invalid status/reason"
         if row["status"] == Status.NOT_APPLICABLE:
@@ -682,8 +805,8 @@ def public_result(result, format_row=False):
 
 
 def audit_call(mode, folder, **arguments):
-    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
-            ROOT / "scripts/office-windows-audit.ps1", "-Mode", mode]
+    argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
+            AUDIT_SCRIPT, "-Mode", mode]
     nonce = arguments.pop("Nonce", None)
     for key, value in arguments.items():
         argv.extend(["-" + key, str(value)])
@@ -1272,8 +1395,12 @@ def assemble_manifest(manifest):
 def run_suite(args):
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
-    specs = diagnostic_plan() + sorted(plan(), key=lambda row: row["id"] != "inventory-outcome")
+    selected = selected_rows(getattr(args, "rows", None))
+    specs = [s for s in diagnostic_plan() + sorted(plan(), key=lambda row: row["id"] != "inventory-outcome")
+             if s["id"] in selected]
     manifest = initial_manifest()
+    if getattr(args, "rows", None) is not None:
+        apply_selection(manifest, selected)
     def save():
         assemble_manifest(manifest)
         target = out / "manifest.json"
@@ -1285,31 +1412,38 @@ def run_suite(args):
     sentinel_root = None
     run_cursor = None
     run_listener = None
+    audit_setup = {}
+    audit_state = out / "audit-before.clixml"
     try:
         if sys.platform != "win32":
             raise RuntimeError("Windows required; no Windows probes observed")
         manifest["worker_sha256"] = digest(args.worker)
         manifest["launcher_sha256"] = digest(args.launcher)
-        if manifest["source_sha"] is None:
+        if manifest["source_sha"] is None and not getattr(args, "kit_dir", None):
             code = command(["git", "-C", ROOT, "rev-parse", "HEAD"], out / "source-sha.log")
             if code == 0:
                 manifest["source_sha"] = (out / "source-sha.log").read_text().strip()
         if args.pdfium:
             manifest["pdfium_sha256"] = digest(args.pdfium)
+        loader_options = {"portable": True} if getattr(args, "kit_dir", None) else {}
         args.pdfium, args.loader_dlls, args.pdfium_dlls, manifest["loader_grants"] = loader_files(
-            args.worker, args.pdfium, out)
-        audit_setup = audit_call("setup", out)
+            args.worker, args.pdfium, out, **loader_options)
+        audit_setup = audit_call("setup", out, State=audit_state)
         host = audit_call("host", out)
         run_cursor = audit_call("cursor", out)
         run_host = audit_call("host", out)
         manifest["process_auditing"] = {"success": audit_setup.get("success"),
             "inclusion_setting": audit_setup.get("inclusion_setting"),
             "command_line_auditing": audit_setup.get("command_line_auditing")}
-        manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "features", "utility_vms")}
-        spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
-        fixtures_module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(fixtures_module)
-        fixtures = fixtures_module.generate(out / "fixtures")
+        manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "edition", "interactive_session", "features", "features_available", "utility_vms")}
+        fixtures = {}
+        if any("format" in item for item in specs):
+            if getattr(args, "kit_dir", None):
+                raise RuntimeError("kit supports probe rows only; format fixtures require the repository")
+            spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
+            fixtures_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(fixtures_module)
+            fixtures = fixtures_module.generate(out / "fixtures")
         # Host-sentinel location is deliberately under the user's profile and is never granted.
         sentinel_root = Path(tempfile.mkdtemp(prefix="vz-C1-sentinel-", dir=Path.home()))
         sentinel = sentinel_root / "host.txt"
@@ -1319,9 +1453,13 @@ def run_suite(args):
             run_listener = RunUnixListener(args, out, attack)
         # The listener must be ready before the first runtime experiment.
         launch_diagnostic(args, out, manifest, save)
-        client = host.get("success") and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000
-        manifest["windows_11_client_requirement"] = {"status": Status.NOT_MET, "reason": "interactive session not verified" if client else "server runner only"}
-        endpoints = Endpoints()
+        requirement = client_requirement(host)
+        client = requirement["status"] == "MET"
+        manifest["windows_11_client_requirement"] = requirement
+        # Local shell and AF_UNIX controls need no LAN discovery or IP listeners.
+        if any(item.get("request", {}).get("op") == "network" and
+               item["request"].get("operation") != "create" for item in specs):
+            endpoints = Endpoints()
         for item in specs:
             collection = manifest["diagnostics"] if item.get("diagnostic_only") else manifest["rows"]
             entry = next(row for row in collection if row["id"] == item["id"])
@@ -1329,6 +1467,16 @@ def run_suite(args):
             folder.mkdir()
             unix_listeners = None
             try:
+                if item["id"] in SHELL_ROWS:
+                    entry["windows_11_client_requirement"] = requirement
+                    entry["os_edition"] = host.get("edition")
+                    entry["os_build"] = host.get("build")
+                    if audit_setup.get("elevation_required"):
+                        entry.update(status=Status.UNRUN, reason="Security 4688 audit setup requires elevation; run from an elevated PowerShell")
+                        continue
+                if item["id"] == "unix-2c" and audit_setup.get("elevation_required"):
+                    entry.update(status=Status.UNRUN, reason="Security 4688 audit setup requires elevation; run from an elevated PowerShell")
+                    continue
                 if item.get("format") == "pdf" and not args.pdfium:
                     entry.update(status=Status.UNRUN, reason="pinned PDFium path not supplied")
                     continue
@@ -1340,10 +1488,10 @@ def run_suite(args):
                     continue
                 if probe.get("op") == "hyperv-outcome":
                     features = host.get("features") or []
-                    absent = host.get("success") and not host.get("utility_vms") and not any(str(f.get("State")) in ("Enabled", "2") for f in features)
+                    absent = host.get("success") and host.get("features_available") and not host.get("utility_vms") and not any(str(f.get("State")) in ("Enabled", "2") for f in features)
                     entry.update(status=Status.UNRUN, reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED", host_evidence=manifest["host_features"])
                     continue
-                reason = endpoints.configure(probe) if probe else None
+                reason = endpoints.configure(probe) if probe and endpoints else None
                 if reason:
                     entry.update(status=configured_status(reason), reason=reason)
                     continue
@@ -1435,7 +1583,7 @@ def run_suite(args):
                                 result["process_capture"]["capture_id"] = capture_cursor.get("record_id")
                                 result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and audit_setup.get("inclusion_setting") in ("success", "success-and-failure") and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
                                 result["target_was_running"] = target_before.get("target_running")
-                                result["windows_11_client"] = False  # Interactive desktop still requires a client run.
+                                result["windows_11_client"] = client
                             results[mode] = result
                             entry[mode] = public_result(result, "format" in item)
                             if probe.get("op") == "unix-outcomes" and mode == "control":
@@ -1495,9 +1643,14 @@ def run_suite(args):
                 **{key: captured.get(key) for key in ("after", "through", "target_record_ids", "filtered_query_success")},
                 "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
                 "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
-            row = next(r for r in manifest["rows"] if r["id"] == "unix-2c")
-            if row["status"] != Status.FAIL and not row.get("cleanup_error"):
+            row = next((r for r in manifest["rows"] if r["id"] == "unix-2c" and r["id"] in selected), None)
+            if row is not None and row["status"] != Status.FAIL and not row.get("cleanup_error") and not audit_setup.get("elevation_required"):
                 row["status"], row["reason"] = unix_exit(diagnostic, "2c")
+        if audit_state.exists():
+            restored = audit_call("restore", out, State=audit_state)
+            manifest["audit_restoration"] = {"success": restored.get("success")}
+            if not restored.get("success"):
+                manifest["cleanup_error"] = "audit policy restoration failed; use saved private state"
         refresh_sockets(manifest)
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ROW_STATUSES}
         manifest["status"] = Status.PASS if all(row["status"] in (Status.PASS, Status.NOT_APPLICABLE) for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else Status.FAIL
@@ -1512,6 +1665,67 @@ def assembly_self_test():
     from itertools import product
     from types import SimpleNamespace
     from unittest.mock import patch
+
+    # Exercise the real run loop with an offline kit and no elevation. No
+    # omitted row, compiler, fixture module, IP endpoint or git may be invoked.
+    with tempfile.TemporaryDirectory(prefix="kit-assembly-self-test-",
+                                     dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+        folder = outside(Path(temporary))
+        worker = folder / "vz-parser-worker.exe"
+        worker.write_bytes(b"synthetic")
+        args = SimpleNamespace(out=folder / "evidence", worker=worker, launcher=worker,
+                               pdfium=None, kit_dir=folder, rows="shell")
+        def audit(mode, *unused, **kwargs):
+            return {"success": mode == "host", "elevation_required": mode == "setup",
+                    "product_type": 1, "build": "26200", "edition": "Windows 11 Home", "interactive_session": True}
+        with patch.object(sys, "platform", "win32"), \
+             patch.object(Path, "home", return_value=folder), \
+             patch(__name__ + ".audit_call", side_effect=audit), \
+             patch(__name__ + ".loader_files", return_value=(None, [], [], [])) as loader, \
+             patch(__name__ + ".launch_diagnostic"), \
+             patch(__name__ + ".RunUnixListener"), \
+             patch(__name__ + ".UnixListeners") as listeners, \
+             patch(__name__ + ".Endpoints") as endpoints, \
+             patch(__name__ + ".command", return_value=1), \
+             patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
+            assert run_suite(args) == 1
+            observed = json.loads((args.out / "manifest.json").read_text())
+            validate_manifest(observed)
+            loader.assert_called_once_with(worker, None, args.out, portable=True)
+            endpoints.assert_not_called()
+            listeners.assert_not_called()
+            assert observed["windows_11_client_requirement"]["status"] == "MET"
+            assert all(row["status"] == Status.UNRUN for row in observed["rows"])
+            assert next(row for row in observed["rows"] if row["id"] == "shell")["reason"].startswith("Security 4688 audit setup requires elevation")
+            assert all(row["reason"] == NOT_SELECTED for row in observed["rows"] if row["id"] != "shell")
+
+    # Even an exception immediately after audit mutation must restore policy;
+    # a restoration failure makes the manifest fail closed and keeps the state.
+    for restored_ok in (True, False):
+        with tempfile.TemporaryDirectory(prefix="audit-restore-self-test-",
+                                         dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+            folder = outside(Path(temporary))
+            worker = folder / "worker.exe"
+            worker.write_bytes(b"synthetic")
+            args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker,
+                                   pdfium=None, kit_dir=folder, rows="shell")
+            modes = []
+            def interrupted_audit(mode, unused, **arguments):
+                modes.append(mode)
+                if mode == "setup":
+                    arguments["State"].write_text("private backup placeholder")
+                    raise RuntimeError("synthetic failure after audit setup")
+                assert mode == "restore" and arguments["State"].exists()
+                return {"success": restored_ok}
+            with patch.object(sys, "platform", "win32"), \
+                 patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+                 patch(__name__ + ".audit_call", side_effect=interrupted_audit):
+                assert run_suite(args) == 1
+            observed = json.loads((args.out / "manifest.json").read_text())
+            validate_manifest(observed)
+            assert modes == ["setup", "restore"]
+            assert observed["audit_restoration"]["success"] is restored_ok
+            assert bool(observed.get("cleanup_error")) is not restored_ok
 
     manifest = initial_manifest()
     seen_rows = set()
@@ -1538,6 +1752,32 @@ def assembly_self_test():
         return entry
 
     check()  # Includes initial unrun rows, diagnostics and launch diagnostic.
+    partial = initial_manifest()
+    apply_selection(partial, selected_rows("client-outcomes"))
+    assemble_manifest(partial)
+    validate_manifest(json.loads(json.dumps(partial)))
+    assert all(row["reason"] == NOT_SELECTED for row in partial["rows"]
+               if row["id"] not in CLIENT_OUTCOMES)
+    assert selected_rows("unix-2a") == {"unix-2a", "af-unix-outcomes"}
+    excluded = next(row for row in partial["rows"] if row["id"] == "file-read")
+    excluded.update(status=Status.FAIL, reason="unexpected execution")
+    assemble_manifest(partial)
+    try:
+        validate_manifest(partial)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("executed omitted row accepted")
+    assert client_requirement({"success": True, "product_type": 1, "build": "21999", "interactive_session": True})["status"] == Status.NOT_MET
+    assert client_requirement({"success": True, "product_type": 1, "build": "26200", "interactive_session": False})["status"] == Status.NOT_MET
+    assert client_requirement({"success": True, "product_type": 3, "build": "26200"})["status"] == Status.NOT_MET
+    assert client_requirement({"success": True, "product_type": 1, "build": "22000", "interactive_session": True})["status"] == "MET"
+    try:
+        selected_rows("unknown")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("unknown row accepted")
     for spec in diagnostic_plan():
         modes = ("control", "plain_appcontainer", "confined")
         for worker_ok, control_ok in ((False, False), (True, False), (True, True)):
@@ -2163,6 +2403,64 @@ def self_test():
         assert observation["get_received"] and not listener.thread.is_alive()
         assert (folder / "http.log").read_text().count("GET /") == 2
         assert "127.0.0.1" not in json.dumps(observation)
+    # The portable reader follows both import tables and fails closed on bad
+    # images. This synthetic x64 PE has a normal and an RVA delay import.
+    with tempfile.TemporaryDirectory(prefix="portable-loader-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        def image(path, normal=(), delayed=()):
+            data = bytearray(4096)
+            data[:2] = b"MZ"
+            struct.pack_into("<I", data, 0x3c, 0x80)
+            data[0x80:0x84] = b"PE\0\0"
+            struct.pack_into("<HHIIIHH", data, 0x84, 0x8664, 1, 0, 0, 0, 240, 0)
+            optional = 0x98
+            struct.pack_into("<H", data, optional, 0x20b)
+            struct.pack_into("<I", data, optional + 108, 16)
+            struct.pack_into("<IIII", data, optional + 240 + 8, 3584, 0x1000, 3584, 512)
+            cursor = 2048
+            for index, width, imports, start in ((1, 20, normal, 512), (13, 32, delayed, 1024)):
+                struct.pack_into("<II", data, optional + 112 + index * 8,
+                                 start + 0x1000 - 512, (len(imports) + 1) * width)
+                for number, name in enumerate(imports):
+                    address = start + number * width
+                    if index == 13:
+                        struct.pack_into("<I", data, address, 1)
+                    struct.pack_into("<I", data, address + (12 if index == 1 else 4), cursor + 0x1000 - 512)
+                    encoded = name.encode("ascii") + b"\0"
+                    data[cursor:cursor + len(encoded)] = encoded
+                    cursor += len(encoded)
+            path.write_bytes(data)
+        worker = folder / "worker.exe"
+        pdfium = folder / "pdfium.dll"
+        runtime = folder / "runtime.dll"
+        delay = folder / "delay.dll"
+        image(worker, ("KERNEL32.dll", "runtime.dll"), ("delay.dll",))
+        image(pdfium, ("runtime.dll",))
+        image(runtime)
+        image(delay)
+        system = folder / "System32"
+        system.mkdir()
+        (system / "KERNEL32.dll").write_bytes(b"system")
+        assert pe_imports(worker) == ["KERNEL32.dll", "runtime.dll", "delay.dll"]
+        with patch.dict(os.environ, {"SystemRoot": str(folder)}):
+            _, common, dlls, _ = loader_files(worker, pdfium, folder, portable=True)
+            assert {path.name for path in common} == {"runtime.dll", "delay.dll"}
+            assert {path.name for path in dlls} == {"runtime.dll", "delay.dll", "pdfium.dll"}
+            (system / "KERNEL32.dll").unlink()
+            try:
+                loader_files(worker, pdfium, folder, portable=True)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("missing dependency accepted")
+        worker.write_bytes(b"invalid image")
+        try:
+            pe_imports(worker)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid PE accepted")
+
     # Loader closure must exclude unrelated DLLs and follow local imports,
     # including delay-load imports. Full paths stay in private evidence.
     with tempfile.TemporaryDirectory(prefix="loader-self-test-", dir=evidence) as temporary:
@@ -2371,16 +2669,29 @@ def self_test():
 
 
 def main():
+    global AUDIT_SCRIPT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path)
-    parser.add_argument("--worker", type=Path, default=ROOT / "target/debug/vz-parser-worker.exe")
-    parser.add_argument("--launcher", type=Path, default=ROOT / "target/debug/vz-office-windows-launch.exe")
+    parser.add_argument("--worker", type=Path, default=None)
+    parser.add_argument("--launcher", type=Path, default=None)
     parser.add_argument("--pdfium", type=Path)
+    parser.add_argument("--audit", type=Path)
+    parser.add_argument("--kit-dir", type=Path, help="offline extracted run kit")
+    parser.add_argument("--rows", help="comma-separated row IDs or client-outcomes")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--initialize-only", action="store_true", help="write all-unrun manifest before CI build")
     parser.add_argument("--validate-manifest", type=Path)
     parser.add_argument("--fetch-pdfium", type=Path, help="fetch only the native-ci pinned Windows PDFium, no models")
     args = parser.parse_args()
+    binary_dir = args.kit_dir.resolve() if args.kit_dir else ROOT / "target/debug"
+    args.worker = args.worker or binary_dir / "vz-parser-worker.exe"
+    args.launcher = args.launcher or binary_dir / "vz-office-windows-launch.exe"
+    args.pdfium = args.pdfium or (binary_dir / "pdfium.dll" if args.kit_dir else None)
+    AUDIT_SCRIPT = args.audit or (args.kit_dir / "scripts/office-windows-audit.ps1" if args.kit_dir else AUDIT_SCRIPT)
+    try:
+        selected_rows(args.rows)
+    except ValueError as error:
+        parser.error(str(error))
     if args.self_test:
         self_test()
         return 0
@@ -2396,7 +2707,10 @@ def main():
     if args.initialize_only:
         out = outside(args.out)
         out.mkdir(parents=True, exist_ok=False)
-        (out / "manifest.json").write_text(json.dumps(initial_manifest(), indent=2) + "\n", encoding="utf-8")
+        manifest = initial_manifest()
+        if args.rows is not None:
+            apply_selection(manifest, selected_rows(args.rows))
+        (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
         return 0
     return run_suite(args)
 

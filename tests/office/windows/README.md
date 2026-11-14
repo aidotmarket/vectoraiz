@@ -21,7 +21,7 @@ cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features
 python scripts/office-windows-feasibility.py --out "$env:OFFICE_EVIDENCE_DIR/run-1" --pdfium C:/exact/pinned/pdfium.dll
 ```
 
-The runner plans 130 judged rows and three diagnostic groups, including six UDP-listen not-applicable rows. It
+The runner plans 142 judged rows and four diagnostic groups, including six UDP-listen not-applicable rows. It
 creates a sentinel under the user's profile, disposable loopback/LAN TCP/UDP
 controls and synthetic TXT/Markdown/HTML/DOCX/XLSX/PDF fixtures. Every judged row has a
 separate unconfined control and confined worker. AFD, Winsock registry, socket creation, RPC and DNSAPI rows also record a plain zero-capability AppContainer comparison;
@@ -43,6 +43,102 @@ Successful collection restores temporary DACL grants and deletes the profile.
 The runner retries scratch cleanup and records failures without discarding
 completed observations. Abrupt launcher termination can bypass profile/DACL
 cleanup; kill-on-close still terminates workers. Use disposable Windows runners.
+
+By-hand run on a Windows 11 PC
+-----------------------------
+
+Allow 30–45 minutes including download, checksum verification and inspection;
+selected probes normally take about 8–15 minutes. This is an **unqualified
+feasibility measurement**; omitted rows keep the whole manifest incomplete.
+
+Prerequisites: an x64 Windows 11 **client** (ProductType 1, build 22000 or newer),
+an interactive signed-in desktop with a working default HTTP browser, Python
+3.12 x64, and an **elevated PowerShell** (Start → PowerShell → Run as
+administrator). Microsoft Office, Visual Studio, Rust, models and OCR assets
+are not needed. The kit includes the pinned PDFium; CI checks the native loader
+closure and builds with the static MSVC runtime. Only the kit download requires
+network access; the selected shell controls use a disposable loopback HTTP
+listener, and the file control opens a synthetic `.cmd` file, not an Office file.
+Do not run another harness or change audit settings during the measurement.
+
+1. Open the repository's Actions page, select the **Office C1 Windows feasibility
+   (unqualified)** run for the intended commit, and download
+   `office-windows-run-kit-<run_id>` from its Artifacts. Retention is **3 days**.
+   The other artifact, `office-c1-windows-feasibility-<run_id>-<attempt>`, is the
+   Server runner manifest; it is not the client measurement. Extract the ZIP to
+   a fresh folder, for example `$HOME\Downloads\office-windows-run-kit`.
+2. In elevated PowerShell, set the extracted folder and verify the **exact** file
+   set and all five hashes before running any kit code:
+
+   ```powershell
+   $ErrorActionPreference = 'Stop'
+   $kit = (Resolve-Path "$HOME\Downloads\office-windows-run-kit").Path
+   $expected = @('vz-parser-worker.exe', 'vz-office-windows-launch.exe', 'pdfium.dll', 'scripts/office-windows-feasibility.py', 'scripts/office-windows-audit.ps1')
+   $actual = @(Get-ChildItem $kit -Recurse -File | ForEach-Object { $_.FullName.Substring($kit.Length + 1).Replace('\','/') })
+   if (Compare-Object ($expected + 'SHA256SUMS' | Sort-Object) ($actual | Sort-Object)) { throw 'Unexpected kit files' }
+   $sums = @(Get-Content "$kit/SHA256SUMS")
+   if ($sums.Count -ne 5) { throw 'Expected five checksums' }
+   $seen = @()
+   foreach ($line in $sums) {
+     if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'Invalid checksum line' }
+     $hash = $Matches[1]; $file = $Matches[2]
+     if ($file -notin $expected -or $file -in $seen) { throw 'Unexpected checksum path' }
+     $seen += $file
+     if ((Get-FileHash (Join-Path $kit $file) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "Hash mismatch: $file" }
+   }
+   python --version  # Must be Python 3.12.x
+   ```
+
+3. Run this exact command from that PowerShell. Keep the desktop signed in and
+   allow the control browser windows to open. The evidence folder must be fresh
+   and outside the extracted kit:
+
+   ```powershell
+   $out = Join-Path $env:LOCALAPPDATA ("office-c1-byhand-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+   python "$kit/scripts/office-windows-feasibility.py" --kit-dir "$kit" --rows client-outcomes --out "$out"
+   python "$kit/scripts/office-windows-feasibility.py" --validate-manifest "$out/manifest.json"
+   ```
+
+The redacted result is `$out/manifest.json`; share only that file. Raw logs,
+Security event XML, paths, nonces and the saved audit settings in `$out` stay
+private. The selected group contains `shell`, `shell-ex-no-ui`, `shell-ex-ui`,
+`shell-file`, `unix-2a` through `unix-2d`, the `af-unix-outcomes` diagnostic, UNIX
+socket/AFD creation and malformed-family/registry controls, and `scratch-control`.
+Each probe includes its ordinary control and, where planned, plain AppContainer
+comparison. The suspended launch diagnostic still runs. Every other planned row
+is `unrun` with reason `not selected in by-hand run`. A nonzero suite exit is
+expected for this partial run; successful manifest validation confirms structure
+and redaction, not passing outcomes or qualification. Individual missing controls
+remain unrun. Shell rows report edition/build and the client-SKU check; a Server
+build can never satisfy the Windows 11 client requirement. Without elevation,
+shell rows and the audit-dependent UNIX 2c row say why they are unrun.
+
+Cleanup and undo: on normal completion or Ctrl+C, the runner closes its local
+HTTP/AF_UNIX listeners, removes scratch/sentinel directories, and restores the
+previous audit policy and command-line auditing registry value (including prior
+absence). It adds **no firewall rule**. The launcher restores its temporary file
+ACL grants and removes each temporary AppContainer profile. Check
+`audit_restoration.success` and any `cleanup_error` in the manifest before
+removing private evidence. Browser tabs opened by the positive controls can be
+closed by hand.
+
+If the terminal/process was forcibly killed, run the following in elevated
+PowerShell **before deleting evidence** (set `$kit` and `$out` to the same folders
+if reopening the terminal):
+
+```powershell
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$kit/scripts/office-windows-audit.ps1" -Mode restore -State "$out/audit-before.clixml"
+```
+
+This restores the saved audit-policy backup and the prior registry value. Use it
+only if `audit-before.clixml` exists; a run refused for lack of elevation made no
+audit changes. A forced kill can bypass native ACL/profile cleanup; retain the
+private launcher/cleanup logs and resolve their recorded leftover resources
+before deleting them. Normal cleanup failures are recorded rather than hidden.
+After inspection, delete the extracted kit and `$out` to remove downloads,
+private logs and audit backups. There is no installed service or persistent
+listener to uninstall. This run makes no Windows/C1 qualification claim and does
+not change any delta 6 judgment rule.
 
 Stage A — verdicts and public evidence
 -------------------------------------

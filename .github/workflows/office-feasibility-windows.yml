@@ -106,11 +106,64 @@ jobs:
           Get-Content "$env:OFFICE_EVIDENCE_DIR/token-tests.log" -Tail 80
           exit $code
       - name: Build actual opt-in parser worker and suspended launcher
+        env:
+          # The by-hand PC needs no separately installed MSVC runtime.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: '-C target-feature=+crt-static'
         run: |
           cargo build --locked -p vz-parser-worker -p vz-office-windows-harness --features office-feasibility --bin vz-parser-worker --bin vz-office-windows-launch *> "$env:OFFICE_EVIDENCE_DIR/build.log"
           $code = $LASTEXITCODE
           Get-Content "$env:OFFICE_EVIDENCE_DIR/build.log" -Tail 80
           exit $code
+      - name: Assemble offline Windows run kit (exact allowlist)
+        run: |
+          $kit = Join-Path $env:RUNNER_TEMP "office-windows-run-kit"
+          New-Item -ItemType Directory -Path "$kit/scripts" -Force | Out-Null
+          Copy-Item target/debug/vz-parser-worker.exe,target/debug/vz-office-windows-launch.exe $kit
+          Copy-Item "$env:OFFICE_EVIDENCE_DIR/assets/pdfium.dll" $kit
+          Copy-Item scripts/office-windows-feasibility.py,scripts/office-windows-audit.ps1 "$kit/scripts"
+          $files = @('vz-parser-worker.exe', 'vz-office-windows-launch.exe', 'pdfium.dll', 'scripts/office-windows-feasibility.py', 'scripts/office-windows-audit.ps1')
+          $lines = foreach ($file in $files) {
+            $hash = (Get-FileHash (Join-Path $kit $file) -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $file"
+          }
+          [IO.File]::WriteAllLines("$kit/SHA256SUMS", $lines, [Text.UTF8Encoding]::new($false))
+          if (@(Get-ChildItem $kit -Recurse -File).Count -ne 6) { throw 'unexpected run kit contents' }
+          # Exercise the compiler-free reader on the actual shipped images.
+          $env:OFFICE_RUN_KIT = $kit
+          @'
+          import os, pathlib, runpy
+          runner = runpy.run_path('scripts/office-windows-feasibility.py')
+          kit = pathlib.Path(os.environ['OFFICE_RUN_KIT'])
+          evidence = pathlib.Path(os.environ['OFFICE_EVIDENCE_DIR']) / 'kit-loader'
+          evidence.mkdir()
+          _, common, dlls, _ = runner['loader_files'](kit / 'vz-parser-worker.exe', kit / 'pdfium.dll', evidence, portable=True)
+          assert not common and {p.name for p in dlls} == {'pdfium.dll'}, 'kit requires extra loader DLLs'
+          system = set("""
+              kernel32.dll kernelbase.dll advapi32.dll gdi32.dll user32.dll
+              bcrypt.dll bcryptprimitives.dll ntdll.dll ole32.dll oleaut32.dll
+              shell32.dll shlwapi.dll ws2_32.dll mswsock.dll dnsapi.dll iphlpapi.dll
+              propsys.dll secur32.dll crypt32.dll cryptbase.dll userenv.dll
+              msvcrt.dll ucrtbase.dll rpcrt4.dll psapi.dll powrprof.dll setupapi.dll
+              normaliz.dll winmm.dll version.dll dbghelp.dll dbgcore.dll imm32.dll
+              comdlg32.dll comctl32.dll wtsapi32.dll netapi32.dll cfgmgr32.dll
+              windows.storage.dll wintrust.dll dwrite.dll d2d1.dll d3d11.dll
+              dxgi.dll windowscodecs.dll winhttp.dll wininet.dll urlmon.dll
+              oleacc.dll usp10.dll
+          """.split())
+          for image in ('vz-parser-worker.exe', 'vz-office-windows-launch.exe', 'pdfium.dll'):
+              imports = runner['pe_imports'](kit / image)
+              print(image, imports)
+              assert all(name.lower() in system or name.lower().startswith(('api-ms-win-', 'ext-ms-win-')) for name in imports), 'kit needs a non-system runtime'
+          '@ | python - *> "$env:OFFICE_EVIDENCE_DIR/kit-loader.log"
+          $code = $LASTEXITCODE
+          Get-Content "$env:OFFICE_EVIDENCE_DIR/kit-loader.log" -Tail 40
+          if ($code -ne 0) { exit $code }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: office-windows-run-kit-${{ github.run_id }}
+          path: ${{ runner.temp }}/office-windows-run-kit/
+          if-no-files-found: error
+          retention-days: 3
       - name: Run suspended launch diagnostic first, then delta 6 outcome probes and repetitions
         timeout-minutes: 25
         run: |
@@ -135,4 +188,4 @@ jobs:
           # Raw requests, paths, fixture bytes and full logs remain private.
           path: ${{ env.OFFICE_EVIDENCE_DIR }}/manifest.json
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 3
