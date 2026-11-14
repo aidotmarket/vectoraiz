@@ -1,4 +1,4 @@
-Windows C1 feasibility harness (S1944, fold 10)
+Windows C1 feasibility harness (S1944, fold 11)
 =============================================
 
 This default-off harness measures the actual parser worker. It does not change
@@ -237,19 +237,18 @@ before/after readbacks and valid section evidence, or successful calls with no
 effect; reasons distinguish each attempt. Changed limits and unexplained errors
 fail. These are combined job/process-cap experiments.
 
-The reachability diagnostic enumerates at most 200 entries under RPC Control
-and connects to ALPC port candidates, then opens Device/Afd, Device/Tcp,
-Device/Udp, Device/Mup and NamedPipe/{epmapper,lsarpc,samr,srvsvc}. The same
-control-discovered candidate list is attempted from the control, plain
-AppContainer and LPAC. The manifest table has those three literal-outcome
-columns, including unattempted/deadline outcomes. ALPC names are SHA-256 identities
-correlated to native names in private requests/results; device labels use slashes.
-Enumeration/query statuses and truncation/budget evidence are retained. Limits
-are six seconds per mode (18 seconds aggregate attempt budget, excluding launch
-and cleanup), 20 ms per ALPC connect, and 200 candidate ports plus eight devices.
-A successful connection is closed; no ALPC message or device I/O is sent. This
-inventory neither enumerates every Windows IPC route nor changes `rpc-alpc`'s
-strict-denial evaluator. Reachable epmapper continues to fail that judged row.
+The reachability diagnostic seeds epmapper and four service ports before discovery,
+then enumerates RPC Control until STATUS_NO_MORE_ENTRIES, a 5,000-entry cap or a
+six-second mode deadline. It deduplicates candidates and appends eight device
+opens (including Device/Afd/Endpoint). Other device entries are bare device object
+opens. These do not substitute for the judged AFD endpoint creation rows.
+The table publishes readable slash-form service identities and indexed
+random-per-boot classes, with literal outcomes for control, plain AppContainer
+and LPAC. The count summary states enumeration complete or truncated/query failed
+and whether attempts completed. Each mode has a six-second attempt budget and
+ALPC connections use a 20 ms timeout. No message or device I/O is sent. This
+inventory does not enumerate every Windows IPC route or change rpc-alpc's strict
+denial evaluator.
 
 AF_UNIX outcome diagnostics create an unconfined host listener at a non-granted
 path and try confined connect to it, bind outside scratch, bind inside granted
@@ -260,8 +259,27 @@ The direct AFD route uses TLI bind/connect layouts from
 same-route control outcomes required to interpret the private ABI. Connect first
 binds its local endpoint inside scratch. Pending operations wait at most one
 second before cancellation; failed cancellation aborts the worker rather than
-releasing buffers still owned by the kernel. A Winsock fallback is attempted if
-no AFD handle is obtained. All literal statuses, prerequisites and route choices
+releasing buffers still owned by the kernel. Control and plain AppContainer use Winsock socket/bind/connect. The control also
+calibrates eight fresh-handle direct-bind variants per namespace: full/short
+address, Win32/NT path, absent/address-sized output buffer. LPAC uses only a
+variant whose bind succeeded in that control namespace. Winsock fallback also
+runs after direct bind/operation failure, including successful endpoint creation.
+Missing calibration reports `inconclusive: direct route not calibrated`; no
+successful control operation reports `inconclusive: control did not succeed`. All literal statuses, prerequisites and route choices
 remain diagnostic; unsupported namespaces or unsuccessful controls establish no
 policy denial. No socket payload is sent. `afd-unix-tcp`, `rpc-alpc` and shell
 judgment rules are unchanged. No qualification is claimed.
+
+Fold 11 adds a diagnostic AFD stream family sweep, families 0 through 40 with
+protocol 0, plus protocol 1 for family 34, in all three token modes. Literal
+statuses remain diagnostic only. Diagnostic completion requires a successful
+control operation; launcher completion alone does not suffice.
+
+All working-set rows record `peak_excess_bytes` (kernel peak minus cap; null if
+unavailable). The three memory-*-mapping-file rows and section-job-ws-self-ws
+run three control/confined pairs in the same job, retain every repetition and
+fail if any repetition fails the existing cap + 4,096-byte rule. The row excess
+is the maximum across the three repetitions. This does not relax tolerance or
+relabel prior FAIL evidence. Scratch-file sampling is gated to sampler rows;
+the file sampler reason explicitly identifies the logical budget and firing
+signal. No qualification is claimed.

@@ -202,7 +202,8 @@ def diagnostic_plan():
              "plain_appcontainer_comparison": True} for label, request in (
         ("malformed-family-comparison", {"op": "afd", "family": 9999, "transport": "stream"}),
         ("reachability-inventory", {"op": "reachability-inventory"}),
-        ("af-unix-outcomes", {"op": "unix-outcomes"}))]
+        ("af-unix-outcomes", {"op": "unix-outcomes"}),
+        ("afd-family-sweep", {"op": "afd-family-sweep"}))]
 
 
 def initial_manifest():
@@ -214,7 +215,10 @@ def initial_manifest():
             "sampler_enabled": True, "sampler_scope": "section-sampler variants only; all other rows disabled",
             "launch_diagnostic": {"status": "unrun", "reason": "launcher not built or diagnostic not completed", "variations": []},
             "diagnostics": [{"id": s["id"], "diagnostic_only": True, "status": "unrun"} for s in diagnostic_plan()],
-            "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed"} for s in specs],
+            "rows": [{"id": s["id"], "status": "unrun", "reason": "prerequisites or probe not completed",
+                      **({"peak_excess_bytes": None, "kernel_working_set_cap_bytes": LIMIT}
+                         if s.get("request", {}).get("op") == "memory" and s["request"].get("kind") in
+                         ("mapping", "mapping-reserve", "mapping-file", "self-ws") else {})} for s in specs],
             "aggregate_scope": "active-process limit 1 configured; observed job PID/image lists determine actual membership; no multi-child aggregate claim",
             "out_of_scope": ["OCR", "font/render parity", "installed C6", "qualification"],
             "counts": {"pass": 0, "fail": 0, "unrun": len(specs), "not-applicable": 0}, "status": "fail"}
@@ -270,19 +274,28 @@ def validate_manifest(manifest):
                     assert isinstance(result.get("parser_error_excerpt"), str)
                     assert len(result["parser_error_excerpt"].encode("utf-8")) <= 2048
                     assert isinstance(result.get("parser_error_excerpt_truncated"), bool)
+    for row in rows:
+        repetitions = row.get("repetitions", [])
+        for repetition in repetitions:
+            peak = repetition.get("confined", {}).get("parent_peak_working_set_bytes")
+            assert repetition["peak_excess_bytes"] == (peak - LIMIT if isinstance(peak, int) else None)
+            if isinstance(peak, int) and peak > LIMIT + 4096:
+                assert repetition["status"] == "fail"
+        if repetitions and row["status"] == "pass":
+            assert len(repetitions) == 3 and all(r["status"] == "pass" for r in repetitions)
     counts = {status: sum(row["status"] == status for row in rows) for status in ("pass", "fail", "unrun", "not-applicable")}
     assert counts == manifest["counts"], "counts mismatch"
     assert manifest["status"] in ("pass", "fail")
     diagnostics = manifest["diagnostics"]
     assert [row["id"] for row in diagnostics] == [s["id"] for s in diagnostic_plan()]
     for row in diagnostics:
-        assert row["diagnostic_only"] is True and row["status"] in ("unrun", "complete", "error")
+        assert row["diagnostic_only"] is True and row["status"] in ("unrun", "complete", "error", "inconclusive: control did not succeed", "inconclusive: direct route not calibrated")
         if row["id"] == "reachability-inventory" and "table" in row:
-            assert len(row["table"]) <= 208
+            assert len(row["table"]) <= 5013
             for endpoint in row["table"]:
                 assert all(mode in endpoint for mode in ("control", "plain_appcontainer", "lpac"))
     diagnostic = manifest["launch_diagnostic"]
-    assert diagnostic["status"] in ("unrun", "running", "complete") and diagnostic["reason"]
+    assert diagnostic["status"] in ("unrun", "running", "complete", "inconclusive: control did not succeed") and diagnostic["reason"]
     names = [result["variation"] for result in diagnostic["variations"]]
     assert names == list(DIAGNOSTIC_VARIATIONS[:len(names)]), "invalid launch diagnostic variations"
     if diagnostic["status"] == "complete":
@@ -343,7 +356,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
                 and isinstance(kill.get("detected_after_ms"), int)
                 and isinstance(kill.get("kill_completed_after_ms"), int)
                 and kill["kill_completed_after_ms"] >= kill["detected_after_ms"]):
-            return "pass", "parent killed over-budget job; overshoot and latency recorded; responsiveness is launcher loop proxy (best effort)"
+            return "pass", (("logical scratch-file budget kill; not resident memory" if spec["request"]["kind"] == "mapping-file"
+                             else "parent killed over-budget job") + "; firing signal: " + kill["signal"] +
+                            "; overshoot and latency recorded; responsiveness is launcher loop proxy (best effort)")
         return "fail", "sampler did not establish over-budget job kill and responsive launcher"
     if confined.get("exit_code") == 0xC0000008:
         return "fail", "confined worker exited STATUS_INVALID_HANDLE (0xC0000008)"
@@ -619,14 +634,19 @@ class UnixListeners:
 
 
 def inventory_table(results):
-    """Port names and native paths stay private; hashes correlate candidate identities."""
+    """Publish service identities; classify random per-boot names without raw paths."""
     control = results.get("control", {}).get("response", {}).get("probe", {})
     table = []
     for index, candidate in enumerate(control.get("candidates", [])):
         path = candidate["path"]
-        endpoint = ("RPC Control port sha256:" + hashlib.sha256(path.encode()).hexdigest()
-                    if candidate["kind"] == "alpc" else path.replace("\\", "/").lstrip("/"))
-        row = {"endpoint": endpoint, "kind": candidate["kind"]}
+        name = path.rsplit("\\", 1)[-1]
+        known = candidate.get("well_known") or re.fullmatch(r"[A-Za-z][A-Za-z0-9_. -]{0,79}", name) and not re.search(r"(?i)LRPC-|[0-9a-f]{12}|private", name)
+        endpoint = (path.replace("\\", "/").lstrip("/") if candidate["kind"] != "alpc" or known
+                    else f"RPC Control/random-per-boot/{index}")
+        row = {"endpoint": endpoint, "kind": candidate["kind"],
+               "class": "well-known/service" if candidate["kind"] == "alpc" and known else
+                        "random-per-boot" if candidate["kind"] == "alpc" else
+                        "device endpoint open" if path.endswith(r"\Afd\Endpoint") else "bare device object open"}
         for mode in ("control", "plain_appcontainer", "confined"):
             probe = results.get(mode, {}).get("response", {}).get("probe", {})
             outcomes = probe.get("outcomes", [])
@@ -634,6 +654,34 @@ def inventory_table(results):
                 "attempted": False, "reason": "worker outcome unavailable"}
         table.append(row)
     return table
+
+
+def diagnostic_status(results, op):
+    if not all(results.get(mode, {}).get("status") == "pass"
+               for mode in ("control", "plain_appcontainer", "confined")):
+        return "error"
+    probe = results["control"].get("response", {}).get("probe", {})
+    outcomes = probe.get("outcomes", [])
+    if op == "unix-outcomes":
+        if not any(value.get("operation", {}).get("success") is True for value in outcomes.values()):
+            return "inconclusive: control did not succeed"
+        selected = probe.get("calibrated_variants") or {}
+        if any(not selected.get(key) for key in ("filesystem", "abstract")):
+            return "inconclusive: direct route not calibrated"
+    elif not (probe.get("success") is True or any(value.get("success") is True for value in outcomes)):
+        return "inconclusive: control did not succeed"
+    return "complete"
+
+
+def family_sweep_table(results):
+    probes = {mode: result.get("response", {}).get("probe", {}).get("outcomes", [])
+              for mode, result in results.items()}
+    return [{"family": family, "protocol": protocol,
+             **{("lpac" if mode == "confined" else mode): next(
+                 (value for value in probes.get(mode, []) if value.get("family") == family and value.get("protocol") == protocol),
+                 {"attempted": False, "reason": "worker outcome unavailable"})
+                for mode in ("control", "plain_appcontainer", "confined")}}
+            for family in range(41) for protocol in ((0, 1) if family == 34 else (0,))]
 
 
 class ShellListener:
@@ -804,7 +852,7 @@ def launch_diagnostic(args, out, manifest, save):
         if baseline.get("create_process_error_code") == 203 and fixed["status"] == "pass"
         else "LOCALAPPDATA-only repair not established; inspect individual API outcomes; real launches still require LPAC"
     )
-    diagnostic.update(status="complete", reason="observed suspended launch outcomes; no fallback selected")
+    diagnostic.update(status="complete" if any(result.get("status") == "pass" for result in outcomes.values()) else "inconclusive: control did not succeed", reason="observed suspended launch outcomes; no fallback selected")
     save()
 
 
@@ -890,115 +938,145 @@ def run_suite(args):
                 if item.get("experiment") == "sampler":
                     entry["intervention_threshold_bytes"] = LIMIT * 3 // 4 if probe["kind"] == "mapping-file" else LIMIT
                     entry["kernel_working_set_cap_bytes"] = LIMIT
-                results = {}
-                modes = ["confined", "control"] if probe.get("op") == "shell" else ["control", "confined"]
-                if item.get("plain_appcontainer_comparison"):
-                    modes.append("plain_appcontainer")
-                for mode in modes:
-                    sentinel.write_bytes(b"C1-private-sentinel\n")
-                    scratch = (Path(tempfile.mkdtemp(prefix="vz-u-")) if probe.get("op") == "unix-outcomes"
-                               else folder / (mode + "-scratch"))
-                    scratch.mkdir(exist_ok=True)
-                    if probe.get("op") == "unix-outcomes":
-                        (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
-                    listener = None
-                    try:
-                        if probe.get("op") == "shell":
-                            listener = ShellListener(folder / (mode + "-http.log"))
-                            probe["url"] = listener.url
-                        grants = []
-                        if "format" in item:
-                            fixture = fixtures[item["format"]]
-                            request = {"path": str(fixture), "pdfium": str(args.pdfium.resolve()) if args.pdfium else None}
-                            grants = [fixture]
-                            entry["fixture_sha256"] = digest(fixture)
-                        else:
-                            probe.update(sentinel=str(sentinel), directory=str(sentinel_root),
-                                         created=str(sentinel_root / "created.txt"), scratch=str(scratch))
-                            request = {"office_windows_probe": probe}
-                        grants.extend(args.pdfium_dlls if item.get("format") == "pdf" else args.loader_dlls)
-                        request_path = folder / (mode + "-request.json")
-                        result_path = folder / (mode + "-result.json")
-                        request_path.write_text(json.dumps(request), encoding="utf-8")
-                        launch_mode = "confined-plain-appcontainer" if mode == "plain_appcontainer" else mode
-                        if mode == "confined" and item.get("memory_scope", "both") != "both":
-                            launch_mode += "-" + item["memory_scope"]
-                        if mode == "confined" and item.get("experiment"):
-                            launch_mode = "confined-" + item["experiment"]
-                        code = command([args.launcher.resolve(), args.worker.resolve(), launch_mode,
-                                        request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
-                        result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": "fail", "reason": "launcher produced no result"}
-                        result["launcher_exit"] = code
-                        if code != 0:
-                            result["status"] = "fail"
-                        if listener:
-                            result["shell_listener"] = listener.finish()
-                            listener = None
-                        results[mode] = result
-                        entry[mode] = public_result(result, "format" in item)
-                        if probe.get("op") == "reachability-inventory" and mode == "control":
-                            candidates = result.get("response", {}).get("probe", {}).get("candidates")
-                            if not isinstance(candidates, list):
-                                entry.update(status="error", reason="control candidate enumeration unavailable")
-                                break
-                            probe["candidates"] = candidates
-                    finally:
-                        if listener:
-                            listener.finish()
-                        error = cleanup_scratch(scratch, folder / (mode + "-cleanup.json"))
-                        if error is not None:
-                            entry["cleanup_error"] = type(error).__name__
-                        for changed in (sentinel_root / "created.txt", sentinel_root / "host.txt.renamed"):
-                            try:
-                                changed.unlink(missing_ok=True)
-                            except OSError as error:
+                row_folder = folder
+                repetitions = 3 if item["id"] in ("memory-both-mapping-file", "memory-process-mapping-file", "memory-job-mapping-file", "section-job-ws-self-ws") else 1
+                for repetition in range(1, repetitions + 1):
+                    results = {}
+                    if repetitions == 3:
+                        folder = row_folder / f"repetition-{repetition}"
+                        folder.mkdir()
+                    modes = ["confined", "control"] if probe.get("op") == "shell" else ["control", "confined"]
+                    if item.get("plain_appcontainer_comparison"):
+                        modes.append("plain_appcontainer")
+                    for mode in modes:
+                        if probe.get("op") == "unix-outcomes":
+                            probe["route"] = mode
+                        sentinel.write_bytes(b"C1-private-sentinel\n")
+                        scratch = (Path(tempfile.mkdtemp(prefix="vz-u-")) if probe.get("op") == "unix-outcomes"
+                                   else folder / (mode + "-scratch"))
+                        scratch.mkdir(exist_ok=True)
+                        if probe.get("op") == "unix-outcomes":
+                            (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
+                        listener = None
+                        try:
+                            if probe.get("op") == "shell":
+                                listener = ShellListener(folder / (mode + "-http.log"))
+                                probe["url"] = listener.url
+                            grants = []
+                            if "format" in item:
+                                fixture = fixtures[item["format"]]
+                                request = {"path": str(fixture), "pdfium": str(args.pdfium.resolve()) if args.pdfium else None}
+                                grants = [fixture]
+                                entry["fixture_sha256"] = digest(fixture)
+                            else:
+                                probe.update(sentinel=str(sentinel), directory=str(sentinel_root),
+                                             created=str(sentinel_root / "created.txt"), scratch=str(scratch))
+                                request = {"office_windows_probe": probe}
+                            grants.extend(args.pdfium_dlls if item.get("format") == "pdf" else args.loader_dlls)
+                            request_path = folder / (mode + "-request.json")
+                            result_path = folder / (mode + "-result.json")
+                            request_path.write_text(json.dumps(request), encoding="utf-8")
+                            launch_mode = "confined-plain-appcontainer" if mode == "plain_appcontainer" else mode
+                            if mode == "confined" and item.get("memory_scope", "both") != "both":
+                                launch_mode += "-" + item["memory_scope"]
+                            if mode == "confined" and item.get("experiment"):
+                                launch_mode = "confined-" + item["experiment"]
+                            code = command([args.launcher.resolve(), args.worker.resolve(), launch_mode,
+                                            request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
+                            result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": "fail", "reason": "launcher produced no result"}
+                            result["launcher_exit"] = code
+                            if code != 0:
+                                result["status"] = "fail"
+                            if listener:
+                                result["shell_listener"] = listener.finish()
+                                listener = None
+                            results[mode] = result
+                            entry[mode] = public_result(result, "format" in item)
+                            if probe.get("op") == "unix-outcomes" and mode == "control":
+                                probe["calibrated_variants"] = result.get("response", {}).get("probe", {}).get("calibrated_variants", {})
+                            if probe.get("op") == "reachability-inventory" and mode == "control":
+                                candidates = result.get("response", {}).get("probe", {}).get("candidates")
+                                if not isinstance(candidates, list):
+                                    entry.update(status="error", reason="control candidate enumeration unavailable")
+                                    break
+                                probe["candidates"] = candidates
+                        finally:
+                            if listener:
+                                listener.finish()
+                            error = cleanup_scratch(scratch, folder / (mode + "-cleanup.json"))
+                            if error is not None:
                                 entry["cleanup_error"] = type(error).__name__
-                                (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
-                if item.get("diagnostic_only"):
-                    entry.update(status="complete" if all(results.get(mode, {}).get("status") == "pass"
-                        for mode in ("control", "plain_appcontainer", "confined")) and not entry.get("cleanup_error") else "error",
-                        reason="diagnostic only; excluded from verdict counts and qualification")
-                    if probe.get("op") == "reachability-inventory":
-                        entry["table"] = inventory_table(results)
-                        entry["attempt_budget_ms"] = 18000
-                        entry["budget_scope"] = "three modes at six seconds each; launch/cleanup excluded"
-                    continue
-                if probe.get("op") == "network" and probe.get("operation") != "create":
-                    # Creation routes were all exercised earlier. Never infer a global
-                    # absence from only this operation's constructor.
-                    creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-", "afd-"))]
-                    routes_complete = all(r.get("confined", {}).get("status") == "pass" and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
-                    any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
-                    socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
-                    if not socket_exists and (not routes_complete or any_descriptor):
-                        entry.update(status="unrun", reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
+                            for changed in (sentinel_root / "created.txt", sentinel_root / "host.txt.renamed"):
+                                try:
+                                    changed.unlink(missing_ok=True)
+                                except OSError as error:
+                                    entry["cleanup_error"] = type(error).__name__
+                                    (folder / (mode + "-sentinel-cleanup-error.txt")).write_text(str(error), encoding="utf-8")
+                    if item.get("diagnostic_only"):
+                        entry.update(status="error" if entry.get("cleanup_error") else diagnostic_status(results, probe["op"]),
+                            reason="diagnostic only; excluded from verdict counts and qualification")
+                        if probe.get("op") == "afd-family-sweep":
+                            entry["table"] = family_sweep_table(results)
+                        if probe.get("op") == "reachability-inventory":
+                            entry["table"] = inventory_table(results)
+                            enumeration = results.get("control", {}).get("response", {}).get("probe", {}).get("enumeration") or {}
+                            complete = enumeration.get("enumeration_complete") is True
+                            attempted = all(cell.get("attempted") is True for row in entry["table"] for cell in (row["control"], row["plain_appcontainer"], row["lpac"]))
+                            entry["summary"] = f"{len(entry['table'])} candidates; enumeration {'complete' if complete else 'truncated/query failed'}; attempts {'complete' if attempted else 'truncated/unavailable'}"
+                            entry["reason"] += "; " + entry["summary"]
+                            entry["attempt_budget_ms"] = 18000
+                            entry["budget_scope"] = "three modes at six seconds each; launch/cleanup excluded"
                         continue
-                status, reason = evaluate(item, results["control"], results["confined"], manifest["rows"])
-                if item["id"].startswith("socket-"):
-                    entry["token_context"] = {"kind": "zero-capability LPAC", "os_build": manifest["os_build"],
-                                              "readback": results["confined"].get("token_before_resume")}
-                    creation = results["confined"].get("response", {}).get("probe", {})
-                    entry["literal_creation"] = {key: creation.get(key) for key in ("return_code", "descriptor_returned", "error_code", "startup")}
-                    entry["literal_creation"]["status"] = "pass" if (
-                        creation.get("success") is False and creation.get("return_code") == -1
-                        and creation.get("descriptor_returned") is False and isinstance(creation.get("error_code"), int)
-                        and results["control"].get("response", {}).get("probe", {}).get("descriptor_returned") is True
-                        and results["control"].get("status") == "pass"
-                        and results["control"].get("response", {}).get("probe", {}).get("success") is True
-                        and results["confined"].get("status") == "pass") else "fail"
-                    entry["policy_attribution"] = {"status": status, "reason": reason}
-                if item["id"] == "afd-unix-tcp":
-                    reason = "AF_UNIX stream: " + reason
-                    entry["transport"] = "stream"
-                entry.update(status=status, reason=reason,
-                             control=public_result(results["control"], "format" in item),
-                             confined=public_result(results["confined"], "format" in item))
-                if entry.get("cleanup_error"):
-                    entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
-                if item.get("format") == "pdf":
-                    entry["diff_summary"] = parser_diff_summary(results["control"], results["confined"])
-                if item.get("memory_scope"):
-                    entry["memory_scope"] = item["memory_scope"]
+                    if probe.get("op") == "network" and probe.get("operation") != "create":
+                        # Creation routes were all exercised earlier. Never infer a global
+                        # absence from only this operation's constructor.
+                        creation_rows = [r for r in manifest["rows"] if r["id"].startswith(("socket-", "afd-"))]
+                        routes_complete = all(r.get("confined", {}).get("status") == "pass" and isinstance(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned"), bool) for r in creation_rows)
+                        any_descriptor = any(r.get("confined", {}).get("response", {}).get("probe", {}).get("descriptor_returned") for r in creation_rows)
+                        socket_exists = results["confined"].get("response", {}).get("probe", {}).get("socket_creation", {}).get("descriptor_returned")
+                        if not socket_exists and (not routes_complete or any_descriptor):
+                            entry.update(status="unrun", reason="operation not exercised: constructor returned no socket; other creation routes available or incomplete")
+                            continue
+                    status, reason = evaluate(item, results["control"], results["confined"], manifest["rows"])
+                    if item["id"].startswith("socket-"):
+                        entry["token_context"] = {"kind": "zero-capability LPAC", "os_build": manifest["os_build"],
+                                                  "readback": results["confined"].get("token_before_resume")}
+                        creation = results["confined"].get("response", {}).get("probe", {})
+                        entry["literal_creation"] = {key: creation.get(key) for key in ("return_code", "descriptor_returned", "error_code", "startup")}
+                        entry["literal_creation"]["status"] = "pass" if (
+                            creation.get("success") is False and creation.get("return_code") == -1
+                            and creation.get("descriptor_returned") is False and isinstance(creation.get("error_code"), int)
+                            and results["control"].get("response", {}).get("probe", {}).get("descriptor_returned") is True
+                            and results["control"].get("status") == "pass"
+                            and results["control"].get("response", {}).get("probe", {}).get("success") is True
+                            and results["confined"].get("status") == "pass") else "fail"
+                        entry["policy_attribution"] = {"status": status, "reason": reason}
+                    if item["id"] == "afd-unix-tcp":
+                        reason = "AF_UNIX stream: " + reason
+                        entry["transport"] = "stream"
+                    entry.update(status=status, reason=reason,
+                                 control=public_result(results["control"], "format" in item),
+                                 confined=public_result(results["confined"], "format" in item))
+                    if probe.get("op") == "memory" and probe.get("kind") in ("mapping", "mapping-reserve", "mapping-file", "self-ws"):
+                        peak = results["confined"].get("parent_peak_working_set_bytes")
+                        entry["peak_excess_bytes"] = peak - LIMIT if isinstance(peak, int) else None
+                        entry["kernel_working_set_cap_bytes"] = LIMIT
+                    if entry.get("cleanup_error"):
+                        entry.update(status="fail", reason="scratch cleanup failed; completed probe evidence retained")
+                    if item.get("format") == "pdf":
+                        entry["diff_summary"] = parser_diff_summary(results["control"], results["confined"])
+                    if item.get("memory_scope"):
+                        entry["memory_scope"] = item["memory_scope"]
+                    if repetitions == 3:
+                        entry.setdefault("repetitions", []).append({"repetition": repetition,
+                            **{key: entry.get(key) for key in ("status", "reason", "control", "confined", "peak_excess_bytes")}})
+                        save()
+                        if repetition == 3:
+                            failed = [row for row in entry["repetitions"] if row["status"] != "pass"]
+                            entry["status"] = "fail" if failed else "pass"
+                            entry["reason"] = (failed[0]["reason"] if failed else "all three repetitions passed unchanged per-row rule")
+                            peaks = [row["peak_excess_bytes"] for row in entry["repetitions"] if isinstance(row["peak_excess_bytes"], int)]
+                            entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
             except Exception as error:
                 entry.update(status="error" if item.get("diagnostic_only") else "fail", reason="probe orchestration exception: " + type(error).__name__)
                 (folder / "exception.txt").write_text(str(error), encoding="utf-8")
@@ -1006,7 +1084,7 @@ def run_suite(args):
                 if unix_listeners:
                     unix_listeners.close()
                 save()
-            print(entry["id"], entry["status"], flush=True)
+            print(entry["id"], entry["status"], entry.get("summary", ""), flush=True)
     except Exception as error:
         manifest["setup_error"] = type(error).__name__ + ": " + str(error) if isinstance(error, RuntimeError) else type(error).__name__
         (out / "setup-error.txt").write_text(str(error), encoding="utf-8")
@@ -1202,8 +1280,22 @@ def self_test():
     file_kill["sampler_kill"].update(over_budget=True, threshold_bytes=LIMIT * 3 // 4,
         signal="scratch backing file size (logical bytes, not resident memory)")
     assert evaluate(file_sampler, section, file_kill)[0] == "pass"
+    assert "logical scratch-file budget kill; not resident memory" in evaluate(file_sampler, section, file_kill)[1]
     file_kill["sampler_kill"]["threshold_bytes"] = LIMIT
     assert evaluate(file_sampler, section, file_kill)[0] == "fail"
+    for op in ("afd", "reachability-inventory", "afd-family-sweep"):
+        controls = {mode: response(success=False, outcomes=[]) for mode in ("control", "plain_appcontainer", "confined")}
+        assert diagnostic_status(controls, op) == "inconclusive: control did not succeed"
+        controls["control"] = response(outcomes=[{"success": True}])
+        assert diagnostic_status(controls, op) == "complete"
+    controls = {mode: response(outcomes={"bind": {"operation": {"success": False}}}) for mode in ("control", "plain_appcontainer", "confined")}
+    assert diagnostic_status(controls, "unix-outcomes") == "inconclusive: control did not succeed"
+    controls["control"]["response"]["probe"]["outcomes"]["bind"]["operation"]["success"] = True
+    assert diagnostic_status(controls, "unix-outcomes") == "inconclusive: direct route not calibrated"
+    controls["control"]["response"]["probe"]["calibrated_variants"] = {key: {"short": True} for key in ("abstract", "filesystem")}
+    assert diagnostic_status(controls, "unix-outcomes") == "complete"
+    sweep = family_sweep_table({})
+    assert len(sweep) == 42 and sum(row["family"] == 34 for row in sweep) == 2
     inventory = response(candidates=[{"kind": "alpc", "path": "private-port"},
                                      {"kind": "device", "path": r"\Device\Afd"}],
                          outcomes=[{"error_code": 0, "literal_status_hex": "0x00000000"},
@@ -1375,6 +1467,38 @@ def self_test():
             assert cleanup["removed"] is False and len(cleanup["failures"]) == 5
             assert all(row[mode]["shell_launch_observation"]["launch_ruled_out"] is False
                        for mode in ("control", "confined"))
+            validate_manifest(observed)
+    # A middle repetition over the unchanged ceiling must survive a later pass.
+    with tempfile.TemporaryDirectory(prefix="peak-repetition-self-test-", dir=evidence) as temporary:
+        folder = outside(Path(temporary))
+        worker = folder / "worker.exe"
+        worker.write_bytes(b"synthetic")
+        calls = []
+        def peak_command(argv, log, timeout=70):
+            calls.append(argv[2])
+            repetition = int(Path(argv[4]).parent.name.removeprefix("repetition-"))
+            result = deepcopy(section)
+            result["response"]["probe"]["scratch_file_size_bytes"] = 2 * 1024 ** 3
+            result["parent_peak_working_set_bytes"] = LIMIT + (8192 if repetition == 2 else 4096)
+            Path(argv[4]).write_text(json.dumps(result))
+            return 0
+        with patch(__name__ + ".plan", return_value=[file_spec]), \
+             patch(__name__ + ".diagnostic_plan", return_value=[]), \
+             patch(__name__ + ".launch_diagnostic"), \
+             patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+             patch(__name__ + ".Endpoints", return_value=fake_endpoints), \
+             patch(__name__ + ".command", side_effect=peak_command), \
+             patch.object(sys, "platform", "win32"), \
+             patch.object(Path, "home", return_value=folder), \
+             patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
+            run_args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker, pdfium=None)
+            assert run_suite(run_args) == 1
+            observed = json.loads((run_args.out / "manifest.json").read_text())
+            row = observed["rows"][0]
+            assert calls == ["control", "confined-process"] * 3
+            assert [r["status"] for r in row["repetitions"]] == ["pass", "fail", "pass"]
+            assert [r["peak_excess_bytes"] for r in row["repetitions"]] == [4096, 8192, 4096]
+            assert row["status"] == "fail" and row["peak_excess_bytes"] == 8192
             validate_manifest(observed)
     # The inventory shares the exact control candidates with both token modes,
     # retains a failed launch, and publishes no raw native names or paths.

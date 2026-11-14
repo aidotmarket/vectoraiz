@@ -1238,7 +1238,7 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let mut timed_out = false;
     let mut samples = Vec::new();
     let mut parent_peak_ws = 0usize;
-    let sampler_file = value["office_windows_probe"]["kind"] == "mapping-file";
+    let sampler_file = sampler_enabled && value["office_windows_probe"]["kind"] == "mapping-file";
     let intervention_threshold = if sampler_file { MEMORY * 3 / 4 } else { MEMORY };
     let mut max_overshoot = 0u64;
     let mut sampler_kill = Value::Null;
