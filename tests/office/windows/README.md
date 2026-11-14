@@ -283,14 +283,15 @@ is the maximum across the three repetitions. This does not relax tolerance or
 relabel prior FAIL evidence. Scratch-file sampling is gated to sampler rows;
 the file sampler reason explicitly identifies the logical budget and firing
 signal. No qualification is claimed.
-Fold 12 / delta 6 (current evaluator)
+Fold 13 / delta 6 (current evaluator)
 -----------------------------------
 
 This supersedes the historical fold descriptions elsewhere in this document. This is an unqualified
 server harness. It does not establish the delta 6 exit evidence on client builds.
 
-* Non-IP constructor results record endpoint creation without claiming creation
-  denial. Separate 2a–2e outcome rows judge reachability. Filesystem rows require
+* The six non-IP constructor rows and the mapper ALPC connection row are
+  observation-only `not-applicable` rows, excluded from pass counts. Non-IP
+  constructor results record endpoint creation without claiming creation denial. Separate 2a–2e outcome rows judge reachability. Filesystem rows require
   a successful direct control operation and a bind inside granted scratch in LPAC
   through the selected direct route. Plain AppContainer cannot qualify them.
   Calibration now also tries 128/256-byte output buffers. Abstract local bind uses
@@ -298,12 +299,15 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   abstract binds even when filesystem calibration fails. An EINVAL control or
   failed local bind never establishes platform unavailability for 2d.
 * A successfully bound worker endpoint attempts AFD listen and a one-second
-  wait-for-connection window. Row 2c additionally requires absence of a vectorAIz
-  process before the run and no vectorAIz start in its Security capture. Failed
-  bind/listen/wait prerequisites keep it unrun. Hyper-V/WSL/Sandbox feature and VM
+  wait-for-connection diagnostic. Row 2c requires run-wide listener coverage,
+  absence of a vectorAIz process before the run and no vectorAIz start in the
+  capture spanning all harness calls. The present one-second listener cannot
+  qualify this row, even if bind/listen/wait succeed; it remains unrun. Hyper-V/WSL/Sandbox feature and VM
   inventory records why 2e is NOT EXERCISABLE on an unequipped host. On an equipped
   host, a calibrated utility-VM service is still required; absence of that control
-  stays UNMEASURED, not a refusal.
+  stays UNMEASURED, not a refusal. The current Windows runner has Hyper-V,
+  VirtualMachinePlatform and WSL enabled: 2e is UNMEASURED and cannot support a
+  limitation about PCs running Hyper-V being untested. The row retains host evidence.
 * The scoped inventory is now a judged row, requiring complete enumeration and
   attempts. Its reviewed list is RPC Control/epmapper (mapper outcome separately
   owed) and Device/Afd/Endpoint (family outcomes separately owed). Newly reachable
@@ -315,9 +319,11 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   capture. **Limitation: this uses COM runtime activation, not activation over the
   measured direct mapper connection. The outcome row therefore remains unrun.**
   No client-library prerequisite failure qualifies as service refusal.
-* GetAddrInfoW and DnsQuery_W use www.example.com, with a control immediately
+* GetAddrInfoW, DnsQuery_W and synchronous DnsQueryEx use www.example.com, with a control immediately
   before each confined call in the same run. Literal statuses and Winsock startup
-  failures are retained. No resolution can pass only with the completed scoped
+  failures and each call's UTC start timestamp are retained. The inventory verdict
+  looks up RPC Control/DNSResolver and reports its LPAC literal status or its
+  absence from the enumerated namespace. No resolution can pass only with the completed scoped
   inventory backstop excluding the DNS service from LPAC-reachable endpoints.
 * Each ShellExecute variant and a non-HTTP .cmd file target run three pairs. Each
   call has a fresh nonce (in URL or file path). The evaluator requires a control
@@ -325,7 +331,12 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   start and no confined listener GET. It permits confined API success. Server
   results remain unrun with "server runner only"; Windows 11 interactive-client
   coverage is NOT MET. The capture helper enables process creation via auditpol
-  and command-line auditing via the registry, recording setup/readbacks privately.
+  and command-line auditing via the registry. It requires Success in auditpol's
+  readback and publishes the normalized inclusion setting. Filtered-query errors
+  fail capture; only the explicit no-matching-events result is an empty success.
+  The control's ending record ID is the confined window's starting ID; both query
+  upper bounds are fixed before filtering. Each window extends ten seconds after
+  its call returns, and the evaluator checks contiguity and the observation period.
   Nonces are matched in Python, never supplied on the capture helper command line.
   Full event XML stays private; only record IDs, bounds and booleans are published.
 * Every section/file-view working-set row runs three pairs with a 65,536-byte

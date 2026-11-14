@@ -12,7 +12,16 @@ try {
             New-ItemProperty $key -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -PropertyType DWord -Force | Out-Null
             $policy = & auditpol /get /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' /r
             if ($LASTEXITCODE -ne 0) { throw 'auditpol verification failed' }
-            @{success=$true; policy=@($policy); command_line_auditing=(Get-ItemProperty $key).ProcessCreationIncludeCmdLine_Enabled} | ConvertTo-Json -Compress
+            $rows = @($policy | ConvertFrom-Csv)
+            if ($rows.Count -ne 1) { throw 'auditpol readback must contain one subcategory' }
+            # CSV field order is stable; reject unrecognised/localised values closed.
+            $setting = @($rows[0].PSObject.Properties)[4].Value.Trim()
+            $inclusion = switch ($setting) {
+                'Success' { 'success' }
+                'Success and Failure' { 'success-and-failure' }
+                default { throw "Success auditing not verified: $setting" }
+            }
+            @{success=$true; inclusion_setting=$inclusion; policy=@($policy); command_line_auditing=(Get-ItemProperty $key).ProcessCreationIncludeCmdLine_Enabled} | ConvertTo-Json -Compress
         }
         cursor {
             $event = Get-WinEvent -LogName Security -MaxEvents 1
@@ -20,7 +29,12 @@ try {
         }
         capture {
             # Persist full XML privately. Python publishes only matched counts/IDs.
-            $events = @(Get-WinEvent -LogName Security -FilterXPath "*[System[(EventID=4688) and (EventRecordID > $After)]]" -ErrorAction SilentlyContinue)
+            $latest = Get-WinEvent -LogName Security -MaxEvents 1
+            $queryErrors = @()
+            $events = @(Get-WinEvent -LogName Security -FilterXPath "*[System[(EventID=4688) and (EventRecordID > $After) and (EventRecordID <= $($latest.RecordId))]]" -ErrorAction Continue -ErrorVariable queryErrors 2>$null)
+            foreach ($queryError in $queryErrors) {
+                if ($queryError.FullyQualifiedErrorId -notlike 'NoMatchingEventsFound,*') { throw $queryError }
+            }
             $all = @($events | ForEach-Object { $_.ToXml() })
             $nonceIds = @(); $targetIds = @()
             foreach ($event in $events) {
@@ -30,9 +44,7 @@ try {
                 if ($Nonce -and $data.CommandLine -and $data.CommandLine.Contains($Nonce)) { $nonceIds += $event.RecordId }
                 if ($data.NewProcessName -and [IO.Path]::GetFileName($data.NewProcessName) -ieq $Target) { $targetIds += $event.RecordId }
             }
-            # Reading the channel must succeed even when the window has no 4688s.
-            $latest = Get-WinEvent -LogName Security -MaxEvents 1
-            @{success=$true; after=$After; through=$latest.RecordId; xml=$all;
+            @{success=$true; filtered_query_success=$true; after=$After; through=$latest.RecordId; xml=$all;
               nonce_record_ids=$nonceIds; target_record_ids=$targetIds;
               target_running=[bool](Get-Process ([IO.Path]::GetFileNameWithoutExtension($Target)) -ErrorAction SilentlyContinue)} | ConvertTo-Json -Depth 5 -Compress
         }
@@ -46,6 +58,6 @@ try {
         }
     }
 } catch {
-    @{success=$false; error=$_.Exception.Message} | ConvertTo-Json -Compress
+    @{success=$false; filtered_query_success=$false; error=$_.Exception.Message} | ConvertTo-Json -Compress
     exit 1
 }

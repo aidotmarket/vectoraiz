@@ -5,6 +5,7 @@ No product listener. Temporary TCP/UDP positive-control endpoints close at exit.
 Worker and shell subprocesses run directly; confinement uses Win32 APIs.
 """
 import argparse
+from datetime import datetime, timezone
 import hashlib
 import http.server
 import secrets
@@ -183,8 +184,9 @@ def plan():
     for exit_row in ("2a", "2b", "2c", "2d"):
         add("unix-" + exit_row, op="unix-exit", exit_row=exit_row)
     add("hyperv-2e", op="hyperv-outcome")
-    add("dns-query", op="dns-query")
-    rows[-1]["plain_appcontainer_comparison"] = True
+    for name, variant in (("dns-query", "w"), ("dns-query-ex", "ex")):
+        add(name, op="dns-query", api_variant=variant)
+        rows[-1]["plain_appcontainer_comparison"] = True
     for scope in ("both", "process", "job"):
         for kind in ("virtual", "mapping", "mapping-reserve", "mapping-file", "small", "malloc", "burst"):
             add(f"memory-{scope}-{kind}", op="memory", kind=kind)
@@ -397,9 +399,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if positive.get("descriptor_returned") is not True:
             return "unrun", "non-IP endpoint control unavailable; no creation-denial claim"
         if negative.get("descriptor_returned") is True:
-            return "pass", "non-IP endpoint creation observed; reachability is judged only by delta 6 outcome rows"
+            return "not-applicable", "non-IP endpoint creation observed; reachability is judged only by delta 6 outcome rows"
         if isinstance(negative.get("error_code"), int):
-            return "pass", "non-IP constructor literal failure recorded; no reachability or creation-denial claim"
+            return "not-applicable", "non-IP constructor literal failure recorded; no reachability or creation-denial claim"
         return "unrun", "non-IP constructor literal outcome missing"
     if op == "shell":
         if confined.get("shell_listener", {}).get("get_received") or confined.get("process_capture", {}).get("nonce_record_ids"):
@@ -408,7 +410,7 @@ def evaluate(spec, control, confined, evidence_rows=()):
         http = spec["request"].get("target_kind") != "file"
         if not positive.get("success") or (http and not control.get("shell_listener", {}).get("get_received")):
             return "unrun", "link positive control did not succeed"
-        if not cp.get("success") or not np.get("success") or not cp.get("nonce_record_ids") or cp.get("capture_id") != np.get("capture_id"):
+        if not contiguous_capture(cp, np) or not cp.get("nonce_record_ids"):
             return "unrun", "same Security 4688 capture lacks successful control nonce record or complete confined window"
         if confined.get("windows_11_client") is not True:
             return "unrun", "server runner only; Windows 11 interactive client requirement NOT MET"
@@ -417,9 +419,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if not positive.get("success"):
             return "unrun", "mapper ALPC connection control failed"
         if negative.get("success"):
-            return "pass", "reviewed mapper connection reachable; lookup and activation judged in separate outcome row"
+            return "not-applicable", "reviewed mapper connection reachable; lookup and activation judged in separate outcome row"
         if negative.get("explicit_denial"):
-            return "pass", "mapper connection explicitly refused on this build"
+            return "not-applicable", "mapper connection explicitly refused on this build"
         return "unrun", "mapper connection outcome uncalibrated"
     if op == "mapper-activation":
         if confined.get("process_capture", {}).get("target_record_ids") or negative.get("activation", {}).get("success"):
@@ -427,13 +429,22 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if control.get("target_was_running") is not False or confined.get("target_was_running") is not False:
             return "unrun", "target server was already running or absence could not be established"
         cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
-        if not cp.get("success") or not np.get("success") or not cp.get("target_record_ids") or cp.get("capture_id") != np.get("capture_id"):
+        if not contiguous_capture(cp, np) or not cp.get("target_record_ids"):
             return "unrun", "same Security 4688 capture lacks control server start or complete confined window"
         if not positive.get("lookup", {}).get("success") or not positive.get("activation", {}).get("success"):
             return "unrun", "mapper lookup or activation control failed; literal replies retained"
         if not positive.get("same_mapper_connection") or not negative.get("same_mapper_connection"):
             return "unrun", "direct lookup-to-activation connection not established; COM runtime probe is supplementary"
-        if negative.get("activation", {}).get("explicit_denial"):
+        lookup, activation = negative.get("lookup", {}), negative.get("activation", {})
+        if (lookup.get("direct_request_reply") is True and isinstance(lookup.get("return_code"), int)
+                and lookup.get("api", "").startswith("direct mapper")
+                and isinstance(lookup.get("error_code"), int) and lookup["error_code"] != 14
+                and lookup.get("return_code") != 14
+                and activation.get("direct_request_reply") is True
+                and activation.get("api", "").startswith("direct mapper")
+                and isinstance(activation.get("return_code"), int)
+                and activation.get("error_code") in (5, 0x80070005, 0xC0000022)
+                and activation.get("explicit_denial") is True):
             return "pass", "mapper activation refused with no target server start; successful control in same capture"
         return "unrun", "activation refusal not calibrated"
     if op == "network":
@@ -665,6 +676,16 @@ def audit_call(mode, folder, **arguments):
         return {"success": False, "reason": "audit command failed; full output retained privately"}
 
 
+def contiguous_capture(control, confined):
+    return (all(c.get("success") is True and c.get("filtered_query_success") is True
+                and isinstance(c.get("after"), int) and isinstance(c.get("through"), int)
+                and c["through"] >= c["after"] for c in (control, confined))
+            and isinstance(control.get("capture_id"), int)
+            and control["capture_id"] == confined.get("capture_id") == control["after"]
+            and control["through"] == confined["after"]
+            and confined.get("post_call_observation_seconds", 0) >= 10)
+
+
 def inventory_verdict(diagnostic):
     table = diagnostic.get("table", [])
     if diagnostic.get("status") != "complete" or not table or "enumeration complete; attempts complete" not in diagnostic.get("summary", ""):
@@ -675,7 +696,14 @@ def inventory_verdict(diagnostic):
         cell = endpoint.get("lpac", {})
         if cell.get("success") and endpoint["endpoint"] not in allowed:
             return "fail", "new reachable endpoint outside reviewed per-build list"
-    return "pass", "RPC Control and seeded devices complete; only reviewed endpoints reachable; DNS client endpoint absent"
+    dns = next((e.get("lpac", {}) for e in table if e.get("endpoint") == "RPC Control/DNSResolver"), None)
+    if dns is None:
+        dns_status = "DNSResolver absent from enumerated RPC Control namespace"
+    elif not dns.get("attempted", True) or not isinstance(dns.get("error_code"), int):
+        return "unrun", "DNSResolver LPAC status unavailable"
+    else:
+        dns_status = f"DNSResolver LPAC status 0x{dns['error_code']:08X} (success={dns.get('success')})"
+    return "pass", "RPC Control and seeded devices complete; only reviewed endpoints reachable; " + dns_status
 
 
 def unix_exit(diagnostic, label):
@@ -687,10 +715,12 @@ def unix_exit(diagnostic, label):
         if wait.get("success"):
             return "fail", "a connection reached the worker-bound listener"
         processes = diagnostic.get("vectoraiz_capture", {})
-        if processes.get("running_before") is not False or not processes.get("success") or processes.get("target_record_ids"):
+        if processes.get("running_before") is not False or not processes.get("success") or processes.get("filtered_query_success") is not True or processes.get("target_record_ids") or not isinstance(processes.get("after"), int) or not isinstance(processes.get("through"), int) or processes["through"] < processes["after"]:
             return "unrun", "vectorAIz process absence during listener window not established"
+        if processes.get("scope") != "entire harness run" or listener.get("covers_entire_run") is not True:
+            return "unrun", "run-wide process capture recorded; worker listener does not cover the entire run"
         if listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120":
-            return "pass", "no pending connection during one-second worker listen window; no vectorAIz process or start in capture"
+            return "pass", "no pending connection during entire harness run; no vectorAIz process or start in capture"
         return "unrun", "worker listener or bounded connection observation unavailable"
     name = {"2a": "host_listener_connect", "2b": "outside_scratch_bind", "2d": "abstract_connect"}[label]
     direct = modes["control"].get("control_direct", {})
@@ -1024,6 +1054,7 @@ def run_suite(args):
     save()
     endpoints = None
     sentinel_root = None
+    run_cursor = None
     try:
         if sys.platform != "win32":
             raise RuntimeError("Windows required; no Windows probes observed")
@@ -1037,6 +1068,14 @@ def run_suite(args):
             manifest["pdfium_sha256"] = digest(args.pdfium)
         args.pdfium, args.loader_dlls, args.pdfium_dlls, manifest["loader_grants"] = loader_files(
             args.worker, args.pdfium, out)
+        audit_setup = audit_call("setup", out)
+        host = audit_call("host", out)
+        run_cursor = audit_call("cursor", out)
+        run_host = audit_call("host", out)
+        manifest["process_auditing"] = {"success": audit_setup.get("success"),
+            "inclusion_setting": audit_setup.get("inclusion_setting"),
+            "command_line_auditing": audit_setup.get("command_line_auditing")}
+        manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "features", "utility_vms")}
         # First runtime experiment, before any positive control or confined probe.
         launch_diagnostic(args, out, manifest, save)
         spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
@@ -1048,11 +1087,6 @@ def run_suite(args):
         sentinel = sentinel_root / "host.txt"
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
-        audit_setup = audit_call("setup", out)
-        host = audit_call("host", out)
-        manifest["process_auditing"] = {"success": audit_setup.get("success"),
-            "command_line_auditing": audit_setup.get("command_line_auditing")}
-        manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "features", "utility_vms")}
         client = host.get("success") and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000
         manifest["windows_11_client_requirement"] = {"status": "NOT MET", "reason": "interactive session not verified" if client else "server runner only"}
         endpoints = Endpoints()
@@ -1075,7 +1109,7 @@ def run_suite(args):
                 if probe.get("op") == "hyperv-outcome":
                     features = host.get("features") or []
                     absent = host.get("success") and not host.get("utility_vms") and not any(str(f.get("State")) in ("Enabled", "2") for f in features)
-                    entry.update(status="unrun", reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED")
+                    entry.update(status="unrun", reason="NOT EXERCISABLE: host inventory has no enabled Hyper-V, WSL, VirtualMachinePlatform or Sandbox" if absent else "utility-VM service control not calibrated; Hyper-V outcome UNMEASURED", outcome="NOT EXERCISABLE" if absent else "UNMEASURED", host_evidence=manifest["host_features"])
                     continue
                 reason = endpoints.configure(probe) if probe else None
                 if reason:
@@ -1087,8 +1121,6 @@ def run_suite(args):
                 if item.get("experiment"):
                     entry["experiment"] = item["experiment"]
                 if probe.get("op") == "unix-outcomes":
-                    unix_cursor = audit_call("cursor", folder)
-                    unix_host = audit_call("host", folder)
                     unix_listeners = UnixListeners(sentinel_root / "host.sock")
                     probe.update(unix_listener=str(unix_listeners.path), abstract_name=unix_listeners.abstract_name)
                     entry["host_listeners"] = unix_listeners.evidence
@@ -1106,6 +1138,7 @@ def run_suite(args):
                     modes = ["control", "confined"]
                     if item.get("plain_appcontainer_comparison"):
                         modes.append("plain_appcontainer")
+                    previous_capture = {}
                     for mode in modes:
                         if probe.get("op") == "unix-outcomes":
                             probe["route"] = mode
@@ -1117,7 +1150,8 @@ def run_suite(args):
                             (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
                         listener = None
                         nonce = None
-                        window_cursor = audit_call("cursor", folder) if capture_cursor else {}
+                        window_cursor = ({"success": previous_capture.get("success"), "record_id": previous_capture.get("through")}
+                                         if capture_cursor and mode == "confined" else capture_cursor)
                         target_before = audit_call("capture", folder, After=window_cursor.get("record_id", 0)) if probe.get("op") == "mapper-activation" else {}
                         try:
                             if probe.get("op") == "shell":
@@ -1147,9 +1181,11 @@ def run_suite(args):
                                 launch_mode += "-" + item["memory_scope"]
                             if mode == "confined" and item.get("experiment"):
                                 launch_mode = "confined-" + item["experiment"]
+                            call_started_utc = datetime.now(timezone.utc).isoformat()
                             code = command([args.launcher.resolve(), args.worker.resolve(), launch_mode,
                                             request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
                             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": "fail", "reason": "launcher produced no result"}
+                            result["call_started_utc"] = call_started_utc
                             result["launcher_exit"] = code
                             if code != 0:
                                 result["status"] = "fail"
@@ -1157,11 +1193,13 @@ def run_suite(args):
                                 result["shell_listener"] = listener.finish()
                                 listener = None
                             if capture_cursor:
-                                time.sleep(2)  # Allow event delivery; both windows share the outer capture cursor.
+                                time.sleep(10)  # Observe delayed handler starts after the call returns.
                                 captured = audit_call("capture", folder, After=window_cursor.get("record_id", 0), Nonce=nonce or "")
-                                result["process_capture"] = {key: captured.get(key) for key in ("success", "after", "through", "nonce_record_ids", "target_record_ids")}
+                                result["process_capture"] = {key: captured.get(key) for key in ("success", "filtered_query_success", "after", "through", "nonce_record_ids", "target_record_ids")}
+                                previous_capture = captured
+                                result["process_capture"]["post_call_observation_seconds"] = 10
                                 result["process_capture"]["capture_id"] = capture_cursor.get("record_id")
-                                result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
+                                result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and audit_setup.get("inclusion_setting") in ("success", "success-and-failure") and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
                                 result["target_was_running"] = target_before.get("target_running")
                                 result["windows_11_client"] = False  # Interactive desktop still requires a client run.
                             results[mode] = result
@@ -1190,10 +1228,11 @@ def run_suite(args):
                         entry.update(status="error" if entry.get("cleanup_error") else diagnostic_status(results, probe["op"]),
                             reason="diagnostic only; excluded from verdict counts and qualification")
                         if probe.get("op") == "unix-outcomes":
-                            captured = audit_call("capture", folder, After=unix_cursor.get("record_id", 0), Target="vectoraiz.exe")
-                            entry["vectoraiz_capture"] = {"success": bool(audit_setup.get("success") and unix_cursor.get("success") and captured.get("success")),
-                                "running_before": unix_host.get("vectoraiz_running"), "target_record_ids": captured.get("target_record_ids")}
                             entry["namespace_status"] = unix_namespace_status(entry)
+                            if entry["status"] != "error":
+                                entry["status"] = "; ".join(f"{name}: {value['status']}" for name, value in entry["namespace_status"].items())
+                        if item["id"] == "malformed-family-comparison" and entry["status"] != "error":
+                            entry["status"] = "complete: expected-failure control recorded" if all(isinstance(r.get("response", {}).get("probe", {}).get("error_code"), int) for r in results.values()) else "inconclusive: literal status missing"
                         if probe.get("op") == "afd-family-sweep":
                             entry["table"] = family_sweep_table(results)
                         if probe.get("op") == "reachability-inventory":
@@ -1248,7 +1287,7 @@ def run_suite(args):
                         entry["memory_scope"] = item["memory_scope"]
                     if repetitions == 3:
                         entry["representative_repetition"] = repetition
-                        entry["representative_scope"] = "top-level control/confined are from this repetition; peak excess is maximum"
+                        entry["representative_scope"] = "top-level control/confined are from this repetition" + ("; peak excess is maximum" if probe.get("op") == "memory" else "")
                         entry.setdefault("repetitions", []).append({"repetition": repetition,
                             **{key: entry.get(key) for key in ("status", "reason", "control", "confined", "peak_excess_bytes")}})
                         if repetition < 3:
@@ -1256,7 +1295,7 @@ def run_suite(args):
                         if repetition == 3:
                             failed = [row for row in entry["repetitions"] if row["status"] != "pass"]
                             entry["status"] = ("fail" if any(r["status"] == "fail" for r in failed) else "unrun") if failed else "pass"
-                            entry["reason"] = (failed[0]["reason"] if failed else "all three repetitions passed unchanged per-row rule")
+                            entry["reason"] = (failed[0]["reason"] if failed else ("all three repetitions passed with 64 KiB working-set slack" if probe.get("op") == "memory" else "all three repetitions passed link-opening rule"))
                             peaks = [row["peak_excess_bytes"] for row in entry["repetitions"] if isinstance(row["peak_excess_bytes"], int)]
                             if probe.get("op") == "memory":
                                 entry["peak_excess_bytes"] = max(peaks) if len(peaks) == 3 else None
@@ -1280,6 +1319,16 @@ def run_suite(args):
                 shutil.rmtree(sentinel_root)
             except OSError as error:
                 manifest["cleanup_error"] = type(error).__name__
+        diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
+        if run_cursor is not None and diagnostic is not None:
+            captured = audit_call("capture", out, After=run_cursor.get("record_id", 0), Target="vectoraiz.exe")
+            diagnostic["vectoraiz_capture"] = {
+                **{key: captured.get(key) for key in ("after", "through", "target_record_ids", "filtered_query_success")},
+                "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
+                "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
+            row = next(r for r in manifest["rows"] if r["id"] == "unix-2c")
+            if row["status"] != "fail" and not row.get("cleanup_error"):
+                row["status"], row["reason"] = unix_exit(diagnostic, "2c")
         refresh_sockets()
         manifest["counts"] = {status: sum(row["status"] == status for row in manifest["rows"]) for status in ("pass", "fail", "unrun", "not-applicable")}
         manifest["status"] = "pass" if all(row["status"] in ("pass", "not-applicable") for row in manifest["rows"]) and not manifest.get("setup_error") and not manifest.get("cleanup_error") else "fail"
@@ -1383,10 +1432,13 @@ def self_test():
     shell_denied = response(success=False, api="ShellExecuteW(open URL)", explicit_denial=True)
     shell_denied["shell_listener"] = {"get_received": False}
     assert evaluate(shell, shell_control, shell_denied)[0] == "unrun"
-    shell_control["process_capture"] = {"success": True, "capture_id": 1, "nonce_record_ids": [3]}
-    shell_denied["process_capture"] = {"success": True, "capture_id": 1, "nonce_record_ids": []}
+    shell_control["process_capture"] = {"success": True, "filtered_query_success": True, "capture_id": 1, "after": 1, "through": 4, "nonce_record_ids": [3]}
+    shell_denied["process_capture"] = {"success": True, "filtered_query_success": True, "capture_id": 1, "after": 4, "through": 8, "post_call_observation_seconds": 10, "nonce_record_ids": []}
     shell_denied["windows_11_client"] = True
     assert evaluate(shell, shell_control, shell_denied)[0] == "pass"
+    shell_denied["process_capture"]["post_call_observation_seconds"] = 2
+    assert evaluate(shell, shell_control, shell_denied)[0] == "unrun"
+    shell_denied["process_capture"]["post_call_observation_seconds"] = 10
     shell_denied["response"]["probe"]["success"] = True
     assert evaluate(shell, shell_control, shell_denied)[0] == "pass"
     shell_denied["process_capture"]["nonce_record_ids"] = [5]
@@ -1449,12 +1501,25 @@ def self_test():
         afd_family = next(s for s in specs if s["id"] == f"afd-{family}-tcp")
         assert afd_family["plain_appcontainer_comparison"] is True
         assert evaluate(afd_family, afd_control, response(success=False, api="NtCreateFile(AFD endpoint)",
-            descriptor_returned=False, error_code=0xC0000022, explicit_denial=True))[0] == "pass"
+            descriptor_returned=False, error_code=0xC0000022, explicit_denial=True))[0] == "not-applicable"
     # Delta 6 exits never promote failed prerequisites or comparison-token evidence.
     inv = {"status":"complete", "summary":"2 candidates; enumeration complete; attempts complete",
            "table":[{"endpoint":"RPC Control/epmapper", "lpac":{"success":True}},
                     {"endpoint":"Device/Afd/Endpoint", "lpac":{"success":True}}]}
     assert inventory_verdict(inv)[0] == "pass"
+    denied_dns = {"endpoint":"RPC Control/DNSResolver", "lpac":{"attempted":True,"success":False,"error_code":0xC0000022}}
+    dns_inventory = {**inv, "table":inv["table"] + [denied_dns]}
+    assert "DNSResolver LPAC status 0xC0000022" in inventory_verdict(dns_inventory)[1]
+    assert inventory_verdict({**inv, "table":inv["table"] + [{"endpoint":"RPC Control/DNSResolver", "lpac":{}}]})[0] == "unrun"
+    assert "absent from enumerated" in inventory_verdict(inv)[1]
+    observation_ids = ("socket-unix-tcp-socket", "socket-unix-tcp-WSASocketW", "socket-hyperv-tcp-socket", "socket-hyperv-tcp-WSASocketW", "afd-unix-tcp", "afd-hyperv-tcp", "rpc-alpc")
+    for row_id in observation_ids:
+        spec = next(s for s in specs if s["id"] == row_id)
+        control = response(success=True, descriptor_returned=True)
+        for observed in (response(success=True, descriptor_returned=True),
+                         response(success=False, descriptor_returned=False, error_code=5, explicit_denial=True)):
+            assert evaluate(spec, control, observed)[0] == "not-applicable"
+
     assert inventory_verdict({**inv, "status":"error"})[0] == "unrun"
     assert inventory_verdict({**inv, "table":inv["table"] + [{"endpoint":"RPC Control/NewService", "lpac":{"success":True}}]})[0] == "fail"
     diagnostic = {"control":{"response":{"probe":{"control_direct":{
@@ -1472,12 +1537,42 @@ def self_test():
     mn = response(lookup={"success":True}, activation={"success":False,"explicit_denial":True}, same_mapper_connection=False)
     for result in (mc, mn):
         result["target_was_running"] = False
-        result["process_capture"] = {"success":True,"capture_id":1,"target_record_ids":[]}
+        result["process_capture"] = {"success":True,"filtered_query_success":True,"capture_id":1,"after":1,"through":1,"post_call_observation_seconds":10,"target_record_ids":[]}
+    mc["process_capture"]["through"] = 8
+    mn["process_capture"].update(after=8, through=16)
     mc["process_capture"]["target_record_ids"] = [7]
     assert evaluate(mapper, mc, mn)[0] == "unrun"
     for result in (mc, mn):
         result["response"]["probe"]["same_mapper_connection"] = True
+    assert evaluate(mapper, mc, mn)[0] == "unrun"  # A flag alone proves no service reply.
+    mn["response"]["probe"]["lookup"] = {"api":"RpcBindingFromStringBindingW", "error_code":14, "return_code":14}
+    mn["response"]["probe"]["activation"] = {"api":"CoInitializeEx", "error_code":0x80070005, "return_code":0x80070005, "explicit_denial":True}
+    assert evaluate(mapper, mc, mn)[0] == "unrun"
+    mn["response"]["probe"]["lookup"] = {"api":"direct mapper lookup", "success":True, "return_code":0, "error_code":0, "direct_request_reply":True}
+    assert evaluate(mapper, mc, mn)[0] == "unrun"
+    mn["response"]["probe"]["activation"] = {"api":"direct mapper activation", "success":False, "return_code":5, "error_code":5, "explicit_denial":True, "direct_request_reply":True}
     assert evaluate(mapper, mc, mn)[0] == "pass"
+    # A failed filtered query cannot be rescued by a successful latest-event read.
+    failed_capture = {"success":False, "filtered_query_success":False, "latest_event_read_success":True,
+                      "after":1, "through":8, "post_call_observation_seconds":10}
+    for spec, control, confined in ((mapper, mc, mn), (shell, shell_control, shell_denied)):
+        for mode in ("control", "confined"):
+            a, b = deepcopy(control), deepcopy(confined)
+            b["shell_listener"] = {"get_received":False}
+            (a if mode == "control" else b)["process_capture"] = failed_capture
+            assert evaluate(spec, a, b)[0] != "pass"
+        b = deepcopy(confined)
+        b["shell_listener"] = {"get_received":False}
+        b["process_capture"]["after"] = 999
+        assert evaluate(spec, control, b)[0] != "pass"
+    full_listener = {"confined":{"response":{"probe":{"outcomes":{"inside_scratch_bind":{"listener":{
+        "listen":{"success":True}, "wait":{"timed_out":True,"io_status_hex":"0xC0000120"}, "covers_entire_run":True}}}}}},
+        "vectoraiz_capture":{**failed_capture, "scope":"entire harness run", "running_before":False}}
+    assert unix_exit(full_listener, "2c")[0] == "unrun"
+    full_listener["vectoraiz_capture"].update(success=True, filtered_query_success=True)
+    assert unix_exit(full_listener, "2c")[0] == "pass"
+    del full_listener["confined"]["response"]["probe"]["outcomes"]["inside_scratch_bind"]["listener"]["covers_entire_run"]
+    assert unix_exit(full_listener, "2c")[0] == "unrun"
     mn["process_capture"]["target_record_ids"] = [9]
     assert evaluate(mapper, mc, mn)[0] == "fail"
     dns_query = next(s for s in specs if s["id"] == "dns-query")

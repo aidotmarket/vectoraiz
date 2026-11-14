@@ -72,7 +72,7 @@ pub fn run(v: &Value) -> Result<Value> {
         "read" | "metadata" | "write" | "create" | "rename" | "delete" | "list" => files(v, op)?,
         "network" => network(v)?,
         "dns" => dns(),
-        "dns-query" => dns_query(),
+        "dns-query" => dns_query(v),
         "rpc-alpc" => alpc(),
         "shell" => shell(v)?,
         "com" | "pipe" => broker(op, v),
@@ -83,7 +83,6 @@ pub fn run(v: &Value) -> Result<Value> {
         "afd" => afd(v)?,
         "rpc" => rpc(),
         "mapper-activation" => mapper_activation(),
-        "hyperv-outcome" => hyperv_outcome(),
         "child" | "escape" => child(op == "escape")?,
         "inherited" => inherited(v)?,
         "memory" => memory(arg(v, "kind")?, v)?,
@@ -472,7 +471,28 @@ fn dns() -> Value {
 }
 
 // DNSAPI reaches the resolver without WSAStartup. Free all returned records.
-fn dns_query() -> Value {
+fn dns_query(v: &Value) -> Value {
+    if v["api_variant"] == "ex" {
+        let name = wide("www.example.com");
+        let request = DNS_QUERY_REQUEST {
+            Version: DNS_QUERY_REQUEST_VERSION1,
+            QueryName: name.as_ptr(),
+            QueryType: 1,
+            // A null callback selects a synchronous request.
+            ..Default::default()
+        };
+        let mut result = DNS_QUERY_RESULT {
+            Version: DNS_QUERY_RESULTS_VERSION1,
+            ..Default::default()
+        };
+        let rc = unsafe { DnsQueryEx(&request, &mut result, null_mut()) };
+        if !result.pQueryRecords.is_null() {
+            unsafe { DnsFree(result.pQueryRecords.cast(), DnsFreeRecordList) };
+        }
+        let mut evidence = row("DnsQueryEx", rc as i64, rc == 0, rc as u32, "win32");
+        evidence["query_status"] = json!(result.QueryStatus);
+        return evidence;
+    }
     let mut records = null_mut();
     let rc = unsafe {
         DnsQuery_W(
@@ -1453,13 +1473,6 @@ fn mapper_activation() -> Value {
             "same_mapper_connection":false,
             "limitation":"COM runtime activation does not prove activation over the measured direct mapper connection"})
     }
-}
-
-fn hyperv_outcome() -> Value {
-    // The host must provide an independently listening utility-VM service before
-    // a refusal can be attributed. Do not invent a service GUID or treat a missing
-    // service as isolation. Inventory determines NOT EXERCISABLE on server hosts.
-    json!({"attempted":false,"reason":"no calibrated Hyper-V utility-VM service supplied"})
 }
 
 fn rpc_status(api: &str, status: i32) -> Value {
