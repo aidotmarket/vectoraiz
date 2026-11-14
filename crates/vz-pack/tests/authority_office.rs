@@ -87,7 +87,7 @@ fn relationship_aliases_reopen_through_production_parsers() {
             _ => "ppt/presentation.xml",
         };
         let xml = String::from_utf8(parts[main].clone()).unwrap();
-        // Alphabetically first alias must not replace the source's r:id.
+        // Relationship aliases must still produce the conventional r:id.
         let xml = if ext == "docx" {
             xml.replace(
                 "<w:document ",
@@ -126,6 +126,84 @@ fn relationship_aliases_reopen_through_production_parsers() {
         );
     }
 }
+#[test]
+fn rebuild_discards_unused_namespace_channels_at_root_and_inner_scopes() {
+    for ext in ["docx", "xlsx", "pptx"] {
+        let mut parts = fixture(ext);
+        for bytes in parts.values_mut() {
+            let xml = String::from_utf8(bytes.clone()).unwrap();
+            let mut xml = xml.replacen(">", r#" xmlns:RootMarker="urn:root-marker">"#, 1);
+            // Every fixture has nested elements; plant a different inner binding.
+            let inner = xml.find('>').unwrap() + 1;
+            let end = inner + xml[inner..].find('>').unwrap();
+            let insert = if xml.as_bytes()[end - 1] == b'/' {
+                end - 1
+            } else {
+                end
+            };
+            xml.insert_str(insert, r#" xmlns:InnerMarker="urn:inner-marker""#);
+            *bytes = xml.into_bytes();
+        }
+        let (bytes, report) = rebuild(ext, &parts);
+        assert!(report.text().contains("Project ORION retained body"));
+        for (part, bytes) in members(&bytes) {
+            let xml = String::from_utf8(bytes).unwrap();
+            for marker in [
+                "RootMarker",
+                "urn:root-marker",
+                "InnerMarker",
+                "urn:inner-marker",
+            ] {
+                assert!(!xml.contains(marker), "{ext}/{part}: {marker}");
+            }
+        }
+    }
+}
+
+#[test]
+fn rebuild_replaces_marker_prefix_on_retained_word_names() {
+    let mut parts = fixture("docx");
+    let xml = String::from_utf8(parts["word/document.xml"].clone()).unwrap();
+    parts.insert(
+        "word/document.xml".into(),
+        xml.replace("w:", "JohnDoeSecret:")
+            .replace("xmlns:w=", "xmlns:JohnDoeSecret=")
+            .into_bytes(),
+    );
+    let (bytes, report) = rebuild("docx", &parts);
+    assert!(report.text().contains("Project ORION retained body"));
+    for (part, bytes) in members(&bytes) {
+        let xml = String::from_utf8(bytes).unwrap();
+        assert!(!xml.contains("JohnDoeSecret"), "{part}: {xml}");
+    }
+}
+
+#[test]
+fn rebuild_warns_and_privately_records_unbound_ignorable_tokens() {
+    let mut parts = fixture("docx");
+    let xml = String::from_utf8(parts["word/document.xml"].clone()).unwrap();
+    let mc = "http://schemas.openxmlformats.org/markup-compatibility/2006";
+    // Exercise nested locations and both valid and unbound tokens.
+    let xml = xml.replace("<w:p>", &format!(
+        r#"<w:p xmlns:mc="{mc}" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" mc:Ignorable="w14 MissingSecret AnotherSecret">"#
+    ));
+    parts.insert("word/document.xml".into(), xml.into_bytes());
+    let (bytes, report) = rebuild("docx", &parts);
+    for token in ["MissingSecret", "AnotherSecret"] {
+        let removal = report.removals.iter().find(|r| r.value == token).unwrap();
+        assert!(removal.reason.contains("unbound mc:Ignorable"));
+        assert!(removal.location.starts_with("word/document.xml/"));
+        assert!(removal.location.contains(&format!("{{{W}}}p[1]/@")));
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&removal.location) && w.contains(&removal.reason)));
+        for (part, bytes) in members(&bytes) {
+            assert!(!String::from_utf8(bytes).unwrap().contains(token), "{part}");
+        }
+    }
+}
+
 #[test]
 fn office_benign_roundtrip() {
     for ext in ["docx", "xlsx", "pptx"] {

@@ -7,7 +7,7 @@ use quick_xml::{
 
 type Bindings = BTreeMap<String, String>;
 
-pub(super) fn validate_mc(n: &mut Node, location: &str) -> Result<()> {
+pub(super) fn validate_mc(n: &mut Node, location: &str, report: &mut Report) -> Result<()> {
     for ((ns, key), value) in &mut n.attrs {
         let requires = n.ns == MC && n.local == "Choice" && ns.is_empty() && key == "Requires";
         if !requires && !(ns == MC && words("Ignorable MustUnderstand ProcessContent", key)) {
@@ -27,6 +27,12 @@ pub(super) fn validate_mc(n: &mut Node, location: &str) -> Result<()> {
                 valid.push(token);
             } else if key != "Ignorable" {
                 bail!("unbound MC prefix {token} at {location}/@{key}");
+            } else {
+                report.remove(
+                    &format!("{location}/@{{{MC}}}Ignorable"),
+                    "dropped unbound mc:Ignorable token",
+                    token.into(),
+                );
             }
         }
         ensure!(
@@ -57,114 +63,123 @@ fn conventional(ns: &str) -> Option<&'static str> {
         "http://schemas.microsoft.com/office/drawing/2008/diagram" => "dsp",
         "http://schemas.microsoft.com/office/drawing/2012/chartStyle" => "cs",
         "http://schemas.openxmlformats.org/officeDocument/2006/math" => "m",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingShape" => "wps",
+        "http://schemas.microsoft.com/office/word/2010/wordprocessingGroup" => "wpg",
+        "http://schemas.microsoft.com/office/word/2010/wordml" => "w14",
+        "http://schemas.microsoft.com/office/word/2012/wordml" => "w15",
+        "http://schemas.microsoft.com/office/spreadsheetml/2009/9/ac" => "x14ac",
+        "urn:schemas-microsoft-com:vml" => "v",
+        "urn:schemas-microsoft-com:office:office" => "o",
+        "urn:schemas-microsoft-com:office:word" => "w10",
+        "http://schemas.microsoft.com/office/word/2006/wordml" => "wne",
         _ => return None,
     })
 }
 
-fn qname(
-    ns: &str,
-    local: &str,
-    attribute: bool,
-    source_prefix: Option<&str>,
-    source: &Bindings,
-    bindings: &mut Bindings,
-) -> String {
+fn qname(ns: &str, local: &str, attribute: bool, bindings: &mut Bindings) -> String {
     if ns.is_empty() {
+        if !attribute {
+            bindings.insert(String::new(), String::new());
+        }
         return local.into();
     }
     if ns == XML {
         return format!("xml:{local}");
     }
-    // OPC's structural namespaces must use unprefixed elements.
-    if !attribute && [CT, REL].contains(&ns) {
+    // Defaults apply only to elements. No source spelling or binding participates.
+    if !attribute && [CT, REL, S].contains(&ns) {
         bindings.insert(String::new(), ns.into());
         return local.into();
     }
-    // Aliases can coexist for one URI. Only the prefix on this source name
-    // takes precedence over convention (not the first alias in the map).
-    if let Some(prefix) = source_prefix.filter(|p| {
-        (!attribute || !p.is_empty())
-            && source.get(*p).is_some_and(|uri| uri == ns)
-            && bindings.get(*p).is_some_and(|uri| uri == ns)
-    }) {
-        return if prefix.is_empty() {
-            local.into()
-        } else {
-            format!("{prefix}:{local}")
-        };
-    }
-    // SpreadsheetML conventionally uses the default namespace. Attributes
-    // still need a nonempty prefix because defaults apply only to elements.
-    if !attribute && ns == S && !bindings.contains_key("") {
-        bindings.insert(String::new(), ns.into());
-        return local.into();
-    }
-    let prefix = conventional(ns)
-        .filter(|p| bindings.get(*p).is_none_or(|uri| uri == ns))
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
-            (0..)
-                .map(|i| format!("n{i}"))
-                .find(|p| !bindings.contains_key(p))
-                .unwrap()
-        });
+    let prefix = conventional(ns).map(str::to_owned).unwrap_or_else(|| {
+        bindings
+            .iter()
+            .find(|(p, uri)| !p.is_empty() && uri.as_str() == ns)
+            .map(|(p, _)| p.clone())
+            .unwrap_or_else(|| {
+                (1..)
+                    .map(|i| format!("ns{i}"))
+                    .find(|p| !bindings.contains_key(p))
+                    .unwrap()
+            })
+    });
     bindings.insert(prefix.clone(), ns.into());
     format!("{prefix}:{local}")
 }
 
+// MC prefix values may reference only bindings also used by prefixed names.
+// Default element namespaces cannot justify an otherwise unused prefix alias.
+fn uses_namespace(n: &Node, ns: &str) -> bool {
+    (n.ns == ns && ![CT, REL, S].contains(&ns))
+        || n.attrs.keys().any(|(uri, _)| uri == ns)
+        || n.children.iter().any(|c| uses_namespace(c, ns))
+}
+
+fn mc_value(n: &Node, key: &str, value: &str, bindings: &mut Bindings, removal: bool) -> String {
+    value
+        .split_ascii_whitespace()
+        .filter_map(|token| {
+            let (uri, local) = if key == "Requires" {
+                (token, None)
+            } else {
+                let (prefix, local) = if key == "ProcessContent" {
+                    let (prefix, local) = token.split_once(':')?;
+                    (prefix, Some(local))
+                } else {
+                    (token, None)
+                };
+                (
+                    if prefix == "xml" {
+                        XML
+                    } else {
+                        n.bindings.get(prefix)?.as_str()
+                    },
+                    local,
+                )
+            };
+            if !removal && !uses_namespace(n, uri) {
+                return None;
+            }
+            let name = qname(uri, local.unwrap_or("_"), true, bindings);
+            Some(if local.is_some() {
+                name
+            } else {
+                name.trim_end_matches(":_").into()
+            })
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 pub(super) fn serialize(n: &Node) -> Result<Vec<u8>> {
-    fn write(n: &Node, parent: &Bindings, w: &mut Writer<Vec<u8>>) -> Result<()> {
+    serialize_inner(n, false)
+}
+
+// Private removal evidence may contain discarded MC branches whose Requires
+// namespaces have no element/attribute names. Never use this for delivered parts.
+pub(super) fn serialize_removal(n: &Node) -> Result<Vec<u8>> {
+    serialize_inner(n, true)
+}
+
+fn serialize_inner(n: &Node, removal: bool) -> Result<Vec<u8>> {
+    fn write(n: &Node, parent: &Bindings, w: &mut Writer<Vec<u8>>, removal: bool) -> Result<()> {
         let mut bindings = parent.clone();
-        bindings.extend(n.bindings.iter().map(|(p, uri)| (p.clone(), uri.clone())));
-        if n.ns.is_empty() {
-            bindings.insert(String::new(), String::new());
-        }
-        let name = qname(
-            &n.ns,
-            &n.local,
-            false,
-            n.prefix.as_deref(),
-            &n.bindings,
-            &mut bindings,
-        );
+        let name = qname(&n.ns, &n.local, false, &mut bindings);
         let mut attrs = Vec::new();
-        for (expanded_name, value) in &n.attrs {
-            let (ns, key) = expanded_name;
-            let value = if n.ns == MC && n.local == "Choice" && ns.is_empty() && key == "Requires" {
-                // The parser stores URIs here for AlternateContent selection.
-                value
-                    .split_ascii_whitespace()
-                    .map(|uri| {
-                        qname(
-                            uri,
-                            "_",
-                            true,
-                            n.bindings
-                                .iter()
-                                .find(|(p, bound)| !p.is_empty() && bound.as_str() == uri)
-                                .map(|(p, _)| p.as_str()),
-                            &n.bindings,
-                            &mut bindings,
-                        )
-                        .trim_end_matches(":_")
-                        .to_owned()
-                    })
-                    .collect::<Vec<_>>()
-                    .join(" ")
+        for ((ns, key), value) in &n.attrs {
+            let requires = n.ns == MC && n.local == "Choice" && ns.is_empty() && key == "Requires";
+            let value = if requires
+                || (ns == MC && words("Ignorable MustUnderstand ProcessContent", key))
+            {
+                mc_value(n, key, value, &mut bindings, removal)
             } else {
                 value.clone()
             };
-            attrs.push((
-                qname(
-                    ns,
-                    key,
-                    true,
-                    n.attr_prefixes.get(expanded_name).map(String::as_str),
-                    &n.bindings,
-                    &mut bindings,
-                ),
-                value,
-            ));
+            ensure!(
+                !requires || !value.is_empty(),
+                "mc:Choice has no retained required namespace"
+            );
+            attrs.push((qname(ns, key, true, &mut bindings), value));
         }
         for (prefix, uri) in &bindings {
             if prefix == "xml"
@@ -198,7 +213,7 @@ pub(super) fn serialize(n: &Node) -> Result<Vec<u8>> {
             w.write_event(Event::Text(BytesText::new(&n.text)))?;
         }
         for child in &n.children {
-            write(child, &bindings, w)?;
+            write(child, &bindings, w, removal)?;
         }
         w.write_event(Event::End(BytesEnd::new(&name)))?;
         Ok(())
@@ -209,7 +224,7 @@ pub(super) fn serialize(n: &Node) -> Result<Vec<u8>> {
         Some("UTF-8"),
         Some("yes"),
     )))?;
-    write(n, &Bindings::new(), &mut writer)?;
+    write(n, &Bindings::new(), &mut writer, removal)?;
     Ok(writer.into_inner())
 }
 
@@ -241,57 +256,40 @@ mod tests {
         }
     }
     #[test]
-    fn source_prefixes_scopes_aliases_and_mc_values_survive() {
+    fn canonical_names_and_mc_values_use_only_retained_namespaces() {
         let ext = "http://schemas.microsoft.com/office/word/2010/wordml";
         let (out, n) = roundtrip(&format!(
-            r#"<custom:document xmlns:custom="{W}" xmlns:compat="{MC}" xmlns:feature="{ext}" compat:Ignorable="feature missing" compat:MustUnderstand="feature" compat:ProcessContent="feature:item"><custom:body xmlns:feature="urn:scoped"><feature:item/></custom:body><compat:Choice Requires="feature"><feature:item/></compat:Choice></custom:document>"#
+            r#"<custom:document xmlns:custom="{W}" xmlns:compat="{MC}" xmlns:feature="{ext}" xmlns:Unused="urn:unused" compat:Ignorable="feature missing" compat:MustUnderstand="feature" compat:ProcessContent="feature:item"><custom:body xmlns:feature="urn:scoped"><feature:item/></custom:body><compat:Choice Requires="feature"><feature:item/></compat:Choice></custom:document>"#
         ));
-        assert!(out.contains("<custom:document"));
-        assert!(out.contains("compat:Ignorable=\"feature\""));
-        assert!(out.contains("Requires=\"feature\""));
-        assert_eq!(n.attr_ns(MC, "MustUnderstand"), Some("feature"));
-        assert_eq!(n.attr_ns(MC, "ProcessContent"), Some("feature:item"));
+        for marker in ["custom", "compat:", "feature", "Unused", "urn:unused"] {
+            assert!(!out.contains(marker), "{out}");
+        }
+        assert!(out.contains("<w:document"));
+        assert!(out.contains(r#"mc:Ignorable="w14""#));
+        assert!(out.contains(r#"Requires="w14""#));
+        assert_eq!(n.attr_ns(MC, "MustUnderstand"), Some("w14"));
+        assert_eq!(n.attr_ns(MC, "ProcessContent"), Some("w14:item"));
         assert_eq!(n.children[0].children[0].ns, "urn:scoped");
         assert_eq!(n.children[1].attr("Requires"), Some(ext));
-        assert_eq!(n.children[1].bindings["feature"], ext);
     }
     #[test]
-    fn each_element_and_attribute_keeps_its_actual_alias_in_scope() {
-        let (out, _) = roundtrip(&format!(
-            r#"<z:document xmlns:a="{W}" xmlns:z="{W}" xmlns:b="{R}" xmlns:r="{R}" r:id="one" b:embed="two"><a:body><z:p xmlns:z="urn:scoped" z:flag="yes"/></a:body><z:p/></z:document>"#
+    fn source_aliases_and_collisions_cannot_control_output() {
+        let (out, n) = roundtrip(&format!(
+            r#"<z:document xmlns:a="{W}" xmlns:z="{W}" xmlns:b="{R}" xmlns:r="urn:unused" b:id="one" b:embed="two"><a:body><z:p xmlns:z="urn:scoped" z:flag="yes"/></a:body><a:p/></z:document>"#
         ));
         for lexical in [
-            "<z:document",
-            "<a:body",
-            "<z:p",
-            "r:id=\"one\"",
-            "b:embed=\"two\"",
-            "z:flag=\"yes\"",
+            "<w:document",
+            "<w:body",
+            "<w:p",
+            r#"r:id="one""#,
+            r#"r:embed="two""#,
+            r#"ns1:flag="yes""#,
         ] {
             assert!(out.contains(lexical), "{out}");
         }
-        let (_, n) = roundtrip(&out);
+        assert!(!out.contains("urn:unused"), "{out}");
         assert_eq!(n.children[0].children[0].ns, "urn:scoped");
         assert_eq!(n.children[1].ns, W);
-    }
-    #[test]
-    fn missing_source_prefix_uses_convention_before_other_aliases() {
-        let mut n = parse(
-            format!(r#"<root xmlns:a="{R}" xmlns:r="{R}" a:id="one"/>"#).as_bytes(),
-            "fixture",
-        )
-        .unwrap();
-        n.attr_prefixes.clear();
-        let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
-        assert!(out.contains("r:id=\"one\""), "{out}");
-        // A conventional prefix bound to another URI must never be reused.
-        std::sync::Arc::make_mut(&mut n.bindings).insert("r".into(), "urn:other".into());
-        let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
-        assert!(out.contains("n0:id=\"one\""), "{out}");
-        assert_eq!(
-            parse(out.as_bytes(), "out").unwrap().attr_ns(R, "id"),
-            Some("one")
-        );
     }
     #[test]
     fn conventional_then_generated_prefixes_for_synthesized_nodes() {
@@ -319,7 +317,7 @@ mod tests {
                 "http://schemas.microsoft.com/office/drawing/2012/chartStyle",
                 "cs",
             ),
-            ("urn:unknown", "n0"),
+            ("urn:unknown", "ns1"),
         ] {
             let mut n = parse(
                 format!("<source:item xmlns:source=\"{ns}\"/>").as_bytes(),
@@ -374,21 +372,6 @@ mod tests {
         assert_eq!(n.attr_ns(MC, "Ignorable"), Some(""));
     }
     #[test]
-    fn source_binding_precedes_inherited_fallback() {
-        let mut n = parse(
-            format!(r#"<z:document xmlns:z="{W}"><z:body/></z:document>"#).as_bytes(),
-            "fixture",
-        )
-        .unwrap();
-        n.bindings = Default::default();
-        let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
-        assert!(
-            out.contains("<w:document") && out.contains("<z:body"),
-            "{out}"
-        );
-        parse(out.as_bytes(), "out").unwrap();
-    }
-    #[test]
     fn synthesized_spreadsheet_uses_default_namespace() {
         let mut n = parse(
             format!(r#"<source:worksheet xmlns:source="{S}"/>"#).as_bytes(),
@@ -404,7 +387,7 @@ mod tests {
         assert_eq!(parse(out.as_bytes(), "out").unwrap().ns, S);
     }
     #[test]
-    fn generated_prefixes_avoid_source_collisions() {
+    fn source_collisions_do_not_affect_conventional_prefixes() {
         let mut n = parse(
             format!(r#"<root xmlns:w="urn:other" xmlns:n0="urn:zero"/>"#).as_bytes(),
             "fixture",
@@ -412,7 +395,7 @@ mod tests {
         .unwrap();
         n.ns = W.into();
         let out = String::from_utf8(serialize(&n).unwrap()).unwrap();
-        assert!(out.contains("<n1:root"), "{out}");
+        assert!(out.contains("<w:root"), "{out}");
         assert_eq!(parse(out.as_bytes(), "out").unwrap().ns, W);
     }
 }

@@ -201,7 +201,7 @@ fn diagram_models(
                     report.remove(
                         &format!("{at}/{}", c.attr("modelId").unwrap_or("?")),
                         "removed undrawn SmartArt data-model content and connections",
-                        String::from_utf8(serialize(&c)?)?,
+                        String::from_utf8(serializer::serialize_removal(&c)?)?,
                     );
                     continue;
                 }
@@ -234,7 +234,7 @@ fn definition(
             report.remove(
                 part,
                 "removed SmartArt definition free text",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
@@ -368,7 +368,7 @@ pub(super) fn resolve_alternates(n: &mut Node, at: &str, report: &mut Report) ->
             report.remove(
                 &loc,
                 "selected supported AlternateContent branch; removed alternate displayed content",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             let mut branch = c.children.remove(selected);
             resolve_alternates(&mut branch, &loc, report)?;
@@ -447,7 +447,7 @@ pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bo
         report.remove(
             at,
             "converted chart reference to static cache; caches may be stale",
-            String::from_utf8(serialize(n)?)?,
+            String::from_utf8(serializer::serialize_removal(n)?)?,
         );
         if n.local == "strRef" && series_text {
             let points: Vec<_> = cached.children.iter().filter(|c| c.local == "pt").collect();
@@ -478,7 +478,7 @@ pub(super) fn chart(n: &mut Node, at: &str, report: &mut Report, series_text: bo
         let loc = location(at, &c, i + 1);
         if (c.ns==C && words("f externalData pivotSource pivotFmts printSettings headerFooter protection userShapes extLst",&c.local))
             || (c.ns==A && c.local=="fld" && c.attr("type")==Some("CELLRANGE")) {
-            report.remove(&loc,if c.local=="fld" {"removed CELLRANGE displayed data label"} else {"removed chart source/extension content; retained static display only"},String::from_utf8(serialize(&c)?)?);
+            report.remove(&loc,if c.local=="fld" {"removed CELLRANGE displayed data label"} else {"removed chart source/extension content; retained static display only"},String::from_utf8(serializer::serialize_removal(&c)?)?);
             continue;
         }
         chart(
@@ -519,7 +519,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
         if !part.ends_with(".xml") || removable(part) {
             continue;
         }
-        let mut n = parse(bytes, part)?;
+        let mut n = parse_with_report(bytes, part, report)?;
         chartex(&n, part)?;
         let mut before = BTreeSet::new();
         refs(&n, &mut before);
@@ -550,7 +550,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
     let mut rels = BTreeMap::new();
     for (part, bytes) in parts.iter().filter(|(p, _)| p.ends_with(".rels")) {
         let own = owner(part)?;
-        let mut n = parse(bytes, part)?;
+        let mut n = parse_with_report(bytes, part, report)?;
         let mut keep = Vec::new();
         for rel in std::mem::take(&mut n.children) {
             let kind = rel
@@ -602,7 +602,7 @@ pub(super) fn prepare(parts: &mut BTreeMap<String, Vec<u8>>, report: &mut Report
                 report.remove(
                     part,
                     "removed unused graphics relationship",
-                    String::from_utf8(serialize(&rel)?)?,
+                    String::from_utf8(serializer::serialize_removal(&rel)?)?,
                 );
                 if rel.attr("TargetMode") != Some("External") {
                     candidates.insert(resolve(

@@ -124,9 +124,6 @@ struct Node {
     ns: String,
     local: String,
     attrs: BTreeMap<(String, String), String>,
-    // Lexical source prefixes, checked against in-scope bindings at serialization.
-    prefix: Option<String>,
-    attr_prefixes: BTreeMap<(String, String), String>,
     children: Vec<Node>,
     text: String,
     ignorable: std::sync::Arc<BTreeSet<String>>,
@@ -173,6 +170,9 @@ fn namespace(ns: ResolveResult<'_>) -> Result<String> {
     })
 }
 fn parse(bytes: &[u8], part: &str) -> Result<Node> {
+    parse_with_report(bytes, part, &mut Report::default())
+}
+fn parse_with_report(bytes: &[u8], part: &str, report: &mut Report) -> Result<Node> {
     // quick-xml is pinned by S1927. RUSTSEC-2026-0194 affects NsReader's
     // duplicate-attribute scan. Bound tags/attributes with the plain reader
     // before namespace resolution can reach that quadratic path.
@@ -240,14 +240,6 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     ns: namespace(ns)?,
                     local: std::str::from_utf8(local.as_ref())?.into(),
                     attrs: BTreeMap::new(),
-                    prefix: Some(
-                        e.name()
-                            .prefix()
-                            .map(|p| std::str::from_utf8(p.as_ref()).map(str::to_owned))
-                            .transpose()?
-                            .unwrap_or_default(),
-                    ),
-                    attr_prefixes: BTreeMap::new(),
                     children: vec![],
                     text: String::new(),
                     bindings: stack.last().map(|n| n.bindings.clone()).unwrap_or_default(),
@@ -270,10 +262,6 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     }
                     let (ns, local) = reader.resolve_attribute(a.key);
                     let key = (namespace(ns)?, std::str::from_utf8(local.as_ref())?.into());
-                    if let Some(prefix) = a.key.prefix() {
-                        n.attr_prefixes
-                            .insert(key.clone(), std::str::from_utf8(prefix.as_ref())?.into());
-                    }
                     ensure!(
                         n.attrs
                             .insert(
@@ -296,7 +284,7 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     n.ns,
                     n.local
                 );
-                serializer::validate_mc(&mut n, &location)?;
+                serializer::validate_mc(&mut n, &location, report)?;
                 if n.ns == MC && n.local == "Choice" {
                     let requires = n
                         .attr("Requires")
@@ -312,7 +300,6 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                         namespaces
                             .push(namespace(ns).with_context(|| format!("{location}/@Requires"))?);
                     }
-                    ensure!(!namespaces.is_empty(), "empty mc:Choice Requires at {part}");
                     n.attrs
                         .insert((String::new(), "Requires".into()), namespaces.join(" "));
                 }
@@ -1014,7 +1001,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "resolved AlternateContent; removed alternate branches",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             if let Some(selected) = selected {
                 resolved.extend(std::mem::take(&mut c.children[selected].children));
@@ -1048,8 +1035,6 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                     ns: c.ns.clone(),
                     local: c.local.clone(),
                     attrs: c.attrs.clone(),
-                    prefix: c.prefix.clone(),
-                    attr_prefixes: c.attr_prefixes.clone(),
                     children: properties.clone(),
                     text: c.text.clone(),
                     source_cell: c.source_cell.clone(),
@@ -1087,7 +1072,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "flattened Word content control; removed properties and data-store binding",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             let mut content = c.children.remove(
                 c.children
@@ -1107,7 +1092,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "flattened Drawing field to displayed result",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             ensure!(
                 c.children
@@ -1123,7 +1108,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "removed PowerPoint action",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
@@ -1164,7 +1149,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "removed schema-ignorable content",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
@@ -1189,7 +1174,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "removed Office private/active carrier",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
@@ -1225,7 +1210,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                     report.remove(
                         &format!("{part}/cell/{}", c.attr("r").unwrap_or("?")),
                         "static snapshot: removed cell formula",
-                        String::from_utf8(serialize(&x)?)?,
+                        String::from_utf8(serializer::serialize_removal(&x)?)?,
                     );
                 } else {
                     c.children.push(x);
@@ -1240,13 +1225,13 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "static snapshot: removed formula-bearing name/rule",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
         if c.local == "extLst" {
             // Only explicitly implemented extension children may survive.
-            let original = String::from_utf8(serialize(&c)?)?;
+            let original = String::from_utf8(serializer::serialize_removal(&c)?)?;
             for ext in &mut c.children {
                 let ext_uri = ext.attr("uri").unwrap_or("").to_owned();
                 ext.children.retain(|x| {
@@ -1276,7 +1261,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
             report.remove(
                 part,
                 "removed empty Office extension wrapper",
-                String::from_utf8(serialize(&c)?)?,
+                String::from_utf8(serializer::serialize_removal(&c)?)?,
             );
             continue;
         }
@@ -1640,8 +1625,6 @@ fn walk(
         ns: n.ns.clone(),
         local: n.local.clone(),
         attrs: n.attrs.clone(),
-        prefix: n.prefix.clone(),
-        attr_prefixes: n.attr_prefixes.clone(),
         children: Vec::with_capacity(n.children.len()),
         text: n.text.clone(),
         source_cell: n.source_cell.clone(),
@@ -2210,7 +2193,7 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
         report.remove(
             "xl/sharedStrings.xml",
             "copied referenced shared strings into cells; removed orphan strings",
-            String::from_utf8(serialize(&Node {
+            String::from_utf8(serializer::serialize_removal(&Node {
                 ns: S.into(),
                 local: "sst".into(),
                 attrs: BTreeMap::new(),
@@ -2219,8 +2202,6 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
                 source_cell: None,
                 ignorable: Default::default(),
                 bindings: Default::default(),
-                prefix: None,
-                attr_prefixes: BTreeMap::new(),
             })?)?,
         );
     }
@@ -2615,7 +2596,7 @@ fn rebuild_inner(
         }
         let (ns, local) =
             root_for(part).with_context(|| format!("unsupported Office part {part}"))?;
-        let mut root = parse(bytes, part)?;
+        let mut root = parse_with_report(bytes, part, &mut report)?;
         ensure!(
             root.ns == ns && root.local == local,
             "unsupported/Strict/mismatched root at {part}"
@@ -2944,8 +2925,6 @@ fn rebuild_inner(
         source_cell: None,
         ignorable: Default::default(),
         bindings: Default::default(),
-        prefix: None,
-        attr_prefixes: BTreeMap::new(),
     };
     for (part, bytes) in &rewritten {
         let ty = if part.ends_with(".png") {
@@ -2967,8 +2946,6 @@ fn rebuild_inner(
             source_cell: None,
             ignorable: Default::default(),
             bindings: Default::default(),
-            prefix: None,
-            attr_prefixes: BTreeMap::new(),
         });
     }
     rewritten.insert("[Content_Types].xml".into(), serialize(&new_ct)?);
