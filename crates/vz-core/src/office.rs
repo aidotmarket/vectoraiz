@@ -21,6 +21,7 @@ pub(crate) fn ingest_sheet_parts(
 }
 mod graphics;
 mod layout_allowlist;
+mod serializer;
 mod style_allowlist;
 
 const W: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -126,6 +127,8 @@ struct Node {
     children: Vec<Node>,
     text: String,
     ignorable: std::sync::Arc<BTreeSet<String>>,
+    // In-scope source bindings, including aliases used only in MC attribute values.
+    bindings: std::sync::Arc<BTreeMap<String, String>>,
     // Transient source annotation, deliberately omitted by the XML serializer.
     source_cell: Option<Box<(String, String)>>,
 }
@@ -207,6 +210,8 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
     }
     let mut reader = NsReader::from_str(std::str::from_utf8(bytes)?);
     let mut stack: Vec<Node> = vec![];
+    let mut locations: Vec<String> = vec![];
+    let mut sibling_counts = vec![BTreeMap::<(String, String), usize>::new()];
     let mut root = None;
     let mut count = 0;
     fn attach(n: Node, stack: &mut [Node], root: &mut Option<Node>) -> Result<()> {
@@ -234,6 +239,7 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     attrs: BTreeMap::new(),
                     children: vec![],
                     text: String::new(),
+                    bindings: stack.last().map(|n| n.bindings.clone()).unwrap_or_default(),
                     source_cell: None,
                     ignorable: stack
                         .last()
@@ -243,6 +249,12 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                 for a in e.attributes() {
                     let a = a?;
                     if a.key.as_ref() == b"xmlns" || a.key.as_ref().starts_with(b"xmlns:") {
+                        let key = std::str::from_utf8(a.key.as_ref())?;
+                        let prefix = key.strip_prefix("xmlns:").unwrap_or("");
+                        std::sync::Arc::make_mut(&mut n.bindings).insert(
+                            prefix.into(),
+                            a.decode_and_unescape_value(reader.decoder())?.into_owned(),
+                        );
                         continue;
                     }
                     let (ns, local) = reader.resolve_attribute(a.key);
@@ -257,17 +269,33 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                         "duplicate expanded attribute at {part}"
                     );
                 }
+                let index = sibling_counts
+                    .last_mut()
+                    .unwrap()
+                    .entry((n.ns.clone(), n.local.clone()))
+                    .or_default();
+                *index += 1;
+                let location = format!(
+                    "{}/{{{}}}{}[{index}]",
+                    locations.last().map(String::as_str).unwrap_or(part),
+                    n.ns,
+                    n.local
+                );
+                serializer::validate_mc(&mut n, &location)?;
                 if n.ns == MC && n.local == "Choice" {
                     let requires = n
                         .attr("Requires")
-                        .context("mc:Choice lacks Requires")?
+                        .with_context(|| {
+                            format!("mc:Choice lacks Requires at {location}/@Requires")
+                        })?
                         .to_owned();
                     let mut namespaces = Vec::new();
                     for prefix in requires.split_ascii_whitespace() {
                         let qname = format!("{prefix}:_");
                         let (ns, _) =
                             reader.resolve_element(quick_xml::name::QName(qname.as_bytes()));
-                        namespaces.push(namespace(ns)?);
+                        namespaces
+                            .push(namespace(ns).with_context(|| format!("{location}/@Requires"))?);
                     }
                     ensure!(!namespaces.is_empty(), "empty mc:Choice Requires at {part}");
                     n.attrs
@@ -290,10 +318,14 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
                     attach(n, &mut stack, &mut root)?;
                 } else {
                     stack.push(n);
+                    locations.push(location);
+                    sibling_counts.push(BTreeMap::new());
                 }
             }
             Event::End(_) => {
                 let n = stack.pop().context("unbalanced XML")?;
+                locations.pop();
+                sibling_counts.pop();
                 attach(n, &mut stack, &mut root)?;
             }
             Event::Text(t) => {
@@ -349,91 +381,9 @@ fn parse(bytes: &[u8], part: &str) -> Result<Node> {
     root.context("missing XML root")
 }
 fn serialize(n: &Node) -> Result<Vec<u8>> {
-    use quick_xml::{
-        events::{BytesEnd, BytesStart, BytesText},
-        Writer,
-    };
-    fn collect(n: &Node, s: &mut BTreeSet<String>) {
-        if !n.ns.is_empty() {
-            s.insert(n.ns.clone());
-        }
-        for (ns, _) in n.attrs.keys() {
-            if !ns.is_empty() {
-                s.insert(ns.clone());
-            }
-        }
-        for c in &n.children {
-            collect(c, s);
-        }
-    }
-    let mut ns = BTreeSet::new();
-    collect(n, &mut ns);
-    let prefixes: BTreeMap<String, String> = ns
-        .into_iter()
-        .enumerate()
-        .map(|(i, s)| {
-            let p = if s == XML {
-                "xml".into()
-            } else if s == R {
-                // Calamine recognizes the conventional relationship prefix.
-                "r".into()
-            } else {
-                format!("n{i}")
-            };
-            (s, p)
-        })
-        .collect();
-    fn qname(ns: &str, k: &str, p: &BTreeMap<String, String>) -> String {
-        if ns.is_empty() {
-            k.into()
-        } else {
-            format!("{}:{k}", p[ns])
-        }
-    }
-    fn write(
-        n: &Node,
-        p: &BTreeMap<String, String>,
-        w: &mut Writer<Vec<u8>>,
-        root: bool,
-    ) -> Result<()> {
-        let name = qname(&n.ns, &n.local, p);
-        let mut start = BytesStart::new(&name);
-        let mut attrs: Vec<_> = n
-            .attrs
-            .iter()
-            .map(|((ns, k), v)| (qname(ns, k, p), v.clone()))
-            .collect();
-        if root {
-            for (ns, pr) in p {
-                if ns != XML {
-                    attrs.push((format!("xmlns:{pr}"), ns.clone()));
-                }
-            }
-        }
-        for (k, v) in &attrs {
-            let escaped = quick_xml::escape::escape(v)
-                .replace('\n', "&#10;")
-                .replace('\r', "&#13;")
-                .replace('\t', "&#9;");
-            start.push_attribute(quick_xml::events::attributes::Attribute {
-                key: quick_xml::name::QName(k.as_bytes()),
-                value: std::borrow::Cow::Owned(escaped.into_bytes()),
-            });
-        }
-        w.write_event(Event::Start(start))?;
-        if !n.text.is_empty() {
-            w.write_event(Event::Text(BytesText::new(&n.text)))?;
-        }
-        for c in &n.children {
-            write(c, p, w, false)?;
-        }
-        w.write_event(Event::End(BytesEnd::new(&name)))?;
-        Ok(())
-    }
-    let mut writer = Writer::new(Vec::new());
-    write(n, &prefixes, &mut writer, true)?;
-    Ok(writer.into_inner())
+    serializer::serialize(n)
 }
+
 fn words(s: &str, k: &str) -> bool {
     s.split_ascii_whitespace().any(|x| x == k)
 }
@@ -1087,6 +1037,7 @@ fn cleanse(n: &mut Node, part: &str, report: &mut Report) -> Result<()> {
                     text: c.text.clone(),
                     source_cell: c.source_cell.clone(),
                     ignorable: c.ignorable.clone(),
+                    bindings: c.bindings.clone(),
                 };
                 run.children.push(child.clone());
                 old.push(run);
@@ -1676,6 +1627,7 @@ fn walk(
         text: n.text.clone(),
         source_cell: n.source_cell.clone(),
         ignorable: n.ignorable.clone(),
+        bindings: n.bindings.clone(),
     };
     if n.ns == W && words("vanish webHidden", &n.local) {
         report.add(
@@ -2247,6 +2199,7 @@ fn shared_strings(trees: &mut BTreeMap<String, Node>, report: &mut Report) -> Re
                 text: String::new(),
                 source_cell: None,
                 ignorable: Default::default(),
+                bindings: Default::default(),
             })?)?,
         );
     }
@@ -2969,6 +2922,7 @@ fn rebuild_inner(
         text: String::new(),
         source_cell: None,
         ignorable: Default::default(),
+        bindings: Default::default(),
     };
     for (part, bytes) in &rewritten {
         let ty = if part.ends_with(".png") {
@@ -2989,6 +2943,7 @@ fn rebuild_inner(
             text: String::new(),
             source_cell: None,
             ignorable: Default::default(),
+            bindings: Default::default(),
         });
     }
     rewritten.insert("[Content_Types].xml".into(), serialize(&new_ct)?);

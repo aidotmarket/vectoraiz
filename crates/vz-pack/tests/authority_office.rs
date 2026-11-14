@@ -88,6 +88,28 @@ fn office_benign_roundtrip() {
         assert_eq!(r.text(), reopened.text());
         assert!(r.text().contains("Project ORION retained body"));
         assert_eq!(sha256(&source), digest);
+        for (part, xml) in members(&bytes) {
+            if part.ends_with(".xml") || part.ends_with(".rels") {
+                let xml = String::from_utf8(xml).unwrap();
+                let declaration = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>";
+                assert!(xml.starts_with(declaration), "{part}: missing XML declaration");
+                if part == "[Content_Types].xml" || part.ends_with(".rels") {
+                    let (root, ns) = if part.ends_with(".rels") {
+                        ("Relationships", REL)
+                    } else {
+                        ("Types", CT)
+                    };
+                    assert!(
+                        xml[declaration.len()..].starts_with(&format!("<{root} ")),
+                        "{part}: prefixed OPC root"
+                    );
+                    assert!(
+                        xml.contains(&format!("xmlns=\"{ns}\"")),
+                        "{part}: missing default namespace"
+                    );
+                }
+            }
+        }
         assert!(!members(&bytes).keys().any(|p| p.contains("identity-sheet")));
     }
 }
