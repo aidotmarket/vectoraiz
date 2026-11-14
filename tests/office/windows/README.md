@@ -140,9 +140,14 @@ if reopening the terminal):
 python "$kit/scripts/office-windows-feasibility.py" --kit-dir "$kit" --recover --out "$out"
 ```
 
-Recovery removes the journaled package SID ACEs and AppContainer profiles and
-restores the saved audit-policy backup and prior registry value if not already
-restored. It is idempotent: retry after resolving any reported failure. Keep the
+Recovery removes the journaled package SID ACEs, AppContainer profiles, and
+external `vz-C1-sentinel-*` (home) and `vz-u-*` (system temp) directories after
+checking their exact journaled paths, expected parents/prefixes, and rejecting
+reparse points. Each directory deletion failure is reported and retained for retry.
+Workers are assigned atomically at creation to a kill-on-close job: forcibly
+terminating the launcher also terminates its suspended or running worker, so no
+worker PID journal is needed or recovered. Recovery also restores the saved
+audit-policy backup and prior registry value if not already restored. It is idempotent: retry after resolving any reported failure. Keep the
 private resource journals and audit backups until recovery reports success.
 The runner also performs recovery at the start and end of each run and after a
 launcher timeout. Ctrl+C requests native cancellation and waits for cleanup;

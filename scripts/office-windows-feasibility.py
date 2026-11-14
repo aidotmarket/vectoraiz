@@ -19,6 +19,7 @@ import re
 import shutil
 import signal
 import socket
+import stat
 import subprocess
 import struct
 import sys
@@ -113,6 +114,65 @@ def stop_child(process):
         process.wait(timeout=5)
 
 
+EXTERNAL_DIRS = {"sentinel": "vz-C1-sentinel-", "unix": "vz-u-"}
+
+
+def external_parent(kind):
+    return (Path.home() if kind == "sentinel" else Path(tempfile.gettempdir())).resolve()
+
+
+def journaled_temp_dir(out, kind):
+    """Persist ownership intent before mkdir; a killed creator leaves a retryable record."""
+    parent = external_parent(kind)
+    token = secrets.token_hex(16)
+    path = parent / (EXTERNAL_DIRS[kind] + token)
+    if path.exists() or path.is_symlink():
+        raise FileExistsError(path)
+    directory = out / "external-directory-journal"
+    directory.mkdir(exist_ok=True)
+    record = directory / (token + ".json")
+    # Exclusive record creation and fsync complete before the external mutation.
+    with record.open("x", encoding="utf-8") as stream:
+        json.dump({"kind": kind, "path": str(path)}, stream)
+        stream.flush()
+        os.fsync(stream.fileno())
+    path.mkdir()
+    return path
+
+
+def recover_external_dirs(out):
+    failures = []
+    directory = out / "external-directory-journal"
+    for record in sorted(directory.glob("*.json")):
+        try:
+            value = json.loads(record.read_text(encoding="utf-8"))
+            kind = value["kind"]
+            prefix = EXTERNAL_DIRS[kind]
+            path = Path(value["path"])
+            token = record.stem
+            # Never resolve the target: doing so could follow a substituted link.
+            if (not re.fullmatch(r"[0-9a-f]{32}", token)
+                    or not path.is_absolute() or str(path) != value["path"]
+                    or path.parent != external_parent(kind)
+                    or path.name != prefix + token):
+                raise ValueError("external directory ownership/path mismatch")
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                pass  # Includes the interrupted journal-before-mkdir case.
+            else:
+                if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+                        or getattr(info, "st_file_attributes", 0) & 0x400):
+                    raise ValueError("external directory is not a plain directory (reparse point rejected)")
+                shutil.rmtree(path)
+            record.unlink()
+        except Exception as error:
+            # Keep every failed record for a later retry; report each failure.
+            print(f"external directory recovery failed ({record.name}): {error}", file=sys.stderr)
+            failures.append({"record": record.name, "error": type(error).__name__})
+    return {"success": not failures, "failures": failures}
+
+
 def recover_resources(launcher, out):
     success = True
     for root in sorted(out.glob("native-*")):
@@ -123,7 +183,8 @@ def recover_resources(launcher, out):
                 success = code == 0 and success
             except Exception:
                 success = False
-    return {"success": success}
+    external = recover_external_dirs(out)
+    return {"success": success and external["success"], "external_directories": external}
 
 
 def command(argv, log, timeout=70, allow_no_log=False):
@@ -1625,7 +1686,7 @@ def run_suite(args):
             spec.loader.exec_module(fixtures_module)
             fixtures = fixtures_module.generate(out / "fixtures")
         # Host-sentinel location is deliberately under the user's profile and is never granted.
-        sentinel_root = Path(tempfile.mkdtemp(prefix="vz-C1-sentinel-", dir=Path.home()))
+        sentinel_root = journaled_temp_dir(out, "sentinel")
         sentinel = sentinel_root / "host.txt"
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
@@ -1703,7 +1764,7 @@ def run_suite(args):
                         if probe.get("op") == "unix-outcomes":
                             probe["route"] = mode
                         sentinel.write_bytes(b"C1-private-sentinel\n")
-                        scratch = (Path(tempfile.mkdtemp(prefix="vz-u-")) if probe.get("op") == "unix-outcomes"
+                        scratch = (journaled_temp_dir(out, "unix") if probe.get("op") == "unix-outcomes"
                                    else folder / (mode + "-scratch"))
                         scratch.mkdir(exist_ok=True)
                         if probe.get("op") == "unix-outcomes":
@@ -1837,9 +1898,9 @@ def run_suite(args):
             try:
                 manifest["resource_recovery"] = recover_resources(args.launcher, out)
                 if not manifest["resource_recovery"]["success"]:
-                    manifest["cleanup_error"] = "native resource recovery failed"
+                    manifest["cleanup_error"] = "resource recovery failed"
             except Exception as error:
-                manifest["cleanup_error"] = "native resource recovery failed: " + type(error).__name__
+                manifest["cleanup_error"] = "resource recovery failed: " + type(error).__name__
             finally:
                 if audit_state.exists():
                     manifest["audit_restoration"] = restore_audit(out)
@@ -1851,6 +1912,86 @@ def run_suite(args):
         save()
     print(json.dumps({"status": manifest["status"], "counts": manifest["counts"]}))
     return 0 if manifest["status"] == Status.PASS else 1
+
+
+def external_directory_self_test():
+    from unittest.mock import patch
+    with tempfile.TemporaryDirectory(prefix="directory-recovery-self-test-",
+                                     dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+        root = Path(temporary).resolve()
+        out = root / "out"
+        out.mkdir()
+        parents = {kind: root / kind for kind in EXTERNAL_DIRS}
+        for parent in parents.values():
+            parent.mkdir()
+        with patch(__name__ + ".external_parent", side_effect=lambda kind: parents[kind]):
+            paths = [journaled_temp_dir(out, kind) for kind in EXTERNAL_DIRS]
+            for path in paths:
+                (path / "leftover.txt").write_text("interrupted run")
+            # Use the public recovery orchestration twice, including audit restore.
+            assert recover_run(None, out)["success"]
+            assert recover_run(None, out)["success"]
+            assert all(not path.exists() for path in paths)
+            assert not list((out / "external-directory-journal").iterdir())
+
+            # Check the record already exists when mkdir is attempted, then
+            # simulate a kill in the journal-before-mkdir window.
+            mkdir = Path.mkdir
+            def interrupted_mkdir(path, *args, **kwargs):
+                if path.parent == parents["unix"]:
+                    records = list((out / "external-directory-journal").glob("*.json"))
+                    assert len(records) == 1
+                    assert json.loads(records[0].read_text())["path"] == str(path)
+                    raise OSError("interrupted before mkdir")
+                return mkdir(path, *args, **kwargs)
+            with patch.object(Path, "mkdir", interrupted_mkdir):
+                try:
+                    journaled_temp_dir(out, "unix")
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("external mkdir was not intercepted")
+            assert recover_external_dirs(out)["success"]
+            assert recover_external_dirs(out)["success"]
+            with patch.object(os, "fsync", side_effect=OSError("journal flush failed")):
+                try:
+                    journaled_temp_dir(out, "unix")
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("failed journal flush allowed mkdir")
+            assert not list(parents["unix"].iterdir())
+            assert recover_external_dirs(out)["success"]
+
+            paths = [journaled_temp_dir(out, kind) for kind in EXTERNAL_DIRS]
+            with patch.object(shutil, "rmtree", side_effect=PermissionError("held open")):
+                failed = recover_external_dirs(out)
+            assert not failed["success"] and len(failed["failures"]) == 2
+            assert all(path.exists() for path in paths)
+            assert recover_external_dirs(out)["success"]
+
+            # Tampered paths, unexpected names and reparse points fail closed.
+            for mutation in ("parent", "prefix", "relative", "reparse"):
+                path = journaled_temp_dir(out, "sentinel")
+                record = next((out / "external-directory-journal").glob("*.json"))
+                original = record.read_text()
+                value = json.loads(original)
+                if mutation == "reparse":
+                    info = path.lstat()
+                    from types import SimpleNamespace
+                    with patch.object(Path, "lstat", return_value=SimpleNamespace(
+                            st_mode=info.st_mode, st_file_attributes=0x400)):
+                        assert not recover_external_dirs(out)["success"]
+                else:
+                    value["path"] = str({"parent": root / path.name,
+                                         "prefix": path.parent / ("other-" + record.stem),
+                                         "relative": Path(path.name)}[mutation])
+                    record.write_text(json.dumps(value))
+                    assert not recover_external_dirs(out)["success"]
+                    record.write_text(original)
+                assert path.exists() and record.exists()
+                assert recover_external_dirs(out)["success"]
+            assert recover_external_dirs(out) == {"success": True, "failures": []}
 
 
 def assembly_self_test():
@@ -2303,6 +2444,7 @@ def assembly_self_test():
 
 
 def self_test():
+    external_directory_self_test()
     assembly_self_test()
     specs = plan()
     assert len({row["id"] for row in specs}) == len(specs)
@@ -3005,7 +3147,7 @@ def main():
     parser.add_argument("--write-kit-requirements", type=Path, help="inventory actual kit PE imports")
     parser.add_argument("--rows", help="comma-separated row IDs or client-outcomes")
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--recover", action="store_true", help="restore journaled native resources and saved audit settings")
+    parser.add_argument("--recover", action="store_true", help="restore native resources, journaled temp directories and saved audit settings")
     parser.add_argument("--initialize-only", action="store_true", help="write all-unrun manifest before CI build")
     parser.add_argument("--validate-manifest", type=Path)
     parser.add_argument("--fetch-pdfium", type=Path, help="fetch only the native-ci pinned Windows PDFium, no models")

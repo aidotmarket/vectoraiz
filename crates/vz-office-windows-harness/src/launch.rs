@@ -1027,12 +1027,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     }
     let attributes = Attributes::new(if confined {
         if lpac {
-            3
+            4
         } else {
-            2
+            3
         }
     } else {
-        1
+        2
     })?;
     attributes.set_bytes(
         PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -1114,6 +1114,12 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         );
         Some(handle)
     };
+    // CreateProcess assigns the worker atomically: killing the launcher at any
+    // point after creation closes the job and kills even a suspended worker.
+    // Unsupported attributes fail before a worker exists; never fall back to
+    // assigning the job after creation.
+    let job_handles = [job.as_ref().context("creation job")?.0];
+    attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &job_handles)?;
     // Completion port is owned until after worker exit; setup failure never resumes it.
     let notification_port = if mode == "confined-notification" {
         let port =
@@ -1230,10 +1236,6 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
     let kill = Kill(process_handle.0);
     cancelled()?;
     if let Some(job) = &job {
-        check(
-            unsafe { AssignProcessToJobObject(job.0, process_handle.0) },
-            "AssignProcessToJobObject before resume",
-        )?;
         let mut assigned = 0;
         check(
             unsafe { IsProcessInJob(process_handle.0, job.0, &mut assigned) },
@@ -1777,7 +1779,24 @@ mod tests {
                 FILE_ALL_ACCESS,
                 SUB_CONTAINERS_AND_OBJECTS_INHERIT,
             )?;
-            let attributes = Attributes::new(if lpac { 2 } else { 1 })?;
+            let job = Handle(unsafe { CreateJobObjectW(null(), null()) });
+            ensure!(!job.0.is_null(), "token regression CreateJobObjectW");
+            let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            check(
+                unsafe {
+                    SetInformationJobObject(
+                        job.0,
+                        JobObjectExtendedLimitInformation,
+                        &limits as *const _ as _,
+                        size_of_val(&limits) as u32,
+                    )
+                },
+                "token regression kill-on-close job",
+            )?;
+            let attributes = Attributes::new(if lpac { 3 } else { 2 })?;
+            let jobs = [job.0];
+            attributes.set(PROC_THREAD_ATTRIBUTE_JOB_LIST, &jobs)?;
             let caps = SECURITY_CAPABILITIES {
                 AppContainerSid: profile.sid,
                 ..Default::default()
@@ -1827,6 +1846,12 @@ mod tests {
                 process: Handle(process.hProcess),
             };
             let thread = Handle(process.hThread);
+            let mut assigned = 0;
+            check(
+                unsafe { IsProcessInJob(child.process.0, job.0, &mut assigned) },
+                "token regression atomic job assignment",
+            )?;
+            assert_ne!(assigned, 0);
             let verified = token_readback(child.process.0, profile.sid, lpac, &mut trace)?;
             assert_eq!(verified["appcontainer"], 1);
             assert_eq!(verified["lpac"], u32::from(lpac));
@@ -1849,6 +1874,13 @@ mod tests {
             assert!(lpac_access_readback(token.0, profile.sid, !lpac, &mut json!({})).is_err());
             assert!(token_readback(child.process.0, profile.sid, !lpac, &mut json!({})).is_err());
             println!("token regression lpac={lpac}: {trace}");
+            // No resume or explicit assignment: closing the sole job handle
+            // must reap a worker suspended since its creation.
+            drop(job);
+            assert_eq!(
+                unsafe { WaitForSingleObject(child.process.0, 5000) },
+                WAIT_OBJECT_0
+            );
             drop(thread);
             drop(child);
             scratch_grant.restore()?;
