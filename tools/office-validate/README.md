@@ -35,3 +35,25 @@ failures, not silently waived. LibreOffice is not Microsoft Office: a successful
 render is a useful independent smoke check, not an Office fidelity guarantee.
 The downloaded POI originals bootstrap the tool; they do not prove vectorAIz
 delivery behavior. Add real public delivered outputs per the corpus README.
+
+
+The workflow also runs `leak_check.py` in an independent job over every committed
+DOCX/XLSX/PPTX under `tests/office/delivered`, recursively. It uses only Python's
+standard library and expanded XML namespace names (transitional and strict), so
+prefix changes cannot hide tracked edits, comment anchors, chart formulas or
+external chart data. Nonempty Dublin Core creator / core-properties
+lastModifiedBy fields and forbidden metadata, comment, thumbnail, macro,
+embedding, external-link and ActiveX part paths fail the check. Invalid ZIP/XML
+also fails. Hidden/veryHidden spreadsheet sheets are informational (S1927).
+
+```sh
+python tools/office-validate/leak_check.py tests/office/delivered --report /tmp/office-delivered-leaks.json
+python -m unittest discover -s tools/office-validate -p 'test_*.py' -v
+```
+
+`office-delivered-leaks` is a separate JSON CI artifact containing paths, hashes,
+violations and sheet information per file. The Windows job independently retains
+both SDK targets and LibreOffice conversion/page counts. Its downloaded POI
+bootstrap originals are not vectorAIz deliveries and are not present in the leak
+job's checkout. A failure in either job fails the workflow; both preserve their
+reports on failure.
