@@ -79,6 +79,7 @@ pub fn run(v: &Value) -> Result<Value> {
         "winsock-registry" => winsock_registry(v)?,
         "reachability-inventory" => reachability_inventory(v)?,
         "unix-outcomes" => unix_outcomes(v)?,
+        "unix-run-listener" => unix_run_listener(v)?,
         "afd-family-sweep" => afd_family_sweep()?,
         "afd" => afd(v)?,
         "rpc" => rpc(),
@@ -1296,11 +1297,162 @@ fn unix_winsock(path: &[u8], connect_to: bool, abstract_name: bool) -> Result<Va
     unsafe { closesocket(socket) };
     Ok(json!({"route":"Winsock","creation":creation,"operation":operation}))
 }
+
+// Alternative confined route: supply the successful control's protocol record
+// explicitly, without changing the token, granting catalog access or adding a
+// capability. Failure to create/bind still leaves the exit rows unmeasured.
+fn unix_explicit(path: &[u8], connect_to: bool, protocol: &Value) -> Result<Value> {
+    let bytes: Vec<u8> = serde_json::from_value(protocol.clone())?;
+    anyhow::ensure!(
+        bytes.len() == size_of::<WSAPROTOCOL_INFOW>(),
+        "protocol record size"
+    );
+    let info = unsafe { std::ptr::read_unaligned(bytes.as_ptr().cast::<WSAPROTOCOL_INFOW>()) };
+    anyhow::ensure!(
+        info.iAddressFamily == 1 && info.iSocketType == SOCK_STREAM && info.iProtocol == 0,
+        "AF_UNIX stream protocol required"
+    );
+    let socket = unsafe { WSASocketW(-1, -1, -1, &info, 0, 0) };
+    let creation = wsa(
+        "WSASocketW(explicit AF_UNIX protocol)",
+        socket as i64,
+        socket != INVALID_SOCKET,
+    );
+    if socket == INVALID_SOCKET {
+        return Ok(
+            json!({"route":"Winsock explicit protocol", "creation":creation,
+            "operation":{"attempted":false,"reason":"explicit protocol constructor failed"}}),
+        );
+    }
+    let (address, length) = unix_address(path, false)?;
+    let rc = unsafe {
+        if connect_to {
+            connect(
+                socket,
+                (&address as *const UnixAddress).cast(),
+                length as i32,
+            )
+        } else {
+            bind(
+                socket,
+                (&address as *const UnixAddress).cast(),
+                length as i32,
+            )
+        }
+    };
+    let operation = wsa(
+        if connect_to {
+            "connect(explicit AF_UNIX protocol)"
+        } else {
+            "bind(explicit AF_UNIX protocol)"
+        },
+        rc as i64,
+        rc == 0,
+    );
+    unsafe { closesocket(socket) };
+    Ok(json!({"route":"Winsock explicit protocol", "creation":creation,"operation":operation}))
+}
+
+fn unix_protocol() -> Value {
+    unsafe {
+        let socket = windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0);
+        let creation = wsa(
+            "socket(protocol control)",
+            socket as i64,
+            socket != INVALID_SOCKET,
+        );
+        if socket == INVALID_SOCKET {
+            return json!({"creation":creation});
+        }
+        let mut info: WSAPROTOCOL_INFOW = zeroed();
+        let mut length = size_of::<WSAPROTOCOL_INFOW>() as i32;
+        let rc = getsockopt(
+            socket,
+            SOL_SOCKET,
+            SO_PROTOCOL_INFOW,
+            (&mut info as *mut WSAPROTOCOL_INFOW).cast(),
+            &mut length,
+        );
+        let query = wsa("getsockopt(SO_PROTOCOL_INFOW)", rc as i64, rc == 0);
+        closesocket(socket);
+        let bytes = if rc == 0 && length as usize == size_of::<WSAPROTOCOL_INFOW>() {
+            Some(
+                std::slice::from_raw_parts(
+                    (&info as *const WSAPROTOCOL_INFOW).cast::<u8>(),
+                    size_of::<WSAPROTOCOL_INFOW>(),
+                )
+                .to_vec(),
+            )
+        } else {
+            None
+        };
+        json!({"creation":creation,"query":query,"bytes":bytes})
+    }
+}
+
+fn unix_run_listener(v: &Value) -> Result<Value> {
+    let root = std::path::Path::new(arg(v, "scratch")?);
+    let variant = json!({"short":false,"nt_path":false,"output":110});
+    let (creation, handle) = afd_open(&json!({"family":1,"transport":"stream"}))?;
+    let Some(handle) = handle else {
+        return Ok(json!({"creation":creation}));
+    };
+    let (address, _) = unix_address(arg(v, "abstract_name")?.as_bytes(), true)?;
+    let bound = afd_ioctl(
+        handle.0,
+        0x12003,
+        &UnixBind { share: 0, address },
+        4 + size_of::<UnixAddress>(),
+        110,
+    )?;
+    if bound["success"] != true {
+        return Ok(json!({"creation":creation,"bind":bound,"variant":variant}));
+    }
+    let mut info: UnixListen = unsafe { zeroed() };
+    info.backlog = 8;
+    let listen = afd_ioctl(handle.0, 0x1200B, &info, size_of::<UnixListen>(), 0)?;
+    if listen["success"] != true {
+        return Ok(json!({"creation":creation,"bind":bound,"listen":listen}));
+    }
+    // Ready is published only after listen. Parent starts the probe window after
+    // observing it, and requests stop only after the final probe has returned.
+    let start = std::time::Instant::now();
+    std::fs::write(root.join("ready.json"), serde_json::to_vec(&listen)?)?;
+    let mut waits = 0;
+    let mut wait = Value::Null;
+    let mut connected = false;
+    let mut clean = true;
+    while !root.join("stop").exists() && start.elapsed().as_secs() < 1500 {
+        wait = afd_ioctl(handle.0, 0x1200C, &0u8, 0, 256)?;
+        waits += 1;
+        if wait["success"] == true {
+            connected = true;
+            break;
+        }
+        if wait["timed_out"] != true || wait["io_status_hex"] != "0xC0000120" {
+            clean = false;
+            break;
+        }
+    }
+    Ok(
+        json!({"creation":creation,"bind":bound,"listen":listen,"wait":wait,
+        "connection_observed":connected,"all_waits_cancelled":clean && waits > 0,
+        "stop_observed":root.join("stop").exists(),"wait_count":waits,
+        "observation_seconds":start.elapsed().as_secs_f64(),"namespace":"abstract"}),
+    )
+}
+
 fn unix_outcomes(v: &Value) -> Result<Value> {
     let mut data = unsafe { zeroed() };
     let rc = unsafe { WSAStartup(0x202, &mut data) };
     let startup = row("WSAStartup", rc as i64, rc == 0, rc as u32, "winsock");
     let scratch = std::path::Path::new(arg(v, "scratch")?);
+    let protocol = if v["route"] == "control" {
+        unix_protocol()
+    } else {
+        v["explicit_protocol"].clone()
+    };
+    let scratch_access = self::scratch(v)?;
     let mut calibration = Vec::new();
     let mut selected = v["calibrated_variants"].clone();
     if v["route"] == "control" {
@@ -1368,7 +1520,17 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
     ];
     let mut outcomes = json!({});
     let mut control_direct = json!({});
+    let mut alternative = json!({});
     for (index, (label, path, connect_to, abstract_name)) in targets.into_iter().enumerate() {
+        if !abstract_name && protocol["bytes"].is_array() {
+            let alternative_path = if connect_to {
+                path.clone()
+            } else {
+                format!("{path}.explicit")
+            };
+            alternative[label] =
+                unix_explicit(alternative_path.as_bytes(), connect_to, &protocol["bytes"])?;
+        }
         let key = if abstract_name {
             "abstract"
         } else {
@@ -1433,11 +1595,16 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
     }
     Ok(
         json!({"diagnostic_only":true,"startup":startup,"outcomes":outcomes,
-        "calibration":calibration,"calibrated_variants":selected,"control_direct":control_direct,"messages_sent":0}),
+        "calibration":calibration,"calibrated_variants":selected,"control_direct":control_direct,
+        "explicit_protocol":protocol,"alternative":alternative,"scratch_access":scratch_access,
+        "filesystem_path_bytes":inside.to_string_lossy().len(),
+        "scratch_grant":if v["route"] == "control" { "unconfined; no package grant" } else { "package SID FILE_ALL_ACCESS including FILE_ADD_FILE; inherited; low integrity" },
+        "messages_sent":0}),
     )
 }
 
 fn mapper_activation() -> Value {
+    let connection = alpc();
     let lookup = rpc();
     unsafe {
         let init = CoInitializeEx(null(), COINIT_MULTITHREADED as u32);
@@ -1469,8 +1636,9 @@ fn mapper_activation() -> Value {
             }
             CoUninitialize();
         }
-        json!({"lookup":lookup,"activation":activation,
+        json!({"lookup":lookup,"activation":activation,"direct_connection":connection,
             "same_mapper_connection":false,
+            "direct_request_unrun_reason":"direct epmapper ALPC RPC bind, ept lookup NDR request and returned-endpoint activation wire format not implemented; no direct request sent",
             "limitation":"COM runtime activation does not prove activation over the measured direct mapper connection"})
     }
 }

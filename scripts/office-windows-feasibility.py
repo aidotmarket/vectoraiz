@@ -52,12 +52,12 @@ class Status:
 ROW_STATUSES = (Status.PASS, Status.FAIL, Status.UNRUN, Status.NOT_APPLICABLE)
 OUTCOME_STATUSES = (Status.PASS, Status.FAIL)
 DIAGNOSTIC_STATUSES = (Status.UNRUN, Status.COMPLETE, Status.ERROR,
-                       Status.CONTROL_INCONCLUSIVE, Status.ROUTE_INCONCLUSIVE)
+                       Status.CONTROL_INCONCLUSIVE)
 MALFORMED_STATUSES = (Status.UNRUN, Status.ERROR, Status.EXPECTED_FAILURE_RECORDED,
                       Status.LITERAL_STATUS_MISSING)
 LAUNCH_STATUSES = (Status.UNRUN, Status.RUNNING, Status.COMPLETE, Status.CONTROL_INCONCLUSIVE)
 UNIX_NAMESPACES = ("filesystem", "abstract")
-NAMESPACE_STATUSES = (Status.CALIBRATED, Status.UNCALIBRATED)
+NAMESPACE_STATUSES = (Status.CALIBRATED, Status.UNCALIBRATED, Status.CONTROL_INCONCLUSIVE)
 
 
 # Only these probes can be observations rather than delta 6 outcome judgments.
@@ -475,27 +475,9 @@ def evaluate(spec, control, confined, evidence_rows=()):
     if op == "mapper-activation":
         if confined.get("process_capture", {}).get("target_record_ids") or negative.get("activation", {}).get("success"):
             return Status.FAIL, "confined mapper activation launched or activated target server"
-        if control.get("target_was_running") is not False or confined.get("target_was_running") is not False:
-            return Status.UNRUN, "target server was already running or absence could not be established"
-        cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
-        if not contiguous_capture(cp, np) or not cp.get("target_record_ids"):
-            return Status.UNRUN, "same Security 4688 capture lacks control server start or complete confined window"
-        if not positive.get("lookup", {}).get("success") or not positive.get("activation", {}).get("success"):
-            return Status.UNRUN, "mapper lookup or activation control failed; literal replies retained"
-        if not positive.get("same_mapper_connection") or not negative.get("same_mapper_connection"):
-            return Status.UNRUN, "direct lookup-to-activation connection not established; COM runtime probe is supplementary"
-        lookup, activation = negative.get("lookup", {}), negative.get("activation", {})
-        if (lookup.get("direct_request_reply") is True and isinstance(lookup.get("return_code"), int)
-                and lookup.get("api", "").startswith("direct mapper")
-                and isinstance(lookup.get("error_code"), int) and lookup["error_code"] != 14
-                and lookup.get("return_code") != 14
-                and activation.get("direct_request_reply") is True
-                and activation.get("api", "").startswith("direct mapper")
-                and isinstance(activation.get("return_code"), int)
-                and activation.get("error_code") in (5, 0x80070005, 0xC0000022)
-                and activation.get("explicit_denial") is True):
-            return Status.PASS, "mapper activation refused with no target server start; successful control in same capture"
-        return Status.UNRUN, "activation refusal not calibrated"
+        # No direct wire implementation exists yet. Worker labels/flags cannot
+        # establish a service reply, even if every supplementary control succeeds.
+        return Status.UNRUN, "direct epmapper ALPC RPC bind, ept lookup NDR request and returned-endpoint activation wire format not implemented; no direct request sent"
     if op == "network":
         creation = negative if spec["request"]["operation"] == "create" else negative.get("socket_creation", {})
         if spec["request"]["operation"] == "create":
@@ -759,18 +741,23 @@ def unix_exit(diagnostic, label):
     modes = {m: diagnostic.get(m, {}).get("response", {}).get("probe", {}) for m in ("control", "confined")}
     control, confined = (modes[m].get("outcomes", {}) for m in ("control", "confined"))
     if label == "2c":
-        listener = confined.get("inside_scratch_bind", {}).get("listener", {})
+        observation = diagnostic.get("run_listener", {})
+        listener = observation.get("response", {}).get("probe", {})
         wait = listener.get("wait") or {}
-        if wait.get("success"):
+        if wait.get("success") or listener.get("connection_observed"):
             return Status.FAIL, "a connection reached the worker-bound listener"
         processes = diagnostic.get("vectoraiz_capture", {})
         if processes.get("running_before") is not False or not processes.get("success") or processes.get("filtered_query_success") is not True or processes.get("target_record_ids") or not isinstance(processes.get("after"), int) or not isinstance(processes.get("through"), int) or processes["through"] < processes["after"]:
             return Status.UNRUN, "vectorAIz process absence during listener window not established"
-        if processes.get("scope") != "entire harness run" or listener.get("covers_entire_run") is not True:
+        if processes.get("scope") != "entire harness run" or observation.get("covers_entire_run") is not True:
             return Status.UNRUN, "run-wide process capture recorded; worker listener does not cover the entire run"
-        if listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120":
+        if (observation.get("status") == Status.PASS and listener.get("stop_observed") is True
+                and listener.get("all_waits_cancelled") is True and listener.get("wait_count", 0) > 0
+                and listener.get("listen", {}).get("success") and wait.get("timed_out") and wait.get("io_status_hex") == "0xC0000120"):
             return Status.PASS, "no pending connection during entire harness run; no vectorAIz process or start in capture"
         return Status.UNRUN, "worker listener or bounded connection observation unavailable"
+    if any(diagnostic.get(mode, {}).get("status") != Status.PASS for mode in ("control", "confined")):
+        return Status.UNRUN, "socket control or confined worker did not complete successfully"
     name = {"2a": "host_listener_connect", "2b": "outside_scratch_bind", "2d": "abstract_connect"}[label]
     direct = modes["control"].get("control_direct", {})
     positive = direct.get(name, {}).get("operation", {})
@@ -779,14 +766,25 @@ def unix_exit(diagnostic, label):
         # EINVAL alone cannot establish platform unavailability independently.
         return Status.UNRUN, "abstract control route unavailable; invalid arguments are not platform-unavailability proof"
     calibrated = confined.get("inside_scratch_bind", {}).get("operation", {}).get("success") is True
+    route = "direct AFD TLI IOCTL"
     if label != "2d" and not calibrated:
-        return Status.UNRUN, "LPAC same-route bind inside scratch did not calibrate; plain AppContainer cannot pass"
+        ca, na = (modes[m].get("alternative", {}) for m in ("control", "confined"))
+        calibrated = all(a.get("inside_scratch_bind", {}).get("operation", {}).get("success") is True for a in (ca, na))
+        if calibrated:
+            positive, negative = (a.get(name, {}).get("operation", {}) for a in (ca, na))
+            route = "Winsock explicit protocol"
+    if label != "2d" and not calibrated:
+        direct_codes = sorted({str(c.get("result", {}).get("operation", {}).get("literal_status_hex"))
+                               for c in modes["control"].get("calibration", []) if c.get("namespace") == "filesystem"})
+        alt = modes["confined"].get("alternative", {}).get("inside_scratch_bind", {})
+        code = alt.get("operation", {}).get("error_code", alt.get("creation", {}).get("error_code"))
+        return Status.UNRUN, f"LPAC same-route scratch bind uncalibrated; direct control statuses {','.join(direct_codes) or 'unavailable'}; explicit protocol status {code}"
     if not positive.get("success"):
         return Status.UNRUN, "connect or bind positive control did not succeed"
     if negative.get("success"):
         return Status.FAIL, "confined local socket operation succeeded"
     if negative.get("explicit_denial"):
-        return Status.PASS, "calibrated LPAC route refused operation outside scratch"
+        return Status.PASS, "calibrated LPAC route refused operation outside scratch via " + route
     return Status.UNRUN, "literal refusal unavailable or connect prerequisite failed"
 
 
@@ -800,14 +798,29 @@ def joined_namespace_status(namespaces):
 
 def unix_namespace_status(diagnostic):
     probe = diagnostic.get("confined", {}).get("response", {}).get("probe", {})
-    outcomes = probe.get("outcomes", {})
-    return {namespace: {"status": Status.CALIBRATED if probe.get("calibrated_variants", {}).get(namespace) else Status.UNCALIBRATED,
-                        "calibrated_variant": probe.get("calibrated_variants", {}).get(namespace),
-                        "bind_success": outcomes.get(bind, {}).get("operation", {}).get("success"),
-                        "connect_attempted": "return_code" in outcomes.get(connect, {}).get("operation", {}),
-                        "connect_success": outcomes.get(connect, {}).get("operation", {}).get("success")}
-            for namespace, bind, connect in (("filesystem", "inside_scratch_bind", "host_listener_connect"),
-                                              ("abstract", "abstract_bind", "abstract_connect"))}
+    control = diagnostic.get("control", {}).get("response", {}).get("probe", {})
+    namespaces = {}
+    for namespace, bind, connect in (("filesystem", "inside_scratch_bind", "host_listener_connect"),
+                                      ("abstract", "abstract_bind", "abstract_connect")):
+        outcomes = probe.get("outcomes", {})
+        control_ok = control.get("outcomes", {}).get(bind, {}).get("operation", {}).get("success") is True
+        calibrated = outcomes.get(bind, {}).get("operation", {}).get("success") is True
+        route = "direct AFD TLI IOCTL"
+        if namespace == "filesystem":
+            alternative_control = control.get("alternative", {}).get(bind, {}).get("operation", {}).get("success") is True
+            control_ok = control_ok or alternative_control
+            if not calibrated and alternative_control and probe.get("alternative", {}).get(bind, {}).get("operation", {}).get("success") is True:
+                calibrated = True
+                route = "Winsock explicit protocol"
+                outcomes = probe["alternative"]
+        namespaces[namespace] = {
+            "status": Status.CONTROL_INCONCLUSIVE if not control_ok else Status.CALIBRATED if calibrated else Status.UNCALIBRATED,
+            "calibrated_route": route if calibrated else None,
+            "calibrated_variant": probe.get("calibrated_variants", {}).get(namespace),
+            "bind_success": outcomes.get(bind, {}).get("operation", {}).get("success"),
+            "connect_attempted": "return_code" in outcomes.get(connect, {}).get("operation", {}),
+            "connect_success": outcomes.get(connect, {}).get("operation", {}).get("success")}
+    return namespaces
 
 
 class UnixListeners:
@@ -855,6 +868,70 @@ class UnixListeners:
         if self.evidence["startup_status"] == 0:
             self.api.WSACleanup()
         self.path.unlink(missing_ok=True)
+
+
+class RunUnixListener:
+    """Parent brackets all runtime probes with one live zero-capability LPAC listener."""
+    def __init__(self, args, out, attack):
+        self.folder = out / "run-unix-listener"
+        self.folder.mkdir()
+        self.scratch = self.folder / "scratch"
+        self.scratch.mkdir()
+        self.result_path = self.folder / "result.json"
+        request = self.folder / "request.json"
+        request.write_text(json.dumps({"office_windows_probe": {
+            "op": "unix-run-listener", "scratch": str(self.scratch),
+            "abstract_name": "vz-run-" + secrets.token_hex(12)}}))
+        self.log = (self.folder / "launcher.log").open("wb")
+        try:
+            self.process = subprocess.Popen(list(map(str, [args.launcher.resolve(), args.worker.resolve(),
+                "confined", request, self.result_path, self.scratch, attack, *args.loader_dlls])),
+                stdout=self.log, stderr=subprocess.STDOUT)
+        except Exception:
+            self.log.close()
+            cleanup_scratch(self.scratch, self.folder / "cleanup.json")
+            raise
+        deadline = time.monotonic() + 20
+        self.ready = False
+        while self.process.poll() is None and time.monotonic() < deadline:
+            try:
+                self.ready = json.loads((self.scratch / "ready.json").read_text()).get("success") is True
+            except (OSError, ValueError):
+                pass
+            if self.ready:
+                break
+            time.sleep(0.05)
+        self.started = time.monotonic()
+
+    def finish(self):
+        alive_after_probes = self.process.poll() is None
+        self.window_seconds = time.monotonic() - self.started
+        (self.scratch / "stop").touch()
+        stopped_normally = True
+        try:
+            code = self.process.wait(timeout=8)
+        except subprocess.TimeoutExpired:
+            stopped_normally = False
+            # Closing the launcher also closes its kill-on-close worker job.
+            self.process.kill()
+            code = self.process.wait(timeout=5)
+        finally:
+            self.log.close()
+        try:
+            result = json.loads(self.result_path.read_text()) if self.result_path.exists() else {"status": Status.FAIL}
+        except (OSError, ValueError):
+            result = {"status": Status.FAIL, "reason": "listener result unavailable or invalid"}
+        probe = result.get("response", {}).get("probe", {})
+        result["covers_entire_run"] = bool(self.ready and alive_after_probes and stopped_normally and code == 0
+            and result.get("status") == Status.PASS and probe.get("stop_observed") is True
+            and probe.get("observation_seconds", 0) >= self.window_seconds)
+        result["probe_window_seconds"] = self.window_seconds
+        result["launcher_exit"] = code
+        result["stop_timed_out"] = not stopped_normally
+        error = cleanup_scratch(self.scratch, self.folder / "cleanup.json")
+        if error:
+            result.update(status=Status.FAIL, covers_entire_run=False, cleanup_error=type(error).__name__)
+        return public_result(result, False)
 
 
 def inventory_table(results):
@@ -1203,6 +1280,7 @@ def run_suite(args):
     endpoints = None
     sentinel_root = None
     run_cursor = None
+    run_listener = None
     try:
         if sys.platform != "win32":
             raise RuntimeError("Windows required; no Windows probes observed")
@@ -1224,8 +1302,6 @@ def run_suite(args):
             "inclusion_setting": audit_setup.get("inclusion_setting"),
             "command_line_auditing": audit_setup.get("command_line_auditing")}
         manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "features", "utility_vms")}
-        # First runtime experiment, before any positive control or confined probe.
-        launch_diagnostic(args, out, manifest, save)
         spec = importlib.util.spec_from_file_location("windows_synthetic", ROOT / "tests/office/fixtures/windows_synthetic.py")
         fixtures_module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(fixtures_module)
@@ -1235,6 +1311,10 @@ def run_suite(args):
         sentinel = sentinel_root / "host.txt"
         attack = sentinel_root / "attack.txt"
         attack.write_bytes(b"C1-private-sentinel\n")
+        if any(s["id"] == "af-unix-outcomes" for s in specs):
+            run_listener = RunUnixListener(args, out, attack)
+        # The listener must be ready before the first runtime experiment.
+        launch_diagnostic(args, out, manifest, save)
         client = host.get("success") and host.get("product_type") == 1 and int(host.get("build", 0)) >= 22000
         manifest["windows_11_client_requirement"] = {"status": Status.NOT_MET, "reason": "interactive session not verified" if client else "server runner only"}
         endpoints = Endpoints()
@@ -1296,6 +1376,7 @@ def run_suite(args):
                         scratch.mkdir(exist_ok=True)
                         if probe.get("op") == "unix-outcomes":
                             (sentinel_root / "unix-outside.sock").unlink(missing_ok=True)
+                            (sentinel_root / "unix-outside.sock.explicit").unlink(missing_ok=True)
                         listener = None
                         nonce = None
                         window_cursor = ({"success": previous_capture.get("success"), "record_id": previous_capture.get("through")}
@@ -1341,11 +1422,12 @@ def run_suite(args):
                                 result["shell_listener"] = listener.finish()
                                 listener = None
                             if capture_cursor:
+                                observation_started = time.monotonic()
                                 time.sleep(10)  # Observe delayed handler starts after the call returns.
                                 captured = audit_call("capture", folder, After=window_cursor.get("record_id", 0), Nonce=nonce or "")
                                 result["process_capture"] = {key: captured.get(key) for key in ("success", "filtered_query_success", "after", "through", "nonce_record_ids", "target_record_ids")}
                                 previous_capture = captured
-                                result["process_capture"]["post_call_observation_seconds"] = 10
+                                result["process_capture"]["post_call_observation_seconds"] = time.monotonic() - observation_started
                                 result["process_capture"]["capture_id"] = capture_cursor.get("record_id")
                                 result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and audit_setup.get("inclusion_setting") in ("success", "success-and-failure") and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
                                 result["target_was_running"] = target_before.get("target_running")
@@ -1354,6 +1436,7 @@ def run_suite(args):
                             entry[mode] = public_result(result, "format" in item)
                             if probe.get("op") == "unix-outcomes" and mode == "control":
                                 probe["calibrated_variants"] = result.get("response", {}).get("probe", {}).get("calibrated_variants", {})
+                                probe["explicit_protocol"] = result.get("response", {}).get("probe", {}).get("explicit_protocol", {})
                             if probe.get("op") == "reachability-inventory" and mode == "control":
                                 candidates = result.get("response", {}).get("probe", {}).get("candidates")
                                 if not isinstance(candidates, list):
@@ -1386,6 +1469,14 @@ def run_suite(args):
         manifest["setup_error"] = type(error).__name__ + ": " + str(error) if isinstance(error, RuntimeError) else type(error).__name__
         (out / "setup-error.txt").write_text(str(error), encoding="utf-8")
     finally:
+        diagnostic = next((d for d in manifest["diagnostics"] if d["id"] == "af-unix-outcomes"), None)
+        if run_listener is not None and diagnostic is not None:
+            try:
+                diagnostic["run_listener"] = run_listener.finish()
+            except Exception as error:
+                diagnostic["run_listener"] = {"status": Status.FAIL, "covers_entire_run": False,
+                                              "reason": type(error).__name__}
+                (out / "listener-finish-error.txt").write_text(str(error))
         if endpoints:
             endpoints.close()
         if sentinel_root:
@@ -1455,9 +1546,10 @@ def assembly_self_test():
             del results["confined"]["response"]["probe"]["error_code"]
             emit(spec, results)
         if spec["id"] == "af-unix-outcomes":
-            for filesystem, abstract in product((None, "synthetic-variant"), repeat=2):
-                results = {mode: response(outcomes={"inside_scratch_bind": {"operation": {"success": True}}},
-                           calibrated_variants={"filesystem": filesystem, "abstract": abstract}) for mode in modes}
+            for filesystem, abstract in product(NAMESPACE_STATUSES, repeat=2):
+                results = {mode: response(outcomes={bind: {"operation": {"success":
+                           status != Status.CONTROL_INCONCLUSIVE if mode == "control" else status == Status.CALIBRATED}}
+                           for bind, status in (("inside_scratch_bind", filesystem), ("abstract_bind", abstract))}) for mode in modes}
                 emit(spec, results)
         entry = next(row for row in manifest["diagnostics"] if row["id"] == spec["id"])
         entry["cleanup_error"] = "PermissionError"
@@ -1483,7 +1575,7 @@ def assembly_self_test():
         elif spec["id"] == "malformed-family-comparison":
             expected = set(MALFORMED_STATUSES)
         else:
-            expected = set(DIAGNOSTIC_STATUSES) - {Status.ROUTE_INCONCLUSIVE}
+            expected = set(DIAGNOSTIC_STATUSES)
         assert observed == expected, (spec["id"], observed, expected)
 
     specs = {spec["id"]: spec for spec in plan()}
@@ -1510,6 +1602,83 @@ def assembly_self_test():
         assert next(row for row in manifest["rows"] if row["id"] == label)["status"] == Status.NOT_APPLICABLE
     assert seen_rows == set(ROW_STATUSES)
     assert manifest["counts"][Status.NOT_APPLICABLE] == len(NOT_APPLICABLE_IDS)
+
+    # Assemble the new alternative route through real exit evaluation and JSON
+    # validation. A comparison token, missing control or non-denial never passes.
+    unix_spec = next(s for s in diagnostic_plan() if s["id"] == "af-unix-outcomes")
+    for case, expected in (("denied", Status.PASS), ("reachable", Status.FAIL),
+                           ("no-calibration", Status.UNRUN), ("bad-control", Status.UNRUN),
+                           ("non-denial", Status.UNRUN), ("worker-failed", Status.UNRUN)):
+        results = {mode: response(outcomes={}, alternative={
+            "inside_scratch_bind": {"operation":{"success":case != "no-calibration"}},
+            **{name:{"operation":{"success": mode == "control" and case != "bad-control" or case == "reachable",
+                                   "explicit_denial": mode == "confined" and case != "non-denial", "error_code":5}}
+               for name in ("host_listener_connect", "outside_scratch_bind")}}) for mode in modes}
+        if case == "worker-failed":
+            results["confined"]["status"] = Status.FAIL
+        diagnostic = emit(unix_spec, results)
+        for label in ("2a", "2b"):
+            status, reason = unix_exit(diagnostic, label)
+            assert status == expected, (case, label, status)
+            row = next(row for row in manifest["rows"] if row["id"] == "unix-" + label)
+            row.update(status=status, reason=reason)
+        check()
+
+    # Listener outcome must survive assembly; no observation flag can replace
+    # successful waits, an orderly stop, or the run-wide 4688 capture.
+    diagnostic = next(row for row in manifest["diagnostics"] if row["id"] == "af-unix-outcomes")
+    for case, expected in (("complete", Status.PASS), ("connected", Status.FAIL),
+                           ("early-exit", Status.UNRUN), ("capture-failed", Status.UNRUN)):
+        diagnostic["run_listener"] = response(listen={"success":True}, wait={"timed_out":True,"io_status_hex":"0xC0000120"},
+            wait_count=3, all_waits_cancelled=True, stop_observed=True, connection_observed=case == "connected")
+        diagnostic["run_listener"]["covers_entire_run"] = case != "early-exit"
+        diagnostic["vectoraiz_capture"] = {"success":case != "capture-failed", "filtered_query_success":True,
+            "running_before":False,"scope":"entire harness run","after":1,"through":3,"target_record_ids":[]}
+        status, reason = unix_exit(diagnostic,"2c")
+        assert status == expected
+        next(row for row in manifest["rows"] if row["id"] == "unix-2c").update(status=status,reason=reason)
+        check()
+
+    # The dormant mapper pass branch is gone, including when all old flags and
+    # supplementary controls claim success.
+    mapper = specs["mapper-activation"]
+    fake_direct = {"same_mapper_connection":True,
+        "lookup":{"success":True,"api":"direct mapper lookup","direct_request_reply":True,"return_code":0,"error_code":0},
+        "activation":{"api":"direct mapper activation","direct_request_reply":True,"success":False,
+                      "return_code":5,"error_code":5,"explicit_denial":True}}
+    assert emit(mapper, {"control":response(lookup={"success":True},activation={"success":True}),
+                         "confined":response(**fake_direct)})["status"] == Status.UNRUN
+
+    with tempfile.TemporaryDirectory(prefix="run-listener-self-test-", dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+        for case in ("complete", "early-exit", "failed-launch", "missing-stop", "stop-timeout", "invalid-result"):
+            folder = outside(Path(temporary) / case)
+            folder.mkdir()
+            class ListenerProcess:
+                def __init__(self, argv, **kwargs):
+                    self.killed = False
+                    self.root = Path(argv[5])
+                    self.result = Path(argv[4])
+                    if case != "early-exit":
+                        (self.root / "ready.json").write_text('{"success":true}')
+                def poll(self):
+                    return 1 if case == "early-exit" else None
+                def wait(self, timeout):
+                    assert (self.root / "stop").exists()
+                    if case == "stop-timeout" and not self.killed:
+                        raise subprocess.TimeoutExpired("listener", timeout)
+                    if case == "invalid-result":
+                        self.result.write_text("invalid JSON")
+                        return 0
+                    self.result.write_text(json.dumps(response(stop_observed=case != "missing-stop",
+                        observation_seconds=10)))
+                    return 1 if case in ("failed-launch", "early-exit", "stop-timeout") else 0
+                def kill(self):
+                    self.killed = True
+            with patch.object(subprocess, "Popen", side_effect=ListenerProcess):
+                listener = RunUnixListener(SimpleNamespace(launcher=folder / "launcher",worker=folder / "worker",loader_dlls=[]),
+                                           folder, folder / "attack")
+                observation = listener.finish()
+            assert observation["covers_entire_run"] is (case == "complete"), case
 
     # Run the real suspended-launch emitter, validating every partial save.
     seen_launch = {manifest["launch_diagnostic"]["status"]}
@@ -1749,9 +1918,9 @@ def self_test():
 
     assert inventory_verdict({**inv, "status":"error"})[0] == "unrun"
     assert inventory_verdict({**inv, "table":inv["table"] + [{"endpoint":"RPC Control/NewService", "lpac":{"success":True}}]})[0] == "fail"
-    diagnostic = {"control":{"response":{"probe":{"control_direct":{
+    diagnostic = {"control":{"status":"pass","response":{"probe":{"control_direct":{
         "host_listener_connect":{"operation":{"success":True}}}}}},
-        "confined":{"response":{"probe":{"outcomes":{
+        "confined":{"status":"pass","response":{"probe":{"outcomes":{
         "inside_scratch_bind":{"operation":{"success":True}},
         "host_listener_connect":{"operation":{"success":False,"explicit_denial":True}}}}}}}
     assert unix_exit(diagnostic, "2a")[0] == "pass"
@@ -1778,7 +1947,7 @@ def self_test():
     mn["response"]["probe"]["lookup"] = {"api":"direct mapper lookup", "success":True, "return_code":0, "error_code":0, "direct_request_reply":True}
     assert evaluate(mapper, mc, mn)[0] == "unrun"
     mn["response"]["probe"]["activation"] = {"api":"direct mapper activation", "success":False, "return_code":5, "error_code":5, "explicit_denial":True, "direct_request_reply":True}
-    assert evaluate(mapper, mc, mn)[0] == "pass"
+    assert evaluate(mapper, mc, mn)[0] == "unrun"  # Self-declared replies never qualify.
     # A failed filtered query cannot be rescued by a successful latest-event read.
     failed_capture = {"success":False, "filtered_query_success":False, "latest_event_read_success":True,
                       "after":1, "through":8, "post_call_observation_seconds":10}
@@ -1792,13 +1961,22 @@ def self_test():
         b["shell_listener"] = {"get_received":False}
         b["process_capture"]["after"] = 999
         assert evaluate(spec, control, b)[0] != "pass"
-    full_listener = {"confined":{"response":{"probe":{"outcomes":{"inside_scratch_bind":{"listener":{
-        "listen":{"success":True}, "wait":{"timed_out":True,"io_status_hex":"0xC0000120"}, "covers_entire_run":True}}}}}},
+    listener_probe = {"listen":{"success":True}, "wait":{"timed_out":True,"io_status_hex":"0xC0000120"},
+                      "stop_observed":True,"all_waits_cancelled":True,"wait_count":2}
+    full_listener = {"run_listener": {"status":"pass", "covers_entire_run":True,
+                     "response":{"probe":listener_probe}},
         "vectoraiz_capture":{**failed_capture, "scope":"entire harness run", "running_before":False}}
     assert unix_exit(full_listener, "2c")[0] == "unrun"
     full_listener["vectoraiz_capture"].update(success=True, filtered_query_success=True)
     assert unix_exit(full_listener, "2c")[0] == "pass"
-    del full_listener["confined"]["response"]["probe"]["outcomes"]["inside_scratch_bind"]["listener"]["covers_entire_run"]
+    for key, value in (("stop_observed",False),("all_waits_cancelled",False),("wait_count",0)):
+        changed = deepcopy(full_listener)
+        changed["run_listener"]["response"]["probe"][key] = value
+        assert unix_exit(changed,"2c")[0] == "unrun"
+    changed = deepcopy(full_listener)
+    changed["run_listener"]["response"]["probe"]["connection_observed"] = True
+    assert unix_exit(changed, "2c")[0] == "fail"
+    del full_listener["run_listener"]["covers_entire_run"]
     assert unix_exit(full_listener, "2c")[0] == "unrun"
     mn["process_capture"]["target_record_ids"] = [9]
     assert evaluate(mapper, mc, mn)[0] == "fail"

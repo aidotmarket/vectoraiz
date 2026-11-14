@@ -1213,7 +1213,13 @@ fn run(args: &[std::ffi::OsString], trace: &mut Value) -> Result<Value> {
         }
     };
     let start = Instant::now();
-    let deadline = Duration::from_secs(45);
+    let deadline = Duration::from_secs(
+        if value["office_windows_probe"]["op"] == "unix-run-listener" {
+            1530
+        } else {
+            45
+        },
+    );
     let mut notifications = Vec::new();
     let mut notification_errors = Vec::new();
     let mut drain_notifications = || {

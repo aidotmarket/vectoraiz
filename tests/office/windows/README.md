@@ -168,6 +168,11 @@ or slash-separated logical device labels; native paths stay private. Artifact up
 validation step to succeed; a leak or malformed manifest fails closed.
 
 Portable verification: `python scripts/office-windows-feasibility.py --self-test`.
+The assembly self-test covers the alternative socket route's refusal, reachability,
+failed control, failed launch and missing-calibration branches; run-wide listener
+completion, early exit, connection and capture failure; and forged mapper reply
+flags. Post-call 4688 observation durations use a monotonic measurement around the
+wait and capture, rather than a literal ten seconds.
 Windows-target check/strict clippy of the standalone harness work on the Mac;
 Windows linking/runtime and the actual worker's native C++ dependencies require
 Windows SDK/MSVC. The operator reads CI outcomes; no CI success is asserted here.
@@ -292,17 +297,35 @@ server harness. It does not establish the delta 6 exit evidence on client builds
 * The six non-IP constructor rows and the mapper ALPC connection row are
   observation-only `not-applicable` rows, excluded from pass counts. Non-IP
   constructor results record endpoint creation without claiming creation denial. Separate 2a–2e outcome rows judge reachability. Filesystem rows require
-  a successful direct control operation and a bind inside granted scratch in LPAC
-  through the selected direct route. Plain AppContainer cannot qualify them.
+  a successful control operation and a bind inside granted scratch in LPAC
+  through the same route. Plain AppContainer cannot qualify them.
   Calibration now also tries 128/256-byte output buffers. Abstract local bind uses
   its own namespace. Status is published per namespace, including successful
-  abstract binds even when filesystem calibration fails. An EINVAL control or
+  abstract binds even when filesystem calibration fails. Each namespace distinguishes
+  a failed control from an uncalibrated confined route. An EINVAL control or
   failed local bind never establishes platform unavailability for 2d.
-* A successfully bound worker endpoint attempts AFD listen and a one-second
-  wait-for-connection diagnostic. Row 2c requires run-wide listener coverage,
+  Fold 16 retains every direct calibration status and adds a second route using
+  `WSASocketW` with the successful unconfined control's exact `SO_PROTOCOL_INFOW`
+  record. This adds no capability or catalog ACL grant. Both control and LPAC must
+  bind inside scratch through this route before its outside bind/connect outcomes
+  can qualify 2a/2b. Failed construction or an unattempted operation stays unrun.
+  Scratch create/read/rename/delete status, path byte length and the existing
+  inherited package-SID full-access grant (including FILE_ADD_FILE) are recorded.
+  Run 43610803971 failed filesystem AFD binds in the unconfined control already:
+  full packets returned `0xC000000D`; shortened packets also returned `0xC0000141`.
+  Those results do not establish an LPAC ACL failure or platform unavailability.
+  The alternative route is an experiment, not a calibrated-route claim.
+* A dedicated zero-capability LPAC worker attempts abstract AFD bind/listen before
+  the first runtime probe, then continuously observes its listener with bounded
+  waits until the parent requests stop after the final probe. The launcher grants
+  this operation a 1,530-second deadline; the listener's own bound is 1,500 seconds.
+  The parent derives coverage from readiness, liveness after the probes, measured
+  duration, successful launch/collection and orderly stop. Row 2c also requires
+  successful listen, completed waits, no observed connection, run-wide listener coverage,
   absence of a vectorAIz process before the run and no vectorAIz start in the
-  capture spanning all harness calls. The present one-second listener cannot
-  qualify this row, even if bind/listen/wait succeed; it remains unrun. Hyper-V/WSL/Sandbox feature and VM
+  capture spanning all harness calls. An early listener exit, a failed wait or a
+  missing ready/stop observation leaves the row unrun. A connection fails it.
+  Hyper-V/WSL/Sandbox feature and VM
   inventory records why 2e is NOT EXERCISABLE on an unequipped host. On an equipped
   host, a calibrated utility-VM service is still required; absence of that control
   stays UNMEASURED, not a refusal. The current Windows runner has Hyper-V,
@@ -319,6 +342,10 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   capture. **Limitation: this uses COM runtime activation, not activation over the
   measured direct mapper connection. The outcome row therefore remains unrun.**
   No client-library prerequisite failure qualifies as service refusal.
+  Fold 16 also records the direct ALPC connection's literal status, but sends no
+  endpoint-lookup RPC request. The missing ALPC RPC bind, ept lookup NDR request and
+  returned-endpoint activation wire implementation is the explicit unrun reason.
+  There is no mapper pass branch: API labels and reply flags cannot qualify it.
 * GetAddrInfoW, DnsQuery_W and synchronous DnsQueryEx use www.example.com, with a control immediately
   before each confined call in the same run. Literal statuses and Winsock startup
   failures and each call's UTC start timestamp are retained. The inventory verdict
