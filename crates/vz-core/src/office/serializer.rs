@@ -10,7 +10,7 @@ type Bindings = BTreeMap<String, String>;
 pub(super) fn validate_mc(n: &mut Node, location: &str, report: &mut Report) -> Result<()> {
     for ((ns, key), value) in &mut n.attrs {
         let requires = n.ns == MC && n.local == "Choice" && ns.is_empty() && key == "Requires";
-        if !requires && !(ns == MC && words("Ignorable MustUnderstand ProcessContent", key)) {
+        if !(requires || ns == MC && words("Ignorable MustUnderstand ProcessContent", key)) {
             continue;
         }
         let mut valid = Vec::new();
@@ -389,7 +389,9 @@ mod tests {
     #[test]
     fn source_collisions_do_not_affect_conventional_prefixes() {
         let mut n = parse(
-            format!(r#"<root xmlns:w="urn:other" xmlns:n0="urn:zero"/>"#).as_bytes(),
+            r#"<root xmlns:w="urn:other" xmlns:n0="urn:zero"/>"#
+                .to_string()
+                .as_bytes(),
             "fixture",
         )
         .unwrap();
