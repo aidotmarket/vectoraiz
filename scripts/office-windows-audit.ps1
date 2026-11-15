@@ -6,13 +6,14 @@ function Convert-AuditBackupReadback([string[]]$Csv) {
     # /get /r has only six columns. /backup adds numeric Setting Value.
     # Use documented column positions: headings and display values can localize.
     $rows = @($Csv | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ConvertFrom-Csv)
-    $matches = @($rows | Where-Object {
+    # Avoid the case-insensitive automatic $Matches variable; absent CSV fields are null.
+    $rowsForGuid = @($rows | Where-Object {
         $fields = @($_.PSObject.Properties)
-        $fields.Count -eq 7 -and $fields[3].Value.Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
+        $fields.Count -eq 7 -and ([string]$fields[3].Value).Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
     })
-    if ($matches.Count -ne 1) { throw 'auditpol backup readback must contain one Process Creation subcategory' }
-    $fields = @($matches[0].PSObject.Properties)
-    switch ($fields[6].Value.Trim()) {
+    if ($rowsForGuid.Count -ne 1) { throw 'auditpol backup readback must contain one Process Creation subcategory' }
+    $fields = @($rowsForGuid[0].PSObject.Properties)
+    switch (([string]$fields[6].Value).Trim()) {
         '1' { 'success' }
         '3' { 'success-and-failure' }
         default { throw 'Success auditing not verified by numeric backup readback' }
@@ -51,6 +52,7 @@ try {
             try {
                 & auditpol /backup /file:"$verification" | Out-Null
                 if ($LASTEXITCODE -ne 0) { throw 'auditpol verification backup failed' }
+                # Get-Content detects auditpol BOMs; without a BOM, Windows PowerShell uses ANSI.
                 $inclusion = Convert-AuditBackupReadback (Get-Content -LiteralPath $verification)
             } finally {
                 if (Test-Path -LiteralPath $verification) { Remove-Item -LiteralPath $verification }

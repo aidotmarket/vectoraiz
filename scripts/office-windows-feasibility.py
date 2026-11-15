@@ -2529,7 +2529,8 @@ def assembly_self_test():
 
 def audit_readback_self_test():
     """Run literal backup CSV fixtures through the actual PowerShell parser."""
-    powershell = os.environ.get("OFFICE_TEST_POWERSHELL") or shutil.which("powershell.exe") or shutil.which("pwsh")
+    # Prefer the same Windows PowerShell executable as the real setup path and CI.
+    powershell = shutil.which("powershell.exe") or os.environ.get("OFFICE_TEST_POWERSHELL") or shutil.which("pwsh")
     if not powershell:
         print("audit readback parser tests skipped: PowerShell unavailable")
         return
@@ -2560,27 +2561,47 @@ TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Failure,,
         {"csv": success.replace("0CCE922B", "00000000"), "expected": None},
         {"csv": success.replace(",Success,,1", ",Success,,unknown"), "expected": None},
         {"csv": "\n\n", "expected": None},
+        {"csv": success.replace("Machine Name", "M\u00e1quina").replace("Success,,1", "\u00c9xito,,1"), "expected": "success"},
+        # ConvertFrom-Csv fills missing trailing fields with null in both editions.
+        {"csv": success.rsplit(",", 1)[0], "expected": None},
+        {"csv": success.splitlines()[0] + "\nTEST-PC,System,Process Creation", "expected": None},
     ])
     with tempfile.TemporaryDirectory(prefix="audit-parser-self-test-",
                                      dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
         folder = outside(Path(temporary))
-        fixtures = folder / "cases.json"
-        fixtures.write_text(json.dumps(cases), encoding="utf-8")
+        # One file per case avoids ConvertFrom-Json array enumeration differences in
+        # Windows PowerShell 5.1. Exercise the exact Get-Content path used by setup.
+        # cp1252 covers a BOM-less Windows ANSI backup, including localized text.
+        encodings = ("cp1252", "utf-8-sig", "utf-16", "utf-16-be")
+        for index, case in enumerate(cases):
+            expected = case["expected"] or "reject"
+            for encoding in encodings:
+                data = case["csv"].encode(encoding)
+                if encoding == "utf-16-be":
+                    data = b"\xfe\xff" + data
+                (folder / f"{index:02d}.{encoding}.{expected}.csv").write_bytes(data)
         test = folder / "parser-tests.ps1"
-        test.write_text('''param($Audit, $Cases)
+        test.write_text('''param($Audit, $Cases, [int]$ExpectedCount)
 . $Audit
-$cases = @(Get-Content -LiteralPath $Cases -Raw | ConvertFrom-Json)
-foreach ($case in $cases) {
+$ErrorActionPreference = 'Stop'
+$files = @(Get-ChildItem -LiteralPath $Cases -Filter '*.csv')
+if ($files.Count -ne $ExpectedCount) { throw 'audit CSV fixture count mismatch' }
+$executed = 0
+foreach ($file in $files) {
+    $expected = $file.BaseName.Split('.')[-1]
+    if ($expected -eq 'reject') { $expected = $null }
     $actual = $null
-    try { $actual = Convert-AuditBackupReadback ($case.csv -split "`r?`n") }
-    catch { if ($null -ne $case.expected) { throw } }
-    if ($actual -cne $case.expected) { throw 'audit CSV fixture result mismatch' }
+    try { $actual = Convert-AuditBackupReadback (Get-Content -LiteralPath $file.FullName) }
+    catch { if ($null -ne $expected) { throw } }
+    if ($actual -cne $expected) { throw "audit CSV fixture result mismatch: $($file.Name)" }
+    $executed++
 }
-Write-Output "audit readback parser tests passed: $($cases.Count) fixtures"
+if ($executed -ne $ExpectedCount) { throw 'audit CSV fixture execution count mismatch' }
+Write-Output "audit readback parser tests passed: $executed fixtures; PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
 ''', encoding="utf-8")
         log = folder / "parser-tests.log"
         code = command([powershell, "-NoProfile", "-NonInteractive", "-File", test,
-                        str(AUDIT_SCRIPT), str(fixtures)], log)
+                        str(AUDIT_SCRIPT), str(folder), str(len(cases) * len(encodings))], log)
         output = log.read_text(encoding="utf-8-sig")
         assert code == 0, output
         print(output.strip())
