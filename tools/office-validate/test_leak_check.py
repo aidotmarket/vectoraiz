@@ -1,4 +1,5 @@
 """Synthetic package tests: prefixes must never control leak detection."""
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -19,33 +20,90 @@ class LeakCheckTests(unittest.TestCase):
         self.path = self.root / "delivered.docx"
 
     def check(self, parts):
-        with zipfile.ZipFile(self.path, "w") as package:
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as package:
             if "[Content_Types].xml" not in parts:
                 package.writestr("[Content_Types].xml", CONTENT_TYPES)
             for name, content in parts.items():
                 package.writestr(name, content)
+        self.path.write_bytes(buffer.getvalue())
         return leak_check.check_file(self.path, self.root)
 
-    def test_planted_n0_prefix_catches_every_forbidden_element(self):
-        for tag in sorted(leak_check.FORBIDDEN | leak_check.IDENTITY):
-            namespace, local = tag[1:].split("}")
-            with self.subTest(tag=tag):
-                result = self.check({"custom/part.xml":
-                    f'<n0:{local} xmlns:n0="{namespace}">planted</n0:{local}>'})
-                self.assertFalse(result["ok"])
-                self.assertEqual(result["violations"][0]["element"], tag)
+    def test_independently_enumerated_revision_and_field_carriers(self):
+        # Hand-written fixtures: never derive test cases from the checker.
+        carriers = ["ins", "del", "moveFrom", "moveTo", "moveFromRangeStart",
+                    "moveFromRangeEnd", "moveToRangeStart", "moveToRangeEnd",
+                    "customXmlInsRangeStart", "customXmlDelRangeStart",
+                    "rPrChange", "pPrChange", "sectPrChange", "tblPrChange",
+                    "tblPrExChange", "trPrChange", "tcPrChange", "tblGridChange",
+                    "numberingChange", "cellIns", "cellDel", "cellMerge",
+                    "commentReference", "commentRangeStart", "commentRangeEnd",
+                    "docVars", "rsids", "documentProtection", "writeProtection",
+                    "attachedTemplate", "trackRevisions", "altChunk",
+                    "embedTrueTypeFonts", "embedSystemFonts", "saveSubsetFonts", "paperSrc",
+                    "savePreviewPicture", "printerSettings", "rsid", "aliases", "numIdMacAtCleanup",
+                    "formsDesign", "proofErr", "shapeDefaults", "hdrShapeDefaults",
+                    "doNotIncludeSubdocsInStats", "embedRegular", "embedBold", "embedItalic",
+                    "embedBoldItalic", "glossaryDocument", "instrText", "fldChar", "fldSimple", "sdt", "sdtPr"]
+        for ns in ["http://schemas.openxmlformats.org/wordprocessingml/2006/main",
+                   "http://purl.oclc.org/ooxml/wordprocessingml/main"]:
+            for local in carriers:
+                for prefix in ["n0", "x", ""]:
+                    with self.subTest(namespace=ns, carrier=local, prefix=prefix):
+                        tag = f"{prefix}:{local}" if prefix else local
+                        declaration = f'xmlns:{prefix}' if prefix else 'xmlns'
+                        # Each case is a separate package with identity and text.
+                        xml = (f'<{tag} {declaration}="{ns}" author="Private Author">'
+                               f'private moved/revised content</{tag}>')
+                        result = self.check({"word/document.xml": xml})
+                        self.assertFalse(result["ok"])
+                        self.assertEqual(result["violations"][0]["element"], f"{{{ns}}}{local}")
 
-    def test_default_namespace_is_caught(self):
-        result = self.check({"word/document.xml":
-            '<ins xmlns="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>'})
-        self.assertFalse(result["ok"])
+    def test_independently_enumerated_chart_and_identity_carriers(self):
+        cases = [
+            ("http://schemas.openxmlformats.org/drawingml/2006/chart", "f"),
+            ("http://schemas.openxmlformats.org/drawingml/2006/chart", "externalData"),
+            ("http://purl.oclc.org/ooxml/drawingml/chart", "f"),
+            ("http://purl.oclc.org/ooxml/drawingml/chart", "externalData"),
+            ("http://purl.org/dc/elements/1.1/", "creator"),
+            ("http://schemas.openxmlformats.org/package/2006/metadata/core-properties", "lastModifiedBy")]
+        for ns, local in cases:
+            for prefix in ["n0", "x", ""]:
+                with self.subTest(namespace=ns, carrier=local, prefix=prefix):
+                    tag = f"{prefix}:{local}" if prefix else local
+                    declaration = f'xmlns:{prefix}' if prefix else 'xmlns'
+                    self.assertFalse(self.check({"custom/part.xml":
+                        f'<{tag} {declaration}="{ns}">private</{tag}>'})["ok"])
+
+    def test_independent_spreadsheet_and_presentation_carriers(self):
+        cases = [
+            (["http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+              "http://purl.oclc.org/ooxml/spreadsheetml/main"],
+             ["legacyDrawing", "legacyDrawingHF", "fileVersion", "fileRecoveryPr",
+              "sheetCalcPr", "mruColors", "calcPr", "calcChain", "fileSharing",
+              "customWorkbookViews", "pivotCaches", "pivotTableParts", "phoneticPr", "rPh",
+              "sheetProtection", "workbookProtection", "definedName", "f"]),
+            (["http://schemas.openxmlformats.org/presentationml/2006/main",
+              "http://purl.oclc.org/ooxml/presentationml/main"],
+             ["clrMru", "printPr", "custDataLst", "custData", "tags", "embeddedFontLst"]),
+            (["http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac"], ["absPath"])]
+        for namespaces, carriers in cases:
+            for ns in namespaces:
+                for local in carriers:
+                    for prefix in ["n0", "x", ""]:
+                        with self.subTest(namespace=ns, carrier=local, prefix=prefix):
+                            tag = f"{prefix}:{local}" if prefix else local
+                            declaration = f'xmlns:{prefix}' if prefix else 'xmlns'
+                            self.assertFalse(self.check({"custom/part.xml":
+                                f'<{tag} {declaration}="{ns}">private</{tag}>'})["ok"])
 
     def test_matching_local_names_in_other_namespaces_are_allowed(self):
         xml = '<root xmlns:n0="urn:unrelated"><n0:ins/><n0:f/><n0:creator>safe</n0:creator></root>'
         self.assertTrue(self.check({"custom/data.xml": xml})["ok"])
 
     def test_empty_identity_is_allowed_but_nested_text_is_not(self):
-        for tag in leak_check.IDENTITY:
+        for tag in ["{http://purl.org/dc/elements/1.1/}creator",
+                    "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}lastModifiedBy"]:
             namespace, local = tag[1:].split("}")
             for text, expected in [("  ", True), ("<value>identity</value>", False)]:
                 with self.subTest(tag=tag, text=text):
@@ -57,10 +115,20 @@ class LeakCheckTests(unittest.TestCase):
                  "word/commentsExtended.xml", "word/commentsIds.xml",
                  "word/commentsExtensible.xml", "ppt/people.xml",
                  "media/thumbnail.jpeg", "xl/vbaProject.bin", "xl/embeddings/data.bin",
-                 "xl/externalLinks/externalLink1.xml", "ppt/activeX/activeX1.bin"]
+                 "xl/externalLinks/externalLink1.xml", "ppt/activeX/activeX1.bin",
+                 "xl/threadedComments/threadedComment1.xml", "xl/persons/person.xml",
+                 "ppt/commentAuthors.xml", "ppt/comments/comment1.xml", "word/people.xml",
+                 "customXml/item1.xml", "customXml/itemProps1.xml", "customXml/_rels/item1.xml.rels",
+                 "[trash]/private.xml", "docMetadata/identity.xml", "word/webSettings.xml",
+                 "ppt/viewProps.xml", "xl/printerSettings/printerSettings1.bin",
+                 "xl/pivotCache/pivotCacheDefinition1.xml", "xl/pivotTables/pivotTable1.xml",
+                 "xl/revisions/revision1.xml", "word/webextensions/webextension1.xml",
+                 "ppt/tags/tag1.xml", "xl/revisionInfo.xml", "xl/changesInfos/info.xml",
+                 "word/glossary/document.xml", "word/fonts/font1.odttf", "word/ink/ink1.xml",
+                 "xl/drawings/vmlDrawing1.vml", "xl/calcChain.xml", "_xmlsignatures/sig1.xml"]
         for name in paths:
             with self.subTest(name=name):
-                result = self.check({name: '<root/>'})
+                result = self.check({name: '<root author="Private Author">private content</root>'})
                 self.assertFalse(result["ok"])
                 self.assertEqual(result["violations"][0]["reason"], "forbidden part path")
         self.assertTrue(self.check({"custom/mycomments.xml": "<root/>"})["ok"])

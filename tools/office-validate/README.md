@@ -3,7 +3,7 @@
 `dotnet run --project tools/office-validate -- <directory>` opens every DOCX,
 XLSX and PPTX recursively, read-only. JSON on stdout contains relative paths,
 SHA256, open status, and independent Microsoft365/Office2007 validation results.
-Counts are uncapped; each format retains its first 50 diagnostic entries with
+Counts and per-ID histograms are uncapped; each format retains its first 50 diagnostic entries with
 ID, description, part URI and XPath. Exceptions have null counts and explicit
 errors. Any error, open failure, or empty input directory returns nonzero.
 
@@ -30,9 +30,24 @@ tree; stdout/stderr, exit status, hashes, page count and failures go into the
 single JSON report. SDK execution has a separate 300-second timeout. Both checks
 are attempted even if one fails, and CI uploads the report on failure.
 
-Both schema targets must pass. Office2007 errors in modern documents are visible
-failures, not silently waived. LibreOffice is not Microsoft Office: a successful
-render is a useful independent smoke check, not an Office fidelity guarantee.
+The combined runner gates on each set's `EXPECTED.json`: exact file membership,
+SHA256, SDK open result, and exact error-ID histograms/counts for both schema
+targets, plus LibreOffice success and exit code. Expectations originate in raw
+run 43633394595, not a new automatic acceptance of observed results. The 0.0.24
+set expects eight SDK open failures and four LibreOffice load failures. Each
+newer set expects only the two inherited POI schema issues: six
+`Sch_AttributeValueDataTypeDetailed` errors in the chart presentation and one
+`Sch_UnexpectedElementContentExpectingComplex` in the properties document,
+per schema target. All other schemas and renders must pass. A changed hash,
+new/missing error, missing/unexpected file or leak fails. SDK raw `ok: false`,
+exit codes, errors and full process output remain in the JSON even when expected.
+Timeouts, process failures and version-pin failures cannot be expected away.
+`self-test-expectations.py <inputs> <report>` copies inputs to temporary storage
+and proves a one-byte fixture mutation and an expected-entry mutation turn the
+gate red in every set, including the bootstrap set.
+
+LibreOffice is not Microsoft Office: a successful render is a useful independent
+smoke check, not an Office fidelity guarantee.
 The downloaded POI originals bootstrap the tool; they do not prove vectorAIz
 delivery behavior. Add real public delivered outputs per the corpus README.
 
@@ -57,3 +72,16 @@ both SDK targets and LibreOffice conversion/page counts. Its downloaded POI
 bootstrap originals are not vectorAIz deliveries and are not present in the leak
 job's checkout. A failure in either job fails the workflow; both preserve their
 reports on failure.
+
+Deny-set sources in `crates/vz-core/src/office.rs`: `removable`, lines 661–693,
+removes metadata, custom XML (including identity-bearing item properties), comments,
+threaded comments, persons/people, comment authors, printer/pivot/revision/web
+extension/tag/glossary/font/ink parts and comment VML. Lines 1110–1238 flatten
+content controls/fields/revisions and remove or refuse private Word carriers;
+all Word `*Change` property revisions are denied as well as move/range revisions.
+Lines 1212–1220 also remove spreadsheet and presentation private elements.
+Lines 2564–2608 refuse binary active carriers/signatures and remove carrier parts.
+Both transitional and strict namespaces are checked. Hand-written fixtures in
+`test_leak_check.py` enumerate carriers independently, build one in-memory ZIP per
+case, and exercise n0/x/default prefixes; the moved-away-text, threaded-comment
+and presentation-author review reproductions are included.

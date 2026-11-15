@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "sourceRun": 43633394595,
+  "files": {
+    "Bug66263-paragraph.docx": {
+      "sha256": "41ccacadeda1ac97485b772404228b9a66c2339d46208271b932b7a4a6661998",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "SimpleMultiCell.xlsx": {
+      "sha256": "119b6e70c5bbca6ca3e46f981e0719c154d87203adb4b5b61210d726deab9f7a",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    }
+  }
+}

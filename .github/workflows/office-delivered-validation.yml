@@ -70,6 +70,10 @@ jobs:
           --sdk-dll tools/office-validate/bin/Release/net8.0/OfficeValidate.dll
           --soffice "C:/Program Files/LibreOffice/program/soffice.com"
           --report "${{ runner.temp }}/office-delivered-validation.json"
+      - name: Prove fixture and expectation mutations fail for every set
+        run: >-
+          python tools/office-validate/self-test-expectations.py tests/office/delivered
+          "${{ runner.temp }}/office-delivered-validation.json"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: ${{ always() }}
         with:

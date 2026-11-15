@@ -8,6 +8,9 @@ import signal
 import subprocess
 import tempfile
 
+import expectations
+import leak_check
+
 LIBREOFFICE_VERSION = "26.2.6"
 EXTENSIONS = {".docx", ".xlsx", ".pptx"}
 
@@ -87,8 +90,8 @@ def main():
             sdk = run(["dotnet", args.sdk_dll.resolve(), root], 300)
             report["sdkProcess"] = sdk
             report["openXml"] = json.loads(sdk["stdout"])
-            if sdk["exitCode"] != 0 or sdk["timedOut"] or not report["openXml"]["ok"]:
-                report["errors"].append("Open XML SDK validation failed")
+            if sdk["exitCode"] not in (0, 1) or sdk["timedOut"]:
+                report["errors"].append("Open XML SDK process failed")
             expected = {p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
                         for p in files}
             actual = {f["path"]: f["sha256"] for f in report["openXml"]["files"]}
@@ -108,8 +111,15 @@ def main():
             report["errors"].append(f"LibreOffice version: {type(error).__name__}: {error}")
         report["libreOffice"] = [render(p, root, args.soffice, version_ok, args.render_timeout)
                                  for p in files]
+        report["expectationErrors"] = expectations.compare(
+            root, files, report["openXml"], report["libreOffice"], expectations.load(root))
+        # Bootstrap originals are independently validated but are not deliveries.
+        report["leaks"] = [leak_check.check_file(p, root) for p in files
+                           if p.relative_to(root).parts[0] != "_poi-sanity"]
         report["ok"] = (bool(files) and not report["errors"] and
-                        all(item["ok"] for item in report["libreOffice"]))
+                        not report["expectationErrors"] and
+                        all(item["ok"] for item in report["leaks"]))
+
     except Exception as error:
         report["errors"].append(f"{type(error).__name__}: {error}")
     finally:

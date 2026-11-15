@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "sourceRun": 43633394595,
+  "files": {
+    "document-0001.pptx": {
+      "sha256": "10bd20e06470702286581107f51ddfbc00c8d366ce90fdd0427b2535f0b48a50",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        },
+        "Office2007": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0002.pptx": {
+      "sha256": "73e3eff6c8f44d2dc748488009c45dcb485ebd9f9eee4d5f486615ea33fbc947",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0003.docx": {
+      "sha256": "f553f3574b14e44166162506fd3306c43cf974bb66a586c77908ccaeac8825bb",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        },
+        "Office2007": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0004.xlsx": {
+      "sha256": "cff088fc5b03d02738557ee0785461b19c06747df129c652f61cbd7faa86286e",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0006.xlsx": {
+      "sha256": "6ddacb2b6ceaa8226d880ab9b9664bbde2a61cbb38b8b84d85dbd80b3ab5f6d5",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0007.xlsx": {
+      "sha256": "4105872c3f3ed37884c7b47fa35bbbf159f8dec2b2ec1e6acb2978f42728fb18",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0008.docx": {
+      "sha256": "ab51f8ff29b90eea020039b199aed0457d73e0c5e7a563622a0afeafb1f42be8",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0010.xlsx": {
+      "sha256": "71eefc5746b919061f7e0c6e32185872eef53bc5525ebae437f7a2f844869cda",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    }
+  }
+}

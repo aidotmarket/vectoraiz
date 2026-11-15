@@ -1,0 +1,142 @@
+{
+  "version": 1,
+  "sourceRun": 43633394595,
+  "files": {
+    "SimpleWithComments.xlsx": {
+      "sha256": "98d65d0c7d55d124d36e6060d656d22ba9d48752e5849488d15c4103a2519167",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "TwoSheetsOneHidden.xlsx": {
+      "sha256": "62cfa21952afb11c07dfd94593ff287f065bc0ea352ef3294508902657a9702d",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "WithChart.xlsx": {
+      "sha256": "4392605e1e85db04b87e93c269e5751ed832ffeee841910b3660006768ac593d",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "bar-chart.pptx": {
+      "sha256": "bf78a48df9ec74cea1596eaa5bc24a22ebff48dc05fc58fa26a962abea69927f",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        },
+        "Office2007": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "bug56075-changeTracking_on.docx": {
+      "sha256": "8161456bec73b3d223c984b3f3b03049322f108ce35adc23cddba3c0eec6e0d2",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "chartTitle_withTitle.xlsx": {
+      "sha256": "55bc0a265413fd29b780df6b6dfd073268a497a37c312e26624e2dec252b83da",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "documentProperties.docx": {
+      "sha256": "253873981577e20f93a497aaa4b71abdcf116283017e1079888dd0b3796e41dd",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        },
+        "Office2007": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "smartart-rotated-text.pptx": {
+      "sha256": "21312439d47723c97a38ee7c6d7db7ed5a5195934c98ee3e1d4e130d5eac7e91",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    }
+  }
+}

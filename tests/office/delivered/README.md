@@ -14,6 +14,7 @@ vectorAIz-delivered outputs and not evidence of delivery correctness. See POI's
 and [notice](https://github.com/apache/poi/blob/77df76b9c990cadbb3c8ae72f05a03fa06194c7a/NOTICE).
 
 The workflow reports SDK validation for Microsoft365 and Office2007 separately;
-any error in either version fails the job. LibreOffice PDF conversion and page
+each set’s hash-bound `EXPECTED.json` specifies the exact accepted open and
+schema outcomes. Any difference fails the job; raw errors remain in the report. LibreOffice PDF conversion and page
 counts are separate checks. LibreOffice is not Microsoft Office, and successful
 conversion does not establish Microsoft Office rendering fidelity.

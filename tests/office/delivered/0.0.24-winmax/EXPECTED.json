@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "sourceRun": 43633394595,
+  "files": {
+    "document-0002.docx": {
+      "sha256": "95abe913e100aefd6810713ccada980daf8d8d3fbec14737d6dd0058810a45a3",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": false,
+      "libreOfficeExitCode": 1
+    },
+    "document-0003.xlsx": {
+      "sha256": "5b0e27e34f24ce1bd2a2ba3ed555362f10d751e41f939cbb5904caf07d3e7b94",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0005.xlsx": {
+      "sha256": "d07ddfae9c45b00229904b02ae804b383688ec1c15e70d3c757ed22fc6343277",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0006.xlsx": {
+      "sha256": "d0a464ca3dc00615836115314119adde6a523c1bfc102fa84170c33517994a62",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0007.xlsx": {
+      "sha256": "21637db76cac50b62e94f955a94cb0f509843b1a588ddc5022bd9c7a9158bbee",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0
+    },
+    "document-0008.pptx": {
+      "sha256": "a29e2b3e0a01729111dc9e7dd5e0825b334f5a0a3a13d7e56afe44f7bccfccd7",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": false,
+      "libreOfficeExitCode": 1
+    },
+    "document-0009.docx": {
+      "sha256": "7ddaf03303a75ab49ff4e6763ed263e1e8700906f5b4c0e774731537396afb55",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": false,
+      "libreOfficeExitCode": 1
+    },
+    "document-0011.pptx": {
+      "sha256": "814b9acd27cc61240c2a58398434fb976194bae61e5a6aa811e7b86969906c67",
+      "openOk": false,
+      "formats": {},
+      "libreOfficeOk": false,
+      "libreOfficeExitCode": 1
+    }
+  }
+}

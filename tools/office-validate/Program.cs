@@ -41,6 +41,7 @@ foreach (var path in Directory.EnumerateFiles(root, "*", SearchOption.AllDirecto
                 foreach (var error in validator.Validate(package))
                 {
                     count++;
+                    validation.ErrorIds[error.Id] = validation.ErrorIds.GetValueOrDefault(error.Id) + 1;
                     if (validation.Errors.Count < 50)
                         validation.Errors.Add(new ErrorResult(error.Id, error.Description,
                             error.Part?.Uri.ToString(), error.Path?.XPath));
@@ -69,6 +70,7 @@ sealed class FileResult
 }
 sealed class ValidationResult
 {
+    public Dictionary<string, int> ErrorIds { get; } = new();
     public int? ErrorCount { get; set; }
     public string? Error { get; set; }
     public List<ErrorResult> Errors { get; } = new();

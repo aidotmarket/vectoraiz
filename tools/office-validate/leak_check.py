@@ -14,9 +14,38 @@ CHART = {"http://schemas.openxmlformats.org/drawingml/2006/chart",
 SHEET = {"http://schemas.openxmlformats.org/spreadsheetml/2006/main",
          "http://purl.oclc.org/ooxml/spreadsheetml/main"}
 SHEET_TAGS = {f"{{{ns}}}sheet" for ns in SHEET}
-FORBIDDEN = ({f"{{{ns}}}{name}" for ns in WORD for name in
-              ("ins", "del", "commentReference", "commentRangeStart", "commentRangeEnd")} |
-             {f"{{{ns}}}{name}" for ns in CHART for name in ("f", "externalData")})
+# Delivery invariants: office.rs removable (661-693), cleanse (1110-1238),
+# private attributes (1352-1368), binary/active refusals (2564-2580).
+WORD_PRIVATE = """ins del moveFrom moveTo moveFromRangeStart moveFromRangeEnd
+moveToRangeStart moveToRangeEnd customXmlInsRangeStart customXmlDelRangeStart
+commentReference commentRangeStart commentRangeEnd docVars rsids
+ documentProtection writeProtection attachedTemplate trackRevisions altChunk
+ embedTrueTypeFonts embedSystemFonts saveSubsetFonts paperSrc savePreviewPicture
+printerSettings rsid aliases numIdMacAtCleanup formsDesign proofErr shapeDefaults
+hdrShapeDefaults doNotIncludeSubdocsInStats embedRegular embedBold embedItalic embedBoldItalic
+ glossaryDocument cellIns cellDel cellMerge instrText fldChar fldSimple sdt sdtPr""".split()
+FORBIDDEN = ({f"{{{ns}}}{name}" for ns in WORD for name in WORD_PRIVATE} |
+             {f"{{{ns}}}{name}" for ns in CHART for name in ("f", "externalData")} |
+             {f"{{{ns}}}{name}" for ns in SHEET for name in
+              "legacyDrawing legacyDrawingHF fileVersion fileRecoveryPr sheetCalcPr mruColors calcPr calcChain fileSharing customWorkbookViews pivotCaches pivotTableParts phoneticPr rPh sheetProtection workbookProtection definedName f".split()} |
+             {f"{{{ns}}}{name}" for ns in
+              ("http://schemas.openxmlformats.org/presentationml/2006/main",
+               "http://purl.oclc.org/ooxml/presentationml/main") for name in
+              "clrMru printPr custDataLst custData tags embeddedFontLst".split()} |
+             {"{http://schemas.microsoft.com/office/spreadsheetml/2010/11/ac}absPath"})
+
+
+def forbidden_element(tag):
+    if tag in FORBIDDEN:
+        return True
+    if tag.startswith("{"):
+        ns, local = tag[1:].split("}", 1)
+        # Property revisions include rPrChange/pPrChange/sectPrChange and future
+        # *Change carriers; none can occur in the delivery allowlist.
+        return ns in WORD and local.endswith("Change")
+    return False
+
+
 IDENTITY = {"{http://purl.org/dc/elements/1.1/}creator",
             "{http://schemas.openxmlformats.org/package/2006/metadata/core-properties}lastModifiedBy"}
 
@@ -24,9 +53,17 @@ IDENTITY = {"{http://purl.org/dc/elements/1.1/}creator",
 def forbidden_part(name):
     # Match part components anywhere in the package, independently of XML prefixes.
     parts = name.replace("\\", "/").lower().split("/")
-    return (any(p in {"docprops", "embeddings", "externallinks", "activex"} for p in parts[:-1]) or
-            any(p.startswith(("comments", "thumbnail", "vbaproject")) or p == "people.xml"
-                for p in parts))
+    return (any(p in {"docprops", "customxml", "[trash]", "docmetadata",
+                     "embeddings", "externallinks", "activex", "_xmlsignatures",
+                     "threadedcomments", "persons", "printersettings", "pivotcache",
+                     "pivottables", "revisions", "webextensions", "tags", "changesinfos",
+                     "glossary", "fonts", "ink"} for p in parts[:-1]) or
+            any(p.startswith(("comments", "thumbnail", "vbaproject")) or
+                p in {"people.xml", "commentauthors.xml", "revisioninfo.xml"}
+                for p in parts) or
+            "/".join(parts) in {"word/websettings.xml", "ppt/viewprops.xml", "xl/calcchain.xml"} or
+            ("/".join(parts).startswith("xl/drawings/") and parts[-1].endswith(".vml")))
+
 
 
 def check_file(path, root):
@@ -55,7 +92,7 @@ def check_file(path, root):
                 try:
                     tree = ET.fromstring(package.read(member))
                     for element in tree.iter():
-                        if element.tag in FORBIDDEN or (element.tag in IDENTITY and
+                        if forbidden_element(element.tag) or (element.tag in IDENTITY and
                                                        "".join(element.itertext()).strip()):
                             result["violations"].append({"part": name, "element": element.tag,
                                                          "reason": "forbidden element"})
