@@ -839,7 +839,7 @@ async fn pipeline_index<R: tauri::Runtime>(
                     engines,
                     &assets,
                     |value| {
-                        let _ = progress.send(value.clone());
+                        let _ = progress.send(desktop_pipeline::display_progress(value));
                     },
                     || *cancel.borrow(),
                 ))?;

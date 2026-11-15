@@ -2927,3 +2927,231 @@ fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
     assert_eq!(pages[0].text.matches("Second undrawn marker\n").count(), 1);
     assert!(!pages[0].text.contains("Undrawn secret marker"));
 }
+
+#[test]
+fn poi_comments_extensible_is_removed_and_unknown_relationships_still_refuse() {
+    let source = include_bytes!("fixtures/office-public/testComment.docx");
+    assert_eq!(
+        sha256(source),
+        "06b63b13f0b78a7179151af52c2282557c1ed204899feee9fcef4ca575344f97"
+    );
+    let (delivered, report) =
+        office::rebuild("testComment.docx", source, &BTreeMap::new()).unwrap();
+    let parts = members(&delivered);
+    assert!(parts
+        .keys()
+        .all(|part| !part.to_lowercase().contains("comment")));
+    assert!(parts
+        .values()
+        .all(|bytes| !String::from_utf8_lossy(bytes).contains("commentsExtensible")));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.location.contains("commentsExtensible.xml")));
+    office::inspect("testComment.docx", &delivered).unwrap();
+    let mut parts = members(source);
+    let rels = parts.get_mut("word/_rels/document.xml.rels").unwrap();
+    *rels = String::from_utf8(rels.clone())
+        .unwrap()
+        .replace(
+            "2018/08/relationships/commentsExtensible",
+            "2018/08/relationships/unknownComments",
+        )
+        .into_bytes();
+    let error = office::rebuild("unknown.docx", &archive(&parts), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("unsupported relationship type at word/_rels/document.xml.rels/rId7"),
+        "{error}"
+    );
+}
+
+#[test]
+fn poi_45545_comments_deck_remains_an_ole_refusal() {
+    let error = office::rebuild(
+        "45545_Comment.pptx",
+        include_bytes!("fixtures/office-public/45545_Comment.pptx"),
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("oleObject1.bin"), "{error}");
+}
+
+#[test]
+fn poi_comment_only_derivative_removes_slide_comments_without_ole() {
+    let source = include_bytes!("fixtures/office-public/SampleShow-WithComments.pptx");
+    let original = members(include_bytes!("fixtures/office-public/45545_Comment.pptx"));
+    let pristine = members(source);
+    assert_eq!(
+        sha256(source),
+        "af689ea64567d459d082e63ef887bb639929f8216a0f4bbd67cf3731ae8403ce"
+    );
+    assert!(pristine.keys().all(|part| !part.contains("/embeddings/")));
+    for part in ["ppt/comments/comment2.xml", "ppt/commentAuthors.xml"] {
+        assert_eq!(
+            pristine[part], original[part],
+            "POI comment bytes must stay intact"
+        );
+    }
+    let (delivered, report) = office::rebuild("comments.pptx", source, &BTreeMap::new()).unwrap();
+    let parts = members(&delivered);
+    assert!(parts
+        .keys()
+        .all(|part| !part.to_lowercase().contains("comment")));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.location.contains("ppt/comments/comment2.xml")));
+    office::inspect("comments.pptx", &delivered).unwrap();
+}
+
+#[test]
+fn comment_relationship_exceptions_refuse_external_wrong_owner_and_retargeting() {
+    let source = include_bytes!("fixtures/office-public/testComment.docx");
+    for (version, kind) in [
+        ("2018/08", "commentsExtensible"),
+        ("2016/09", "commentsIds"),
+        ("2011", "commentsExtended"),
+    ] {
+        let ty = format!("http://schemas.microsoft.com/office/{version}/relationships/{kind}");
+        let canonical = format!("{kind}.xml");
+        let mut cases = vec![
+            (
+                "word/_rels/document.xml.rels",
+                canonical.clone(),
+                " TargetMode=\"External\"",
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!("https://example.com/{canonical}"),
+                " TargetMode=\"External\"",
+            ),
+        ];
+        for owner in [
+            "word/_rels/settings.xml.rels",
+            "word/_rels/styles.xml.rels",
+            "_rels/.rels",
+        ] {
+            cases.push((owner, format!("/word/{canonical}"), ""));
+        }
+        for target in [
+            "styles.xml".into(),
+            "document.xml".into(),
+            "comments.xml".into(),
+            "media/image1.png".into(),
+            format!("other/{canonical}"),
+            canonical.to_uppercase(),
+        ] {
+            cases.push(("word/_rels/document.xml.rels", target, ""));
+        }
+        for (owner, target, mode) in cases {
+            let mut parts = members(source);
+            let rels = parts
+                .get(owner)
+                .map(|bytes| String::from_utf8(bytes.clone()).unwrap())
+                .unwrap_or_else(|| format!(r#"<Relationships xmlns="{REL}"></Relationships>"#));
+            let relationship = format!(
+                r#"<Relationship Id="negativeComment" Type="{ty}" Target="{target}"{mode}/>"#
+            );
+            let rels = rels.replace(
+                "</Relationships>",
+                &format!("{relationship}</Relationships>"),
+            );
+            parts.insert(owner.into(), rels.into_bytes());
+            let error = office::rebuild("testComment.docx", &archive(&parts), &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "unsupported relationship type at {owner}/negativeComment"
+                )),
+                "{kind} {owner} {target} {mode}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn preserved_hidden_status_warnings_use_exact_attribute_locations() {
+    for (ext, part, attribute, reason) in [
+        (
+            "xlsx",
+            "xl/workbook.xml",
+            "state",
+            "hidden sheet kept hidden",
+        ),
+        (
+            "xlsx",
+            "xl/worksheets/identity-sheet.xml",
+            "hidden",
+            "hidden row kept hidden",
+        ),
+        (
+            "xlsx",
+            "xl/worksheets/identity-sheet.xml",
+            "hidden",
+            "hidden column kept hidden",
+        ),
+        (
+            "pptx",
+            "ppt/slides/slide1.xml",
+            "show",
+            "hidden slide kept hidden",
+        ),
+    ] {
+        for boolean in ["1", "true"] {
+            let mut parts = fixture(ext);
+            if ext == "xlsx" {
+                let xml = String::from_utf8(parts[part].clone()).unwrap()
+                    .replace("hidden=\"1\"", &format!("hidden=\"{boolean}\""))
+                    .replace("</s:worksheet>", &format!(r#"<s:cols><s:col min="1" max="1" hidden="{boolean}"/></s:cols></s:worksheet>"#));
+                parts.insert(part.into(), xml.into_bytes());
+            } else {
+                let xml = String::from_utf8(parts[part].clone()).unwrap().replace(
+                    "show=\"0\"",
+                    if boolean == "true" {
+                        "show=\"false\""
+                    } else {
+                        "show=\"0\""
+                    },
+                );
+                parts.insert(part.into(), xml.into_bytes());
+            }
+            let (bytes, report) = rebuild(ext, &parts);
+            let delivered = members(&bytes);
+            let status = report
+                .inventory
+                .iter()
+                .find(|entry| {
+                    entry.location.ends_with(&format!("/@{{}}{attribute}"))
+                        && entry.location.starts_with(part.rsplit_once('/').unwrap().0)
+                        && (reason != "hidden column kept hidden"
+                            || entry.location.contains("}col["))
+                })
+                .unwrap();
+            assert!(report
+                .warnings
+                .contains(&format!("{}: {reason}", status.location)));
+            assert!(String::from_utf8_lossy(
+                &delivered[status
+                    .location
+                    .split("/{")
+                    .next()
+                    .unwrap()
+                    .split("/@")
+                    .next()
+                    .unwrap()]
+            )
+            .contains(&format!(
+                "{attribute}=\"{}\"",
+                status.value.as_deref().unwrap()
+            )));
+            assert!(report.warnings.iter().all(|w| !w.contains("ORION")));
+        }
+    }
+}

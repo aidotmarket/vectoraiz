@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 interface Current { pack_id: string; generation: string; review_hash: string }
 interface Entry { location: string; kind: string; value: string | null; warning: boolean }
 interface Review { metadata_inventory: Entry[]; warnings: string[]; exclusions: string[]; accepted_review_hash: string | null }
-interface Source { source: string; artifact: string; format: string; supported: boolean }
+interface Source { source: string; artifact: string; format: string; supported: boolean; refusal?: string | null }
 interface Sources { pack_id: string; sources: Source[]; protected_columns: string[] }
 interface Built { current: Current; review: Review }
 const PAGE = 50;
@@ -32,6 +32,7 @@ export function ListingReview() {
   const [confirmed, setConfirmed] = useState(false);
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
+  const [warningPage, setWarningPage] = useState(0);
   const [editing, setEditing] = useState<{entry: Entry; index: number; value: string}>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -65,7 +66,7 @@ export function ListingReview() {
       await invalidation.current;
       const result = await invoke<Built>("listing_rebuild", {packId: sources.pack_id, changes: {edits, exclusions: excluded, identity_terms: terms.split(/\r?\n/).map(term => term.trim()).filter(Boolean), origin: built?.current ?? null}});
       if (!alive.current || version !== mutation.current) return;
-      setBuilt(result); setDirty(false); setPage(0); setSearch(""); setMessage("Preview rebuilt from delivered bytes. Review the full inventory before accepting.");
+      setBuilt(result); setDirty(false); setPage(0); setWarningPage(0); setSearch(""); setMessage("Preview rebuilt from delivered bytes. Review the full inventory before accepting.");
     } catch (cause) { if (alive.current) {setDirty(true); setError(failure(cause));} }
     finally { if (alive.current) setBusy(false); }
   }
@@ -81,7 +82,8 @@ export function ListingReview() {
   }
   const needle = search.toLocaleLowerCase();
   const entries = built?.review.metadata_inventory.filter(entry => `${entry.location} ${entry.kind} ${entry.value ?? "Unknown / absent"}`.toLocaleLowerCase().includes(needle)) ?? [];
-  const sourceEntries = sources?.sources.filter(source => `${source.source} ${source.format} ${source.artifact}`.toLocaleLowerCase().includes(sourceSearch.toLocaleLowerCase())) ?? [];
+  const warnings = built?.review.warnings.filter(warning => warning.toLocaleLowerCase().includes(needle)) ?? [];
+  const sourceEntries = sources?.sources.filter(source => `${source.source} ${source.format} ${source.artifact} ${source.refusal ?? ""}`.toLocaleLowerCase().includes(sourceSearch.toLocaleLowerCase())) ?? [];
   const unsupported = sources?.sources.some(source => !source.supported && !excluded.includes(source.source));
   const allExcluded = sources?.sources.every(source => excluded.includes(source.source));
   return <section className="card stack" aria-labelledby="listing-review-title" aria-busy={busy}>
@@ -96,7 +98,7 @@ export function ListingReview() {
         <p>{sourceEntries.length} source documents</p>
         {sourceEntries.slice(sourcePage * PAGE, (sourcePage + 1) * PAGE).map(source => <label key={source.source} style={{display: "block"}}>
           <input type="checkbox" checked={!excluded.includes(source.source)} onChange={event => {changed(); setExcluded(old => event.target.checked ? old.filter(value => value !== source.source) : [...old, source.source]);}} />
-          Include {source.source} → {source.artifact} ({source.supported ? "supported" : "unsupported: exclude or re-ingest"})
+          Include {source.source} → {source.artifact} ({source.supported ? "supported" : `unsupported: ${source.refusal ?? "exclude or re-ingest"}`})
         </label>)}
         <button disabled={sourcePage === 0} onClick={() => setSourcePage(value => value - 1)}>Previous documents</button>
         <button disabled={(sourcePage + 1) * PAGE >= sourceEntries.length} onClick={() => setSourcePage(value => value + 1)}>More documents</button>
@@ -109,8 +111,11 @@ export function ListingReview() {
       <h3 ref={heading} tabIndex={-1}>Delivered inventory</h3>
       <p>Generation {built.current.generation}. {built.review.metadata_inventory.length} complete values and locations; {built.review.warnings.length} warnings. Unknown measurements are shown explicitly.</p>
       {dirty && <p>Changes pending: rebuild before accepting or transferring.</p>}
-      <label>Search delivered inventory<input type="search" value={search} onChange={event => {setSearch(event.target.value); setPage(0);}} /></label>
-      <p aria-live="polite">{entries.length} matching entries. Page {page + 1} of {Math.max(1, Math.ceil(entries.length / PAGE))}.</p>
+      <label>Search delivered inventory<input type="search" value={search} onChange={event => {setSearch(event.target.value); setPage(0); setWarningPage(0);}} /></label>
+      <ul aria-label="Delivered warnings">{warnings.slice(warningPage * PAGE, (warningPage + 1) * PAGE).map((warning, index) => <li key={index}>Warning: {warning}</li>)}</ul>
+      <button disabled={warningPage === 0} onClick={() => setWarningPage(value => value - 1)}>Previous warnings</button>
+      <button disabled={(warningPage + 1) * PAGE >= warnings.length} onClick={() => setWarningPage(value => value + 1)}>More warnings</button>
+      <p aria-live="polite">{entries.length} matching entries; {warnings.length} matching warnings. Page {page + 1} of {Math.max(1, Math.ceil(entries.length / PAGE))}.</p>
       <ol start={page * PAGE + 1}>
         {entries.slice(page * PAGE, (page + 1) * PAGE).map((entry, index) => <li key={`${entry.location}:${entry.kind}:${index}`}>
           <strong>{entry.location}</strong> <span>({entry.kind})</span>

@@ -151,6 +151,7 @@ export default function App() {
   const [indexing, setIndexing] = useState(false);
   const [selfTestRunning, setSelfTestRunning] = useState(false);
   const [folder, setFolder] = useState("");
+  const [replaceFolder, setReplaceFolder] = useState(false);
   const [query, setQuery] = useState("What is the orbital archive retention policy?");
   const [progress, setProgress] = useState("");
   const [indexError, setIndexError] = useState("");
@@ -294,6 +295,10 @@ export default function App() {
       setInstalling(false); setUpdateProgress("");
     }
   }
+  function requestIndexFolder() {
+    if (models?.last_indexed_folder && readableFolder(models.last_indexed_folder).path !== readableFolder(folder).path) setReplaceFolder(true);
+    else void indexFolder();
+  }
   async function indexFolder() {
     setIndexing(true); setRunning(true); setIndexError(""); setIndexProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
     let active = true;
@@ -301,7 +306,7 @@ export default function App() {
     setIndexedCount(undefined);
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${p.path}${p.reason ? ` · ${p.reason}` : ""}`); } };
+    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(`${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${readableFolder(p.path).path}${p.reason ? ` · ${p.reason}` : ""}`); } };
     try {
       const result = await invoke<Progress>("pipeline_index", { folder, progress: channel });
       const next = await refreshModels();
@@ -566,7 +571,7 @@ export default function App() {
           <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
           {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
           {askState === "cloud_error" && <div className="actions">{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button id="cloud-recovery" className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
-          {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) void indexFolder();}}>Re-index</button></div>}
+          {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) requestIndexFolder();}}>Re-index</button></div>}
           {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
         </div>
         {(answer || askState === "answer" || answerStreaming) && <article className="card stack">
@@ -580,11 +585,11 @@ export default function App() {
         {chooser}
       </section>}
       {view === "Library" && <section className="view stack" aria-label="Library"><h1>Library</h1>
-        {models?.needs_reindex && <div className="notice warning"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Re-index</button></div>}
+        {models?.needs_reindex && <div className="notice warning"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled || !folder.trim()} onClick={requestIndexFolder}>Re-index</button></div>}
         <section className="card stack" aria-label="Folders"><h2>Folders</h2>
           {models?.last_indexed_folder && <p>{readableFolder(models.last_indexed_folder).path}</p>}
           <label>Folder <input id="library-folder" placeholder="Choose a folder to index" className="bg-white text-slate-950 p-2 w-full" value={folder} onChange={event => setFolder(event.target.value)} /></label>
-          <div className="actions"><button className="button primary" disabled={pipelineDisabled || !folder.trim()} onClick={indexFolder}>Index folder</button>{indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}</div>
+          <div className="actions"><button className="button primary" disabled={pipelineDisabled || !folder.trim()} onClick={requestIndexFolder}>Index folder</button>{indexing && <button className={buttonStyle} onClick={() => void cancelModels("pipeline")}>Cancel indexing</button>}</div>
           <div id="index-feedback" tabIndex={-1} role="status" aria-live="polite">{indexProgress && <p>{indexProgress}</p>}</div>
           {indexError && <p role="alert">{indexError}</p>}
         </section>
@@ -717,6 +722,12 @@ export default function App() {
           <div role="status" aria-live="polite">{result && <pre>{JSON.stringify(result, null, 2)}</pre>}</div>
         </details>
       </section>}
+    {replaceFolder && <div className="modal card stack" role="dialog" aria-modal="true" aria-label="Replace library folder?">
+      <p>Replace {readableFolder(models?.last_indexed_folder ?? "").path} with {readableFolder(folder).path}?</p>
+      <p>The documents in {readableFolder(models?.last_indexed_folder ?? "").path} will leave your library.</p>
+      <button autoFocus disabled={pipelineDisabled} onClick={() => {setReplaceFolder(false); void indexFolder();}}>Replace folder</button>
+      <button onClick={() => setReplaceFolder(false)}>Cancel</button>
+    </div>}
     {deleteFile && <div className="modal card stack" role="dialog" aria-label={M1_COPY.deleteTitle}>
       <p>{M1_COPY.deleteTitle}</p><p>{M1_COPY.freed((deleteFile.installed_bytes ?? 0) + (deleteFile.partial_bytes ?? 0))}</p>
       {!!deleteFile.partial_bytes && <p>{M1_COPY.partial}</p>}

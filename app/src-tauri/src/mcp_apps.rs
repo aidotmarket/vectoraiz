@@ -498,13 +498,7 @@ pub fn reveal_extension(path: &std::path::Path) -> Result<(), String> {
     .unwrap_or_else(|e| std::panic::resume_unwind(e))
 }
 #[cfg(any(windows, test))]
-fn windows_reveal_path(path: &str) -> String {
-    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{unc}")
-    } else {
-        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
-    }
-}
+use crate::desktop_pipeline::display_path as windows_reveal_path;
 
 /// Opening is best effort: the response always retains the drag/install fallback.
 pub fn open_extension(

@@ -1640,6 +1640,26 @@ fn walk(
             true,
         )?;
     }
+    let hidden_status = match (n.ns.as_str(), n.local.as_str()) {
+        (S, "sheet") if matches!(n.attr("state"), Some("hidden" | "veryHidden")) => {
+            Some(("state", "hidden sheet kept hidden"))
+        }
+        (S, "row") if matches!(n.attr("hidden"), Some("1" | "true")) => {
+            Some(("hidden", "hidden row kept hidden"))
+        }
+        (S, "col") if matches!(n.attr("hidden"), Some("1" | "true")) => {
+            Some(("hidden", "hidden column kept hidden"))
+        }
+        (P, "sld") if matches!(n.attr("show"), Some("0" | "false")) => {
+            Some(("show", "hidden slide kept hidden"))
+        }
+        _ => None,
+    };
+    if let Some((attribute, reason)) = hidden_status {
+        report
+            .warnings
+            .push(format!("{location}/@{{}}{attribute}: {reason}"));
+    }
     for ((ns, k), value) in &mut result.attrs {
         let at = format!("{location}/@{{{ns}}}{k}");
         let content = content_attr(&n, k);
@@ -2763,6 +2783,13 @@ fn rebuild_inner(
                 .to_owned();
             ensure!(
                 (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || (own == "word/document.xml"
+                        && rel.attr("TargetMode") != Some("External")
+                        && [
+                            ("http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible", "word/commentsExtensible.xml"),
+                            ("http://schemas.microsoft.com/office/2016/09/relationships/commentsIds", "word/commentsIds.xml"),
+                            ("http://schemas.microsoft.com/office/2011/relationships/commentsExtended", "word/commentsExtended.xml"),
+                        ].iter().any(|(relationship, target_part)| ty == *relationship && resolve(&own, &target).is_ok_and(|resolved| resolved == *target_part)))
                     || ty == "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
                     || ["http://schemas.microsoft.com/office/2011/relationships/chartStyle", "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"].contains(&ty.as_str())
                     || (ty == "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"
@@ -2962,6 +2989,7 @@ fn rebuild_inner(
     // The independent walk reopens ZIP headers, type table and relationships.
     let reopened = inspect(name, &output)?;
     report.allowlist_version = ALLOWLIST_VERSION;
+    report.warnings.extend(reopened.warnings);
     report.inventory = reopened.inventory;
     report.expanded_bytes = reopened.expanded_bytes.max(expanded);
     report.parts = reopened.parts;

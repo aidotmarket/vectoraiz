@@ -18,3 +18,11 @@ All are tested pristine before separately planting metadata/binding/trash marker
 AppVersion is provenance evidence, not installed Office/Document Inspector proof.
 
 S1934 adds the unmodified chart and SmartArt originals recorded in s1934-provenance.json. Apache POI files use Apache-2.0 (LICENSE/NOTICE here). boxWhisker.xlsx is an unmodified Microsoft Excel 16.0300-saved chartEx regression workbook from LibreOffice/core at the recorded immutable revision, distributed separately under MPL-2.0 (LIBREOFFICE-COPYING.MPL). Its editable OOXML source is included in full and linked upstream. No fixture is compiled into the application. Source URLs, Application/AppVersion and SHA256 values are recorded for each file. Installed Office rendering is not qualified by these bytes.
+
+S1944 adds pristine POI testComment.docx (commentsExtensible/Ids/Extended removal)
+and 45545_Comment.pptx (OLE-refusal control), plus the explicitly constructed
+SampleShow-WithComments.pptx comment-removal regression. Both donor files are
+from the same pinned POI commit. s1944-comments-provenance.json records SHA256
+and the substitution: no complete deck with real slide-comment parts and no OLE
+exists in that pinned corpus. scripts/office-comment-fixture.py reproduces the
+constructed case without changing the original or any production removal rule.
