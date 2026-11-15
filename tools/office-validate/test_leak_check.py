@@ -144,6 +144,179 @@ class LeakCheckTests(unittest.TestCase):
             self.assertTrue(result["ok"])
             self.assertEqual([i["state"] for i in result["info"]], ["hidden", "veryHidden"])
 
+    def test_review_four_reproductions(self):
+        cases = [
+            {"word/document.xml": '<w:p xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:rsidR="Private"/>'},
+            {"ppt/presentation.xml": '<a:hlinkClick xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" action="ppaction://macro?name=PrivateMacro"/>'},
+            {"ppt/presentation.xml": '<a:fld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" id="Private" type="datetime"><a:t>Visible</a:t></a:fld>'},
+            {"word/_rels/webSettings.xml.rels": '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" TargetMode="External" Target="https://private.example/"/></Relationships>'},
+        ]
+        for parts in cases:
+            with self.subTest(parts=parts):
+                self.assertFalse(self.check(parts)["ok"])
+
+    def test_independent_attributes_under_renamed_prefixes(self):
+        cases = [
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.openxmlformats.org/wordprocessingml/2006/main", "rsidR"),
+            ("http://purl.oclc.org/ooxml/wordprocessingml/main", "p", "http://purl.oclc.org/ooxml/wordprocessingml/main", "rsidFuture"),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.openxmlformats.org/wordprocessingml/2006/main", "displacedByCustomXml"),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.microsoft.com/office/word/2010/wordml", "paraId"),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.microsoft.com/office/word/2010/wordml", "textId"),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.openxmlformats.org/markup-compatibility/2006", "Ignorable"),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", "p", "http://schemas.openxmlformats.org/markup-compatibility/2006", "PreserveAttributes"),
+        ]
+        for ns, local, ans, attr in cases:
+            for prefix in ["n0", "x", "renamed"]:
+                with self.subTest(attr=attr, prefix=prefix):
+                    xml = f'<{local} xmlns="{ns}" xmlns:{prefix}="{ans}" {prefix}:{attr}="private"/>'
+                    self.assertFalse(self.check({"word/document.xml": xml})["ok"])
+        for ns, local, attr in [
+            ("http://schemas.openxmlformats.org/spreadsheetml/2006/main", "workbookPr", "codeName"),
+            ("http://schemas.openxmlformats.org/presentationml/2006/main", "sp", "macro"),
+            ("http://purl.oclc.org/ooxml/presentationml/main", "sp", "textlink"),
+            ("http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing", "sp", "macro"),
+            ("http://purl.oclc.org/ooxml/drawingml/spreadsheetDrawing", "sp", "textlink"),
+            ("http://schemas.openxmlformats.org/drawingml/2006/main", "hlinkClick", "action"),
+            ("http://purl.oclc.org/ooxml/drawingml/main", "hlinkHover", "action"),
+            ("http://schemas.openxmlformats.org/spreadsheetml/2006/main", "hyperlink", "location"),
+        ]:
+            for value in ["", "PrivateMacro"]:
+                with self.subTest(ns=ns, attr=attr, value=value):
+                    self.assertFalse(self.check({"custom/data.xml": f'<{local} xmlns="{ns}" {attr}="{value}"/>'})["ok"])
+        self.assertFalse(self.check({"word/document.xml": '<w:hyperlink xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" w:anchor="private"/>'})["ok"])
+        self.assertTrue(self.check({"custom/data.xml": '<p xmlns="urn:other" rsidR="safe" codeName="safe" macro="safe"/>'})["ok"])
+
+    def test_independent_flattened_elements_and_chart_removals(self):
+        cases = [
+            ("http://schemas.openxmlformats.org/markup-compatibility/2006", ["AlternateContent", "Choice", "Fallback"]),
+            ("http://schemas.openxmlformats.org/drawingml/2006/main", ["fld"]),
+            ("http://purl.oclc.org/ooxml/drawingml/main", ["fld"]),
+            ("http://schemas.openxmlformats.org/wordprocessingml/2006/main", ["sdtContent", "sdtEndPr"]),
+            ("http://schemas.openxmlformats.org/drawingml/2006/chart", ["pivotSource", "pivotFmts", "printSettings", "headerFooter", "protection", "userShapes", "extLst", "strRef", "numRef", "multiLvlStrRef"]),
+            ("http://purl.oclc.org/ooxml/drawingml/chart", ["pivotSource", "pivotFmts", "printSettings", "headerFooter", "protection", "userShapes", "extLst", "strRef", "numRef", "multiLvlStrRef"]),
+            ("http://schemas.openxmlformats.org/drawingml/2006/diagram", ["title", "desc", "catLst", "sampData", "styleData", "clrData"]),
+            ("http://schemas.microsoft.com/office/drawing/2014/chartex", ["chartSpace"]),
+        ]
+        for ns, locals_ in cases:
+            for local in locals_:
+                for prefix in ["n0", "x", ""]:
+                    tag = f"{prefix}:{local}" if prefix else local
+                    decl = f"xmlns:{prefix}" if prefix else "xmlns"
+                    with self.subTest(ns=ns, local=local, prefix=prefix):
+                        self.assertFalse(self.check({"custom/data.xml": f'<{tag} {decl}="{ns}"/>'})["ok"])
+        self.assertFalse(self.check({"word/settings.xml": '<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><m:mathPr xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math"/></w:settings>'})["ok"])
+
+    def test_independent_formula_and_empty_wrapper_cases(self):
+        for ns in ["http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+                   "http://purl.oclc.org/ooxml/spreadsheetml/main",
+                   "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"]:
+            for fragment in ['<f>PRIVATE()</f>', '<formula>PRIVATE()</formula>',
+                             '<formula1>PRIVATE()</formula1>', '<formula2>PRIVATE()</formula2>',
+                             '<calculatedColumnFormula>PRIVATE()</calculatedColumnFormula>',
+                             '<totalsRowFormula>PRIVATE()</totalsRowFormula>',
+                             '<cfvo type="formula" val="1"/>', '<cfvo val="PrivateName"/>',
+                             '<dataValidation><formula1>PRIVATE()</formula1></dataValidation>',
+                             '<cfRule><formula>PRIVATE()</formula></cfRule>',
+                             '<dataValidations/>', '<conditionalFormatting/>',
+                             '<conditionalFormattings/>', '<definedNames/>',
+                             '<dataValidations count="9"><dataValidation/></dataValidations>']:
+                with self.subTest(ns=ns, fragment=fragment):
+                    self.assertFalse(self.check({"custom/data.xml": f'<root xmlns="{ns}">{fragment}</root>'})["ok"])
+            self.assertTrue(self.check({"custom/data.xml": f'<cfvo xmlns="{ns}" type="num" val="3.5"/>'})["ok"])
+        self.assertFalse(self.check({"custom/data.xml": '<x:f xmlns:x="http://schemas.microsoft.com/office/excel/2006/main">PRIVATE()</x:f>'})["ok"])
+        self.assertFalse(self.check({"xl/workbook.xml": '<c xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" t="s"><v>0</v></c>'})["ok"])
+        for ns in ["http://schemas.openxmlformats.org/spreadsheetml/2006/main", "http://schemas.openxmlformats.org/presentationml/2006/main"]:
+            for xml in ['<ext/>', '<extLst/>', '<extLst><ext uri="private"><private xmlns="urn:private"/></ext></extLst>']:
+                self.assertFalse(self.check({"custom/data.xml": f'<root xmlns="{ns}">{xml}</root>'})["ok"])
+
+    def test_relationship_ownership_targets_and_external_policy(self):
+        def rel(target, kind="hyperlink", mode="External"):
+            return (f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+                    f'<Relationship Id="r1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" TargetMode="{mode}" Target="{target}"/></Relationships>')
+        # These owners are independently listed, not taken from forbidden_part.
+        for owner in ["word/webSettings.xml", "ppt/viewProps.xml", "xl/calcChain.xml",
+                      "xl/sharedStrings.xml", "docProps/core.xml", "word/comments.xml",
+                      "word/glossary/document.xml", "word/fonts/font.bin"]:
+            directory, file = owner.rsplit("/", 1)
+            with self.subTest(owner=owner):
+                self.assertFalse(self.check({f"{directory}/_rels/{file}.rels": rel("https://private.example")})["ok"])
+        for target in ["webSettings.xml", "../docProps/core.xml", "/xl/sharedStrings.xml",
+                       "../xl/calcChain.xml", "comments.xml", "../customXml/item.xml"]:
+            with self.subTest(target=target):
+                result = self.check({"word/document.xml": "<root/>", "word/_rels/document.xml.rels": rel(target, "settings", "Internal")})
+                self.assertTrue(any(v["reason"] == "relationship points to removed part" for v in result["violations"]))
+        for target, kind in [("https://private.example", "attachedTemplate"), ("file:///private", "hyperlink"),
+                             ("mailto:private@example.org", "hyperlink"), ("ppaction://macro", "hyperlink"),
+                             ("https://private.example", "image"), ("https://private.example", "package"),
+                             ("https://private.example", "oleObject"), ("https://private.example", "themeOverride")]:
+            self.assertFalse(self.check({"_rels/.rels": rel(target, kind)})["ok"])
+        self.assertTrue(self.check({"_rels/.rels": rel("https://public.example")})["ok"])
+        self.assertFalse(self.check({"word/_rels/missing.xml.rels": rel("https://private.example")})["ok"])
+        for target in ["../../outside.xml", "escaped%20name.xml", "missing.xml"]:
+            self.assertFalse(self.check({"_rels/.rels": rel(target, "image", "Internal")})["ok"])
+        self.assertFalse(self.check({"word/document.xml": '<root xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="removed"/>'})["ok"])
+
+    def test_independent_media_and_binary_carriers(self):
+        def png_chunk(kind, data=b""):
+            # Chunk CRC is immaterial to metadata policy; no pixel decoder here.
+            return len(data).to_bytes(4, "big") + kind + data + b"\0" * 4
+        clean_png = b"\x89PNG\r\n\x1a\n" + png_chunk(b"IEND")
+        for kind in [b"tEXt", b"iTXt", b"zTXt", b"eXIf", b"iCCP", b"acTL", b"ABCD"]:
+            data = b"\x89PNG\r\n\x1a\n" + png_chunk(kind, b"private") + png_chunk(b"IEND")
+            self.assertFalse(self.check({"word/media/part-000001.png": data})["ok"])
+        self.assertFalse(self.check({"word/media/part-000001.png": clean_png + b"private"})["ok"])
+        for marker, segment in [(0xe1, b"ExifPrivate"), (0xfe, b"PrivateComment"), (0xe2, b"ICC_PROFILEPrivate"),
+                                (0xe0, b"JFIF\0private"), (0xee, b"AdobePrivate"), (0xe3, b"private")]:
+            jpeg = b"\xff\xd8\xff" + bytes([marker]) + (len(segment) + 2).to_bytes(2, "big") + segment + b"\xff\xd9"
+            self.assertFalse(self.check({"word/media/part-000001.jpg": jpeg})["ok"])
+        self.assertFalse(self.check({"word/media/part-000001.jpg": b"\xff\xd8\xff\xd9private"})["ok"])
+        for name, data in [("word/data.bin", b"PK\x03\x04private"),
+                           ("word/data.bin", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1private"),
+                           ("word/media/part-000001.svg", b"<svg/>"),
+                           ("word/media/part-000001.png", b"broken"),
+                           ("word/media/part-000001.jpg", b"broken")]:
+            self.assertFalse(self.check({name: data})["ok"])
+
+    def test_independent_smartart_source_and_hidden_carriers(self):
+        ns = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+        for attr in ["uniqueId", "loTypeId", "qsTypeId", "csTypeId", "presId"]:
+            self.assertFalse(self.check({"custom/data.xml": f'<layoutDef xmlns="{ns}" {attr}="private-definition"/>'})["ok"])
+        self.assertFalse(self.check({"custom/data.xml": f'<shape xmlns="{ns}" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:blip=""/>'})["ok"])
+        for fragment in ['<pt modelId="private"><t>undrawn private</t></pt>',
+                         '<cxn srcId="removed" destId="absent"/>']:
+            result = self.check({"word/diagrams/data-000001.xml": f'<dataModel xmlns="{ns}">{fragment}</dataModel>'})
+            self.assertFalse(result["ok"])
+            wanted = "undrawn/inconsistent SmartArt model text" if fragment.startswith("<pt") else "dangling SmartArt connection"
+            self.assertIn(wanted, [v["reason"] for v in result["violations"]])
+
+    def test_independent_chart_refusals_and_surviving_extensions(self):
+        for local in ["filteredLineSeries", "filteredBarSeries", "categoryFilterExceptions", "categoryFilterException"]:
+            self.assertFalse(self.check({"custom/data.xml": f'<x:{local} xmlns:x="http://schemas.microsoft.com/office/drawing/2012/chart"/>'})["ok"])
+        for body in ["", '<plotVisOnly val="0"/>', '<plotVisOnly val="false"/>', '<plotVisOnly val="private"/>']:
+            self.assertFalse(self.check({"custom/data.xml": f'<chart xmlns="http://schemas.openxmlformats.org/drawingml/2006/chart">{body}</chart>'})["ok"])
+        self.assertTrue(self.check({"custom/data.xml": '<chart xmlns="http://schemas.openxmlformats.org/drawingml/2006/chart"><plotVisOnly val="1"/></chart>'})["ok"])
+        for xml in [
+            '<extLst xmlns="http://schemas.openxmlformats.org/presentationml/2006/main"><ext uri="sections"><p14:sectionLst xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"/></ext></extLst>',
+            '<extLst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><ext uri="rules"><x14:dataValidations xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main" count="1"><x14:dataValidation/></x14:dataValidations></ext></extLst>',
+        ]:
+            self.assertTrue(self.check({"custom/data.xml": xml})["ok"])
+
+    def test_serialization_part_and_type_table_removals(self):
+        for name in ["xl/sharedStrings.xml", "word/xxcommentsPrivate.xml", "word/commentsPrivate.xml",
+                     "word/vbaProjectSignature.bin", "word/headerPrivate.xml", "ppt/slides/private.xml",
+                     "word/media/private.png", "../private.xml", "word/escaped%20name.xml"]:
+            # xxcomments is deliberately not a pipeline prefix and stays legal.
+            result = self.check({name: "<root/>"})
+            self.assertEqual(result["ok"], name == "word/xxcommentsPrivate.xml")
+            if name in {"word/headerPrivate.xml", "ppt/slides/private.xml", "word/media/private.png"}:
+                self.assertIn("source part name survived neutral naming", [v["reason"] for v in result["violations"]])
+        for xml in ["<root><!--private comment--></root>", "<root><?private secret?></root>",
+                    '<!DOCTYPE root [<!ENTITY private "secret">]><root>&private;</root>']:
+            self.assertFalse(self.check({"word/document.xml": xml})["ok"])
+        for target in ["word/comments.xml", "word/missing.xml"]:
+            types = f'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/{target}" ContentType="application/xml"/></Types>'
+            self.assertFalse(self.check({"[Content_Types].xml": types})["ok"])
+
     def test_malformed_xml_does_not_hide_other_violations(self):
         result = self.check({"word/document.xml": "<broken>", "word/comments.xml": "<root/>"})
         self.assertFalse(result["ok"])

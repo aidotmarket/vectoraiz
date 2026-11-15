@@ -73,15 +73,14 @@ bootstrap originals are not vectorAIz deliveries and are not present in the leak
 job's checkout. A failure in either job fails the workflow; both preserve their
 reports on failure.
 
-Deny-set sources in `crates/vz-core/src/office.rs`: `removable`, lines 661–693,
-removes metadata, custom XML (including identity-bearing item properties), comments,
-threaded comments, persons/people, comment authors, printer/pivot/revision/web
-extension/tag/glossary/font/ink parts and comment VML. Lines 1110–1238 flatten
-content controls/fields/revisions and remove or refuse private Word carriers;
-all Word `*Change` property revisions are denied as well as move/range revisions.
-Lines 1212–1220 also remove spreadsheet and presentation private elements.
-Lines 2564–2608 refuse binary active carriers/signatures and remove carrier parts.
-Both transitional and strict namespaces are checked. Hand-written fixtures in
-`test_leak_check.py` enumerate carriers independently, build one in-memory ZIP per
-case, and exercise n0/x/default prefixes; the moved-away-text, threaded-comment
-and presentation-author review reproductions are included.
+The source-by-source [removal inventory](REMOVAL_RULES.md) records 72 rule
+families across `office.rs` and its graphics helper, with source line numbers,
+checker functions, independently enumerated regressions and output observability
+limits. Checks include private attributes under renamed prefixes, DrawingML fields
+and actions, formula/extension carriers, SmartArt definition/hidden-model content,
+image metadata, owned relationships and resolved targets. Every external
+relationship except a permitted HTTP(S) hyperlink fails. The four fold-5 review
+reproductions each have a separate hand-written package. Both transitional and
+strict namespace variants are checked. The leak check supplements the pinned SDK,
+render and hash-bound expectations; it does not replace the production positive
+allowlists or prove that retained displayed content is public.
