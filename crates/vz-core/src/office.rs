@@ -1640,6 +1640,26 @@ fn walk(
             true,
         )?;
     }
+    let hidden_status = match (n.ns.as_str(), n.local.as_str()) {
+        (S, "sheet") if matches!(n.attr("state"), Some("hidden" | "veryHidden")) => {
+            Some(("state", "hidden sheet kept hidden"))
+        }
+        (S, "row") if matches!(n.attr("hidden"), Some("1" | "true")) => {
+            Some(("hidden", "hidden row kept hidden"))
+        }
+        (S, "col") if matches!(n.attr("hidden"), Some("1" | "true")) => {
+            Some(("hidden", "hidden column kept hidden"))
+        }
+        (P, "sld") if matches!(n.attr("show"), Some("0" | "false")) => {
+            Some(("show", "hidden slide kept hidden"))
+        }
+        _ => None,
+    };
+    if let Some((attribute, reason)) = hidden_status {
+        report
+            .warnings
+            .push(format!("{location}/@{{}}{attribute}: {reason}"));
+    }
     for ((ns, k), value) in &mut result.attrs {
         let at = format!("{location}/@{{{ns}}}{k}");
         let content = content_attr(&n, k);
@@ -2969,6 +2989,7 @@ fn rebuild_inner(
     // The independent walk reopens ZIP headers, type table and relationships.
     let reopened = inspect(name, &output)?;
     report.allowlist_version = ALLOWLIST_VERSION;
+    report.warnings.extend(reopened.warnings);
     report.inventory = reopened.inventory;
     report.expanded_bytes = reopened.expanded_bytes.max(expanded);
     report.parts = reopened.parts;

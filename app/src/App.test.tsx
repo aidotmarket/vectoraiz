@@ -2367,14 +2367,14 @@ it("shows every preparation refusal before rebuild and blocks until all are excl
 it("displays and searches specific delivered warnings including removed locations", async () => {
   mockListing();
   const original = invoke.getMockImplementation()!;
-  const warnings = ["document.xlsx!xl/workbook.xml/sheet[1]: hidden sheet kept hidden", "document.pptx!ppt/charts/chart1.xml: static chart cache", "document.docx!word/comments.xml: removed comments", "document.docx!word/document.xml: removed tracked changes", "document.pptx!ppt/theme/themeOverride1.xml: themeOverride colour change", "document.docx!docMetadata/LabelInfo.xml: label removal", "document.docx!word/document.xml/field[1]: field removal"];
+  const warnings = ["document.xlsx!xl/workbook.xml/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheets[1]/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet[2]/@{}state: hidden sheet kept hidden", "document.pptx!ppt/charts/chart1.xml: retained static chart caches may be stale; review every cached string and value", "document.docx!word/comments.xml: removed Office carrier", "document.docx!word/document.xml: removed Office private/active carrier", "document.pptx!ppt/charts/chart1.xml: removing themeOverride may change chart colours", "document.docx!docMetadata/LabelInfo.xml: removed Office carrier", "document.docx!word/document.xml: removed Word field instruction"];
   invoke.mockImplementation(async (command, args) => command === "listing_rebuild" ? {current:listingCurrent,review:{...listingFixture(),warnings}} : original(command,args));
   const region = within(await openListing());
   await userEvent.click(await region.findByRole("checkbox", {name:/Include unsupported.pdf/}));
   await userEvent.click(region.getByRole("button", {name:"Rebuild purchaser preview"}));
   await region.findByRole("list", {name:"Delivered warnings"});
   for (const warning of warnings) expect(region.getByText(`Warning: ${warning}`)).toBeVisible();
-  fireEvent.change(region.getByRole("searchbox", {name:"Search delivered inventory"}), {target:{value:"static chart cache"}});
+  fireEvent.change(region.getByRole("searchbox", {name:"Search delivered inventory"}), {target:{value:"retained static chart caches"}});
   expect(region.getByText(`Warning: ${warnings[1]}`)).toBeVisible();
   expect(region.queryByText(`Warning: ${warnings[0]}`)).not.toBeInTheDocument();
 });
@@ -2411,7 +2411,7 @@ it.each([String.raw`\\?\C:\folder\file.docx`, String.raw`\\?\UNC\server\share\fi
 
 it("pages specific warnings and searches beyond the first warning page", async () => {
   mockListing(); const original = invoke.getMockImplementation()!;
-  const warnings = Array.from({length:53}, (_, index) => `document.xlsx!sheet/${index}: hidden sheet kept hidden ${index}`);
+  const warnings = Array.from({length:53}, (_, index) => `document.xlsx!xl/worksheets/part-${String(index + 1).padStart(6,"0")}.xml/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheetData[1]/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}row[1]/@{}hidden: hidden row kept hidden`);
   invoke.mockImplementation(async (command,args) => command === "listing_rebuild" ? {current:listingCurrent,review:{...listingFixture(),warnings}} : original(command,args));
   const region = within(await openListing());
   await userEvent.click(await region.findByRole("checkbox", {name:/Include unsupported.pdf/}));
@@ -2420,7 +2420,21 @@ it("pages specific warnings and searches beyond the first warning page", async (
   expect(region.queryByText(`Warning: ${warnings[52]}`)).not.toBeInTheDocument();
   await userEvent.click(region.getByRole("button", {name:"More warnings"}));
   expect(region.getByText(`Warning: ${warnings[52]}`)).toBeVisible();
-  fireEvent.change(region.getByRole("searchbox", {name:"Search delivered inventory"}), {target:{value:"hidden sheet kept hidden 52"}});
+  fireEvent.change(region.getByRole("searchbox", {name:"Search delivered inventory"}), {target:{value:"part-000053.xml"}});
   expect(region.getByText(`Warning: ${warnings[52]}`)).toBeVisible();
   expect(region.getByRole("button", {name:"Previous warnings"})).toBeDisabled();
+});
+
+it("Ask Re-index confirms replacement before indexing a different Library folder", async () => {
+  modelsInvoke.mockResolvedValue({...readyModels,needs_reindex:true,last_indexed_folder:"C:/Existing library"});
+  render(<App />);
+  await screen.findByTitle("C:/Existing library"); at("Library");
+  fireEvent.change(screen.getByLabelText("Folder"), {target:{value:"C:/New library"}});
+  await userEvent.click(screen.getByRole("link", {name:"Ask"}));
+  await userEvent.click(screen.getByRole("button", {name:"Re-index"}));
+  const dialog = within(screen.getByRole("dialog", {name:"Replace library folder?"}));
+  expect(dialog.getByText("The documents in C:/Existing library will leave your library.")).toBeVisible();
+  expect(invoke.mock.calls.some(([command]) => command === "pipeline_index")).toBe(false);
+  await userEvent.click(dialog.getByRole("button", {name:"Replace folder"}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("pipeline_index", expect.objectContaining({folder:"C:/New library"})));
 });

@@ -3008,3 +3008,150 @@ fn poi_comment_only_derivative_removes_slide_comments_without_ole() {
         .any(|r| r.location.contains("ppt/comments/comment2.xml")));
     office::inspect("comments.pptx", &delivered).unwrap();
 }
+
+#[test]
+fn comment_relationship_exceptions_refuse_external_wrong_owner_and_retargeting() {
+    let source = include_bytes!("fixtures/office-public/testComment.docx");
+    for (version, kind) in [
+        ("2018/08", "commentsExtensible"),
+        ("2016/09", "commentsIds"),
+        ("2011", "commentsExtended"),
+    ] {
+        let ty = format!("http://schemas.microsoft.com/office/{version}/relationships/{kind}");
+        let canonical = format!("{kind}.xml");
+        let mut cases = vec![
+            (
+                "word/_rels/document.xml.rels",
+                canonical.clone(),
+                " TargetMode=\"External\"",
+            ),
+            (
+                "word/_rels/document.xml.rels",
+                format!("https://example.com/{canonical}"),
+                " TargetMode=\"External\"",
+            ),
+        ];
+        for owner in [
+            "word/_rels/settings.xml.rels",
+            "word/_rels/styles.xml.rels",
+            "_rels/.rels",
+        ] {
+            cases.push((owner, format!("/word/{canonical}"), ""));
+        }
+        for target in [
+            "styles.xml".into(),
+            "document.xml".into(),
+            "comments.xml".into(),
+            "media/image1.png".into(),
+            format!("other/{canonical}"),
+            canonical.to_uppercase(),
+        ] {
+            cases.push(("word/_rels/document.xml.rels", target, ""));
+        }
+        for (owner, target, mode) in cases {
+            let mut parts = members(source);
+            let rels = parts
+                .get(owner)
+                .map(|bytes| String::from_utf8(bytes.clone()).unwrap())
+                .unwrap_or_else(|| format!(r#"<Relationships xmlns="{REL}"></Relationships>"#));
+            let relationship = format!(
+                r#"<Relationship Id="negativeComment" Type="{ty}" Target="{target}"{mode}/>"#
+            );
+            let rels = rels.replace(
+                "</Relationships>",
+                &format!("{relationship}</Relationships>"),
+            );
+            parts.insert(owner.into(), rels.into_bytes());
+            let error = office::rebuild("testComment.docx", &archive(&parts), &BTreeMap::new())
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(
+                error.contains(&format!(
+                    "unsupported relationship type at {owner}/negativeComment"
+                )),
+                "{kind} {owner} {target} {mode}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn preserved_hidden_status_warnings_use_exact_attribute_locations() {
+    for (ext, part, attribute, reason) in [
+        (
+            "xlsx",
+            "xl/workbook.xml",
+            "state",
+            "hidden sheet kept hidden",
+        ),
+        (
+            "xlsx",
+            "xl/worksheets/identity-sheet.xml",
+            "hidden",
+            "hidden row kept hidden",
+        ),
+        (
+            "xlsx",
+            "xl/worksheets/identity-sheet.xml",
+            "hidden",
+            "hidden column kept hidden",
+        ),
+        (
+            "pptx",
+            "ppt/slides/slide1.xml",
+            "show",
+            "hidden slide kept hidden",
+        ),
+    ] {
+        for boolean in ["1", "true"] {
+            let mut parts = fixture(ext);
+            if ext == "xlsx" {
+                let xml = String::from_utf8(parts[part].clone()).unwrap()
+                    .replace("hidden=\"1\"", &format!("hidden=\"{boolean}\""))
+                    .replace("</s:worksheet>", &format!(r#"<s:cols><s:col min="1" max="1" hidden="{boolean}"/></s:cols></s:worksheet>"#));
+                parts.insert(part.into(), xml.into_bytes());
+            } else {
+                let xml = String::from_utf8(parts[part].clone()).unwrap().replace(
+                    "show=\"0\"",
+                    if boolean == "true" {
+                        "show=\"false\""
+                    } else {
+                        "show=\"0\""
+                    },
+                );
+                parts.insert(part.into(), xml.into_bytes());
+            }
+            let (bytes, report) = rebuild(ext, &parts);
+            let delivered = members(&bytes);
+            let status = report
+                .inventory
+                .iter()
+                .find(|entry| {
+                    entry.location.ends_with(&format!("/@{{}}{attribute}"))
+                        && entry.location.starts_with(part.rsplit_once('/').unwrap().0)
+                        && (reason != "hidden column kept hidden"
+                            || entry.location.contains("}col["))
+                })
+                .unwrap();
+            assert!(report
+                .warnings
+                .contains(&format!("{}: {reason}", status.location)));
+            assert!(String::from_utf8_lossy(
+                &delivered[status
+                    .location
+                    .split("/{")
+                    .next()
+                    .unwrap()
+                    .split("/@")
+                    .next()
+                    .unwrap()]
+            )
+            .contains(&format!(
+                "{attribute}=\"{}\"",
+                status.value.as_deref().unwrap()
+            )));
+            assert!(report.warnings.iter().all(|w| !w.contains("ORION")));
+        }
+    }
+}

@@ -1255,6 +1255,85 @@ mod tests {
     }
 
     #[test]
+    fn build_reports_hidden_sheet_at_preserved_attribute_without_private_values() {
+        use std::io::{Read, Write};
+        let f = Fixture::new();
+        for state_value in ["hidden", "veryHidden"] {
+            let source = include_bytes!("../tests/fixtures/office-public/WithVariousData.xlsx");
+            let mut input = zip::ZipArchive::new(Cursor::new(source)).unwrap();
+            let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            for i in 0..input.len() {
+                let mut part = input.by_index(i).unwrap();
+                let mut bytes = Vec::new();
+                part.read_to_end(&mut bytes).unwrap();
+                if part.name() == "xl/workbook.xml" {
+                    bytes = String::from_utf8(bytes)
+                        .unwrap()
+                        .replace(
+                            "sheetId=\"2\"",
+                            &format!("sheetId=\"2\" state=\"{state_value}\""),
+                        )
+                        .into_bytes();
+                }
+                output
+                    .start_file(part.name(), zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                output.write_all(&bytes).unwrap();
+            }
+            let bytes = output.finish().unwrap().into_inner();
+            let path = f.root.join("source/private-workbook.xlsx");
+            std::fs::write(&path, &bytes).unwrap();
+            let index = f.root.join("index");
+            let mut state = State::open(&index).unwrap();
+            let doc = vz_core::pipeline::Document {
+                doc_id: "hidden-sheet-source".into(),
+                path: path.to_str().unwrap().into(),
+                sha256: sha256(&bytes),
+                bytes: bytes.len() as u64,
+                pages: 1,
+                kind: "xlsx".into(),
+                needs_ocr_pages: vec![],
+                chunks: vec![],
+            };
+            let generation = Uuid::new_v4().to_string();
+            let directory = index.join("generations").join(&generation);
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::write(
+                directory.join("document.json"),
+                serde_json::to_vec(&doc).unwrap(),
+            )
+            .unwrap();
+            state.commit(&doc, "fixture", &generation).unwrap();
+            drop(state);
+            let id = Uuid::new_v4();
+            let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+            let guard = store.lock_native(&f.policy, id, &index).unwrap();
+            let current = build(
+                &guard,
+                &f.root.join("source"),
+                id,
+                &f.engine,
+                "query",
+                &Fixture::changes(),
+            )
+            .unwrap();
+            let review = guard.inspect(&current).unwrap();
+            let suffix = "!xl/workbook.xml/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheets[1]/{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet[2]/@{}state: hidden sheet kept hidden";
+            assert_eq!(
+                review
+                    .warnings
+                    .iter()
+                    .filter(|w| w.ends_with(suffix))
+                    .count(),
+                1
+            );
+            assert!(review.warnings.iter().all(|w| !w.contains("Sheet2")
+                && !w.contains("private-workbook")
+                && !w.contains(path.to_str().unwrap())));
+        }
+    }
+
+    #[test]
     fn office_edit_exclusion_rechunk_and_generation_binding() {
         let f = Fixture::new();
         let bytes = include_bytes!("../../../spike/fixtures/documents/library.docx");

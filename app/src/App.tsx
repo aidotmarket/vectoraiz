@@ -571,7 +571,7 @@ export default function App() {
           <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
           {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
           {askState === "cloud_error" && <div className="actions">{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button id="cloud-recovery" className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
-          {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) void indexFolder();}}>Re-index</button></div>}
+          {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) requestIndexFolder();}}>Re-index</button></div>}
           {askState === "checking" && models?.answer?.state !== "checking" && <p>{M1_COPY.checking}</p>}
         </div>
         {(answer || askState === "answer" || answerStreaming) && <article className="card stack">
