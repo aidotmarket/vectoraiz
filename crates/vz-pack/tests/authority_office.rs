@@ -2927,3 +2927,84 @@ fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
     assert_eq!(pages[0].text.matches("Second undrawn marker\n").count(), 1);
     assert!(!pages[0].text.contains("Undrawn secret marker"));
 }
+
+#[test]
+fn poi_comments_extensible_is_removed_and_unknown_relationships_still_refuse() {
+    let source = include_bytes!("fixtures/office-public/testComment.docx");
+    assert_eq!(
+        sha256(source),
+        "06b63b13f0b78a7179151af52c2282557c1ed204899feee9fcef4ca575344f97"
+    );
+    let (delivered, report) =
+        office::rebuild("testComment.docx", source, &BTreeMap::new()).unwrap();
+    let parts = members(&delivered);
+    assert!(parts
+        .keys()
+        .all(|part| !part.to_lowercase().contains("comment")));
+    assert!(parts
+        .values()
+        .all(|bytes| !String::from_utf8_lossy(bytes).contains("commentsExtensible")));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.location.contains("commentsExtensible.xml")));
+    office::inspect("testComment.docx", &delivered).unwrap();
+    let mut parts = members(source);
+    let rels = parts.get_mut("word/_rels/document.xml.rels").unwrap();
+    *rels = String::from_utf8(rels.clone())
+        .unwrap()
+        .replace(
+            "2018/08/relationships/commentsExtensible",
+            "2018/08/relationships/unknownComments",
+        )
+        .into_bytes();
+    let error = office::rebuild("unknown.docx", &archive(&parts), &BTreeMap::new())
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        error.contains("unsupported relationship type at word/_rels/document.xml.rels/rId7"),
+        "{error}"
+    );
+}
+
+#[test]
+fn poi_45545_comments_deck_remains_an_ole_refusal() {
+    let error = office::rebuild(
+        "45545_Comment.pptx",
+        include_bytes!("fixtures/office-public/45545_Comment.pptx"),
+        &BTreeMap::new(),
+    )
+    .err()
+    .unwrap()
+    .to_string();
+    assert!(error.contains("oleObject1.bin"), "{error}");
+}
+
+#[test]
+fn poi_comment_only_derivative_removes_slide_comments_without_ole() {
+    let source = include_bytes!("fixtures/office-public/SampleShow-WithComments.pptx");
+    let original = members(include_bytes!("fixtures/office-public/45545_Comment.pptx"));
+    let pristine = members(source);
+    assert_eq!(
+        sha256(source),
+        "af689ea64567d459d082e63ef887bb639929f8216a0f4bbd67cf3731ae8403ce"
+    );
+    assert!(pristine.keys().all(|part| !part.contains("/embeddings/")));
+    for part in ["ppt/comments/comment2.xml", "ppt/commentAuthors.xml"] {
+        assert_eq!(
+            pristine[part], original[part],
+            "POI comment bytes must stay intact"
+        );
+    }
+    let (delivered, report) = office::rebuild("comments.pptx", source, &BTreeMap::new()).unwrap();
+    let parts = members(&delivered);
+    assert!(parts
+        .keys()
+        .all(|part| !part.to_lowercase().contains("comment")));
+    assert!(report
+        .removals
+        .iter()
+        .any(|r| r.location.contains("ppt/comments/comment2.xml")));
+    office::inspect("comments.pptx", &delivered).unwrap();
+}

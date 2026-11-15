@@ -289,6 +289,9 @@ jobs:
       - name: Install UI dependencies
         working-directory: app
         run: npm ci
+      - name: Listing review and library UI regressions
+        working-directory: app
+        run: npm test -- src/App.test.tsx
       - name: Build debug UI test app (no model assets)
         working-directory: app
         run: npm run tauri -- build --debug --ci --features ui-test,custom-protocol --bundles app --config src-tauri/ui-test/tauri.conf.json

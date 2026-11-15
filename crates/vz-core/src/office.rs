@@ -2763,6 +2763,13 @@ fn rebuild_inner(
                 .to_owned();
             ensure!(
                 (ty.starts_with(R) && ty.as_bytes().get(R.len()) == Some(&b'/'))
+                    || (own == "word/document.xml"
+                        && rel.attr("TargetMode") != Some("External")
+                        && [
+                            ("http://schemas.microsoft.com/office/2018/08/relationships/commentsExtensible", "word/commentsExtensible.xml"),
+                            ("http://schemas.microsoft.com/office/2016/09/relationships/commentsIds", "word/commentsIds.xml"),
+                            ("http://schemas.microsoft.com/office/2011/relationships/commentsExtended", "word/commentsExtended.xml"),
+                        ].iter().any(|(relationship, target_part)| ty == *relationship && resolve(&own, &target).is_ok_and(|resolved| resolved == *target_part)))
                     || ty == "http://schemas.microsoft.com/office/2007/relationships/diagramDrawing"
                     || ["http://schemas.microsoft.com/office/2011/relationships/chartStyle", "http://schemas.microsoft.com/office/2011/relationships/chartColorStyle"].contains(&ty.as_str())
                     || (ty == "http://schemas.microsoft.com/office/2007/relationships/stylesWithEffects"

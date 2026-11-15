@@ -2,6 +2,21 @@
 use std::{collections::HashMap, path::Path};
 use vz_core::storage::State;
 
+/// Presentation only: keep canonical internal and source paths unchanged.
+pub(crate) fn display_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
+    }
+}
+
+pub(crate) fn display_progress(value: &vz_core::index::Progress) -> vz_core::index::Progress {
+    let mut display = value.clone();
+    display.path = display_path(&display.path);
+    display
+}
+
 pub(crate) fn require_index(root: &Path) -> Result<(), String> {
     require_index_with(root, |path| path.try_exists())
 }
@@ -525,5 +540,28 @@ mod tests {
         );
         std::fs::remove_file(state.root.join("generations/active-unix/document.json")).unwrap();
         assert!(file_names(&state).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+    #[test]
+    fn indexing_progress_only_normalizes_its_display_copy() {
+        for (source, expected) in [
+            (r"\\?\C:\Documents\a.docx", r"C:\Documents\a.docx"),
+            (r"\\?\UNC\server\share\a.docx", r"\\server\share\a.docx"),
+            ("/Users/max/a.docx", "/Users/max/a.docx"),
+        ] {
+            let original = vz_core::index::Progress {
+                path: source.into(),
+                completed: 3,
+                ..Default::default()
+            };
+            let display = display_progress(&original);
+            assert_eq!(display.path, expected);
+            assert_eq!(display.completed, original.completed);
+            assert_eq!(original.path, source);
+        }
     }
 }

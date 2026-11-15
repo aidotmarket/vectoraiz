@@ -27,6 +27,7 @@ pub struct Candidate {
     pub artifact: String,
     pub format: String,
     pub supported: bool,
+    pub refusal: Option<String>,
 }
 
 pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
@@ -38,25 +39,72 @@ pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
         .into_iter()
         .enumerate()
         .map(|(position, doc)| {
+            let artifact = format!(
+                "originals-0001.zip!document-{:04}.{}",
+                position + 1,
+                doc.kind
+            );
+            lease.check(policy)?;
+            let mut budget = Budget::default();
+            budget.enable_office();
+            budget.cancel = Some(lease.cancellation_token());
+            let refusal = preparation_refusal(&doc, &artifact, &mut budget);
             Ok(Candidate {
                 source: Path::new(&doc.path)
                     .strip_prefix(&source)?
                     .to_str()
                     .context("source path must be UTF-8")?
                     .replace('\\', "/"),
-                artifact: format!(
-                    "originals-0001.zip!document-{:04}.{}",
-                    position + 1,
-                    doc.kind
-                ),
-                supported: ["txt", "md", "markdown", "docx", "xlsx", "pptx"]
-                    .contains(&doc.kind.as_str()),
+                artifact,
+                supported: refusal.is_none(),
+                refusal,
                 format: doc.kind,
             })
         })
         .collect::<Result<Vec<_>>>()?;
     lease.check(policy)?;
     Ok(candidates)
+}
+
+// Run the production rebuild worker, including its independent readback and
+// resource limits. Parser success or an extension alone cannot certify a file.
+fn preparation_refusal(
+    doc: &vz_core::pipeline::Document,
+    artifact: &str,
+    budget: &mut Budget,
+) -> Option<String> {
+    let result = (|| -> Result<()> {
+        ensure!(
+            ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str()),
+            "original format has no proven rewrite handler; exclude or re-ingest as text"
+        );
+        let office = ["docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
+        let bytes = source_bytes(
+            doc,
+            if office {
+                512 * 1024 * 1024
+            } else {
+                64 * 1024 * 1024
+            },
+        )?;
+        if office {
+            sanitize::office_worker(artifact, &bytes, budget, false)?;
+        }
+        Ok(())
+    })();
+    result.err().map(|error| format!("{error:#}"))
+}
+
+fn source_bytes(doc: &vz_core::pipeline::Document, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(&doc.path)?
+        .take(limit + 1)
+        .read_to_end(&mut bytes)?;
+    ensure!(
+        bytes.len() as u64 <= limit && sha256(&bytes) == doc.sha256,
+        "source changed since indexing"
+    );
+    Ok(bytes)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,24 +251,14 @@ fn build(
             if changes.exclusions.contains(&location) {
                 continue;
             }
-            let mut bytes = Vec::new();
-            std::fs::File::open(&doc.path)?
-                .take(if has_office {
-                    512 * 1024 * 1024 + 1
+            let mut bytes = source_bytes(
+                &doc,
+                if has_office {
+                    512 * 1024 * 1024
                 } else {
-                    64 * 1024 * 1024 + 1
-                })
-                .read_to_end(&mut bytes)?;
-            ensure!(
-                bytes.len()
-                    <= if has_office {
-                        512 * 1024 * 1024
-                    } else {
-                        64 * 1024 * 1024
-                    }
-                    && sha256(&bytes) == doc.sha256,
-                "source changed since indexing"
-            );
+                    64 * 1024 * 1024
+                },
+            )?;
             let office = ["docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
             // A stable per-pack pseudonym preserves identity-bound edits without
             // exposing a path digest or linking independent packs to one index.
@@ -573,6 +611,58 @@ mod tests {
     use super::*;
     use crate::listing_policy::{ListingPolicy, ManagedPolicy, PolicySource};
     use std::sync::{Arc, Mutex};
+    #[test]
+    fn preparation_reports_every_refusal_with_production_worker_reasons() {
+        let temp = tempfile::tempdir().unwrap();
+        let cases: &[(&str, &[u8])] = &[
+            (
+                "ole.pptx",
+                include_bytes!("../tests/fixtures/office-public/45545_Comment.pptx"),
+            ),
+            ("bad.docx", b"not an Office package"),
+            ("bad.xlsx", b"not an Office package either"),
+            (
+                "comments.docx",
+                include_bytes!("../tests/fixtures/office-public/testComment.docx"),
+            ),
+        ];
+        let refusals: Vec<_> = cases
+            .iter()
+            .map(|(name, bytes)| {
+                let path = temp.path().join(name);
+                std::fs::write(&path, bytes).unwrap();
+                let doc = vz_core::pipeline::Document {
+                    doc_id: name.to_string(),
+                    path: path.to_str().unwrap().into(),
+                    sha256: sha256(bytes),
+                    bytes: bytes.len() as u64,
+                    pages: 1,
+                    kind: name.rsplit('.').next().unwrap().into(),
+                    needs_ocr_pages: vec![],
+                    chunks: vec![],
+                };
+                let mut budget = Budget::default();
+                budget.enable_office();
+                let refusal = preparation_refusal(&doc, name, &mut budget);
+                let expected = vz_core::office::rebuild(name, bytes, &BTreeMap::new())
+                    .err()
+                    .map(|e| e.to_string());
+                assert_eq!(
+                    refusal, expected,
+                    "preparation must use the rebuild refusal for {name}"
+                );
+                // A source swap cannot be marked supported even for a supported extension.
+                std::fs::write(&path, b"changed since indexing").unwrap();
+                assert!(preparation_refusal(&doc, name, &mut budget)
+                    .unwrap()
+                    .contains("source changed since indexing"));
+                refusal
+            })
+            .collect();
+        assert!(refusals[..3].iter().all(Option::is_some));
+        assert!(refusals[3].is_none());
+    }
+
     struct Source(Mutex<ManagedPolicy>);
     impl PolicySource for Source {
         fn read(&self) -> ManagedPolicy {

@@ -1,0 +1,27 @@
+{
+  "repository": "https://github.com/apache/poi",
+  "revision": "77df76b9c990cadbb3c8ae72f05a03fa06194c7a",
+  "licence": "Apache-2.0",
+  "files": [
+    {
+      "upstream": "test-data/document/testComment.docx",
+      "file": "testComment.docx",
+      "sha256": "06b63b13f0b78a7179151af52c2282557c1ed204899feee9fcef4ca575344f97"
+    },
+    {
+      "upstream": "test-data/slideshow/45545_Comment.pptx",
+      "file": "45545_Comment.pptx",
+      "sha256": "0295a51f63150e3ee680154d07dab88062ba2306030b790561f85436f3ded7c8"
+    },
+    {
+      "file": "SampleShow-WithComments.pptx",
+      "sha256": "af689ea64567d459d082e63ef887bb639929f8216a0f4bbd67cf3731ae8403ce",
+      "derived_from": [
+        "SampleShow.pptx",
+        "45545_Comment.pptx"
+      ],
+      "derivation": "scripts/office-comment-fixture.py",
+      "note": "Constructed test-only derivative, not an unmodified Office-saved original. Copies real slide-comment and author parts from 45545_Comment.pptx into the benign SampleShow.pptx, adding the two relationships/content types. All other SampleShow parts stay unchanged. Both sources are from the pinned POI commit. The pinned corpus has no complete slide-comment PPTX without OLE; its only comment deck also has unsupported WMF/VML/transitions. The pristine original remains the OLE-refusal case."
+    }
+  ]
+}
