@@ -13,6 +13,21 @@ The tests do not import or iterate the checker's deny sets. Regressions run each
 package separately; a compound dirty package cannot conceal a missing check.
 The four codex2 reproductions also have a separate explicit regression method.
 
+Fold 6 audited all 72 rows against their production sites. Corrected rows are
+22, 42, 43, 44, 56 and 62, each with a hand-written regression named below.
+The remaining audit found no further partial value or condition checks:
+01–21 cover complete removed paths and resolved relationship conditions;
+23–41 cover removed wrappers/elements/attributes and documented provenance;
+45–55 cover child counts, exact recomputed validation counts, complete attribute
+removal and namespace/name refusals; 57–61 cover complete reference wrappers,
+model graph conditions and empty blip values; 63–64 cover serialization and
+documented provenance; 65–72 cover image marker/chunk allowlists, exact JFIF
+bytes, exact Adobe version/flags with transform 0–2, framing and supplemental
+carriers. No provenance exception or expectation was added by this audit.
+For row 22, source suffixes are preserved by production; for row 46, counts
+already compare against the complete decimal child count; rows 67–68 already
+compare every normalized byte. These are not prefix-only checks.
+
 Checker function names are the enforcement mapping. Regression method names in
 the last column omit `test_`; `paths`, `word`, `sheet`, `chart`, `attrs`,
 `flat`, `formula`, `rels`, `media`, `models`, `serial`, and `visibility` expand to:
@@ -63,7 +78,7 @@ dot segments, before testing removal. Missing targets do not mask removed ones.
 | 19 | G:558–619 | Remove relationships whose source references were deleted, and chart themeOverride; refuse unrelated OLE/control/VBA and unproven package dependencies | `check_relationships` rejects unused graphics/link relationships and package/oleObject/control/vbaProject/themeOverride kinds | rels |
 | 20 | G:621–670 | Recursively remove orphan graphics dependencies reached through deleted references, including their `.rels` | `check_relationships` catches absent owners/targets; forbidden dependency kinds/parts catch carriers | rels; see provenance limit below |
 | 21 | G:686–693; O:2963–2997 | Remove pruned type overrides; rebuild type table from retained parts | `check_file` rejects removed/dangling overrides | serial |
-| 22 | O:2665–2773 | Replace source names for media, themes, charts, diagrams, chartsheets, worksheets, tables, drawings, Word headers/footers and presentation slide/layout/master/notes/handout parts; rename owned `.rels` and targets | `part_reasons` checks neutral basename; relationships check owner and target existence | serial |
+| 22 | O:2665–2773 | Replace source names for media, themes, charts, diagrams, chartsheets, worksheets, tables, drawings, Word headers/footers and presentation slide/layout/master/notes/handout parts; rename owned `.rels` and targets | `part_reasons` full-matches family/root-specific canonical directory and stem/serial/suffix; media/theme retain production's first root component; relationships check owner and target existence | serial, rule22_complete_neutral_paths_and_stems |
 
 ## Elements and attributes
 
@@ -94,9 +109,9 @@ elements. A default namespace does not put unqualified attributes in that URI.
 | 39 | O:1228 | Refuse Word moveTo, moveFromRangeStart, moveFromRangeEnd, moveToRangeStart, moveToRangeEnd, customXmlInsRangeStart, customXmlDelRangeStart | `forbidden_element` | word |
 | 40 | O:1229–1240 | Flatten ins/fldSimple, clearing wrapper attributes; refuse empty simple-field result | `forbidden_element` | word |
 | 41 | O:1242–1268,924–1013 | Remove cell formulas after validating cached scalar/shared/array results; refuse missing/unsupported cache, shared anchors or array dependencies | `formula_element` rejects all formula elements, including orphan formulas | sheet, formula |
-| 42 | O:802–813,1269–1279 | Remove definedName unconditionally; formula-bearing dataValidation/cfRule in S/X14; formula detector includes f, formula, formula1, formula2, calculatedColumnFormula, totalsRowFormula, XM f, and formula/non-number cfvo | `forbidden_element`, `formula_element` | sheet, formula |
-| 43 | O:1281–1296 | extLst retains only DSP dataModelExt with DSP URI, P14 sectionLst, X14 dataValidations/conditionalFormattings; remove other extension children/empty ext | `element_reasons` checks namespace/local/URI, not just local name | formula, visibility |
-| 44 | O:1298–1306 | Remove empty X14 conditionalFormatting | `element_reasons` | formula |
+| 42 | O:802–813,1269–1279 | Remove definedName unconditionally; formula-bearing dataValidation/cfRule in S/X14; formula detector includes f, formula, formula1, formula2, calculatedColumnFormula, totalsRowFormula, XM f, and formula/non-number cfvo | `forbidden_element`, `formula_element`; cfvo val must full-match ASCII numeric lexical characters and parse to a finite number, without whitespace/underscores/Unicode digits | sheet, formula, rule42_numeric_cfvo_lexical_form |
+| 43 | O:1281–1296 | extLst retains only DSP dataModelExt with DSP URI, P14 sectionLst, X14 dataValidations/conditionalFormattings; remove childless extension children and childless extLst in every namespace | `element_reasons` checks namespace/local/URI and actual child count independently of wrapper namespace | formula, visibility, rule43_empty_extension_child_in_other_namespace |
+| 44 | O:1298–1306 | Remove X14 conditionalFormatting without a direct X14 cfRule child, including sqref-only content | `element_reasons` checks direct child expanded name | formula, rule44_requires_direct_x14_rule_child |
 | 45 | O:1307–1314 | Remove empty S/P ext/extLst | `element_reasons` | formula |
 | 46 | O:1317–1330 | Remove empty S/X14 dataValidations, conditionalFormatting, conditionalFormattings, definedNames; recompute dataValidations count | `element_reasons` | formula |
 | 47 | O:1335–1350 | Remove empty P/XDR macro/textlink; refuse nonempty actions | `element_reasons` rejects either attribute, empty or populated | attrs |
@@ -108,13 +123,13 @@ elements. A default namespace does not put unqualified attributes in that URI.
 | 53 | G:275–291 | Refuse any chartex/chartEx namespace, including alternate Choice Requires | `element_reasons`; MC wrapper also forbidden | flat |
 | 54 | G:384–394 | Refuse filtered* / categoryFilterExceptions / categoryFilterException in Microsoft drawing chart namespaces | `element_reasons` | visibility |
 | 55 | G:404–407 | Refuse multiLvlStrRef | `forbidden_element` | flat |
-| 56 | G:408–424 | Chart must plot visible cells only; missing/false/invalid plotVisOnly refused | `element_reasons` on chart content (reference-only chart r:id is not chart content) | visibility |
+| 56 | G:408–424 | Chart must plot visible cells only; first plotVisOnly must exist and have absent/1/true val | `element_reasons` checks the first direct setting; only a childless, textless chart with exactly one R id attribute is reference-only | visibility, rule56_visibility_uses_first_setting_and_content |
 | 57 | G:426–473 | Convert strRef/numRef to strLit/numLit or series text v; clear source attributes/children; refuse missing/ambiguous cache | `forbidden_element` rejects original reference wrappers even without f | flat |
 | 58 | G:479–482 | Remove chart f, externalData, pivotSource, pivotFmts, printSettings, headerFooter, protection, userShapes, extLst | `forbidden_element` | chart, flat |
 | 59 | G:94–220 | Remove undrawn textual DGM pt and all cxn touching its ID (src/dest/parTrans/sibTrans); refuse dangling IDs, inconsistent cache text and hidden presAssocID semantics | `check_models` resolves drawing cache within owning graph, checks visible mapping/text and dangling connections | models |
 | 60 | G:232–242 | Remove DGM title, desc, catLst, sampData, styleData, clrData recursively | `element_reasons` | flat |
 | 61 | G:245–247 | Remove empty DGM shape R blip attribute | `element_reasons` | models |
-| 62 | G:248–259,675–684 | Neutralize DGM definition uniqueId and references loTypeId/qsTypeId/csTypeId/presId to urn:vectoraiz:diagram:N | `element_reasons` | models |
+| 62 | G:248–259,675–684 | Neutralize DGM definition uniqueId and references loTypeId/qsTypeId/csTypeId/presId to urn:vectoraiz:diagram:N | `element_reasons` full-matches `urn:vectoraiz:diagram:(?:0\|[1-9][0-9]*)`, including canonical ASCII integer syntax | models, rule62_complete_numeric_diagram_urns |
 | 63 | O:202,317,343; O:351–435 | Refuse DTD/entities/PI; discard comments during parsing/serialization | XML preflight, comment/PI preserving TreeBuilder, `check_file` | serial |
 | 64 | O:82–89,2257–2263,2999–3019 | Removals, staging chart source annotations and report remain outside delivered ZIP | Known carrier checks cover their XML/part forms; arbitrary text matching private input cannot be inferred from output alone | See provenance limit |
 

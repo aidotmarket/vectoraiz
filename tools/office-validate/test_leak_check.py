@@ -317,6 +317,86 @@ class LeakCheckTests(unittest.TestCase):
             types = f'<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Override PartName="/{target}" ContentType="application/xml"/></Types>'
             self.assertFalse(self.check({"[Content_Types].xml": types})["ok"])
 
+    def test_rule22_complete_neutral_paths_and_stems(self):
+        chart = '<chartSpace xmlns="http://schemas.openxmlformats.org/drawingml/2006/chart"/>'
+        for name in ["word/charts/PrivateClient/part-000001.xml",
+                     "xl/charts/part-000001.xml", "word/charts/layout-000001.xml",
+                     "xl/worksheets/PrivateClient/part-000001.xml",
+                     "xl/tables/PrivateClient/part-000001.xml",
+                     "xl/drawings/PrivateClient/part-000001.xml",
+                     "xl/chartsheets/PrivateClient/part-000001.xml",
+                     "ppt/slides/PrivateClient/part-000001.xml",
+                     "ppt/slideLayouts/PrivateClient/part-000001.xml",
+                     "ppt/slideMasters/PrivateClient/part-000001.xml",
+                     "ppt/notesSlides/PrivateClient/part-000001.xml",
+                     "ppt/notesMasters/PrivateClient/part-000001.xml",
+                     "ppt/handoutMasters/PrivateClient/part-000001.xml",
+                     "word/theme/PrivateClient/part-000001.xml",
+                     "word/headerPrivate/header-000001.xml",
+                     "word/footerPrivate/footer-000001.xml"]:
+            with self.subTest(name=name):
+                result = self.check({name: chart})
+                self.assertFalse(result["ok"])
+                self.assertTrue(any("neutral naming" in v["reason"] for v in result["violations"]))
+        self.assertTrue(self.check({"word/charts/part-000001.xml": chart})["ok"])
+        diagram = '<layoutDef xmlns="http://schemas.openxmlformats.org/drawingml/2006/diagram"/>'
+        for name in ["word/diagrams/PrivateClient/layout-000001.xml",
+                     "word/diagrams/part-000001.xml"]:
+            self.assertFalse(self.check({name: diagram})["ok"])
+        self.assertTrue(self.check({"word/diagrams/layout-000001.xml": diagram})["ok"])
+        # Directory validation also applies to binaries.
+        png = b"\x89PNG\r\n\x1a\n" + b"\0\0\0\0IEND\0\0\0\0"
+        self.assertTrue(self.check({"word/media/part-000001.png": png})["ok"])
+        self.assertFalse(self.check({"word/media/PrivateClient/part-000001.png": png})["ok"])
+
+    def test_rule62_complete_numeric_diagram_urns(self):
+        ns = "http://schemas.openxmlformats.org/drawingml/2006/diagram"
+        for attr in ["uniqueId", "loTypeId", "qsTypeId", "csTypeId", "presId"]:
+            for suffix in ["PrivateClient", "1PrivateClient", "1:PrivateClient", "01", "+1", "-1", "١", "1\n", ""]:
+                with self.subTest(attr=attr, suffix=suffix):
+                    result = self.check({"word/diagrams/layout-000001.xml":
+                        f'<layoutDef xmlns="{ns}" {attr}="urn:vectoraiz:diagram:{suffix}"/>'})
+                    self.assertIn("source SmartArt definition identifier", [v["reason"] for v in result["violations"]])
+            for suffix in ["0", "1", "123456"]:
+                self.assertTrue(self.check({"word/diagrams/layout-000001.xml":
+                    f'<layoutDef xmlns="{ns}" {attr}="urn:vectoraiz:diagram:{suffix}"/>'})["ok"])
+
+    def test_rule44_requires_direct_x14_rule_child(self):
+        ns = "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+        xm = "http://schemas.microsoft.com/office/excel/2006/main"
+        for body in [f'<xm:sqref xmlns:xm="{xm}">A1</xm:sqref>',
+                     '<cfRule xmlns="urn:private"/>', '<wrapper><cfRule/></wrapper>']:
+            result = self.check({"custom/data.xml": f'<conditionalFormatting xmlns="{ns}">{body}</conditionalFormatting>'})
+            self.assertIn("conditional formatting without X14 cfRule", [v["reason"] for v in result["violations"]])
+        self.assertTrue(self.check({"custom/data.xml": f'<conditionalFormatting xmlns="{ns}"><cfRule/></conditionalFormatting>'})["ok"])
+
+    def test_rule42_numeric_cfvo_lexical_form(self):
+        for ns in ["http://schemas.openxmlformats.org/spreadsheetml/2006/main",
+                   "http://purl.oclc.org/ooxml/spreadsheetml/main",
+                   "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"]:
+            for value in [" 1", "1 ", "1_000", "١", "NaN", "inf", "1e999", "1private", ""]:
+                with self.subTest(ns=ns, value=value):
+                    self.assertFalse(self.check({"custom/data.xml": f'<cfvo xmlns="{ns}" type="num" val="{value}"/>'})["ok"])
+            for value in ["+1", "-.5", "1E-3", "3.5"]:
+                self.assertTrue(self.check({"custom/data.xml": f'<cfvo xmlns="{ns}" type="num" val="{value}"/>'})["ok"])
+
+    def test_rule43_empty_extension_child_in_other_namespace(self):
+        # The source prunes childless ext children regardless of extLst namespace.
+        for xml, reason in [
+                ('<extLst xmlns="urn:other"><ext uri="PrivateClient"/></extLst>', "empty extension child"),
+                ('<extLst xmlns="urn:other"/>', "empty extension wrapper")]:
+            result = self.check({"custom/data.xml": xml})
+            self.assertIn(reason, [v["reason"] for v in result["violations"]])
+
+    def test_rule56_visibility_uses_first_setting_and_content(self):
+        ns = "http://schemas.openxmlformats.org/drawingml/2006/chart"
+        rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        for xml in [f'<chart xmlns="{ns}"><plotVisOnly val="0"/><plotVisOnly val="1"/></chart>',
+                    f'<chart xmlns="{ns}" xmlns:r="{rel}" r:private="secret"/>',
+                    f'<chart xmlns="{ns}" xmlns:r="{rel}" r:id="r1"><plotVisOnly val="0"/></chart>']:
+            result = self.check({"custom/data.xml": xml})
+            self.assertIn("missing/unsafe chart visibility setting", [v["reason"] for v in result["violations"]])
+
     def test_malformed_xml_does_not_hide_other_violations(self):
         result = self.check({"word/document.xml": "<broken>", "word/comments.xml": "<root/>"})
         self.assertFalse(result["ok"])

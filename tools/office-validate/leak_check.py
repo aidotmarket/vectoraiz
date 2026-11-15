@@ -96,7 +96,7 @@ def expanded(tag):
     return tag[1:].split("}", 1) if tag.startswith("{") else ("", tag)
 
 
-def part_reasons(name):
+def part_reasons(name, package_root, tree=None):
     if (not name.isascii() or any(ord(c) < 32 for c in name)
             or any(c in name for c in "\\:\0?#%") or name.startswith("/")
             or any(c in {"", ".", ".."} for c in name.split("/"))):
@@ -108,7 +108,32 @@ def part_reasons(name):
                "ppt/notesMasters/", "ppt/handoutMasters/")
     if (name.startswith(dynamic) or any(s in name for s in ("/media/", "/theme/", "/charts/", "/diagrams/"))
             or name.startswith(("word/header", "word/footer"))):
-        if not re.fullmatch(r"(?:part|header|footer|data|layout|quickStyle|colors|drawing|style)-[0-9]{6}\.[a-z0-9]+", name.rsplit("/", 1)[-1]):
+        directory, filename = name.rsplit("/", 1)
+        stem = "part"
+        if "/media/" in name:
+            expected_directory = name.split("/", 1)[0] + "/media"
+        elif "/charts/" in name or "/diagrams/" in name or name.startswith("xl/chartsheets/"):
+            family = "diagrams" if "/diagrams/" in name else "chartsheets" if name.startswith("xl/chartsheets/") else "charts"
+            expected_directory = f"{package_root}/{family}"
+        elif "/theme/" in name:
+            expected_directory = name.split("/", 1)[0] + "/theme"
+        elif name.startswith(("word/header", "word/footer")):
+            expected_directory = "word"
+        else:
+            expected_directory = next(p.rstrip("/") for p in dynamic if name.startswith(p))
+        if "/diagrams/" in name:
+            stem = {"dataModel": "data", "layoutDef": "layout", "styleDef": "quickStyle",
+                    "colorsDef": "colors", "drawing": "drawing"}.get(
+                        expanded(tree.tag)[1] if tree is not None else "", "INVALID")
+        elif "/charts/" in name and tree is not None:
+            stem = {"chartStyle": "style", "colorStyle": "colors"}.get(expanded(tree.tag)[1], "part")
+        elif name.startswith("word/header"):
+            stem = "header"
+        elif name.startswith("word/footer"):
+            stem = "footer"
+        if directory != expected_directory:
+            yield "source part directory survived neutral naming"
+        if not re.fullmatch(re.escape(stem) + r"-[0-9]{6}\.[a-z0-9]+", filename):
             yield "source part name survived neutral naming"
 
 
@@ -149,7 +174,8 @@ def formula_element(element):
         if local == "cfvo":
             value = element.get("val")
             try:
-                numeric = value is None or math.isfinite(float(value))
+                numeric = value is None or (re.fullmatch(r"[0-9+.eE-]+", value) is not None
+                                            and math.isfinite(float(value)))
             except ValueError:
                 numeric = False
             return element.get("type") == "formula" or not numeric
@@ -173,12 +199,19 @@ def element_reasons(element, parent):
     if (ns.startswith("http://schemas.microsoft.com/office/drawing/") and ns.endswith("/chart")
             and (local.startswith("filtered") or local in {"categoryFilterExceptions", "categoryFilterException"})):
         yield "filtered chart content"
-    if ns in CHART and local == "chart" and not any(expanded(k)[0] in R for k in element.attrib) and not any(
-            expanded(c.tag) == [ns, "plotVisOnly"] and c.get("val") in {None, "1", "true"}
-            for c in element if isinstance(c.tag, str)):
-        yield "missing/unsafe chart visibility setting"
+    if ns in CHART and local == "chart":
+        reference_only = (not len(element) and not (element.text or "").strip()
+                          and len(element.attrib) == 1
+                          and any(k == f"{{{r}}}id" for r in R for k in element.attrib))
+        setting = next((c for c in element if c.tag == f"{{{ns}}}plotVisOnly"), None)
+        if not reference_only and (setting is None or setting.get("val") not in {None, "1", "true"}):
+            yield "missing/unsafe chart visibility setting"
     if local == "extLst":
+        if not len(element):
+            yield "empty extension wrapper"
         for ext in element:
+            if not len(ext):
+                yield "empty extension child"
             for child in ext:
                 cns, clocal = expanded(child.tag)
                 if not ((cns == DSP and clocal == "dataModelExt" and ext.get("uri") == DSP)
@@ -187,6 +220,9 @@ def element_reasons(element, parent):
                     yield "unsupported extension content"
     if ns in SHEET | PRESENTATION and local in {"ext", "extLst"} and not len(element):
         yield "empty extension wrapper"
+    if ns == X14 and local == "conditionalFormatting" and not any(
+            child.tag == f"{{{X14}}}cfRule" for child in element):
+        yield "conditional formatting without X14 cfRule"
     if ns in SHEET | {X14} and local in {"dataValidations", "conditionalFormatting", "conditionalFormattings", "definedNames"}:
         if not len(element):
             yield "empty formula-rule wrapper"
@@ -205,7 +241,7 @@ def element_reasons(element, parent):
                 or ns in SHEET and local == "hyperlink" and not ans and attr == "location"
                 or ns == DGM and local == "shape" and ans in R and attr == "blip" and not value):
             yield f"forbidden attribute {key}"
-        if ns == DGM and attr in {"uniqueId", "loTypeId", "qsTypeId", "csTypeId", "presId"} and not value.startswith("urn:vectoraiz:diagram:"):
+        if ns == DGM and attr in {"uniqueId", "loTypeId", "qsTypeId", "csTypeId", "presId"} and not re.fullmatch(r"urn:vectoraiz:diagram:(?:0|[1-9][0-9]*)", value):
             yield "source SmartArt definition identifier"
 
 
@@ -405,8 +441,6 @@ def check_file(path, root):
                 data = package.read(member)
                 if forbidden_part(name):
                     result["violations"].append({"part": name, "reason": "forbidden part path"})
-                for reason in part_reasons(name):
-                    result["violations"].append({"part": name, "reason": reason})
                 if data.startswith((b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", b"PK\x03\x04")):
                     result["violations"].append({"part": name, "reason": "embedded/legacy binary"})
                 if "/media/" in name.lower():
@@ -444,6 +478,10 @@ def check_file(path, root):
                 except Exception as error:
                     result["violations"].append({"part": name,
                                                  "reason": f"{type(error).__name__}: {error}"})
+            package_root = {".docx": "word", ".xlsx": "xl", ".pptx": "ppt"}[path.suffix.lower()]
+            for name in names:
+                for reason in part_reasons(name, package_root, trees.get(name)):
+                    result["violations"].append({"part": name, "reason": reason})
             check_relationships(trees, names, result["violations"])
             check_models(trees, result["violations"])
         result["ok"] = not result["violations"]
