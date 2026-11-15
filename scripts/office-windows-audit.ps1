@@ -1,13 +1,31 @@
 param([ValidateSet('setup','cursor','capture','host','restore')][string]$Mode,
       [string]$State = '', [long]$After = 0, [string]$Nonce = '', [string]$Target = 'mmc.exe')
 $ErrorActionPreference = 'Stop'
+
+function Convert-AuditBackupReadback([string[]]$Csv) {
+    # /get /r has only six columns. /backup adds numeric Setting Value.
+    # Use documented column positions: headings and display values can localize.
+    $rows = @($Csv | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ConvertFrom-Csv)
+    $matches = @($rows | Where-Object {
+        $fields = @($_.PSObject.Properties)
+        $fields.Count -eq 7 -and $fields[3].Value.Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
+    })
+    if ($matches.Count -ne 1) { throw 'auditpol backup readback must contain one Process Creation subcategory' }
+    $fields = @($matches[0].PSObject.Properties)
+    switch ($fields[6].Value.Trim()) {
+        '1' { 'success' }
+        '3' { 'success-and-failure' }
+        default { throw 'Success auditing not verified by numeric backup readback' }
+    }
+}
+
 try {
     switch ($Mode) {
         setup {
             $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
             $principal = [Security.Principal.WindowsPrincipal]::new($identity)
             if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-                @{success=$false; elevation_required=$true; reason='Security 4688 audit setup requires elevated PowerShell'} | ConvertTo-Json -Compress
+                @{success=$false; elevation_required=$true; error='Security 4688 audit setup requires elevated PowerShell'; reason='Security 4688 audit setup requires elevated PowerShell'} | ConvertTo-Json -Compress
                 exit 0
             }
             if (-not $State -or (Test-Path $State) -or (Test-Path "$State.csv")) { throw 'fresh audit state path required' }
@@ -24,24 +42,20 @@ try {
             $saved | Export-Clixml -LiteralPath $State
             # Process Creation subcategory GUID avoids localized auditpol names.
             $output = & auditpol /set /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' /success:enable 2>&1
-            if ($LASTEXITCODE -ne 0) { throw "auditpol failed: $output" }
+            if ($LASTEXITCODE -ne 0) { throw 'auditpol set failed' }
             $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
             New-Item $key -Force | Out-Null
             New-ItemProperty $key -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -PropertyType DWord -Force | Out-Null
-            $policy = & auditpol /get /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' /r
-            if ($LASTEXITCODE -ne 0) { throw 'auditpol verification failed' }
-            $rows = @($policy | ConvertFrom-Csv)
-            if ($rows.Count -ne 1) { throw 'auditpol readback must contain one subcategory' }
-            # The numeric setting column is independent of the OS language:
-            # 1 = Success, 2 = Failure, 3 = Success and Failure.
-            $fields = @($rows[0].PSObject.Properties)
-            if ($fields.Count -lt 7) { throw 'auditpol numeric setting missing' }
-            $inclusion = switch ($fields[6].Value.Trim()) {
-                '1' { 'success' }
-                '3' { 'success-and-failure' }
-                default { throw 'Success auditing not verified by numeric readback' }
+            $verification = "$State.$([guid]::NewGuid().ToString('N')).verify.csv"
+            if (Test-Path -LiteralPath $verification) { throw 'fresh audit verification path required' }
+            try {
+                & auditpol /backup /file:"$verification" | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw 'auditpol verification backup failed' }
+                $inclusion = Convert-AuditBackupReadback (Get-Content -LiteralPath $verification)
+            } finally {
+                if (Test-Path -LiteralPath $verification) { Remove-Item -LiteralPath $verification }
             }
-            @{success=$true; inclusion_setting=$inclusion; policy=@($policy); command_line_auditing=(Get-ItemProperty $key).ProcessCreationIncludeCmdLine_Enabled} | ConvertTo-Json -Compress
+            @{success=$true; inclusion_setting=$inclusion; command_line_auditing=(Get-ItemProperty $key).ProcessCreationIncludeCmdLine_Enabled} | ConvertTo-Json -Compress
         }
         restore {
             if (-not $State -or -not (Test-Path $State)) { throw 'saved audit state required' }

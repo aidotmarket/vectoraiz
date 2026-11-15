@@ -795,11 +795,12 @@ def evaluate(spec, control, confined, evidence_rows=()):
         if confined.get("shell_listener", {}).get("get_received") or confined.get("process_capture", {}).get("nonce_record_ids"):
             return Status.FAIL, "confined link opened: nonce listener or Security 4688 match"
         cp, np = control.get("process_capture", {}), confined.get("process_capture", {})
+        detail = capture_error_detail(cp, np)
         http = spec["request"].get("target_kind") != "file"
         if not positive.get("success") or (http and not control.get("shell_listener", {}).get("get_received")):
-            return Status.UNRUN, "link positive control did not succeed"
+            return Status.UNRUN, "link positive control did not succeed" + detail
         if not contiguous_capture(cp, np) or not cp.get("nonce_record_ids"):
-            return Status.UNRUN, "same Security 4688 capture lacks successful control nonce record or complete confined window"
+            return Status.UNRUN, "same Security 4688 capture lacks successful control nonce record or complete confined window" + detail
         if confined.get("windows_11_client") is not True:
             return Status.UNRUN, "server runner only; Windows 11 interactive client requirement NOT MET"
         return Status.PASS, "no confined nonce GET or process start; positive control in same 4688 capture"
@@ -1020,6 +1021,45 @@ def public_result(result, format_row=False):
     return result
 
 
+def public_audit_error(result):
+    """Only known non-sensitive exception messages may leave private audit logs.
+
+    An arbitrary PowerShell exception can embed a command, event XML, account
+    or path. Redacting patterns alone cannot guarantee those stay private.
+    """
+    message = result.get("error", "")
+    safe = {
+        "Security 4688 audit setup requires elevated PowerShell",
+        "fresh audit state path required", "fresh audit verification path required",
+        "audit policy backup failed; no settings changed", "auditpol set failed",
+        "auditpol verification backup failed",
+        "auditpol backup readback must contain one Process Creation subcategory",
+        "Success auditing not verified by numeric backup readback",
+        "Access is denied", "Access is denied.", "Requested registry access is not allowed.",
+        "Attempted to perform an unauthorized operation.",
+        "audit command failed; full output retained privately",
+    }
+    return message[:300] if isinstance(message, str) and message in safe else (
+        "<redacted exception message>" if message else "exception message unavailable")
+
+
+def failed_audit_preconditions(*conditions):
+    failures = [(name, public_audit_error(result))
+                for name, result in conditions if not result.get("success")]
+    if not failures:
+        return {}
+    # List every failed stage before bounded messages, so an earlier failure
+    # cannot truncate the name of a later failed precondition.
+    stages = ", ".join(name for name, _ in failures)
+    messages = "; ".join(dict.fromkeys(message for _, message in failures))
+    return {"error": (stages + ": " + messages)[:300]}
+
+
+def capture_error_detail(*captures):
+    errors = list(dict.fromkeys(c["error"] for c in captures if c.get("error")))
+    return "; " + "; ".join(errors)[:300] if errors else ""
+
+
 def audit_call(mode, folder, **arguments):
     argv = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
             AUDIT_SCRIPT, "-Mode", mode]
@@ -1047,7 +1087,7 @@ def audit_call(mode, folder, **arguments):
             result["nonce_record_ids"] = ids
         return result
     except (ValueError, OSError):
-        return {"success": False, "reason": "audit command failed; full output retained privately"}
+        return {"success": False, "error": "audit command failed; full output retained privately"}
 
 
 def contiguous_capture(control, confined):
@@ -1093,7 +1133,7 @@ def unix_exit(diagnostic, label):
             return Status.FAIL, scope + "a connection reached the worker-bound listener"
         processes = diagnostic.get("vectoraiz_capture", {})
         if processes.get("running_before") is not False or not processes.get("success") or processes.get("filtered_query_success") is not True or processes.get("target_record_ids") or not isinstance(processes.get("after"), int) or not isinstance(processes.get("through"), int) or processes["through"] < processes["after"]:
-            return Status.UNRUN, scope + "vectorAIz process absence during listener window not established"
+            return Status.UNRUN, scope + "vectorAIz process absence during listener window not established" + capture_error_detail(processes)
         if processes.get("scope") != "entire harness run" or observation.get("covers_entire_run") is not True:
             return Status.UNRUN, scope + "run-wide process capture recorded; worker listener does not cover the entire run"
         if (observation.get("status") == Status.PASS and listener.get("stop_observed") is True
@@ -1135,6 +1175,39 @@ def unix_exit(diagnostic, label):
     if negative.get("explicit_denial"):
         return Status.PASS, "calibrated LPAC route refused operation outside scratch via " + route
     return Status.UNRUN, "literal refusal unavailable or connect prerequisite failed"
+
+
+def unix_call_diagnostics(result):
+    """Annotate the harness's private ABI without guessing at a repaired ABI.
+
+    probes.rs uses repr(C) on Windows x64, with explicit offset assertions.
+    Keep source layout sizes distinct from the actual lengths passed to AFD.
+    No address bytes, paths, protocol records or command lines are published.
+    """
+    probe = result.get("response", {}).get("probe", {})
+    probe["source_layout"] = {
+        "source": "vz-office-windows-harness probes.rs; Windows x64 repr(C)",
+        "sockaddr_un_bytes": 110, "sun_path_bytes": 108,
+        "afd_bind_struct_bytes": 116, "afd_bind_address_offset": 4,
+        "afd_connect_struct_bytes": 136, "afd_connect_address_offset": 24,
+        "filesystem_encoding": "UTF-8 with trailing NUL; full or short sockaddr",
+        "abstract_encoding": "leading NUL then UTF-8 name; full or short sockaddr",
+        "interpretation": "source layout only; same-route positive control still required",
+    }
+    def annotate(value):
+        if isinstance(value, dict):
+            api = value.get("api")
+            offset = {"NtDeviceIoControlFile(AFD_BIND)": 4,
+                      "NtDeviceIoControlFile(AFD_CONNECT)": 24}.get(api)
+            if offset is not None and isinstance(value.get("input_bytes"), int):
+                value["address_bytes"] = value["input_bytes"] - offset
+                value["address_offset"] = offset
+            for child in value.values():
+                annotate(child)
+        elif isinstance(value, list):
+            for child in value:
+                annotate(child)
+    annotate(probe)
 
 
 def joined_namespace_status(namespaces):
@@ -1676,6 +1749,8 @@ def run_suite(args):
         manifest["process_auditing"] = {"success": audit_setup.get("success"),
             "inclusion_setting": audit_setup.get("inclusion_setting"),
             "command_line_auditing": audit_setup.get("command_line_auditing")}
+        if not audit_setup.get("success"):
+            manifest["process_auditing"]["error"] = public_audit_error(audit_setup)
         manifest["host_features"] = {key: host.get(key) for key in ("success", "product_type", "build", "edition", "interactive_session", "features", "features_available", "utility_vms")}
         fixtures = {}
         if any("format" in item for item in specs):
@@ -1808,6 +1883,8 @@ def run_suite(args):
                                             request_path, result_path, scratch, attack, *grants], folder / (mode + ".log"))
                             result = json.loads(result_path.read_text(encoding="utf-8")) if result_path.exists() else {"status": Status.FAIL, "reason": "launcher produced no result"}
                             result["call_started_utc"] = call_started_utc
+                            if probe.get("op") == "unix-outcomes":
+                                unix_call_diagnostics(result)
                             result["launcher_exit"] = code
                             if code != 0:
                                 result["status"] = Status.FAIL
@@ -1823,6 +1900,11 @@ def run_suite(args):
                                 result["process_capture"]["post_call_observation_seconds"] = time.monotonic() - observation_started
                                 result["process_capture"]["capture_id"] = capture_cursor.get("record_id")
                                 result["process_capture"]["success"] = bool(audit_setup.get("success") and audit_setup.get("command_line_auditing") == 1 and audit_setup.get("inclusion_setting") in ("success", "success-and-failure") and capture_cursor.get("success") and window_cursor.get("success") and captured.get("success"))
+                                result["process_capture"].update(failed_audit_preconditions(
+                                    ("audit setup", audit_setup),
+                                    ("audit setup command-line readback", {"success": audit_setup.get("command_line_auditing") == 1}),
+                                    ("audit setup inclusion readback", {"success": audit_setup.get("inclusion_setting") in ("success", "success-and-failure")}),
+                                    ("cursor", capture_cursor), ("window cursor", window_cursor), ("capture", captured)))
                                 result["target_was_running"] = target_before.get("target_running")
                                 result["windows_11_client"] = client
                             results[mode] = result
@@ -1888,6 +1970,8 @@ def run_suite(args):
                     **{key: captured.get(key) for key in ("after", "through", "target_record_ids", "filtered_query_success")},
                     "success": bool(audit_setup.get("success") and run_cursor.get("success") and captured.get("success")),
                     "running_before": run_host.get("vectoraiz_running"), "scope": "entire harness run"}
+                diagnostic["vectoraiz_capture"].update(failed_audit_preconditions(
+                    ("audit setup", audit_setup), ("cursor", run_cursor), ("capture", captured)))
                 row = next((r for r in manifest["rows"] if r["id"] == "unix-2c" and r["id"] in selected), None)
                 if row is not None and row["status"] != Status.FAIL and not row.get("cleanup_error") and not audit_setup.get("elevation_required"):
                     row["status"], row["reason"] = unix_exit(diagnostic, "2c")
@@ -2443,7 +2527,125 @@ def assembly_self_test():
     print("assembly self-test passed: all row/diagnostic/namespace/launch statuses; unknown statuses rejected")
 
 
+def audit_readback_self_test():
+    """Run literal backup CSV fixtures through the actual PowerShell parser."""
+    powershell = os.environ.get("OFFICE_TEST_POWERSHELL") or shutil.which("powershell.exe") or shutil.which("pwsh")
+    if not powershell:
+        print("audit readback parser tests skipped: PowerShell unavailable")
+        return
+    # Literal auditpol /backup CSV format; fixture identities are non-sensitive.
+    # /get /r deliberately lacks Setting Value and must never be accepted.
+    success = """Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value
+TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Success,,1"""
+    both = """Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value
+TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Success and Failure,,3"""
+    disabled = """Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value
+TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},No Auditing,,0"""
+    failure = """Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value
+TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Failure,,2"""
+    cases = [{"csv": fixture + ending, "expected": expected}
+             for fixture, expected in ((success, "success"), (both, "success-and-failure"),
+                                       (disabled, None), (failure, None))
+             for ending in ("", "\r\n\r\n")]
+    cases.extend([
+        {"csv": "\n\n" + success + "\n \n", "expected": "success"},
+        {"csv": success.replace("Process Creation", '"Process, Creation"'), "expected": "success"},
+        {"csv": success.replace("Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value",
+                                "Equipo,Destino,Subcategoria,GUID,Inclusion,Exclusion,Valor").replace("Success,,1", "Exito,,1"),
+         "expected": "success"},
+        {"csv": success + "\nTEST-PC,System,Other,{00000000-0000-0000-0000-000000000000},Failure,,2", "expected": "success"},
+        {"csv": success + "\n" + success.splitlines()[1], "expected": None},
+        {"csv": success.replace("Setting Value", "").replace(",Success,,1", ",Success,,"), "expected": None},
+        {"csv": success.replace(",Setting Value", "").replace(",Success,,1", ",Success,"), "expected": None},
+        {"csv": success.replace("0CCE922B", "00000000"), "expected": None},
+        {"csv": success.replace(",Success,,1", ",Success,,unknown"), "expected": None},
+        {"csv": "\n\n", "expected": None},
+    ])
+    with tempfile.TemporaryDirectory(prefix="audit-parser-self-test-",
+                                     dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
+        folder = outside(Path(temporary))
+        fixtures = folder / "cases.json"
+        fixtures.write_text(json.dumps(cases), encoding="utf-8")
+        test = folder / "parser-tests.ps1"
+        test.write_text('''param($Audit, $Cases)
+. $Audit
+$cases = @(Get-Content -LiteralPath $Cases -Raw | ConvertFrom-Json)
+foreach ($case in $cases) {
+    $actual = $null
+    try { $actual = Convert-AuditBackupReadback ($case.csv -split "`r?`n") }
+    catch { if ($null -ne $case.expected) { throw } }
+    if ($actual -cne $case.expected) { throw 'audit CSV fixture result mismatch' }
+}
+Write-Output "audit readback parser tests passed: $($cases.Count) fixtures"
+''', encoding="utf-8")
+        log = folder / "parser-tests.log"
+        code = command([powershell, "-NoProfile", "-NonInteractive", "-File", test,
+                        str(AUDIT_SCRIPT), str(fixtures)], log)
+        output = log.read_text(encoding="utf-8-sig")
+        assert code == 0, output
+        print(output.strip())
+
+
+def audit_diagnostics_self_test():
+    from copy import deepcopy
+    safe = {"success": False, "error": "auditpol verification backup failed"}
+    assert public_audit_error(safe) == safe["error"]
+    for private in ('<Event><CommandLine>secret</CommandLine></Event>',
+                    r'Cannot access C:\Users\Private\audit.csv',
+                    'powershell.exe -Command secret', 'private-account', 'x' * 1000):
+        assert public_audit_error({"error": private}) == "<redacted exception message>"
+    good = {"success": True}
+    shell = next(spec for spec in plan() if spec["id"] == "shell")
+    control = {"status": Status.PASS, "response": {"probe": {"success": True}},
+               "shell_listener": {"get_received": True}, "process_capture": {
+                   "success": True, "filtered_query_success": True, "capture_id": 100,
+                   "after": 100, "through": 110, "nonce_record_ids": [101]}}
+    confined = {"status": Status.PASS, "response": {"probe": {}}, "windows_11_client": True,
+                "process_capture": {"success": True, "filtered_query_success": True,
+                    "capture_id": 100, "after": 110, "through": 120,
+                    "nonce_record_ids": [], "post_call_observation_seconds": 10}}
+    assert evaluate(shell, control, confined)[0] == Status.PASS
+    for stage in ("audit setup", "cursor", "window cursor", "capture"):
+        error = failed_audit_preconditions(*[(name, safe if name == stage else good)
+                                            for name in ("audit setup", "cursor", "window cursor", "capture")])
+        assert error == {"error": stage + ": " + safe["error"]}
+        validate = initial_manifest()
+        validate["process_auditing"] = error
+        validate_manifest(validate)
+        failed = deepcopy(control)
+        failed["process_capture"].update(success=False, **error)
+        status, reason = evaluate(shell, failed, confined)
+        assert status == Status.UNRUN and stage in reason
+        # Reproduce the run-wide absence evidence from the reported runs.
+        diagnostic = {"vectoraiz_capture": {"running_before": False, "success": False,
+            "filtered_query_success": True, "after": 100, "through": 120,
+            "target_record_ids": [], **error}}
+        status, reason = unix_exit(diagnostic, "2c")
+        assert status == Status.UNRUN and stage in reason
+    assert failed_audit_preconditions(("capture", good)) == {}
+    assert len(failed_audit_preconditions(*[("capture", safe)] * 20)["error"]) <= 300
+    sample = {"response": {"probe": {"calibration": [{"result": {"operation": {
+        "api": "NtDeviceIoControlFile(AFD_BIND)", "input_bytes": 114,
+        "output_bytes": 0, "success": False, "literal_status_hex": "0xC000000D"}}}],
+        "control_direct": {"abstract_connect": {"operation": {
+            "api": "NtDeviceIoControlFile(AFD_CONNECT)", "input_bytes": 40}}}}}}
+    original = deepcopy(sample)
+    unix_call_diagnostics(sample)
+    probe = sample["response"]["probe"]
+    call = probe["calibration"][0]["result"]["operation"]
+    assert call["address_bytes"] == 110 and call["address_offset"] == 4
+    assert call["success"] is False and call["literal_status_hex"] == "0xC000000D"
+    assert probe["control_direct"]["abstract_connect"]["operation"]["address_bytes"] == 16
+    assert probe["source_layout"]["afd_bind_struct_bytes"] == 116
+    # Diagnostic metadata cannot change either exit or namespace verdicts.
+    for label in ("2a", "2b", "2c", "2d"):
+        assert unix_exit({"control": original}, label) == unix_exit({"control": sample}, label)
+    print("audit diagnostics tests passed: setup/cursor/window/capture failures; redaction; AF_UNIX layouts")
+
+
 def self_test():
+    audit_readback_self_test()
+    audit_diagnostics_self_test()
     external_directory_self_test()
     assembly_self_test()
     specs = plan()
