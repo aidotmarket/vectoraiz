@@ -2686,14 +2686,14 @@ def audit_diagnostics_self_test():
     probe["control_endpoint_comparison"] = {
         "diagnostic_only": True,
         "direct_bind": {"operation": {"api": "NtDeviceIoControlFile(AFD_BIND)",
-                        "input_bytes": 114, "ioctl_code": 0x12003,
-                        "io_information": 110, "success": True}},
-        "address_readback": {"returned_length": 110, "input_path_length": 12,
+                        "input_bytes": 87, "ioctl_code": 0x12003,
+                        "io_information": 83, "success": True}},
+        "address_readback": {"returned_length": 83, "input_path_length": 80,
                              "family_matches": True, "matched_offset": 0,
                              "class": "same-as-input"},
     }
     unix_call_diagnostics(sample)
-    assert probe["control_endpoint_comparison"]["direct_bind"]["operation"]["address_bytes"] == 110
+    assert probe["control_endpoint_comparison"]["direct_bind"]["operation"]["address_bytes"] == 83
     assert unix_namespace_status({"control": original}) == unix_namespace_status({"control": sample})
     call = probe["calibration"][0]["result"]["operation"]
     assert call["address_bytes"] == 110 and call["address_offset"] == 4

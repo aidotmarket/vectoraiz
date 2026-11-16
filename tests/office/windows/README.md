@@ -141,49 +141,50 @@ For that historical kit, compare SHA256SUMS and binaries against these values
 | vz-office-windows-launch.exe | `b747ab9f574927f7c61fb82fffc95c723831ee8b6e5b28095458d5e5c8fe6608` |
 | pdfium.dll | `a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f` |
 
-Fold 23 keeps the confined AF_UNIX measurement and all calibration requirements
-unchanged. The bind/connect IOCTLs and TLI field offsets match the referenced
-phnt definitions; that does not identify the cause of the failed unconfined
-filesystem bind on build 26200 (all 16 control variants failed, despite successful
-endpoint opens; the recorded filesystem path length was 84 bytes, and six
-abstract variants did bind successfully). The historical control calibration
-shows the following synchronous versus pended pattern for NtCreateFile endpoints:
+Fold 25 uses the filesystem sockaddr's used length for direct AFD binds and
+connects: `2 + path_len + 1` (family, path, terminating NUL). An 80-byte path
+therefore uses an 83-byte address and an 87-byte AFD_BIND input packet. The
+control and confined NtCreateFile routes and the Winsock-endpoint direct-bind
+comparison share `unix_encode`; abstract defaults retain the full 110-byte
+address (114-byte bind packet). Verdict and calibration requirements are unchanged.
 
-| Variant | Abstract | Filesystem |
-| --- | --- | --- |
-| Output buffer 0 | `0xC000000D` at submission | `0xC000000D` at submission |
-| Short address length | `0xC0000141` at submission | `0xC0000141` at submission |
-| Full 110-byte address, output 110 or more | Pends, completes `0x00000000` | Pends, completes `0xC000000D` |
+This is an inference pending CI and winmax confirmation. Fold-24 winmax readback
+(2026-11-16, build 26200) showed direct AFD_BIND on a Winsock socket with a full
+110-byte filesystem address pending then completing `0xC000000D`. Ordinary
+Winsock bind followed by AFD_GET_ADDRESS succeeded: returned length 83 for an
+80-byte path, family matched, offset 0, class `same-as-input`. This supports
+used-length encoding without path translation; readback alone does not prove
+what Winsock submitted or that the corrected direct bind will succeed.
 
-The next run is diagnostic narrowing, not a guaranteed root-cause determination.
-Its control-only `control_endpoint_comparison` keeps one full direct AFD bind on
-a fresh Winsock-created endpoint. Compare this with `calibration` (NtCreateFile
-endpoints, same packet). Success only on the Winsock endpoint would implicate
-endpoint creation. On another fresh socket, an ordinary Winsock bind is followed
-by direct `IOCTL_AFD_GET_ADDRESS` (`0x1202F`) readback. It publishes the returned
-length, integer `input_path_length`, boolean `family_matches` (the first two
-returned bytes equal AF_UNIX), and `matched_offset` (0, 4, or null for no match),
-alongside operation status and address class (`same-as-input`, `\\??\\-prefixed`,
-`wide-char`, or `other`). No address bytes or paths are published. The classifier
-checks sockaddr offsets 0 then 4, accepting the full input path or a trimmed
-NUL-terminated path with an all-zero tail, recognizing an NT prefix or the input
-encoded as UTF-16LE, and otherwise reporting `other`. The matched offset is the
-first offset with a recognized class.
-Readback may retain the caller's form rather than any translated form, so it may
-not distinguish translation from another Winsock prerequisite. The repeated
-ordinary-bind result and short direct-bind attempt are omitted. The comparison
-runs after the outcomes loop, and a comparison error is recorded without
-propagating a recoverable error out of the control probe. Readback errors stay
-inside `address_readback`, preserving the completed `direct_bind`. Errors use
-fixed labels: `path_encoding`, `event_creation`, `output_length`, or `other`.
+Historical calibration on NtCreateFile endpoints found output length zero failed
+synchronously with `0xC000000D`; `short` variants failed synchronously with
+`0xC0000141`; full addresses with output 110 or more pended, then succeeded for
+abstract names but failed with `0xC000000D` for filesystem paths. Source fixtures
+show the historical filesystem `short` already included family + path + NUL
+(83 bytes for an 80-byte path), identical to the new filesystem default. It was
+**not** shorter than that used length. The abstract `short` is family + namespace
+NUL + name (83 bytes for an 80-byte name), versus its 110-byte default. Preserve
+these earlier failures as counterevidence to the inference, not as proof of a
+missing NUL; the existing `short` calibration remains available unchanged.
 
-Literal IOCTL code, completion information and lengths are retained without
-addresses. These diagnostics never select a confined route or qualify a row.
-The compile-time layout assertions and Windows Rust fixtures check sockaddr
-size, bind/connect offsets, encoder output (full, short and NT-prefixed), zero
-termination, and readback classification. Actual control success and
-unix-2a/2b/2d outcomes, and 2c's connect dependency, still require a winmax rerun.
-No repaired ABI or successful control is claimed here.
+The control-only `control_endpoint_comparison` now expects direct-bind success
+using the shared filesystem encoder on a fresh Winsock socket. It records
+`direct_bind.address_bytes` and operation input/output lengths. Ordinary Winsock
+bind on another socket is followed by `IOCTL_AFD_GET_ADDRESS` (`0x1202F`). Readback
+publishes length, integer `input_path_length`, boolean `family_matches`,
+`matched_offset` (0, 4, or null), and class (`same-as-input`, `\\??\\-prefixed`,
+`wide-char`, or `other`), without address bytes or paths. The classifier checks
+sockaddr offsets 0 then 4, accepts the full input path or a trimmed NUL-terminated
+path with an all-zero tail, and recognizes NT prefixes and UTF-16LE encoding.
+The comparison runs after outcomes; recoverable errors use fixed labels
+(`path_encoding`, `event_creation`, `output_length`, `other`). Readback errors
+preserve the completed `direct_bind`.
+
+These diagnostics never select a confined route or qualify a row. Windows Rust
+fixtures name filesystem/abstract default and historical short lengths, NT-prefix
+lengths, packet offsets, zero termination, and readback classification. Actual
+control success, unix-2a/2b/2d outcomes and 2c's connect dependency require runtime
+evidence; a Windows Server CI result does not qualify the Windows 11 client.
 
 Cleanup and undo: on normal completion or Ctrl+C, the runner closes its local
 HTTP/AF_UNIX listeners, removes scratch/sentinel directories, and restores the

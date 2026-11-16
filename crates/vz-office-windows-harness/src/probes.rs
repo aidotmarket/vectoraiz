@@ -1204,7 +1204,13 @@ fn unix_encode(path: &[u8], abstract_name: bool, variant: &Value) -> Result<(Uni
         path.to_vec()
     };
     let (address, _) = unix_address(&path, abstract_name)?;
-    let mut length = size_of::<UnixAddress>();
+    // Filesystem sockaddr includes the family, used path and terminating NUL.
+    // Abstract names remain length-delimited with the historical full buffer.
+    let mut length = if abstract_name {
+        size_of::<UnixAddress>()
+    } else {
+        2 + path.len() + 1
+    };
     if variant["short"] == true {
         length = 2 + usize::from(abstract_name) + path.len() + usize::from(!abstract_name);
     }
@@ -1396,7 +1402,7 @@ fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
         .to_str()
         .context("endpoint comparison encoding")?
         .as_bytes();
-    let (address, length) = unix_address(bytes, false)?;
+    let (address, length) = unix_encode(bytes, false, &json!({}))?;
     let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
     let creation = wsa("socket(AF_UNIX)", socket as i64, socket != INVALID_SOCKET);
     let operation = if socket != INVALID_SOCKET {
@@ -1415,7 +1421,7 @@ fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
     let readback = unix_endpoint_readback(scratch).unwrap_or_else(unix_comparison_error);
     Ok(json!({"diagnostic_only":true,"namespace":"filesystem",
         "endpoint":"Winsock socket; direct AFD bind packet unchanged",
-        "direct_bind":{"creation":creation,"operation":operation},"address_readback":readback}))
+        "direct_bind":{"creation":creation,"operation":operation,"address_bytes":length},"address_readback":readback}))
 }
 
 fn unix_endpoint_readback(scratch: &std::path::Path) -> Result<Value> {
@@ -2674,18 +2680,45 @@ mod unix_layout_tests {
     }
 
     #[test]
+    fn unix_namespace_lengths_fixture() {
+        let path = [b'x'; 80];
+        let (filesystem, used_length) = unix_encode(&path, false, &json!({})).unwrap();
+        assert_eq!(used_length, 83); // 2 family + 80 path + 1 NUL
+        assert_eq!(4 + used_length, 87); // AFD_BIND share + sockaddr
+        assert_eq!(24 + used_length, 107); // AFD_CONNECT fields + sockaddr
+        assert_eq!(&filesystem.path[..80], &path);
+        assert!(filesystem.path[80..].iter().all(|b| *b == 0));
+        // The historical filesystem "short" was already used-length, not
+        // shorter than family + path + NUL. Preserve it without relabeling evidence.
+        let (_, historical_short) = unix_encode(&path, false, &json!({"short":true})).unwrap();
+        assert_eq!(historical_short, used_length);
+        let (abstract_address, full_length) = unix_encode(&path, true, &json!({})).unwrap();
+        assert_eq!(full_length, 110);
+        assert_eq!(4 + full_length, 114);
+        assert_eq!(abstract_address.path[0], 0);
+        assert_eq!(&abstract_address.path[1..81], &path);
+        assert!(abstract_address.path[81..].iter().all(|b| *b == 0));
+        let (_, abstract_short) = unix_encode(&path, true, &json!({"short":true})).unwrap();
+        assert_eq!(abstract_short, 83); // 2 family + 1 namespace NUL + 80 name
+        assert_eq!(4 + abstract_short, 87);
+        assert!(abstract_short < full_length);
+    }
+
+    #[test]
     fn bind_packet_fixture() {
         let (address, length) = unix_encode(b"fixture.sock", false, &json!({})).unwrap();
         let packet = UnixBind { share: 0, address };
         assert_eq!(packet.address.family.to_le_bytes(), [1, 0]);
         assert_eq!(&packet.address.path[..13], b"fixture.sock\0");
         assert!(packet.address.path[13..].iter().all(|b| *b == 0));
-        assert_eq!(4 + length, 114);
+        assert_eq!(length, 15); // 2 family + 12 path + 1 NUL
+        assert_eq!(4 + length, 19);
         let (short, length) = unix_encode(b"fixture.sock", false, &json!({"short":true})).unwrap();
         assert_eq!(4 + length, 19);
         assert_eq!(short.path, packet.address.path);
         let (nt, length) = unix_encode(b"fixture.sock", false, &json!({"nt_path":true})).unwrap();
-        assert_eq!(4 + length, 114);
+        assert_eq!(length, 19); // 2 family + 4 NT prefix + 12 path + 1 NUL
+        assert_eq!(4 + length, 23);
         assert_eq!(&nt.path[..17], b"\x5c??\x5cfixture.sock\0");
         assert!(nt.path[17..].iter().all(|b| *b == 0));
         let (_, length) = unix_encode(
