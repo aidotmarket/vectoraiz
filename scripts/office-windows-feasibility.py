@@ -1203,8 +1203,10 @@ def unix_call_diagnostics(result):
             offset = {"NtDeviceIoControlFile(AFD_BIND)": 4,
                       "NtDeviceIoControlFile(AFD_CONNECT)": 24}.get(api)
             if offset is not None and type(value.get("input_bytes")) is int:
-                value["address_bytes"] = value["input_bytes"] - offset
-                value["address_offset"] = offset
+                offset = value.get("address_offset", offset)
+                if type(offset) is int and 0 <= offset <= value["input_bytes"]:
+                    value["address_bytes"] = value["input_bytes"] - offset
+                    value["address_offset"] = offset
             for child in value.values():
                 annotate(child)
         elif isinstance(value, list):
@@ -2694,6 +2696,11 @@ def audit_diagnostics_self_test():
     }
     unix_call_diagnostics(sample)
     assert probe["control_endpoint_comparison"]["direct_bind"]["operation"]["address_bytes"] == 83
+    observed = {"api": "NtDeviceIoControlFile(AFD_BIND)", "input_bytes": 116,
+                "address_offset": 6}
+    probe["control_observed_bind"] = {"replica": {"operation": observed}}
+    unix_call_diagnostics(sample)
+    assert observed["address_offset"] == 6 and observed["address_bytes"] == 110
     assert unix_namespace_status({"control": original}) == unix_namespace_status({"control": sample})
     call = probe["calibration"][0]["result"]["operation"]
     assert call["address_bytes"] == 110 and call["address_offset"] == 4

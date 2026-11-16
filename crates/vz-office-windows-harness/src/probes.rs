@@ -1044,6 +1044,9 @@ fn reachability_inventory(v: &Value) -> Result<Value> {
     )
 }
 
+#[path = "unix_observe.rs"]
+mod unix_observe;
+
 // Direct AFD TLI bind/connect layouts follow phnt/ntafd.h. Same-route control
 // outcomes validate this private ABI; errors never qualify a judged row.
 #[repr(C)]
@@ -1204,13 +1207,7 @@ fn unix_encode(path: &[u8], abstract_name: bool, variant: &Value) -> Result<(Uni
         path.to_vec()
     };
     let (address, _) = unix_address(&path, abstract_name)?;
-    // Filesystem sockaddr includes the family, used path and terminating NUL.
-    // Abstract names remain length-delimited with the historical full buffer.
-    let mut length = if abstract_name {
-        size_of::<UnixAddress>()
-    } else {
-        2 + path.len() + 1
-    };
+    let mut length = size_of::<UnixAddress>();
     if variant["short"] == true {
         length = 2 + usize::from(abstract_name) + path.len() + usize::from(!abstract_name);
     }
@@ -1761,6 +1758,14 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
             }
         };
     }
+    let observed_bind = if v["route"] == "control" {
+        unix_observe::run(scratch).unwrap_or_else(unix_observe::error)
+    } else {
+        Value::Null
+    };
+    if observed_bind["replica"]["operation"]["success"] == true {
+        control_direct["inside_scratch_bind"] = observed_bind["replica"].clone();
+    }
     let endpoint_comparison = if v["route"] == "control" {
         unix_endpoint_comparison(scratch).unwrap_or_else(unix_comparison_error)
     } else {
@@ -1773,7 +1778,7 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
         json!({"diagnostic_only":true,"startup":startup,"outcomes":outcomes,
         "calibration":calibration,"calibrated_variants":selected,"control_direct":control_direct,
         "explicit_protocol":protocol,"alternative":alternative,"scratch_access":scratch_access,
-        "control_endpoint_comparison":endpoint_comparison,
+        "control_endpoint_comparison":endpoint_comparison,"control_observed_bind":observed_bind,
         "filesystem_path_bytes":inside.to_string_lossy().len(),
         "scratch_grant":if v["route"] == "control" { "unconfined; no package grant" } else { "package SID FILE_ALL_ACCESS including FILE_ADD_FILE; inherited; low integrity" },
         "messages_sent":0}),
@@ -2682,16 +2687,16 @@ mod unix_layout_tests {
     #[test]
     fn unix_namespace_lengths_fixture() {
         let path = [b'x'; 80];
-        let (filesystem, used_length) = unix_encode(&path, false, &json!({})).unwrap();
-        assert_eq!(used_length, 83); // 2 family + 80 path + 1 NUL
-        assert_eq!(4 + used_length, 87); // AFD_BIND share + sockaddr
-        assert_eq!(24 + used_length, 107); // AFD_CONNECT fields + sockaddr
+        let (filesystem, full_length) = unix_encode(&path, false, &json!({})).unwrap();
+        assert_eq!(full_length, 110);
+        assert_eq!(4 + full_length, 114); // AFD_BIND share + sockaddr
+        assert_eq!(24 + full_length, 134); // AFD_CONNECT fields + sockaddr
         assert_eq!(&filesystem.path[..80], &path);
         assert!(filesystem.path[80..].iter().all(|b| *b == 0));
         // The historical filesystem "short" was already used-length, not
         // shorter than family + path + NUL. Preserve it without relabeling evidence.
         let (_, historical_short) = unix_encode(&path, false, &json!({"short":true})).unwrap();
-        assert_eq!(historical_short, used_length);
+        assert_eq!(historical_short, 83);
         let (abstract_address, full_length) = unix_encode(&path, true, &json!({})).unwrap();
         assert_eq!(full_length, 110);
         assert_eq!(4 + full_length, 114);
@@ -2711,14 +2716,14 @@ mod unix_layout_tests {
         assert_eq!(packet.address.family.to_le_bytes(), [1, 0]);
         assert_eq!(&packet.address.path[..13], b"fixture.sock\0");
         assert!(packet.address.path[13..].iter().all(|b| *b == 0));
-        assert_eq!(length, 15); // 2 family + 12 path + 1 NUL
-        assert_eq!(4 + length, 19);
+        assert_eq!(length, 110);
+        assert_eq!(4 + length, 114);
         let (short, length) = unix_encode(b"fixture.sock", false, &json!({"short":true})).unwrap();
         assert_eq!(4 + length, 19);
         assert_eq!(short.path, packet.address.path);
         let (nt, length) = unix_encode(b"fixture.sock", false, &json!({"nt_path":true})).unwrap();
-        assert_eq!(length, 19); // 2 family + 4 NT prefix + 12 path + 1 NUL
-        assert_eq!(4 + length, 23);
+        assert_eq!(length, 110);
+        assert_eq!(4 + length, 114);
         assert_eq!(&nt.path[..17], b"\x5c??\x5cfixture.sock\0");
         assert!(nt.path[17..].iter().all(|b| *b == 0));
         let (_, length) = unix_encode(
