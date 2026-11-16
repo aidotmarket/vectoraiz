@@ -583,6 +583,29 @@ class NoticeGenerators(unittest.TestCase):
                 self.assertEqual(len(calls), failing + 1)
                 self.assertEqual(output.read_text(), 'prior output')
 
+    def test_worker_notice_hashes_accept_crlf_and_reject_changed_text(self):
+        spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / 'docs/native-worker-licenses'
+            folder.mkdir(parents=True)
+            source = b'MIT licence\nCopyright holder\n'
+            (folder / 'manifest.json').write_text(json.dumps([{
+                'name': 'dependency', 'version': '1.0', 'file': 'license.txt',
+                'license_sha256': hashlib.sha256(source).hexdigest(),
+            }]))
+            with patch.object(notices, 'ROOT', root):
+                for data in [source, source.replace(b'\n', b'\r\n')]:
+                    (folder / 'license.txt').write_bytes(data)
+                    result = notices.complete_worker_notices('', 'dependency v1.0\n')
+                    self.assertIn(source.decode(), result)
+                    self.assertNotIn('\r', result)
+                (folder / 'license.txt').write_bytes(source + b'changed')
+                with self.assertRaisesRegex(SystemExit, 'Worker licence text changed'):
+                    notices.complete_worker_notices('', 'dependency v1.0\n')
+
     def test_worker_notices_cover_bundle_and_refuse_unlisted_dependencies(self):
         spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
         notices = importlib.util.module_from_spec(spec)

@@ -28,7 +28,8 @@ def complete_worker_notices(rust, tree):
         key = (entry['name'], entry['version'])
         if key not in required - listed:
             continue
-        data = (folder / entry['file']).read_bytes()
+        # Git may check text out as CRLF on Windows; hashes use canonical LF.
+        data = (folder / entry['file']).read_bytes().replace(b'\r\n', b'\n')
         if hashlib.sha256(data).hexdigest() != entry['license_sha256']:
             raise SystemExit(f'Worker licence text changed: {key}')
         rust += f"\nMIT (MIT)\nUsed by:\n- {key[0]} {key[1]}\n" + data.decode('utf-8')
