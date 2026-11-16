@@ -533,7 +533,7 @@ fn projection_real_powerpoint_slide_level_creation_id_and_notes() {
 
 #[test]
 fn projection_local_dpi_and_data_bar_id_metadata() {
-    let drawing = r#"<w:p><w:r><w:drawing><a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip></w:drawing><w:t>VISIBLE</w:t></w:r></w:p>"#;
+    let drawing = r#"<w:p><w:r><w:drawing xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip></w:drawing><w:t>VISIBLE</w:t></w:r></w:p>"#;
     assert_eq!(
         text(&extract("docx", &word(drawing, &[])).unwrap()),
         "VISIBLE"
