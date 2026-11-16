@@ -48,6 +48,7 @@ pub(super) fn reference(
     Ok(false)
 }
 fn chart(n: &Node, at: &str, hidden: bool, out: &mut Projection, cache: bool) -> Result<()> {
+    let paragraph_start = out.nodes.len();
     ensure!(
         n.ns == C || n.ns == A,
         "PROJECTION_CHART_SEMANTICS_UNSUPPORTED at {at}: {}",
@@ -147,6 +148,9 @@ fn chart(n: &Node, at: &str, hidden: bool, out: &mut Projection, cache: bool) ->
             cache,
         )?;
     }
+    if n.ns == A && n.local == "p" {
+        paragraph_nodes(out, paragraph_start, at, "chart paragraph");
+    }
     Ok(())
 }
 fn diagram(
@@ -189,13 +193,13 @@ fn diagram(
     );
     let drawing = targets.into_iter().next().unwrap();
     let mut shapes = Vec::new();
-    descendants(&trees[&drawing], DSP, "sp", &mut shapes);
+    shape_visibility(&trees[&drawing], hidden, &mut shapes)?;
     let mut cache = BTreeMap::new();
-    for shape in &shapes {
+    for (shape, shape_hidden) in &shapes {
         let key = shape.attr("modelId").context("SmartArt shape modelId")?;
         ensure!(
             cache
-                .insert(key, (drawing_text(shape), own_hidden_shape(shape)?))
+                .insert(key, (drawing_text(shape), *shape_hidden))
                 .is_none(),
             "ambiguous SmartArt shape at {drawing}/{key}"
         );
@@ -252,7 +256,7 @@ fn diagram(
     }
     // Descriptions are independent editable nodes, including alt-only shapes.
     // Emit only after the model/cache pairing has been validated.
-    for shape in shapes {
+    for (shape, shape_hidden) in shapes {
         let key = shape.attr("modelId").context("SmartArt shape modelId")?;
         let mut properties = Vec::new();
         descendants(shape, DSP, "cNvPr", &mut properties);
@@ -264,11 +268,25 @@ fn diagram(
                         &format!("{at}!{drawing}/shape/{key}/cNvPr[{i}]/@{attribute}"),
                         "SmartArt alt text",
                         value.into(),
-                        hidden || own_hidden_shape(shape)?,
+                        shape_hidden,
                     )?;
                 }
             }
         }
+    }
+    Ok(())
+}
+fn shape_visibility<'a>(
+    n: &'a Node,
+    hidden: bool,
+    shapes: &mut Vec<(&'a Node, bool)>,
+) -> Result<()> {
+    let hidden = hidden || own_hidden_shape(n)?;
+    if n.ns == DSP && n.local == "sp" {
+        shapes.push((n, hidden));
+    }
+    for child in &n.children {
+        shape_visibility(child, hidden, shapes)?;
     }
     Ok(())
 }

@@ -153,13 +153,12 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
             if !trees.contains_key(part) {
                 out.drop_at("unread-parts", part)?;
             }
-            if kind == "xlsx" && part.ends_with(".vml") && trees.contains_key(part) {
-                out.drop_at("comments", part)?;
-            }
             if part.starts_with("docProps/") {
                 out.drop_at("properties", part)?;
             }
-            if part.to_ascii_lowercase().contains("comment") {
+            if part.to_ascii_lowercase().contains("comment")
+                || (kind == "xlsx" && part.ends_with(".vml") && trees.contains_key(part))
+            {
                 out.drop_at("comments", part)?;
             }
             if part.contains("revision") || part.contains("person") {
@@ -198,9 +197,8 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
             _ => slides(&trees, &mut out)?,
         }
     }
-    out.nodes.retain(|n| !n.text.trim().is_empty());
     ensure!(
-        !out.nodes.is_empty(),
+        out.nodes.iter().any(|n| !n.text.trim().is_empty()),
         "no sale projection text available; exclude document"
     );
     Ok(out)
@@ -339,6 +337,7 @@ fn paragraph_nodes(out: &mut Projection, start: usize, path: &str, kind: &str) {
             "slide text",
             "notes",
             "inline control",
+            "chart cached value",
         ]
         .contains(&node.kind.as_str())
         {
@@ -356,6 +355,15 @@ fn paragraph_nodes(out: &mut Projection, start: usize, path: &str, kind: &str) {
         }
         out.nodes.push(node);
     }
+}
+fn index_entry(instruction: &str) -> bool {
+    instruction
+        .split_whitespace()
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("XE"))
+}
+fn literal_text(n: &Node) -> bool {
+    !n.text.trim().is_empty() || n.children.iter().any(literal_text)
 }
 fn has(n: &Node, ns: &str, local: &str) -> bool {
     (n.ns == ns && n.local == local) || n.children.iter().any(|c| has(c, ns, local))
@@ -402,7 +410,7 @@ fn validate_links(trees: &BTreeMap<String, Node>, parts: &BTreeMap<String, Vec<u
 }
 #[derive(Default)]
 struct WordState {
-    fields: Vec<bool>,
+    fields: Vec<(bool, String)>,
     moved: BTreeSet<String>,
 }
 #[allow(clippy::too_many_arguments)]
@@ -420,7 +428,7 @@ fn walk_word(
         if !fields.moved.is_empty() {
             return out.drop_at("moved-from", path);
         }
-        if fields.fields.iter().any(|display| !display) {
+        if fields.fields.iter().any(|field| !field.0) {
             return out.drop_at("instructions", path);
         }
     }
@@ -429,7 +437,7 @@ fn walk_word(
     }
     if n.ns == "http://schemas.microsoft.com/office/word/2010/wordml" && path.contains("/rPr[") {
         ensure!(
-            !has(n, W, "t") && n.text.trim().is_empty(),
+            !literal_text(n),
             "PROJECTION_CONTENT_UNSUPPORTED at {path}: w14 run property text"
         );
         return Ok(());
@@ -462,7 +470,12 @@ fn walk_word(
         if let Some(category) = match n.local.as_str() {
             "del" | "delText" | "delInstrText" => Some("deletions"),
             "moveFrom" => Some("moved-from"),
-            "instrText" => Some("instructions"),
+            "instrText" => {
+                if let Some(field) = fields.fields.last_mut() {
+                    field.1.push_str(&n.text);
+                }
+                Some("instructions")
+            }
             "comment" | "commentReference" | "commentRangeStart" | "commentRangeEnd" => {
                 Some("comments")
             }
@@ -498,7 +511,7 @@ fn walk_word(
         if n.local == "fldChar" {
             match n.attr_ns(W, "fldCharType") {
                 Some("begin") => {
-                    fields.fields.push(false);
+                    fields.fields.push((false, String::new()));
                     out.drop_at("instructions", path)?;
                 }
                 Some("separate") => {
@@ -506,13 +519,14 @@ fn walk_word(
                         .fields
                         .last_mut()
                         .context("field separator without begin")?;
-                    ensure!(!*f, "duplicate field separator at {path}");
-                    *f = true;
+                    ensure!(!f.0, "duplicate field separator at {path}");
+                    f.0 = true;
                 }
                 Some("end") => {
+                    let field = fields.fields.pop().context("field end without begin")?;
                     ensure!(
-                        fields.fields.pop().is_some(),
-                        "field end without begin at {path}"
+                        field.0 || index_entry(&field.1),
+                        "PROJECTION_FIELD_RESULT_UNPROVEN at {path}: field has no displayed result"
                     );
                 }
                 _ => bail!("unknown field state at {path}"),
@@ -520,15 +534,33 @@ fn walk_word(
             return Ok(());
         }
         if n.local == "fldSimple" {
+            ensure!(
+                has(n, W, "t") || index_entry(n.attr_ns(W, "instr").unwrap_or("")),
+                "PROJECTION_FIELD_RESULT_UNPROVEN at {path}: field has no displayed result"
+            );
             out.drop_at("instructions", &format!("{path}/@instr"))?;
         }
     }
     let hidden = hidden
+        || own_hidden_shape(n)?
+        || (n.ns == WP
+            && n.local == "docPr"
+            && n.attr("hidden")
+                .map(|v| on(Some(v)))
+                .transpose()?
+                .unwrap_or(false))
         || (n.ns == W
             && n.local == "tr"
             && n.children
                 .iter()
-                .any(|c| c.ns == W && c.local == "trPr" && has(c, W, "hidden")))
+                .filter(|c| c.ns == W && c.local == "trPr")
+                .flat_map(|c| &c.children)
+                .any(|p| {
+                    p.ns == W
+                        && p.local == "hidden"
+                        && p.attr_ns(W, "val")
+                            .is_none_or(|v| !["0", "false", "off"].contains(&v))
+                }))
         || (n.ns == W && n.local == "drawing" && {
             let mut props = Vec::new();
             descendants(n, WP, "docPr", &mut props);
@@ -549,13 +581,13 @@ fn walk_word(
                         && p.attr_ns(W, "val")
                             .is_none_or(|v| !["0", "false", "off"].contains(&v))
                 }));
-    if n.ns == W && n.local == "vanish" {
+    if n.ns == W && ["vanish", "hidden"].contains(&n.local.as_str()) {
         on(n.attr_ns(W, "val"))?;
     }
     if n.ns == W && n.local == "t" {
         if !fields.moved.is_empty() {
             out.drop_at("moved-from", path)?;
-        } else if fields.fields.iter().any(|display| !display) {
+        } else if fields.fields.iter().any(|field| !field.0) {
             out.drop_at("instructions", path)?;
         } else {
             out.add(path, "text", n.text.clone(), hidden)?;
@@ -571,7 +603,7 @@ fn walk_word(
     if ((n.ns == W && ["tab", "br", "cr"].contains(&n.local.as_str()))
         || (n.ns == A && n.local == "br"))
         && fields.moved.is_empty()
-        && !fields.fields.iter().any(|display| !display)
+        && !fields.fields.iter().any(|field| !field.0)
     {
         out.add(
             path,
@@ -586,7 +618,7 @@ fn walk_word(
                 let location = format!("{path}/@{key}");
                 if !fields.moved.is_empty() {
                     out.drop_at("moved-from", &location)?;
-                } else if fields.fields.iter().any(|display| !display) {
+                } else if fields.fields.iter().any(|field| !field.0) {
                     out.drop_at("instructions", &location)?;
                 } else {
                     out.add(&location, "alt text", value.into(), hidden)?;
@@ -1089,7 +1121,11 @@ fn inherited_content(n: &Node) -> bool {
     if n.ns == P && ["sp", "graphicFrame", "pic"].contains(&n.local.as_str()) && has(n, P, "ph") {
         return false;
     }
-    (n.ns == A && n.local == "t")
+    (n.local == "cNvPr"
+        && ["descr", "title"]
+            .iter()
+            .any(|key| n.attr(key).is_some_and(|v| !v.trim().is_empty())))
+        || (n.ns == A && n.local == "t")
         || (n.ns == graphics::C && n.local == "chart")
         || (n.ns == graphics::DGM && n.local == "relIds")
         || n.children.iter().any(inherited_content)

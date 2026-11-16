@@ -223,7 +223,8 @@ pub(super) fn build(
                 entries <= 20_000_000,
                 "PROJECTION_PACK_INVENTORY_EXCEEDED: {entries} / 20000000"
             );
-            let mut text = Vec::new();
+            let mut text = String::new();
+            let mut previous_flow: Option<String> = None;
             let mut nodes = BTreeMap::new();
             for node in &mut projection.nodes {
                 let key = format!("{location}/{}", node.location);
@@ -298,7 +299,15 @@ pub(super) fn build(
                         }),
                 });
                 if included {
-                    text.push(node.text.clone());
+                    let flow = node
+                        .location
+                        .rsplit_once("/flow[")
+                        .map(|(path, _)| path.to_string());
+                    if !text.is_empty() && (flow.is_none() || flow != previous_flow) {
+                        text.push('\n');
+                    }
+                    text.push_str(&node.text);
+                    previous_flow = flow;
                 }
             }
             for (node, reason) in &projection.omissions {
@@ -333,7 +342,7 @@ pub(super) fn build(
                 &doc.doc_id,
                 &[Page {
                     page: 1,
-                    text: text.join("\n"),
+                    text,
                     needs_ocr: false,
                 }],
             );

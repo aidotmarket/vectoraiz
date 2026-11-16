@@ -346,6 +346,15 @@ fn projection_instruction_only_fields_and_named_textbox_refusals() {
     let p = extract("docx", &word(r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>XE CANARY</w:instrText><w:fldChar w:fldCharType="end"/><w:t>VISIBLE</w:t></w:r></w:p>"#, &[])).unwrap();
     assert_eq!(text(&p), "VISIBLE");
     assert_eq!(p.drops["instructions"], 2);
+    let unproven = word(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>DATE</w:instrText><w:fldChar w:fldCharType="end"/><w:t>VISIBLE</w:t></w:r></w:p>"#,
+        &[],
+    );
+    assert!(extract("docx", &unproven)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("PROJECTION_FIELD_RESULT_UNPROVEN"));
     for body in [
         r#"<v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent><w:p><w:r><w:t>TEXTBOX</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"#,
         r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Fallback><w:p><w:r><w:t>TEXTBOX</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent>"#,
