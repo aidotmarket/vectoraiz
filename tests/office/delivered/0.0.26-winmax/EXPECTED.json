@@ -1,0 +1,316 @@
+{
+  "version": 1,
+  "files": {
+    "document-0002.docx": {
+      "sha256": "509b4425a6931be6e928808f5859556159dace926bb844ccd076d940a407b82c",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "testComment.docx",
+        "sha256": "06b63b13f0b78a7179151af52c2282557c1ed204899feee9fcef4ca575344f97",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "word/_rels/comments.xml.rels",
+          "word/comments.xml",
+          "word/commentsExtended.xml",
+          "word/commentsExtensible.xml",
+          "word/commentsIds.xml",
+          "word/webSettings.xml"
+        ],
+        "text": [
+          "Nick Burch",
+          "comment content",
+          "poi"
+        ]
+      }
+    },
+    "document-0003.xlsx": {
+      "sha256": "cff088fc5b03d02738557ee0785461b19c06747df129c652f61cbd7faa86286e",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "SimpleWithComments.xlsx",
+        "sha256": "d7d337b3436e863487d26439a57ef749950c599862325d7bce7e830acf1df0ba",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "xl/comments1.xml",
+          "xl/drawings/vmlDrawing1.vml",
+          "xl/sharedStrings.xml"
+        ],
+        "text": [
+          "Yegor Kozlov",
+          "Yegor Kozlov:\nfirst cell",
+          "Yegor Kozlov:\nsecond cell",
+          "Yegor Kozlov:\nthird cell"
+        ]
+      }
+    },
+    "document-0004.docx": {
+      "sha256": "f553f3574b14e44166162506fd3306c43cf974bb66a586c77908ccaeac8825bb",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        },
+        "Office2007": {
+          "errorCount": 1,
+          "errorIds": {
+            "Sch_UnexpectedElementContentExpectingComplex": 1
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "documentProperties.docx",
+        "sha256": "1cff7a0a94dfce307a70032d21070d26ae34b9fdf742cf70fa66d4a2078ec9d5",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "docProps/thumbnail.jpeg",
+          "word/webSettings.xml"
+        ],
+        "text": [
+          "Paolo Mottadelli"
+        ]
+      }
+    },
+    "document-0005.docx": {
+      "sha256": "ab51f8ff29b90eea020039b199aed0457d73e0c5e7a563622a0afeafb1f42be8",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "bug56075-changeTracking_on.docx",
+        "sha256": "9c837e12aaf3deac10ac20ac1bc08dc6bebdec14b553698063742b9bc12f8920",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "word/webSettings.xml"
+        ],
+        "text": [
+          "Riccardo",
+          "Stefan Kopf"
+        ]
+      }
+    },
+    "document-0006.xlsx": {
+      "sha256": "71eefc5746b919061f7e0c6e32185872eef53bc5525ebae437f7a2f844869cda",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "WithChart.xlsx",
+        "sha256": "51f27aabf7417f5aaa0542857b6bb56a92d4afbabdc5c63f084c06f92b67429d",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml"
+        ],
+        "text": [
+          "Nick Burch"
+        ]
+      }
+    },
+    "document-0007.xlsx": {
+      "sha256": "4105872c3f3ed37884c7b47fa35bbbf159f8dec2b2ec1e6acb2978f42728fb18",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "TwoSheetsOneHidden.xlsx",
+        "sha256": "3e9749837cac5a19a7628d7e60c1a1c6d0ff7657f27fa7904b217b96e0dc534f",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "xl/sharedStrings.xml"
+        ],
+        "text": [
+          "Noel Markham",
+          "Yegor Kozlov"
+        ]
+      }
+    },
+    "document-0008.xlsx": {
+      "sha256": "974097186868a70cc441f36fdc65b25fc238c149ea6f94df315bc51a978101be",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "chartTitle_withTitle.xlsx",
+        "sha256": "586c174285621c081020da523c4a814a9ad62b75d86f49276faa1b6036919395",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml"
+        ],
+        "text": [
+          "Jim King"
+        ]
+      }
+    },
+    "document-0009.pptx": {
+      "sha256": "73e3eff6c8f44d2dc748488009c45dcb485ebd9f9eee4d5f486615ea33fbc947",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "smartart-rotated-text.pptx",
+        "sha256": "a357985aec81b0bfa8a71138bbe94c9b3f6e00dee110c0da34302e22253de260",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "docProps/thumbnail.jpeg",
+          "ppt/viewProps.xml"
+        ],
+        "text": [
+          "Yaseen Kadir"
+        ]
+      }
+    },
+    "document-0011.pptx": {
+      "sha256": "10bd20e06470702286581107f51ddfbc00c8d366ce90fdd0427b2535f0b48a50",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        },
+        "Office2007": {
+          "errorCount": 6,
+          "errorIds": {
+            "Sch_AttributeValueDataTypeDetailed": 6
+          }
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "bar-chart.pptx",
+        "sha256": "79e1d218bfb2903e8dc8425a6b1997d9c1976f5a5f025bada85b0c47b5777969",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "docProps/thumbnail.jpeg",
+          "ppt/embeddings/Microsoft_Excel_Worksheet1.xlsx",
+          "ppt/viewProps.xml"
+        ],
+        "text": [
+          "Alain B\u00e9arez",
+          "yegor"
+        ]
+      }
+    },
+    "document-0012.pptx": {
+      "sha256": "e45cf0aa87f587b235b8925d6bf8f0d0840fd68a1d5f030b4b4dceefdd32e7e8",
+      "openOk": true,
+      "formats": {
+        "Microsoft365": {
+          "errorCount": 0,
+          "errorIds": {}
+        },
+        "Office2007": {
+          "errorCount": 0,
+          "errorIds": {}
+        }
+      },
+      "libreOfficeOk": true,
+      "libreOfficeExitCode": 0,
+      "sourceRemovals": {
+        "source": "SampleShow-WithComments.pptx",
+        "sha256": "af689ea64567d459d082e63ef887bb639929f8216a0f4bbd67cf3731ae8403ce",
+        "parts": [
+          "docProps/app.xml",
+          "docProps/core.xml",
+          "docProps/thumbnail.jpeg",
+          "ppt/commentAuthors.xml",
+          "ppt/comments/comment2.xml",
+          "ppt/viewProps.xml"
+        ],
+        "text": [
+          "Nick Burch",
+          "XPVMWARE01",
+          "kiwiwings",
+          "test phrase"
+        ]
+      }
+    }
+  }
+}

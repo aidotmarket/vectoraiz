@@ -84,3 +84,12 @@ reproductions each have a separate hand-written package. Both transitional and
 strict namespace variants are checked. The leak check supplements the pinned SDK,
 render and hash-bound expectations; it does not replace the production positive
 allowlists or prove that retained displayed content is public.
+
+The 0.0.26-winmax expectations additionally record `sourceRemovals` for each
+of its ten pinned sources: original SHA256, forbidden source part names and
+source identity/comment text. The leak job enforces these inventories against
+parsed output text and attribute values, including comment text split over runs
+or copied into allowed carriers. Reports include source hashes and check counts.
+These targeted comparisons supplement every existing removal rule; they do not
+make arbitrary displayed text provenance inferable. See that set's SOURCE.md
+for extraction scope and the constructed presentation fixture's provenance.

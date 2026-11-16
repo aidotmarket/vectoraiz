@@ -177,7 +177,7 @@ an unselected branch, field instruction text that has already lost its markers,
 an arbitrary formerly ignorable namespace after removal of its declaration, or
 arbitrary private text cannot be compared to its original source without that
 source. The checker rejects observable source wrappers, metadata, actions and
-removed dependencies, and reports no new exceptions for the 32 deliveries.
+removed dependencies, and reports no new exceptions for the 42 deliveries.
 It does not claim that all retained displayed text, alt text, cropped/hidden
 pixels, cached chart values or permitted HTTP(S) hyperlinks are public.
 
@@ -186,3 +186,15 @@ ZIP compression and original type identifiers are normalized by rebuild. The
 leak checker deliberately uses expanded names and resolved targets; byte-for-byte
 proof that normalization happened belongs to the pipeline's readback and the
 hash-bound fixture expectations. Hidden sheets remain informational.
+
+## 0.0.26 source comparisons
+
+All 72 families above remain unchanged for the ten 0.0.26-winmax deliveries.
+Their EXPECTED.json sourceRemovals inventories add comparisons against each
+hash-identified original: forbidden part names, core/revision authors and
+comment text/author names. `check_source_removals` checks these values even when
+copied into allowed XML text/attributes. Regressions
+`source_comments_cannot_move_to_allowed_text_or_attributes` and
+`source_removals_are_enforced_on_all_new_deliveries` cover moved payloads and
+the complete new set, including Word commentsExtended/Extensible/Ids and
+presentation commentAuthors/comment2. This adds no exception to any family.

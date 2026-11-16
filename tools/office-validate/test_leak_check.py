@@ -59,6 +59,38 @@ class LeakCheckTests(unittest.TestCase):
                         self.assertFalse(result["ok"])
                         self.assertEqual(result["violations"][0]["element"], f"{{{ns}}}{local}")
 
+    def test_source_comments_cannot_move_to_allowed_text_or_attributes(self):
+        for text in ["comment content", "poi", "XPVMWARE01", "test phrase"]:
+            for xml in [f'<root><a>{text[:2]}</a><b>{text[2:]}</b></root>',
+                        f'<root name="{text}"/>']:
+                with self.subTest(text=text, xml=xml):
+                    self.check({"word/document.xml": xml})
+                    result = leak_check.check_file(self.path, self.root, {
+                        "source": "fixture", "sha256": "0" * 64,
+                        "parts": [], "text": [text],
+                    })
+                    self.assertFalse(result["ok"])
+                    self.assertFalse(result["sourceRemovals"]["ok"])
+
+    def test_source_removals_are_enforced_on_all_new_deliveries(self):
+        root = Path(__file__).resolve().parents[2] / "tests/office/delivered/0.0.26-winmax"
+        entries = json.loads((root / "EXPECTED.json").read_text())["files"]
+        self.assertEqual(len(entries), 10)
+        for name, entry in entries.items():
+            with self.subTest(file=name):
+                source = entry["sourceRemovals"]
+                self.assertTrue(source["parts"])
+                self.assertTrue(source["text"])
+                self.assertTrue(leak_check.check_file(root / name, root, source)["ok"])
+        word = entries["document-0002.docx"]["sourceRemovals"]
+        for part in ["word/comments.xml", "word/commentsExtended.xml",
+                     "word/commentsExtensible.xml", "word/commentsIds.xml"]:
+            self.assertIn(part, word["parts"])
+        self.assertTrue({"comment content", "poi"}.issubset(word["text"]))
+        slides = entries["document-0012.pptx"]["sourceRemovals"]
+        self.assertTrue({"ppt/commentAuthors.xml", "ppt/comments/comment2.xml"}.issubset(slides["parts"]))
+        self.assertTrue({"XPVMWARE01", "test phrase"}.issubset(slides["text"]))
+
     def test_independently_enumerated_chart_and_identity_carriers(self):
         cases = [
             ("http://schemas.openxmlformats.org/drawingml/2006/chart", "f"),

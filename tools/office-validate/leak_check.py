@@ -413,7 +413,23 @@ def check_models(trees, violations):
                 violations.append({"part": name, "reason": "dangling SmartArt connection"})
 
 
-def check_file(path, root):
+def check_source_removals(trees, names, source, violations):
+    """Check source-derived identities even if copied into an allowed carrier."""
+    for name in source["parts"]:
+        if name in names:
+            violations.append({"part": name, "reason": "source removed part survives"})
+    # Joining text catches comment text split across runs; parsing decodes entities.
+    values = []
+    for tree in trees.values():
+        values.append(" ".join("".join(tree.itertext()).split()))
+        values.extend(" ".join(v.split()) for e in tree.iter() for v in e.attrib.values())
+    for text in source["text"]:
+        needle = " ".join(text.split())
+        if any(needle in value for value in values):
+            violations.append({"reason": "source removed text survives", "text": text})
+
+
+def check_file(path, root, source=None):
     result = {"path": path.relative_to(root).as_posix(), "sha256": None,
               "ok": False, "violations": [], "info": []}
     try:
@@ -484,6 +500,14 @@ def check_file(path, root):
                     result["violations"].append({"part": name, "reason": reason})
             check_relationships(trees, names, result["violations"])
             check_models(trees, result["violations"])
+            if source is not None:
+                before = len(result["violations"])
+                check_source_removals(trees, names, source, result["violations"])
+                result["sourceRemovals"] = {
+                    "source": source["source"], "sha256": source["sha256"],
+                    "partsChecked": len(source["parts"]), "textChecked": len(source["text"]),
+                    "ok": len(result["violations"]) == before,
+                }
         result["ok"] = not result["violations"]
     except Exception as error:
         result["violations"].append({"reason": f"{type(error).__name__}: {error}"})
@@ -497,7 +521,10 @@ def main():
     args = parser.parse_args()
     root = args.directory.resolve()
     files = sorted(p for p in root.rglob("*") if p.is_file() and p.suffix.lower() in EXTENSIONS)
-    results = [check_file(p, root) for p in files]
+    from expectations import load
+    expected = load(root)
+    results = [check_file(p, root, expected.get(p.relative_to(root).as_posix(), {}).get("sourceRemovals"))
+               for p in files]
     report = {"ok": bool(files) and all(r["ok"] for r in results), "files": results}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     args.report.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
