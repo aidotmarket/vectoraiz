@@ -338,6 +338,8 @@ pub(super) fn build(
             mapping.insert(relative, location.clone());
             document_ids.insert(doc.doc_id.clone(), public_id.clone());
             doc.doc_id = public_id;
+            doc.sha256 = sha256(text.as_bytes());
+            doc.bytes = text.len() as u64;
             doc.chunks = chunk(
                 &doc.doc_id,
                 &[Page {
@@ -355,9 +357,6 @@ pub(super) fn build(
             }
             // Source commitment remains in the private fence. Delivered metadata
             // describes the projection with neutral names and no source hash.
-            let text = text.join("\n");
-            doc.sha256 = sha256(text.as_bytes());
-            doc.bytes = text.len() as u64;
             doc.pages = 1;
             doc.path = format!("document-{:04}", docs.len() + 1);
             doc.kind = "projection-v1".into();
