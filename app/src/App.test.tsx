@@ -64,6 +64,33 @@ it("requires explicit unsupported exclusions, exposes full inventory pages/searc
   expect(await region.findByText(`Accepted review: ${listingCurrent.review_hash}`)).toBeInTheDocument();
 });
 
+it("omits hidden content by default and requires a fresh review after inclusion", async () => {
+  mockListing();
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => {
+    const result = await original(command, args);
+    if (command !== "listing_rebuild") return result;
+    const built = result as {current: typeof listingCurrent; review: ReturnType<typeof listingFixture> & {projection_inventory?: {location: string; kind: string; value: string; warning: boolean}[]}};
+    built.review.projection_inventory = [{location: "projection/document/word/document.xml/t[1]", kind: "projection text (hidden): omitted", value: "Private hidden text", warning: true}];
+    return built;
+  });
+  const region = within(await openListing());
+  const hidden = region.getByRole("checkbox", {name: /Include supported hidden content/});
+  expect(hidden).not.toBeChecked();
+  expect(region.getByText("The seller attests: chunks, embeddings and metadata; no source files are delivered.")).toBeInTheDocument();
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await region.findByRole("button", {name: "Accept this exact generation"});
+  expect(region.queryByText("Private hidden text")).not.toBeInTheDocument();
+  await userEvent.click(region.getByRole("checkbox", {name: /Show private projection nodes/}));
+  expect(region.getByText("Private hidden text")).toBeInTheDocument();
+  expect(region.queryByRole("button", {name: /Edit projection/})).not.toBeInTheDocument();
+  await userEvent.click(hidden);
+  expect(region.getByRole("button", {name: "Accept this exact generation"})).toBeDisabled();
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {}, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent, include_hidden: true}}));
+});
+
 it("applies real edits through rebuild, invalidates acceptance, restores focus and surfaces stale-generation errors", async () => {
   mockListing();
   const region = within(await openListing());
@@ -80,7 +107,7 @@ it("applies real edits through rebuild, invalidates acceptance, restores focus a
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_invalidate", {current: listingCurrent}));
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
   expect(await region.findByText("Reviewed delivered text")).toBeInTheDocument();
-  expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {"README.md": "Reviewed delivered text"}, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}});
+  expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {"README.md": "Reviewed delivered text"}, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent, include_hidden: false}});
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation((command, args) => command === "listing_review" ? Promise.reject({code: "STALE_GENERATION", reason: "Source changed. Rebuild required."}) : original(command, args));
   await userEvent.click(region.getByRole("checkbox", {name: /I reviewed the complete purchaser inventory/}));
@@ -104,7 +131,7 @@ it("sends document and chunk edits with their stable inventory identities", asyn
     await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
   }
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent, include_hidden: false}}));
 });
 
 it("binds Office body, cell and notes edits to their originating generation", async () => {
@@ -130,7 +157,7 @@ it("binds Office body, cell and notes edits to their originating generation", as
     await userEvent.click(region.getByRole("button", {name: "Apply change and require rebuild"}));
   }
   await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
-  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent}}));
+  await waitFor(() => expect(invoke).toHaveBeenCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent, include_hidden: false}}));
   expect(invoke).toHaveBeenCalledWith("listing_invalidate", {current: listingCurrent});
 });
 

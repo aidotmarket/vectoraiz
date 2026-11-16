@@ -41,6 +41,9 @@ pub struct Changes {
     /// immutable generation whose document/node values the seller reviewed.
     #[serde(default)]
     pub origin: Option<crate::review_store::CurrentReview>,
+    /// Explicit seller inclusion of supported hidden projection content.
+    #[serde(default)]
+    pub include_hidden: bool,
 }
 
 impl Changes {
@@ -108,20 +111,55 @@ pub fn rebuild_artifact(name: &str, input: &[u8], changes: &Changes) -> Result<A
     Ok(ArtifactPreview { bytes, inventory })
 }
 
+/// Worker-only readback of a single generated vector artifact. No rebuilding
+/// or Office/original-file dispatch is permitted by this closed entry point.
+pub fn inspect_vector_artifact(
+    name: &str,
+    input: &[u8],
+    identity_terms: &[String],
+) -> Result<Vec<Entry>> {
+    ensure!(
+        crate::vector_payload::FILES.contains(&name),
+        "unexpected vector artifact"
+    );
+    let changes = Changes {
+        identity_terms: identity_terms.to_vec(),
+        ..Changes::default()
+    };
+    changes.validate()?;
+    let mut inventory = Vec::new();
+    inspect(
+        name,
+        input,
+        &changes,
+        &mut inventory,
+        &mut Budget::default(),
+    )?;
+    Ok(inventory)
+}
+
 #[derive(Default)]
 pub(crate) struct Budget {
     bytes: usize,
     entries: usize,
+    #[cfg(not(feature = "listing-originals"))]
+    pub(crate) projection: Option<vz_core::office::projection::Projection>,
     office: bool,
     zip_entries: usize,
+    #[cfg(feature = "listing-originals")]
     pub(crate) removals: Vec<vz_core::office::Removal>,
+    #[cfg(feature = "listing-originals")]
     pub(crate) office_warnings: Vec<String>,
+    #[cfg(feature = "listing-originals")]
     pub(crate) edit_bindings: BTreeMap<String, vz_core::office::Edit>,
+    #[cfg(feature = "listing-originals")]
     pub(crate) from_origin: BTreeSet<String>,
+    #[cfg(feature = "listing-originals")]
     pub(crate) chart_sources: BTreeMap<String, vz_core::office::ChartSources>,
     pub(crate) cancel: Option<tokio_util::sync::CancellationToken>,
     pub(crate) started: Option<std::time::Instant>,
     current_part: String,
+    #[cfg(feature = "listing-originals")]
     pub(crate) worker_time: BTreeMap<String, std::time::Duration>,
 }
 impl Budget {
@@ -282,6 +320,9 @@ fn transform(
     ensure!(depth <= MAX_DEPTH, "container depth limit");
     budget.charge(input.len())?;
     match extension(name)? {
+        #[cfg(not(feature = "listing-originals"))]
+        "docx" | "xlsx" | "pptx" => anyhow::bail!("original-file handler disabled"),
+        #[cfg(feature = "listing-originals")]
         "docx" | "xlsx" | "pptx" => {
             let (bytes, report) = office_worker(name, input, budget, false)?;
             budget
@@ -680,6 +721,9 @@ fn inspect_at(
         budget,
     )?;
     match extension(name)? {
+        #[cfg(not(feature = "listing-originals"))]
+        "docx" | "xlsx" | "pptx" => anyhow::bail!("original-file handler disabled"),
+        #[cfg(feature = "listing-originals")]
         "docx" | "xlsx" | "pptx" => {
             let (_, report) = office_worker(name, input, budget, true)?;
             budget.zip_entries += report.parts;
@@ -936,6 +980,7 @@ fn inspect_json(
     Ok(())
 }
 
+#[cfg(feature = "listing-originals")]
 pub(crate) fn office_worker(
     name: &str,
     input: &[u8],
@@ -978,6 +1023,8 @@ pub(crate) fn office_worker(
         let request = vz_core::worker::Request {
             path: source,
             pdfium: None,
+            projection: None,
+            readback: None,
             office: Some(vz_core::worker::OfficeJob {
                 name: name.into(),
                 output: root.clone(),

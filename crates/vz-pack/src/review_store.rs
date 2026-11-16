@@ -338,6 +338,7 @@ impl NativePackReview<'_> {
         );
         Ok((generation.review, private))
     }
+    #[cfg(feature = "listing-originals")]
     pub(crate) fn origin_original(&self, current: &CurrentReview, name: &str) -> Result<Vec<u8>> {
         self.edit_origin(current)?;
         let path = self
@@ -406,6 +407,8 @@ impl NativePackReview<'_> {
             generation.sanitizer.as_deref() == Some(&certificate),
             ListingError::ReviewRequired
         );
+        #[cfg(not(feature = "listing-originals"))]
+        crate::vector_payload::verify(&path.join("payload"))?;
         let terms = serde_json::from_value(private["identity_terms"].clone())?;
         Ok((path.join("payload"), terms))
     }
@@ -1276,6 +1279,7 @@ mod tests {
                     staged_artifacts: vec![],
                     metadata_inventory_schema_version: 1,
                     metadata_inventory: Vec::new(),
+                    projection_inventory: Vec::new(),
                     source_revision: String::new(),
                     index_revision: String::new(),
                     embedding_recipe_sha256: digest(&"placeholder").unwrap(),
@@ -1776,6 +1780,7 @@ mod tests {
             staged_artifacts: vec![],
             metadata_inventory_schema_version: 1,
             metadata_inventory: Vec::new(),
+            projection_inventory: Vec::new(),
             source_revision: String::new(),
             index_revision: String::new(),
             embedding_recipe_sha256: digest(&"recipe").unwrap(),

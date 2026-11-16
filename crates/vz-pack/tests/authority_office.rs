@@ -1,3 +1,4 @@
+#![cfg(feature = "listing-originals")]
 //! Constructed OOXML adversarial fixtures plus public Office-saved originals.
 //! Installed Microsoft 365/Document Inspector remains a manual qualification gate.
 use std::{
@@ -102,6 +103,8 @@ fn relationship_aliases_reopen_through_production_parsers() {
             path: path.clone(),
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         };
         std::fs::write(&path, archive(&parts)).unwrap();
         let before = vz_core::parsers::parse(&request).unwrap();
@@ -884,6 +887,8 @@ fn office_capacity() {
     let request = vz_core::worker::Request {
         path: input,
         pdfium: None,
+        projection: None,
+        readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "office_capacity.xlsx".into(),
             output: temp.path().into(),
@@ -1371,6 +1376,8 @@ fn office_saved_files_with_listing_refused_parts_still_ingest() {
             path,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         })
         .unwrap();
         assert!(pages.iter().any(|p| !p.text.trim().is_empty()), "{ext}");
@@ -1926,6 +1933,8 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
             path,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         })
         .unwrap();
         let ingested = pages
@@ -1964,6 +1973,8 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
                 path: original_path,
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             })
             .unwrap();
             for (label, slide_pages) in [("original", &original_pages), ("rebuilt", &pages)] {
@@ -2064,6 +2075,8 @@ fn office_smartart_ingest_resolves_cache_from_host_or_data_only_when_internal() 
                 path,
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             })
             .unwrap();
             assert_eq!(pages.len(), 1);
@@ -2624,6 +2637,8 @@ fn office_ingest_keeps_host_pages_and_order_with_graphics() {
                 path,
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             })
             .unwrap();
             assert_eq!(pages.len(), 2, "{ext}");
@@ -2843,6 +2858,8 @@ fn office_graphics_ingest_joins_runs_like_review_inventory() {
             path,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         })
         .unwrap();
         assert_eq!(pages.len(), 1);
@@ -2877,6 +2894,8 @@ fn office_smartart_ingest_falls_back_to_model_without_usable_cache() {
             path,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         })
         .unwrap();
         for value in ["abc", "def", "ghi", "jkl"] {
@@ -2916,6 +2935,8 @@ fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
         path,
         pdfium: None,
         office: None,
+        projection: None,
+        readback: None,
     })
     .unwrap();
     assert_eq!(pages.len(), 1);

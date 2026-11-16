@@ -196,6 +196,8 @@ pub async fn index(
                 &worker::Request {
                     path: path.clone(),
                     office: None,
+                    projection: None,
+                    readback: None,
                     pdfium: if path
                         .extension()
                         .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))

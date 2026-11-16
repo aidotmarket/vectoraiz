@@ -126,6 +126,8 @@ jobs:
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
+      - name: Frozen originals regression tests (test only)
+        run: cargo test --locked -p vz-pack --features listing-originals office_
       - name: Validate generated MCPB manifest (pinned 2.1.2)
         run: npx --yes @anthropic-ai/mcpb@2.1.2 validate target/mcpb-manifest.json
       - name: Build CLI workers and Tauri debug app

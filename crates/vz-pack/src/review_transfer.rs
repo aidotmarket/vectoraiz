@@ -17,6 +17,7 @@ pub(crate) fn check_input(
     supplied: &Path,
     payload: &Path,
 ) -> Result<()> {
+    guard.check_sanitizer(current)?;
     guard.check_accepted(current)?;
     let expected = inventory(payload, &current.pack_id.to_string())?;
     let actual = inventory(supplied, &current.pack_id.to_string())?;
@@ -62,6 +63,8 @@ fn package_inner(
     output: &Path,
     mut check: impl FnMut(Point) -> Result<()>,
 ) -> Result<Value> {
+    guard.check_sanitizer(current)?;
+    guard.check_accepted(current)?;
     let parent = output
         .parent()
         .filter(|p| !p.as_os_str().is_empty())

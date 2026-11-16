@@ -6,7 +6,9 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+anyhow = "1"
 vz-core.workspace = true
+vz-pack = { path = "../vz-pack" }
 serde_json.workspace = true
 pdfium-render = { version = "=0.8.35", default-features = false, features = ["pdfium_7350", "image"] }
 

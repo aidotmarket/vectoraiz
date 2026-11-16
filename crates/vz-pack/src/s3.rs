@@ -147,6 +147,8 @@ pub(crate) fn upload(
     region: &str,
     prefix: &str,
 ) -> Result<()> {
+    guard.check_sanitizer(current)?;
+    guard.check_accepted(current)?;
     ensure!(
         prefix == format!("vz/{}", current.pack_id),
         "S3 prefix must be the reviewed pack UUID under vz/"

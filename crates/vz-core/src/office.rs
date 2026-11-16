@@ -11,6 +11,7 @@ mod chart_allowlist;
 mod chart_sources;
 mod diagram_allowlist;
 mod ingest;
+pub mod projection;
 pub(crate) fn ingest_graphics(zip: &mut zip::ZipArchive<std::fs::File>, host: &str) -> String {
     ingest::graphics_text(zip, host)
 }

@@ -9,6 +9,7 @@ pub mod review_store;
 mod review_transfer;
 mod s3;
 pub mod sanitize;
+mod vector_payload;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::path::Path;

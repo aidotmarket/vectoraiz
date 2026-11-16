@@ -71,6 +71,65 @@ class DefaultPinsFold(unittest.TestCase):
         self.assertIn('build --debug --ci --features smoke-test,custom-protocol', workflow)
 
 
+class ListingOriginalsBuildGate(unittest.TestCase):
+    feature = 'listing-originals'
+    dedicated = 'run: cargo test --locked -p vz-pack --features listing-originals office_'
+
+    def check_inputs(self, root):
+        allowed = []
+        for path in [*root.glob('.github/workflows/*'), *root.glob('scripts/**/*')]:
+            if not path.is_file() or path.suffix not in {'.yml', '.yaml', '.py', '.sh', '.ps1', '.js', '.mjs', '.cjs', '.swift', '.bat', '.cmd'}:
+                continue
+            if path == root / 'scripts/native-build-tests.py':
+                continue
+            for line in path.read_text().splitlines():
+                if self.feature in line:
+                    self.assertEqual(path, root / '.github/workflows/native-ci.yml', str(path))
+                    self.assertEqual(line.strip(), self.dedicated, line)
+                    allowed.append(line)
+        self.assertEqual(len(allowed), 1)
+        for path in root.rglob('Cargo.toml'):
+            if any(part in {'target', 'node_modules'} for part in path.parts):
+                continue
+            config = tomllib.loads(path.read_text())
+            features = config.get('features', {})
+            if self.feature in features:
+                self.assertEqual(path, root / 'crates/vz-pack/Cargo.toml')
+                self.assertEqual(features[self.feature], [])
+            def reject_forwarding(table):
+                for key, value in table.items():
+                    if isinstance(value, list):
+                        self.assertFalse(any(isinstance(v, str) and self.feature in v for v in value), str(path))
+                    elif isinstance(value, dict):
+                        reject_forwarding(value)
+            reject_forwarding(config)
+        for path in (root / 'app/src-tauri').rglob('*.json'):
+            if 'node_modules' not in path.parts:
+                self.assertNotIn(self.feature, path.read_text(), str(path))
+
+    def test_originals_only_in_dedicated_test_command(self):
+        self.check_inputs(version.ROOT)
+
+    def test_originals_gate_rejects_shipping_and_forwarding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '.github/workflows').mkdir(parents=True)
+            workflow = root / '.github/workflows/native-ci.yml'
+            workflow.write_text(self.dedicated)
+            self.check_inputs(root)
+            workflow.write_text(self.dedicated + '\nrun: cargo build --features listing-originals')
+            with self.assertRaises(AssertionError):
+                self.check_inputs(root)
+            workflow.write_text(self.dedicated)
+            cargo = root / 'Cargo.toml'
+            for text in ['[features]\ndefault=["listing-originals"]',
+                         '[features]\nother=["vz-pack/listing-originals"]',
+                         '[dependencies.vz-pack]\nfeatures=["listing-originals"]']:
+                cargo.write_text(text)
+                with self.assertRaises(AssertionError):
+                    self.check_inputs(root)
+
+
 class ListingPreviewBuildGate(unittest.TestCase):
     feature = 'listing-preview-test-switch'
 

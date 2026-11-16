@@ -62,6 +62,9 @@ pub struct ListingReview {
     pub metadata_inventory_schema_version: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata_inventory: Vec<crate::sanitize::Entry>,
+    /// Private projection provenance; never part of delivered-value parity.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub projection_inventory: Vec<crate::sanitize::Entry>,
     pub source_revision: String,
     pub index_revision: String,
     pub embedding_recipe_sha256: Sha256,

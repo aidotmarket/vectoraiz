@@ -6,7 +6,32 @@ fn main() {
         if request.office_label().is_some() {
             vz_core::worker::apply_office_memory_limit()?;
         }
-        if let Some(job) = &request.office {
+        anyhow::ensure!(
+            usize::from(request.projection.is_some())
+                + usize::from(request.readback.is_some())
+                + usize::from(request.office.is_some())
+                <= 1,
+            "ambiguous worker request"
+        );
+        if let Some(job) = &request.readback {
+            let input = std::fs::read(&request.path)?;
+            let inventory =
+                vz_pack::sanitize::inspect_vector_artifact(&job.name, &input, &job.identity_terms)?;
+            std::fs::write(
+                job.output.join("inventory.json"),
+                serde_json::to_vec(&serde_json::json!({"version":1,"inventory":inventory}))?,
+            )?;
+            Ok(Vec::new())
+        } else if let Some(job) = &request.projection {
+            anyhow::ensure!(request.office.is_none(), "ambiguous worker request");
+            let input = std::fs::read(&request.path)?;
+            let projection = vz_core::office::projection::extract(&job.kind, &input)?;
+            std::fs::write(
+                job.output.join("projection.json"),
+                serde_json::to_vec(&projection)?,
+            )?;
+            Ok(Vec::new())
+        } else if let Some(job) = &request.office {
             let input = std::fs::read(&request.path)?;
             let report = if job.readback {
                 vz_core::office::inspect(&job.name, &input)?
