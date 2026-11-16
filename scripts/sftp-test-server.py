@@ -155,7 +155,23 @@ def serve(connection):
 
 listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-listener.bind(("127.0.0.1", args.port))
+if 'KD_BRIDGE_PORT_BASE' in os.environ:
+    first = int(os.environ['KD_BRIDGE_PORT_BASE'])
+    ports = range(first, first + int(os.environ['KD_BRIDGE_PORT_COUNT']))
+    if args.port and args.port not in ports:
+        parser.error('SFTP fixture port is outside the assigned job range')
+    candidates = [args.port] if args.port else ports
+    for port in candidates:
+        try:
+            listener.bind(('127.0.0.1', port))
+            break
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE:
+                raise
+    else:
+        raise OSError('No assigned SFTP fixture port available')
+else:
+    listener.bind(('127.0.0.1', args.port))
 listener.listen(16)
 print(json.dumps({"port": listener.getsockname()[1]}), flush=True)
 while True:

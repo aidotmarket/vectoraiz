@@ -280,7 +280,15 @@ fn projection_parts(
                 let used = trees
                     .get(&own)
                     .is_some_and(|n| uses_relationship(n, rel.attr("Id").unwrap_or("")));
-                if rel.attr("TargetMode") != Some("External") && (implicit || (explicit && used)) {
+                // Some producers keep the model's cache relationship on the
+                // containing slide/document instead of on the data-model part.
+                let host_cache = typ == "diagramDrawing"
+                    && trees
+                        .get(&own)
+                        .is_some_and(|n| has(n, graphics::DGM, "relIds"));
+                if rel.attr("TargetMode") != Some("External")
+                    && (implicit || host_cache || (explicit && used))
+                {
                     pending.push(resolve(
                         &own,
                         rel.attr("Target").context("relationship target")?,

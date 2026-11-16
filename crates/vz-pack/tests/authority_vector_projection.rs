@@ -265,6 +265,21 @@ fn projection_graphics_static_cache_and_pair_binding() {
             assert!(result.err().unwrap().to_string().contains("PAIR_AMBIGUOUS"));
         }
     }
+    let host_rels = rels.replace("</Relationships>", r#"<Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="diagrams/drawing1.xml"/></Relationships>"#);
+    let p = extract(
+        "docx",
+        &package(
+            "docx",
+            &[
+                ("word/document.xml", host),
+                ("word/_rels/document.xml.rels", &host_rels),
+                ("word/diagrams/data1.xml", model),
+                ("word/diagrams/drawing1.xml", drawing),
+            ],
+        ),
+    )
+    .unwrap();
+    assert!(text(&p).contains("SMARTART_ALT_CANARY"));
 }
 
 fn word(body: &str, extra: &[(&str, &str)]) -> Vec<u8> {
