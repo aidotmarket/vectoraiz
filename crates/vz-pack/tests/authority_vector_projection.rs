@@ -194,7 +194,7 @@ fn projection_format_limits() {
 fn projection_graphics_static_cache_and_pair_binding() {
     let chart_host = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:drawing><a:graphic><a:graphicData><c:chart r:id="chart"/></a:graphicData></a:graphic></w:drawing></w:r></w:p></w:body></w:document>"#;
     let chart_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="chart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="charts/chart1.xml"/></Relationships>"#;
-    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:plotArea><c:barChart><c:ser><c:tx><c:strRef><c:f>CHART_FORMULA_CANARY</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>STATIC_TITLE</c:v></c:pt></c:strCache></c:strRef></c:tx><c:val><c:numRef><c:f>VALUE_FORMULA_CANARY</c:f><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>42</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart><c:title><c:tx><c:rich xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:r><a:t>Annual</a:t></a:r><a:br/><a:r><a:t>Rev</a:t></a:r><a:r><a:t>enue</a:t></a:r></a:p></c:rich></c:tx></c:title><c:plotArea><c:barChart><c:ser><c:tx><c:strRef><c:f>CHART_FORMULA_CANARY</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>STATIC_TITLE</c:v></c:pt></c:strCache></c:strRef></c:tx><c:val><c:numRef><c:f>VALUE_FORMULA_CANARY</c:f><c:numCache><c:ptCount val="1"/><c:pt idx="0"><c:v>42</c:v></c:pt></c:numCache></c:numRef></c:val></c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#;
     let p = extract(
         "docx",
         &package(
@@ -211,6 +211,7 @@ fn projection_graphics_static_cache_and_pair_binding() {
     assert!(!text(&p).contains("CANARY"));
     assert_eq!(p.drops["formulas"], 2);
     assert!(!p.warnings.is_empty());
+    assert!(text(&p).contains("Annual\nRevenue"));
     let missing = chart.replace("<c:ptCount val=\"1\"/>", "<c:ptCount val=\"2\"/>");
     assert!(extract(
         "docx",
@@ -466,7 +467,7 @@ fn projection_xlsx_drawing_visibility_is_local_to_sheet_and_vml_comments_drop() 
             ),
             (
                 "xl/drawings/drawing.xml",
-                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:sp><xdr:txBody><a:p><a:r><a:t>VISIBLE_DRAWING</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>"#,
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:pic><xdr:blipFill><a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip></xdr:blipFill></xdr:pic><xdr:sp><xdr:txBody><a:p><a:r><a:t>VISIBLE_DRAWING</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>"#,
             ),
             (
                 "xl/drawings/comments.vml",
@@ -481,4 +482,85 @@ fn projection_xlsx_drawing_visibility_is_local_to_sheet_and_vml_comments_drop() 
         .any(|n| n.text == "VISIBLE_DRAWING" && !n.hidden));
     assert!(!text(&p).contains("CANARY"));
     assert_eq!(p.drops["comments"], 2);
+}
+
+#[test]
+fn projection_tab_stops_are_not_run_tabs() {
+    let p = extract("docx", &word(r#"<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/><w:tab w:val="right" w:pos="1440"/></w:tabs></w:pPr><w:r><w:t>Hello</w:t><w:tab/><w:t>World</w:t></w:r></w:p><w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="720"/></w:tabs></w:pPr></w:p>"#, &[])).unwrap();
+    assert_eq!(text(&p), "Hello\tWorld");
+    assert_eq!(p.nodes.len(), 1);
+}
+
+#[test]
+fn projection_powerpoint_textless_extensions_and_text_refusal() {
+    let body = r#"<p:sp><p:nvSpPr><p:nvPr><p:extLst><p:ext><p14:media xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main"/></p:ext></p:extLst></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:rPr><a:hlinkClick><a:extLst><a:ext><a16:hlinkClr xmlns:a16="http://schemas.microsoft.com/office/drawing/2014/main"/></a:ext></a:extLst></a:hlinkClick></a:rPr><a:t>VISIBLE</a:t></a:r></a:p></p:txBody></p:sp>"#;
+    assert_eq!(text(&extract("pptx", &deck(body, &[])).unwrap()), "VISIBLE");
+    for payload in ["<a:t>EXTENSION_TEXT</a:t>", "literal text"] {
+        let bad = body.replace("<p:ext>", &format!("<p:ext>{payload}"));
+        assert!(extract("pptx", &deck(&bad, &[])).is_err());
+    }
+}
+
+#[test]
+fn projection_real_powerpoint_slide_level_creation_id_and_notes() {
+    use std::io::Read;
+    let mut source = zip::ZipArchive::new(Cursor::new(include_bytes!(
+        "fixtures/office-public/SampleShow.pptx"
+    )))
+    .unwrap();
+    let mut output = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let mut changed = 0;
+    for i in 0..source.len() {
+        let mut entry = source.by_index(i).unwrap();
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).unwrap();
+        if entry.name().starts_with("ppt/slides/slide") && entry.name().ends_with(".xml") {
+            let xml = String::from_utf8(bytes).unwrap();
+            assert!(xml.contains("</p:cSld>"));
+            bytes = xml.replace("</p:cSld>", r#"<p:extLst><p:ext uri="{BB962C8B-B14F-4D97-AF65-F5344CB8AC3E}"><p14:creationId xmlns:p14="http://schemas.microsoft.com/office/powerpoint/2010/main" val="244990882"/></p:ext></p:extLst></p:cSld>"#).into_bytes();
+            changed += 1;
+        }
+        output
+            .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+            .unwrap();
+        output.write_all(&bytes).unwrap();
+    }
+    assert!(changed > 0);
+    let p = extract("pptx", &output.finish().unwrap().into_inner()).unwrap();
+    assert!(p.nodes.iter().any(|n| n.kind == "slide paragraph"));
+    assert!(p.nodes.iter().any(|n| n.kind == "notes paragraph"));
+}
+
+#[test]
+fn projection_local_dpi_and_data_bar_id_metadata() {
+    let drawing = r#"<w:p><w:r><w:drawing><a:blip><a:extLst><a:ext uri="{28A0092B-C50C-407E-A947-70E740481C1C}"><a14:useLocalDpi xmlns:a14="http://schemas.microsoft.com/office/drawing/2010/main" val="0"/></a:ext></a:extLst></a:blip></w:drawing><w:t>VISIBLE</w:t></w:r></w:p>"#;
+    assert_eq!(
+        text(&extract("docx", &word(drawing, &[])).unwrap()),
+        "VISIBLE"
+    );
+    assert!(extract(
+        "docx",
+        &word(&drawing.replace("useLocalDpi", "unknown"), &[])
+    )
+    .is_err());
+    assert!(extract(
+        "docx",
+        &word(
+            &drawing.replace("<a:ext uri=", "<a:ext>TEXT</a:ext><a:ext uri="),
+            &[]
+        )
+    )
+    .is_err());
+    let rule = r#"<conditionalFormatting sqref="A1:A5"><cfRule type="dataBar" priority="1"><dataBar><cfvo type="min"/><cfvo type="max"/></dataBar><extLst><ext uri="{B025F937-C7B1-47D3-B67F-A62EFF666E3E}"><x14:id xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">{GUID}</x14:id></ext></extLst></cfRule></conditionalFormatting>"#;
+    assert_eq!(
+        text(&extract("xlsx", &workbook("visible", rule)).unwrap()),
+        "Sheet"
+    );
+    for bad in [
+        rule.replace("type=\"dataBar\"", "type=\"expression\""),
+        rule.replace("x14:id", "x14:dataValidations"),
+        rule.replace("{GUID}", "<t>CONTENT</t>"),
+    ] {
+        assert!(extract("xlsx", &workbook("visible", &bad)).is_err());
+    }
 }

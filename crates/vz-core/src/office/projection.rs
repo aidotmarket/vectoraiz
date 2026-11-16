@@ -373,6 +373,27 @@ fn index_entry(instruction: &str) -> bool {
 fn literal_text(n: &Node) -> bool {
     !n.text.trim().is_empty() || n.children.iter().any(literal_text)
 }
+// The DPI flag affects rendering only. Do not skip other drawing extensions.
+fn local_dpi_extension(n: &Node, path: &str) -> bool {
+    n.ns == A
+        && n.local == "extLst"
+        && path.rsplit_once('/').is_some_and(|(parent, _)| {
+            parent
+                .rsplit('/')
+                .next()
+                .is_some_and(|p| p.starts_with("blip["))
+        })
+        && !literal_text(n)
+        && n.children.iter().all(|ext| {
+            ext.ns == A
+                && ext.local == "ext"
+                && ext.children.iter().all(|entry| {
+                    entry.ns == "http://schemas.microsoft.com/office/drawing/2010/main"
+                        && entry.local == "useLocalDpi"
+                        && entry.children.is_empty()
+                })
+        })
+}
 fn has(n: &Node, ns: &str, local: &str) -> bool {
     (n.ns == ns && n.local == local) || n.children.iter().any(|c| has(c, ns, local))
 }
@@ -448,6 +469,9 @@ fn walk_word(
             !literal_text(n),
             "PROJECTION_CONTENT_UNSUPPORTED at {path}: w14 run property text"
         );
+        return Ok(());
+    }
+    if local_dpi_extension(n, path) {
         return Ok(());
     }
     if projected_graphics::reference(n, host, path, hidden, trees, out)? {
@@ -608,8 +632,7 @@ fn walk_word(
         );
         out.add(path, "drawing text", n.text.clone(), hidden)?;
     }
-    if ((n.ns == W && ["tab", "br", "cr"].contains(&n.local.as_str()))
-        || (n.ns == A && n.local == "br"))
+    if ((n.ns == W && ["br", "cr"].contains(&n.local.as_str())) || (n.ns == A && n.local == "br"))
         && fields.moved.is_empty()
         && !fields.fields.iter().any(|field| !field.0)
     {
@@ -635,6 +658,20 @@ fn walk_word(
         }
     }
     for (i, c) in n.children.iter().enumerate() {
+        if n.ns == W
+            && n.local == "r"
+            && c.ns == W
+            && c.local == "tab"
+            && fields.moved.is_empty()
+            && !fields.fields.iter().any(|field| !field.0)
+        {
+            out.add(
+                &format!("{path}/tab[{}]", i + 1),
+                "inline control",
+                "\t".into(),
+                hidden,
+            )?;
+        }
         walk_word(
             c,
             &format!("{path}/{}[{}]", c.local, i + 1),
@@ -749,6 +786,8 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
         }
         let mut extensions = Vec::new();
         descendants(root, S, "extLst", &mut extensions);
+        let mut rules = Vec::new();
+        descendants(root, S, "cfRule", &mut rules);
         for extension in extensions {
             ensure!(
                 extension
@@ -756,8 +795,16 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
                     .iter()
                     .all(|ext| ext.children.iter().all(|entry| entry.ns
                         == "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
-                        && ["conditionalFormattings", "sparklineGroups"]
+                        && (["conditionalFormattings", "sparklineGroups"]
                             .contains(&entry.local.as_str())
+                            || (entry.local == "id"
+                                && entry.children.is_empty()
+                                && rules.iter().any(|rule| rule.attr("type")
+                                    == Some("dataBar")
+                                    && rule
+                                        .children
+                                        .iter()
+                                        .any(|child| std::ptr::eq(child, extension)))))
                         && !has(entry, S, "t")
                         && !has(entry, A, "t"))),
                 "PROJECTION_CONTENT_UNSUPPORTED at {target}: content-bearing worksheet extension"
@@ -1002,21 +1049,13 @@ fn walk_slide(
     if projected_graphics::reference(n, host, path, hidden, trees, out)? {
         return Ok(());
     }
-    if n.local == "extLst"
-        && n.ns == A
-        && !literal_text(n)
-        && path.contains("/cNvPr[")
-        && n.children.iter().all(|ext| {
-            ext.ns == A
-                && ext.local == "ext"
-                && ext.children.iter().all(|entry| {
-                    entry.ns == "http://schemas.microsoft.com/office/drawing/2014/main"
-                        && entry.local == "creationId"
-                        && entry.children.is_empty()
-                        && entry.text.trim().is_empty()
-                })
-        })
-    {
+    // PowerPoint writes creation IDs, hyperlink colours and media metadata here.
+    // Any literal text still refuses rather than disappearing from projection.
+    if n.local == "extLst" && [P, A].contains(&n.ns.as_str()) {
+        ensure!(
+            !literal_text(n),
+            "PROJECTION_CONTENT_UNSUPPORTED at {path}: text-bearing drawing/slide extension"
+        );
         return Ok(());
     }
     let paragraph_start = out.nodes.len();

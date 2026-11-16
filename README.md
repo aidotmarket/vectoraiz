@@ -20,3 +20,14 @@ currently read whole, so an artifact near the cap can refuse with
 `PROJECTION_MEMORY_LIMIT_EXCEEDED`; the payload byte limit is not a promise that
 an artifact of that size can be reviewed. Capacity and installed Office rendering
 remain unqualified. This fold does not raise those limits.
+
+Known projection limits: `x14:dataValidations` and other content-bearing worksheet
+extensions refuse with `PROJECTION_CONTENT_UNSUPPORTED`. Drawings crossing hidden
+rows or columns on their own sheet refuse with `PROJECTION_VISIBILITY_UNKNOWN`.
+Fields without proven results (except instruction-only XE fields) refuse with
+`PROJECTION_FIELD_RESULT_UNPROVEN`. Static layout/master text refuses with
+`PROJECTION_LAYOUT_UNSUPPORTED`; slide AlternateContent and text-bearing extensions
+also refuse. These cases remain outside qualification.
+Crafted XE simple fields with child runs still expose those child runs as visible;
+identity terms split across visibility segments are matched separately. Spreadsheet
+drawing paragraphs currently use the `slide paragraph` inventory label.

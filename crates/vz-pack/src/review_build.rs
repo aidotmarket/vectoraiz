@@ -1573,12 +1573,16 @@ mod tests {
                         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
                     ),
                     (
+                        "ppt/charts/chart1.xml",
+                        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Annual</a:t></a:r><a:br/><a:r><a:t>Rev</a:t></a:r><a:r><a:t>enue</a:t></a:r></a:p></c:rich></c:tx></c:title></c:chart></c:chartSpace>"#,
+                    ),
+                    (
                         "ppt/slides/slide1.xml",
-                        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>SLIDE_RESULT con</a:t></a:r><a:r><a:t>fidential agree</a:t></a:r><a:r><a:t>ment Ac</a:t></a:r><a:r><a:t>me</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+                        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="chart"/><p:sp><p:txBody><a:p><a:r><a:t>SLIDE_RESULT con</a:t></a:r><a:r><a:t>fidential agree</a:t></a:r><a:r><a:t>ment Ac</a:t></a:r><a:r><a:t>me</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
                     ),
                     (
                         "ppt/slides/_rels/slide1.xml.rels",
-                        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="notes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notes1.xml"/></Relationships>"#,
+                        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="chart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="notes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notes1.xml"/></Relationships>"#,
                     ),
                     (
                         "ppt/notesSlides/notes1.xml",
@@ -1690,6 +1694,10 @@ mod tests {
             .iter()
             .any(|e| e.kind.contains("hidden") && e.kind.ends_with("omitted")));
         let inputs = f.engine.texts.lock().unwrap();
+        assert!(inputs.iter().any(|s| s.contains("Annual\nRevenue")));
+        assert!(inputs
+            .iter()
+            .all(|s| !s.contains("AnnualRevenue") && !s.contains("Rev enue")));
         assert!(
             inputs
                 .iter()

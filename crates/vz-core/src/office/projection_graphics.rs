@@ -127,6 +127,9 @@ fn chart(n: &Node, at: &str, hidden: bool, out: &mut Projection, cache: bool) ->
         );
         out.add(at, "chart cached value", n.text.clone(), hidden)?;
     }
+    if n.ns == A && n.local == "br" {
+        out.add(at, "inline control", "\n".into(), hidden)?;
+    }
     // User-facing attributes are content; rendering properties are never text.
     if n.ns == A && n.local == "cNvPr" {
         for key in ["title", "descr"] {
