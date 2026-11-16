@@ -37,6 +37,8 @@ impl Projection {
                 "properties",
                 "revision-history",
                 "hidden-form-data",
+                "unread-parts",
+                "headers-footers",
             ]
             .map(|k| (k.into(), 0))
             .into(),
@@ -61,7 +63,7 @@ impl Projection {
     }
     fn add(&mut self, location: &str, kind: &str, text: String, hidden: bool) -> Result<()> {
         self.limit()?;
-        if !text.trim().is_empty() {
+        if !text.is_empty() {
             self.nodes.push(ProjectionNode {
                 location: location.into(),
                 kind: kind.into(),
@@ -124,30 +126,13 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
         );
         out.expanded_bytes = expanded;
         out.parts = parts.len();
-        let mut trees = BTreeMap::new();
-        for (part, bytes) in &parts {
-            if part.ends_with(".xml") || part.ends_with(".rels") {
-                let mut comments = quick_xml::Reader::from_reader(bytes.as_slice());
-                let mut number = 0;
-                loop {
-                    match comments.read_event()? {
-                        Event::Comment(_) => {
-                            number += 1;
-                            out.drop_at("comments", &format!("{part}/xml-comment[{number}]"))?;
-                        }
-                        Event::Eof => break,
-                        _ => (),
-                    }
-                }
-                trees.insert(part.clone(), parse(bytes, part)?);
-            }
-        }
-        validate_links(&trees, &parts)?;
         let main = match kind {
             "docx" => "word/document.xml",
             "xlsx" => "xl/workbook.xml",
             _ => "ppt/presentation.xml",
         };
+        let trees = projection_parts(&parts, main, &mut out)?;
+        validate_links(&trees, &parts)?;
         let root_rels = trees
             .get("_rels/.rels")
             .context("missing package root relationships")?;
@@ -165,10 +150,12 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
             "mismatched projection package root"
         );
         for part in parts.keys() {
-            ensure!(
-                !part.ends_with(".vml"),
-                "PROJECTION_VISIBILITY_UNKNOWN at {part}: VML content requires a proven projection"
-            );
+            if !trees.contains_key(part) {
+                out.drop_at("unread-parts", part)?;
+            }
+            if kind == "xlsx" && part.ends_with(".vml") && trees.contains_key(part) {
+                out.drop_at("comments", part)?;
+            }
             if part.starts_with("docProps/") {
                 out.drop_at("properties", part)?;
             }
@@ -195,8 +182,7 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
                 }
                 for (part, root) in &trees {
                     if part == "word/document.xml"
-                        || part.starts_with("word/header")
-                        || part.starts_with("word/footer")
+                        || referenced_word_part(&trees, part)?
                         || ["word/footnotes.xml", "word/endnotes.xml"].contains(&part.as_str())
                     {
                         let mut fields = WordState::default();
@@ -212,11 +198,164 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
             _ => slides(&trees, &mut out)?,
         }
     }
+    out.nodes.retain(|n| !n.text.trim().is_empty());
     ensure!(
         !out.nodes.is_empty(),
         "no sale projection text available; exclude document"
     );
     Ok(out)
+}
+// Decode the projection graph only. Unused XML (including customXml processing
+// instructions) is private omission evidence, never a reason to parse its bytes.
+fn projection_parts(
+    parts: &BTreeMap<String, Vec<u8>>,
+    main: &str,
+    out: &mut Projection,
+) -> Result<BTreeMap<String, Node>> {
+    let mut trees = BTreeMap::new();
+    let mut pending = vec!["_rels/.rels".to_string(), main.to_string()];
+    // A few optional parts have implicit Office relationships. Retain support
+    // for minimal producers which omit those relationships.
+    for part in [
+        "word/styles.xml",
+        "word/footnotes.xml",
+        "word/endnotes.xml",
+        "xl/sharedStrings.xml",
+    ] {
+        if parts.contains_key(part) && part.split('/').next() == main.split('/').next() {
+            pending.push(part.into());
+        }
+    }
+    while let Some(part) = pending.pop() {
+        if trees.contains_key(&part) {
+            continue;
+        }
+        let bytes = parts
+            .get(&part)
+            .with_context(|| format!("missing projection part {part}"))?;
+        let root = parse(bytes, &part)?;
+        let mut reader = quick_xml::Reader::from_reader(bytes.as_slice());
+        let mut number = 0;
+        loop {
+            match reader.read_event()? {
+                Event::Comment(_) => {
+                    number += 1;
+                    out.drop_at("comments", &format!("{part}/xml-comment[{number}]"))?;
+                }
+                Event::Eof => break,
+                _ => (),
+            }
+        }
+        if part.ends_with(".rels") {
+            let own = owner(&part)?;
+            for rel in &root.children {
+                let typ = rel
+                    .attr("Type")
+                    .unwrap_or("")
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or("");
+                let implicit = [
+                    "notesSlide",
+                    "slideLayout",
+                    "slideMaster",
+                    "notesMaster",
+                    "styles",
+                    "sharedStrings",
+                    "footnotes",
+                    "endnotes",
+                ]
+                .contains(&typ);
+                let explicit = [
+                    "worksheet",
+                    "slide",
+                    "header",
+                    "footer",
+                    "table",
+                    "drawing",
+                    "chart",
+                    "diagramData",
+                    "diagramDrawing",
+                    "vmlDrawing",
+                ]
+                .contains(&typ);
+                let used = trees
+                    .get(&own)
+                    .is_some_and(|n| uses_relationship(n, rel.attr("Id").unwrap_or("")));
+                if rel.attr("TargetMode") != Some("External") && (implicit || (explicit && used)) {
+                    pending.push(resolve(
+                        &own,
+                        rel.attr("Target").context("relationship target")?,
+                    )?);
+                }
+            }
+        } else if let Some((dir, name)) = part.rsplit_once('/') {
+            let rels = format!("{dir}/_rels/{name}.rels");
+            if parts.contains_key(&rels) {
+                pending.push(rels);
+            }
+        }
+        trees.insert(part, root);
+    }
+    Ok(trees)
+}
+fn uses_relationship(n: &Node, id: &str) -> bool {
+    n.attrs
+        .iter()
+        .any(|((ns, key), value)| value == id && (ns == R || key == "relId"))
+        || n.children.iter().any(|c| uses_relationship(c, id))
+}
+fn referenced_word_part(trees: &BTreeMap<String, Node>, part: &str) -> Result<bool> {
+    let Some(root) = trees.get("word/document.xml") else {
+        return Ok(false);
+    };
+    let mut sections = Vec::new();
+    descendants(root, W, "sectPr", &mut sections);
+    for section in sections {
+        for reference in &section.children {
+            if reference.ns == W
+                && ["headerReference", "footerReference"].contains(&reference.local.as_str())
+            {
+                let id = reference
+                    .attr_ns(R, "id")
+                    .context("header/footer relationship")?;
+                if resolve("word/document.xml", linked(trees, "word/document.xml", id)?)? == part {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+// Paragraphs own edits and warning matching. Visibility changes retain separate
+// segments so including hidden text remains an explicit seller decision.
+fn paragraph_nodes(out: &mut Projection, start: usize, path: &str, kind: &str) {
+    let nodes: Vec<_> = out.nodes.drain(start..).collect();
+    let mut segment = 0;
+    for mut node in nodes {
+        if [
+            "text",
+            "drawing text",
+            "slide text",
+            "notes",
+            "inline control",
+        ]
+        .contains(&node.kind.as_str())
+        {
+            if let Some(last) = out.nodes.last_mut().filter(|last| {
+                last.location.starts_with(&format!("{path}/flow["))
+                    && last.hidden == node.hidden
+                    && last.kind == kind
+            }) {
+                last.text.push_str(&node.text);
+                continue;
+            }
+            segment += 1;
+            node.location = format!("{path}/flow[{segment}]");
+            node.kind = kind.into();
+        }
+        out.nodes.push(node);
+    }
 }
 fn has(n: &Node, ns: &str, local: &str) -> bool {
     (n.ns == ns && n.local == local) || n.children.iter().any(|c| has(c, ns, local))
@@ -285,6 +424,16 @@ fn walk_word(
             return out.drop_at("instructions", path);
         }
     }
+    if n.ns == MC || n.ns == "urn:schemas-microsoft-com:vml" {
+        bail!("PROJECTION_WORD_TEXTBOX_UNSUPPORTED at {path}: VML/AlternateContent requires a proven branch and visibility");
+    }
+    if n.ns == "http://schemas.microsoft.com/office/word/2010/wordml" && path.contains("/rPr[") {
+        ensure!(
+            !has(n, W, "t") && n.text.trim().is_empty(),
+            "PROJECTION_CONTENT_UNSUPPORTED at {path}: w14 run property text"
+        );
+        return Ok(());
+    }
     if projected_graphics::reference(n, host, path, hidden, trees, out)? {
         return Ok(());
     }
@@ -297,7 +446,19 @@ fn walk_word(
         !["altChunk", "object", "subDoc", "contentPart"].contains(&n.local.as_str()),
         "PROJECTION_CONTENT_UNSUPPORTED at {path}"
     );
+    let paragraph_start = out.nodes.len();
     if n.ns == W {
+        if (n.local == "tr"
+            && n.children
+                .iter()
+                .any(|c| c.ns == W && c.local == "trPr" && has(c, W, "del")))
+            || (n.local == "tc"
+                && n.children
+                    .iter()
+                    .any(|c| c.ns == W && c.local == "tcPr" && has(c, W, "cellDel")))
+        {
+            return out.drop_at("deletions", path);
+        }
         if let Some(category) = match n.local.as_str() {
             "del" | "delText" | "delInstrText" => Some("deletions"),
             "moveFrom" => Some("moved-from"),
@@ -350,8 +511,8 @@ fn walk_word(
                 }
                 Some("end") => {
                     ensure!(
-                        fields.fields.pop() == Some(true),
-                        "field has no proven displayed result at {path}"
+                        fields.fields.pop().is_some(),
+                        "field end without begin at {path}"
                     );
                 }
                 _ => bail!("unknown field state at {path}"),
@@ -359,14 +520,23 @@ fn walk_word(
             return Ok(());
         }
         if n.local == "fldSimple" {
-            ensure!(
-                has(n, W, "t"),
-                "field has no proven displayed result at {path}"
-            );
             out.drop_at("instructions", &format!("{path}/@instr"))?;
         }
     }
     let hidden = hidden
+        || (n.ns == W
+            && n.local == "tr"
+            && n.children
+                .iter()
+                .any(|c| c.ns == W && c.local == "trPr" && has(c, W, "hidden")))
+        || (n.ns == W && n.local == "drawing" && {
+            let mut props = Vec::new();
+            descendants(n, WP, "docPr", &mut props);
+            props.iter().any(|p| {
+                p.attr("hidden")
+                    .is_some_and(|v| ["1", "true", "on"].contains(&v))
+            })
+        })
         || (n.ns == W
             && n.local == "r"
             && n.children
@@ -398,7 +568,19 @@ fn walk_word(
         );
         out.add(path, "drawing text", n.text.clone(), hidden)?;
     }
-    if n.local == "docPr" && n.ns == WP {
+    if ((n.ns == W && ["tab", "br", "cr"].contains(&n.local.as_str()))
+        || (n.ns == A && n.local == "br"))
+        && fields.moved.is_empty()
+        && !fields.fields.iter().any(|display| !display)
+    {
+        out.add(
+            path,
+            "inline control",
+            if n.local == "tab" { "\t" } else { "\n" }.into(),
+            hidden,
+        )?;
+    }
+    if (n.local == "docPr" && n.ns == WP) || (n.local == "cNvPr" && n.ns == PIC) {
         for key in ["descr", "title"] {
             if let Some(value) = n.attr(key) {
                 let location = format!("{path}/@{key}");
@@ -422,6 +604,9 @@ fn walk_word(
             trees,
             out,
         )?;
+    }
+    if [W, A].contains(&n.ns.as_str()) && n.local == "p" {
+        paragraph_nodes(out, paragraph_start, path, "paragraph");
     }
     Ok(())
 }
@@ -473,17 +658,71 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
             "unsupported sheet type at {target}"
         );
         ensure!(
-            ![
-                "oleObject",
-                "control",
-                "legacyDrawing",
-                "legacyDrawingHF",
-                "extLst"
-            ]
-            .iter()
-            .any(|local| has(root, S, local)),
+            !["oleObject", "control", "legacyDrawingHF"]
+                .iter()
+                .any(|local| has(root, S, local)),
             "PROJECTION_CONTENT_UNSUPPORTED at {target}: worksheet carrier/extension"
         );
+        let mut legacy = Vec::new();
+        descendants(root, S, "legacyDrawing", &mut legacy);
+        for (i, reference) in legacy.iter().enumerate() {
+            let part = resolve(
+                &target,
+                linked(
+                    trees,
+                    &target,
+                    reference
+                        .attr_ns(R, "id")
+                        .context("legacy drawing relationship")?,
+                )?,
+            )?;
+            let carrier = trees.get(&part).context("missing legacy drawing")?;
+            let mut shapes = Vec::new();
+            descendants(
+                carrier,
+                "urn:schemas-microsoft-com:vml",
+                "shape",
+                &mut shapes,
+            );
+            ensure!(
+                !shapes.is_empty()
+                    && shapes.iter().all(|shape| {
+                        let mut data = Vec::new();
+                        descendants(
+                            shape,
+                            "urn:schemas-microsoft-com:office:excel",
+                            "ClientData",
+                            &mut data,
+                        );
+                        data.len() == 1 && data[0].attr("ObjectType") == Some("Note")
+                    }),
+                "PROJECTION_CONTENT_UNSUPPORTED at {part}: non-comment VML carrier"
+            );
+            out.drop_at("comments", &format!("{target}/legacyDrawing[{i}]"))?;
+        }
+        let mut headers = Vec::new();
+        descendants(root, S, "headerFooter", &mut headers);
+        for (i, header) in headers.iter().enumerate() {
+            if !header.children.is_empty() {
+                out.drop_at("headers-footers", &format!("{target}/headerFooter[{i}]"))?;
+            }
+        }
+        let mut extensions = Vec::new();
+        descendants(root, S, "extLst", &mut extensions);
+        for extension in extensions {
+            ensure!(
+                extension
+                    .children
+                    .iter()
+                    .all(|ext| ext.children.iter().all(|entry| entry.ns
+                        == "http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"
+                        && ["conditionalFormattings", "sparklineGroups"]
+                            .contains(&entry.local.as_str())
+                        && !has(entry, S, "t")
+                        && !has(entry, A, "t"))),
+                "PROJECTION_CONTENT_UNSUPPORTED at {target}: content-bearing worksheet extension"
+            );
+        }
         let mut formats = Vec::new();
         descendants(root, S, "sheetFormatPr", &mut formats);
         ensure!(
@@ -506,6 +745,7 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
                 .map(|v| on(Some(v)))
                 .transpose()?
                 .unwrap_or(false)
+                || c.attr("width").is_some_and(|v| v.parse::<f64>() == Ok(0.0))
             {
                 hidden_cols.push((
                     c.attr("min").context("column min")?.parse::<i64>()?,
@@ -527,7 +767,8 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
                     .attr("hidden")
                     .map(|v| on(Some(v)))
                     .transpose()?
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                || row.attr("ht").is_some_and(|v| v.parse::<f64>() == Ok(0.0));
             if row_hidden {
                 hidden_rows.insert(row.attr("r").context("row coordinate")?.parse::<i64>()?);
             }
@@ -542,7 +783,7 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
                     out.drop_at("formulas", &loc)?;
                 }
                 let value = cell.children.iter().find(|n| n.ns == S && n.local == "v");
-                ensure!(!formula || value.is_some_and(|v| !v.text.is_empty()), "PROJECTION_MISSING_CACHE at {loc}: recalculate/save locally or exclude document");
+                ensure!(!formula || value.is_some(), "PROJECTION_MISSING_CACHE at {loc}: recalculate/save locally or exclude document");
                 let text = match cell.attr("t") {
                     Some("s") => {
                         let i: usize =
@@ -609,7 +850,7 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
         let mut drawings = Vec::new();
         descendants(root, S, "drawing", &mut drawings);
         for drawing in drawings {
-            ensure!(hidden || (!out.nodes.iter().any(|n|n.hidden) && hidden_cols.is_empty()),"PROJECTION_VISIBILITY_UNKNOWN at {target}: drawing anchored across hidden rows/columns");
+            ensure!(hidden || (hidden_rows.is_empty() && hidden_cols.is_empty()),"PROJECTION_VISIBILITY_UNKNOWN at {target}: drawing anchored across hidden rows/columns");
             let part = resolve(
                 &target,
                 linked(
@@ -712,6 +953,20 @@ fn walk_slide(
     if projected_graphics::reference(n, host, path, hidden, trees, out)? {
         return Ok(());
     }
+    if n.local == "extLst"
+        && path.contains("/cNvPr[")
+        && n.children.iter().all(|ext| {
+            ext.children.iter().all(|entry| {
+                entry.ns == "http://schemas.microsoft.com/office/drawing/2014/main"
+                    && entry.local == "creationId"
+                    && entry.children.is_empty()
+                    && entry.text.trim().is_empty()
+            })
+        })
+    {
+        return Ok(());
+    }
+    let paragraph_start = out.nodes.len();
     ensure!(
         [P, A, PIC, XDR, R, WP].contains(&n.ns.as_str()),
         "PROJECTION_NAMESPACE_UNSUPPORTED at {path}: {}",
@@ -746,6 +1001,9 @@ fn walk_slide(
             hidden,
         )?;
     }
+    if n.ns == A && n.local == "br" {
+        out.add(path, "inline control", "\n".into(), hidden)?;
+    }
     if n.ns == A && n.local == "fld" {
         out.drop_at("instructions", &format!("{path}/@type"))?;
     }
@@ -758,6 +1016,18 @@ fn walk_slide(
             trees,
             out,
         )?;
+    }
+    if n.ns == A && n.local == "p" {
+        paragraph_nodes(
+            out,
+            paragraph_start,
+            path,
+            if path.contains("notes") {
+                "notes paragraph"
+            } else {
+                "slide paragraph"
+            },
+        );
     }
     Ok(())
 }
@@ -793,9 +1063,7 @@ fn refuse_inherited_text(trees: &BTreeMap<String, Node>, part: &str, depth: usiz
     );
     let root = trees.get(part).context("missing inherited part")?;
     ensure!(
-        !has(root, A, "t")
-            && !has(root, graphics::C, "chart")
-            && !has(root, graphics::DGM, "relIds"),
+        !inherited_content(root),
         "PROJECTION_LAYOUT_UNSUPPORTED at {part}: inherited content requires a proven projection"
     );
     let (dir, name) = part.rsplit_once('/').context("inherited part path")?;
@@ -814,4 +1082,15 @@ fn refuse_inherited_text(trees: &BTreeMap<String, Node>, part: &str, depth: usiz
         }
     }
     Ok(())
+}
+
+fn inherited_content(n: &Node) -> bool {
+    // Layout/master placeholder prompts are authoring UI, not rendered content.
+    if n.ns == P && ["sp", "graphicFrame", "pic"].contains(&n.local.as_str()) && has(n, P, "ph") {
+        return false;
+    }
+    (n.ns == A && n.local == "t")
+        || (n.ns == graphics::C && n.local == "chart")
+        || (n.ns == graphics::DGM && n.local == "relIds")
+        || n.children.iter().any(inherited_content)
 }

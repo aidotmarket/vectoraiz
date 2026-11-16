@@ -191,7 +191,7 @@ fn diagram(
     let mut shapes = Vec::new();
     descendants(&trees[&drawing], DSP, "sp", &mut shapes);
     let mut cache = BTreeMap::new();
-    for shape in shapes {
+    for shape in &shapes {
         let key = shape.attr("modelId").context("SmartArt shape modelId")?;
         ensure!(
             cache
@@ -250,14 +250,44 @@ fn diagram(
             "PROJECTION_SMARTART_PAIR_AMBIGUOUS at {drawing}/{id}: unpaired cache text"
         );
     }
+    // Descriptions are independent editable nodes, including alt-only shapes.
+    // Emit only after the model/cache pairing has been validated.
+    for shape in shapes {
+        let key = shape.attr("modelId").context("SmartArt shape modelId")?;
+        let mut properties = Vec::new();
+        descendants(shape, DSP, "cNvPr", &mut properties);
+        descendants(shape, A, "cNvPr", &mut properties);
+        for (i, props) in properties.iter().enumerate() {
+            for attribute in ["descr", "title"] {
+                if let Some(value) = props.attr(attribute) {
+                    out.add(
+                        &format!("{at}!{drawing}/shape/{key}/cNvPr[{i}]/@{attribute}"),
+                        "SmartArt alt text",
+                        value.into(),
+                        hidden || own_hidden_shape(shape)?,
+                    )?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 fn drawing_text(n: &Node) -> String {
-    let mut nodes = Vec::new();
-    descendants(n, A, "t", &mut nodes);
-    nodes
-        .iter()
-        .map(|n| n.text.as_str())
-        .collect::<Vec<_>>()
-        .join("")
+    fn append(n: &Node, text: &mut String) {
+        if n.ns == A && n.local == "t" {
+            text.push_str(&n.text);
+        }
+        if n.ns == A && n.local == "br" {
+            text.push('\n');
+        }
+        for child in &n.children {
+            append(child, text);
+        }
+        if n.ns == A && n.local == "p" {
+            text.push('\n');
+        }
+    }
+    let mut text = String::new();
+    append(n, &mut text);
+    text.strip_suffix('\n').unwrap_or(&text).to_string()
 }

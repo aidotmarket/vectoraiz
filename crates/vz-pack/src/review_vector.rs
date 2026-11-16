@@ -290,8 +290,8 @@ pub(super) fn build(
                     ),
                     value: Some(node.text.clone()),
                     warning: node.hidden
-                        || node.kind == "notes"
-                        || node.kind == "alt text"
+                        || node.kind.starts_with("notes")
+                        || node.kind.ends_with("alt text")
                         || changes.identity_terms.iter().any(|t| {
                             !t.trim().is_empty()
                                 && node.text.to_lowercase().contains(&t.trim().to_lowercase())
@@ -431,7 +431,7 @@ pub(super) fn build(
             put(&work, name, &bytes)?;
         }
         let recipe_description = format!("\nParquet schema (column order; editable display names may differ):\ndocuments: neutral document ID, neutral projection reference, reviewed title, projection type, projection-text SHA256, language (und means unknown), projected pages, projected UTF-8 bytes.\nchunks: chunk ID, neutral document ID, reviewed text, projected page, heading path (JSON array), token count, float32 embedding vector.\nJoin on doc_id. References identify projections, not downloadable source files. Projection text is flattened to one page.\n\nEmbedding recipe (including model, normalization and dimensions):\n```json\n{}\n```\n", serde_json::to_string_pretty(&recipe)?);
-        for (name, bytes) in [("README.md", b"# vectorAIz vector pack\n\nLoad the Parquet files with Apache Arrow. The seller attests: chunks, embeddings and metadata; no source files are delivered. Text is customer data; vectors are not anonymization. Original names and file properties are absent. Source projections omit deletions, instructions, comments, properties and formulas. Spreadsheet cells use saved cached values only; formulas are never evaluated. Hidden content is omitted unless the seller includes it. No OCR or resource fetching. PDF/HTML are unsupported in V1. Language and date ranges are unknown.\nRun examples/query.py with Python, numpy and pyarrow.\n".as_slice()), ("examples/query.py", include_bytes!("../../../scripts/pack-query.py").as_slice())] {
+        for (name, bytes) in [("README.md", b"# vectorAIz vector pack\n\nLoad the Parquet files with Apache Arrow. The seller attests: chunks, embeddings and metadata; no source files are delivered. Text is customer data; vectors are not anonymization. Original names and file properties are absent. Source projections omit deletions, instructions, comments, properties and formulas. Spreadsheet cells use saved cached values only; formulas are never evaluated. Numeric dates retain Excel serial numbers; cell number formats are not applied. Worksheet header/footer text is dropped and counted privately. Hidden content is omitted unless the seller includes it. No OCR or resource fetching. PDF/HTML are unsupported in V1. Language and date ranges are unknown.\nRun examples/query.py with Python, numpy and pyarrow.\n".as_slice()), ("examples/query.py", include_bytes!("../../../scripts/pack-query.py").as_slice())] {
             let bytes = if name == "README.md" { [bytes, recipe_description.as_bytes()].concat() } else { bytes.to_vec() };
             let rebuilt = sanitize::rewrite(name, &bytes, changes, &mut mapping, &mut budget)?;
             if name=="README.md" {

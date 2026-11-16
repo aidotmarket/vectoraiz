@@ -87,6 +87,10 @@ class ListingOriginalsBuildGate(unittest.TestCase):
                     self.assertEqual(path, root / '.github/workflows/native-ci.yml', str(path))
                     self.assertEqual(line.strip(), self.dedicated, line)
                     allowed.append(line)
+        package = root / 'app/package.json'
+        if package.exists():
+            for name, command in json.loads(package.read_text()).get('scripts', {}).items():
+                self.assertNotIn(self.feature, command, f'{package}: {name}')
         self.assertEqual(len(allowed), 1)
         for path in root.rglob('Cargo.toml'):
             if any(part in {'target', 'node_modules'} for part in path.parts):
@@ -121,6 +125,12 @@ class ListingOriginalsBuildGate(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 self.check_inputs(root)
             workflow.write_text(self.dedicated)
+            package = root / 'app/package.json'
+            package.parent.mkdir(parents=True)
+            package.write_text(json.dumps({'scripts': {'build': 'cargo build --features listing-originals'}}))
+            with self.assertRaises(AssertionError):
+                self.check_inputs(root)
+            package.write_text(json.dumps({'scripts': {'build': 'vite build'}}))
             cargo = root / 'Cargo.toml'
             for text in ['[features]\ndefault=["listing-originals"]',
                          '[features]\nother=["vz-pack/listing-originals"]',
@@ -246,8 +256,8 @@ class ModelTLSFixture(unittest.TestCase):
         with patch('socket.getfqdn', side_effect=AssertionError('reverse DNS requested')):
             # Negative control: the inherited HTTPServer bind really calls DNS.
             with self.assertRaisesRegex(AssertionError, 'reverse DNS requested'):
-                fixture.http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler)
-            with fixture.LoopbackServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler) as server:
+                fixture.http.server.ThreadingHTTPServer(('127.0.0.1', int(os.environ.get('KD_BRIDGE_PORT_BASE', '0'))), fixture.http.server.BaseHTTPRequestHandler)
+            with fixture.LoopbackServer(('127.0.0.1', int(os.environ.get('KD_BRIDGE_PORT_BASE', '0'))), fixture.http.server.BaseHTTPRequestHandler) as server:
                 self.assertEqual(server.server_name, 'localhost')
                 self.assertGreater(server.server_port, 0)
 

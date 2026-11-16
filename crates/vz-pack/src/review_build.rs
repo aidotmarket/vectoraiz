@@ -1464,10 +1464,26 @@ mod tests {
 
     #[cfg(not(feature = "listing-originals"))]
     fn projection_fixture(f: &Fixture) -> Vec<u8> {
-        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>DISPLAYED_RESULT</w:t></w:r><w:del><w:r><w:delText>DELETION_CANARY</w:delText></w:r></w:del><w:moveFrom><w:r><w:t>MOVED_CANARY</w:t></w:r></w:moveFrom><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:t>INSTRUCTION_CANARY</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>FIELD_RESULT</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>HIDDEN_CANARY</w:t></w:r></w:p></w:body></w:document>"#;
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>DISPLAYED_RESULT</w:t></w:r><w:r><w:t> con</w:t></w:r><w:r><w:t>fidential agree</w:t></w:r><w:r><w:t>ment Ac</w:t></w:r><w:r><w:t>me</w:t></w:r><w:del><w:r><w:delText>DELETION_CANARY</w:delText></w:r></w:del><w:moveFrom><w:r><w:t>MOVED_CANARY</w:t></w:r></w:moveFrom><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:t>INSTRUCTION_CANARY</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>FIELD_RESULT</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>HIDDEN_CANARY</w:t></w:r></w:p><w:tbl><w:tr><w:trPr><w:del/></w:trPr><w:tc><w:p><w:r><w:t>DELETED_ROW_CANARY</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>DELETED_CELL_CANARY</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:drawing><pic:pic><pic:nvPicPr><pic:cNvPr descr="Acme PICTURE_ALT_CANARY" title="PICTURE_TITLE_CANARY"/></pic:nvPicPr></pic:pic><dgm:relIds r:dm="model"/></w:drawing></w:r></w:p></w:body></w:document>"#;
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         for (name, text) in [
             ("word/document.xml", xml),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="model" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/></Relationships>"#,
+            ),
+            (
+                "word/diagrams/data1.xml",
+                r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"><dgm:ptLst><dgm:pt modelId="node"><dgm:t><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dsp:dataModelExt relId="cache"/></dgm:dataModel>"#,
+            ),
+            (
+                "word/diagrams/_rels/data1.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/></Relationships>"#,
+            ),
+            (
+                "word/diagrams/drawing1.xml",
+                r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:sp modelId="node"><dsp:nvSpPr><dsp:cNvPr descr="Acme SMARTART_ALT_CANARY" title="SMARTART_TITLE_CANARY"/></dsp:nvSpPr><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dsp:sp></dsp:drawing>"#,
+            ),
             ("word/comments.xml", "<comments>COMMENT_CANARY</comments>"),
             (
                 "docProps/core.xml",
@@ -1558,7 +1574,7 @@ mod tests {
                     ),
                     (
                         "ppt/slides/slide1.xml",
-                        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>SLIDE_RESULT</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+                        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>SLIDE_RESULT con</a:t></a:r><a:r><a:t>fidential agree</a:t></a:r><a:r><a:t>ment Ac</a:t></a:r><a:r><a:t>me</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
                     ),
                     (
                         "ppt/slides/_rels/slide1.xml.rels",
@@ -1605,18 +1621,22 @@ mod tests {
         let guard = store
             .lock_native(&f.policy, id, &f.root.join("index"))
             .unwrap();
+        let mut changes = Fixture::changes();
+        changes.identity_terms = vec!["Acme".into()];
         let current = build(
             &guard,
             &f.root.join("source"),
             id,
             &f.engine,
             "query",
-            &Fixture::changes(),
+            &changes,
         )
         .unwrap();
         let review = guard.inspect(&current).unwrap();
         for marker in [
             "DELETION_CANARY",
+            "DELETED_ROW_CANARY",
+            "DELETED_CELL_CANARY",
             "MOVED_CANARY",
             "INSTRUCTION_CANARY",
             "COMMENT_CANARY",
@@ -1664,11 +1684,57 @@ mod tests {
         assert!(review
             .warnings
             .iter()
-            .any(|s| s.contains("mandatory drop deletions: 1")));
+            .any(|s| s.contains("mandatory drop deletions: 3")));
         assert!(review
             .projection_inventory
             .iter()
             .any(|e| e.kind.contains("hidden") && e.kind.ends_with("omitted")));
+        let inputs = f.engine.texts.lock().unwrap();
+        assert!(
+            inputs
+                .iter()
+                .filter(|s| s.contains("confidential agreement Acme"))
+                .count()
+                >= 2
+        );
+        for marker in [
+            "PICTURE_ALT_CANARY",
+            "PICTURE_TITLE_CANARY",
+            "SMARTART_ALT_CANARY",
+            "SMARTART_TITLE_CANARY",
+        ] {
+            assert!(
+                inputs.iter().any(|s| s.contains(marker)),
+                "embedding input: {marker}"
+            );
+            assert!(
+                review
+                    .projection_inventory
+                    .iter()
+                    .any(|e| e.kind.contains("alt text")
+                        && e.value.as_ref().is_some_and(|s| s.contains(marker))
+                        && e.warning),
+                "private inventory: {marker}"
+            );
+        }
+        assert!(review
+            .projection_inventory
+            .iter()
+            .filter(|e| e
+                .value
+                .as_ref()
+                .is_some_and(|s| s.contains("confidential agreement Acme")))
+            .all(|e| e.warning));
+        assert!(review.metadata_inventory.iter().any(|e| e.warning
+            && e.value
+                .as_ref()
+                .is_some_and(|s| s.contains("confidential agreement Acme"))));
+        let mapping = guard.source_mapping(&current).unwrap();
+        assert!(review
+            .projection_inventory
+            .iter()
+            .any(|e| e.location.starts_with(&mapping["private-source.docx"])));
+        drop(inputs);
         guard.accept(&current).unwrap();
         let (payload, _) = guard.reviewed_payload(&current).unwrap();
         crate::vector_payload::verify(&payload).unwrap();
@@ -1728,6 +1794,21 @@ mod tests {
             .iter()
             .any(|s| s.contains("HIDDEN_CANARY")));
         let review = guard.inspect(&second).unwrap();
+        for marker in ["DELETED_ROW_CANARY", "DELETED_CELL_CANARY"] {
+            assert!(f
+                .engine
+                .texts
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|s| !s.contains(marker)));
+            assert!(review
+                .metadata_inventory
+                .iter()
+                .filter_map(|e| e.value.as_ref())
+                .all(|s| !s.contains(marker)));
+        }
+
         let hidden = review
             .projection_inventory
             .iter()

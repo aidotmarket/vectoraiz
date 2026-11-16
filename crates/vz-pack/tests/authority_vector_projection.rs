@@ -228,7 +228,7 @@ fn projection_graphics_static_cache_and_pair_binding() {
     let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="model" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/></Relationships>"#;
     let model = r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"><dgm:ptLst><dgm:pt modelId="node"><dgm:t><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dsp:dataModelExt relId="cache"/></dgm:dataModel>"#;
     let model_rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/></Relationships>"#;
-    let drawing = r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:sp modelId="node"><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dsp:sp></dsp:drawing>"#;
+    let drawing = r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:sp modelId="node"><dsp:nvSpPr><dsp:cNvPr hidden="1" descr="SMARTART_ALT_CANARY" title="SMARTART_TITLE_CANARY"/></dsp:nvSpPr><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dsp:sp></dsp:drawing>"#;
     for paired in [true, false] {
         let drawing = if paired {
             drawing.into()
@@ -248,7 +248,14 @@ fn projection_graphics_static_cache_and_pair_binding() {
         let result = extract("docx", &bytes);
         if paired {
             let p = result.unwrap();
-            assert_eq!(p.nodes.len(), 1);
+            assert_eq!(p.nodes.len(), 3);
+            assert!(p.nodes.iter().all(|n| n.hidden));
+            for marker in ["SMARTART_ALT_CANARY", "SMARTART_TITLE_CANARY"] {
+                assert!(p
+                    .nodes
+                    .iter()
+                    .any(|n| n.text == marker && n.kind == "SmartArt alt text"));
+            }
             assert_eq!(p.nodes[0].text, "PAIRED_TEXT");
             assert!(
                 p.nodes[0].location.contains("/model/node!")
@@ -258,4 +265,195 @@ fn projection_graphics_static_cache_and_pair_binding() {
             assert!(result.err().unwrap().to_string().contains("PAIR_AMBIGUOUS"));
         }
     }
+}
+
+fn word(body: &str, extra: &[(&str, &str)]) -> Vec<u8> {
+    let xml = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml"><w:body>{body}</w:body></w:document>"#
+    );
+    let mut parts = vec![("word/document.xml", xml.as_str())];
+    parts.extend_from_slice(extra);
+    package("docx", &parts)
+}
+fn deck(slide: &str, extra: &[(&str, &str)]) -> Vec<u8> {
+    let xml = format!(
+        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:a16="http://schemas.microsoft.com/office/drawing/2014/main"><p:cSld><p:spTree>{slide}</p:spTree></p:cSld></p:sld>"#
+    );
+    let mut parts = vec![
+        (
+            "ppt/presentation.xml",
+            r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="1" r:id="slide"/></p:sldIdLst></p:presentation>"#,
+        ),
+        (
+            "ppt/_rels/presentation.xml.rels",
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+        ),
+        ("ppt/slides/slide1.xml", xml.as_str()),
+    ];
+    parts.extend_from_slice(extra);
+    package("pptx", &parts)
+}
+#[test]
+fn projection_deleted_rows_cells_and_hidden_signals() {
+    let p = extract("docx", &word(r#"<w:p><w:r><w:t>VISIBLE</w:t></w:r></w:p><w:tbl><w:tr><w:trPr><w:del/></w:trPr><w:tc><w:p><w:r><w:t>ROW_DELETE_CANARY</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>CELL_DELETE_CANARY</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:trPr><w:hidden/></w:trPr><w:tc><w:p><w:r><w:t>HIDDEN_ROW</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:drawing><wp:docPr hidden="1" descr="HIDDEN_DRAWING"/><pic:pic><pic:nvPicPr><pic:cNvPr descr="PICTURE_ALT_CANARY" title="PICTURE_TITLE_CANARY"/></pic:nvPicPr></pic:pic></w:drawing></w:r></w:p>"#, &[])).unwrap();
+    assert!(!text(&p).contains("DELETE_CANARY"));
+    assert_eq!(p.drops["deletions"], 2);
+    for value in [
+        "HIDDEN_ROW",
+        "HIDDEN_DRAWING",
+        "PICTURE_ALT_CANARY",
+        "PICTURE_TITLE_CANARY",
+    ] {
+        assert!(
+            p.nodes.iter().any(|n| n.text == value && n.hidden),
+            "{value}"
+        );
+    }
+    assert!(p
+        .nodes
+        .iter()
+        .filter(|n| n.text.starts_with("PICTURE_"))
+        .all(|n| n.kind == "alt text" && n.location.contains("/@")));
+}
+#[test]
+fn projection_paragraph_run_boundaries_and_controls() {
+    let p = extract("docx", &word(r#"<w:p><w:r><w:t>con</w:t></w:r><w:r><w:rPr><w14:ligatures w14:val="standard"/></w:rPr><w:t>fidential agree</w:t></w:r><w:r><w:t>ment</w:t><w:tab/><w:t>Ac</w:t></w:r><w:r><w:t>me</w:t><w:br/><w:t>next</w:t></w:r></w:p><w:p><w:r><w:t>second</w:t></w:r></w:p>"#, &[])).unwrap();
+    assert_eq!(text(&p), "confidential agreement\tAcme\nnext\nsecond");
+    assert_eq!(p.nodes.len(), 2);
+    assert!(p.nodes[0].location.contains("/p[") && p.nodes[0].kind == "paragraph");
+    let p = extract("pptx", &deck(r#"<p:sp><p:txBody><a:p><a:r><a:t>con</a:t></a:r><a:r><a:t>fidential agree</a:t></a:r><a:r><a:t>ment Ac</a:t></a:r><a:r><a:t>me</a:t></a:r><a:br/><a:r><a:t>next</a:t></a:r></a:p></p:txBody></p:sp>"#, &[])).unwrap();
+    assert_eq!(text(&p), "confidential agreement Acme\nnext");
+    assert_eq!(p.nodes.len(), 1);
+}
+#[test]
+fn projection_unread_custom_xml_and_relationship_selected_headers() {
+    let p = extract("docx", &word(r#"<w:p><w:r><w:t>BODY</w:t></w:r></w:p><w:sectPr><w:headerReference r:id="head"/></w:sectPr>"#, &[
+        ("word/_rels/document.xml.rels", r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="head" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/><Relationship Id="custom" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml" Target="../customXml/item1.xml"/></Relationships>"#),
+        ("word/header1.xml", r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>USED_HEADER</w:t></w:r></w:p></w:hdr>"#),
+        ("word/header9.xml", "UNREAD_HEADER_CANARY malformed XML"),
+        ("customXml/item1.xml", "<?mso-contentType testing?><private>UNREAD_CANARY</private>"),
+    ])).unwrap();
+    assert!(text(&p).contains("USED_HEADER"));
+    assert!(!text(&p).contains("CANARY"));
+    assert_eq!(p.drops["unread-parts"], 2);
+    assert!(p
+        .omissions
+        .iter()
+        .any(|(name, why)| name == "customXml/item1.xml" && why == "unread-parts"));
+}
+#[test]
+fn projection_instruction_only_fields_and_named_textbox_refusals() {
+    let p = extract("docx", &word(r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/><w:instrText>XE CANARY</w:instrText><w:fldChar w:fldCharType="end"/><w:t>VISIBLE</w:t></w:r></w:p>"#, &[])).unwrap();
+    assert_eq!(text(&p), "VISIBLE");
+    assert_eq!(p.drops["instructions"], 2);
+    for body in [
+        r#"<v:shape xmlns:v="urn:schemas-microsoft-com:vml"><v:textbox><w:txbxContent><w:p><w:r><w:t>TEXTBOX</w:t></w:r></w:p></w:txbxContent></v:textbox></v:shape>"#,
+        r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Fallback><w:p><w:r><w:t>TEXTBOX</w:t></w:r></w:p></mc:Fallback></mc:AlternateContent>"#,
+    ] {
+        let err = extract("docx", &word(body, &[])).err().unwrap().to_string();
+        assert!(err.contains("PROJECTION_WORD_TEXTBOX_UNSUPPORTED"), "{err}");
+    }
+}
+#[test]
+fn projection_pptx_placeholder_layout_and_creation_id() {
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="layout" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slideLayout" Target="../slideLayouts/layout.xml"/></Relationships>"#;
+    let placeholder = r#"<p:sldLayout xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:nvSpPr><p:nvPr><p:ph/></p:nvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>AUTHORING_PROMPT_CANARY</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sldLayout>"#;
+    for prompts_only in [true, false] {
+        let layout = if prompts_only {
+            placeholder.into()
+        } else {
+            placeholder.replace("<p:ph/>", "")
+        };
+        let bytes = deck(
+            r#"<p:sp><p:nvSpPr><p:cNvPr><a:extLst><a:ext uri="creation"><a16:creationId id="1"/></a:ext></a:extLst></p:cNvPr></p:nvSpPr><p:txBody><a:p><a:r><a:t>SLIDE_TEXT</a:t></a:r></a:p></p:txBody></p:sp>"#,
+            &[
+                ("ppt/slides/_rels/slide1.xml.rels", rels),
+                ("ppt/slideLayouts/layout.xml", &layout),
+            ],
+        );
+        if prompts_only {
+            assert_eq!(text(&extract("pptx", &bytes).unwrap()), "SLIDE_TEXT");
+        } else {
+            assert!(extract("pptx", &bytes)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("PROJECTION_LAYOUT_UNSUPPORTED"));
+        }
+    }
+}
+#[test]
+fn projection_real_powerpoint_slide_and_notes() {
+    let p = extract(
+        "pptx",
+        include_bytes!("fixtures/office-public/SampleShow.pptx"),
+    )
+    .unwrap();
+    assert!(p.nodes.iter().any(|n| n.kind == "slide paragraph"));
+    assert!(p.nodes.iter().any(|n| n.kind == "notes paragraph"));
+}
+#[test]
+fn projection_xlsx_empty_cache_comments_extensions_and_dimensions() {
+    let p = extract("xlsx", &workbook("visible", r#"<cols><col min="2" max="2" width="0"/></cols><sheetData><row r="1" ht="0"><c r="A1" t="str"><v>ZERO_HEIGHT</v></c></row><row r="2"><c r="A2" t="str"><f>FORMULA_CANARY</f><v></v></c><c r="B2" t="str"><v>ZERO_WIDTH</v></c></row></sheetData><headerFooter><oddHeader>HEADER_CANARY</oddHeader></headerFooter><extLst><ext xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:conditionalFormattings/><x14:sparklineGroups/></ext></extLst>"#)).unwrap();
+    assert!(!text(&p).contains("CANARY"));
+    assert!(p
+        .nodes
+        .iter()
+        .filter(|n| n.text.starts_with("ZERO_"))
+        .all(|n| n.hidden));
+    assert_eq!(p.drops["comments"], 0);
+    assert_eq!(p.drops["headers-footers"], 1);
+    let bytes = workbook(
+        "visible",
+        r#"<extLst><ext><unknown><text>UNSUPPORTED</text></unknown></ext></extLst>"#,
+    );
+    assert!(extract("xlsx", &bytes)
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("content-bearing worksheet extension"));
+}
+
+#[test]
+fn projection_xlsx_drawing_visibility_is_local_to_sheet_and_vml_comments_drop() {
+    let bytes = package(
+        "xlsx",
+        &[
+            (
+                "xl/workbook.xml",
+                r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Hidden" sheetId="1" r:id="s1" state="hidden"/><sheet name="Visible" sheetId="2" r:id="s2"/></sheets></workbook>"#,
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="s1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/one.xml"/><Relationship Id="s2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/two.xml"/></Relationships>"#,
+            ),
+            (
+                "xl/worksheets/one.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="str"><v>HIDDEN_SHEET</v></c></row></sheetData></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/two.xml",
+                r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><drawing r:id="drawing"/><legacyDrawing r:id="vml"/></worksheet>"#,
+            ),
+            (
+                "xl/worksheets/_rels/two.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="drawing" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing.xml"/><Relationship Id="vml" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing" Target="../drawings/comments.vml"/></Relationships>"#,
+            ),
+            (
+                "xl/drawings/drawing.xml",
+                r#"<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><xdr:sp><xdr:txBody><a:p><a:r><a:t>VISIBLE_DRAWING</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>"#,
+            ),
+            (
+                "xl/drawings/comments.vml",
+                r#"<xml xmlns:v="urn:schemas-microsoft-com:vml" xmlns:x="urn:schemas-microsoft-com:office:excel"><v:shape><v:textbox>COMMENT_CANARY</v:textbox><x:ClientData ObjectType="Note"/></v:shape></xml>"#,
+            ),
+        ],
+    );
+    let p = extract("xlsx", &bytes).unwrap();
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text == "VISIBLE_DRAWING" && !n.hidden));
+    assert!(!text(&p).contains("CANARY"));
+    assert_eq!(p.drops["comments"], 2);
 }

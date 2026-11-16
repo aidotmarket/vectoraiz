@@ -64,6 +64,28 @@ it("requires explicit unsupported exclusions, exposes full inventory pages/searc
   expect(await region.findByText(`Accepted review: ${listingCurrent.review_hash}`)).toBeInTheDocument();
 });
 
+it("maps private source names to the projection keys used by inventory and warnings", async () => {
+  mockListing();
+  const original = invoke.getMockImplementation()!;
+  const key = `projection/${"d".repeat(64)}`;
+  invoke.mockImplementation(async (command, args) => {
+    const result = await original(command, args);
+    if (command !== "listing_rebuild") return result;
+    const built = result as {current: typeof listingCurrent; review: ReturnType<typeof listingFixture>};
+    return {...built, source_mapping: {"private.md": key}, review: {...built.review,
+      projection_inventory: [{location: `${key}/text/1`, kind: "projection text: included", value: "Mapped content", warning: true}],
+      warnings: [`${key}: mandatory drop deletions: 0`]}};
+  });
+  const region = within(await openListing());
+  await userEvent.click(await region.findByRole("checkbox", {name: /Include unsupported.pdf/}));
+  await userEvent.click(region.getByRole("button", {name: "Rebuild purchaser preview"}));
+  await region.findByRole("button", {name: "Accept this exact generation"});
+  expect(region.getByRole("checkbox", {name: `Include private.md → ${key} (supported)`})).toBeChecked();
+  expect(region.getByText(`Warning: ${key}: mandatory drop deletions: 0`)).toBeInTheDocument();
+  await userEvent.click(region.getByRole("checkbox", {name: /Show private projection nodes/}));
+  expect(region.getByText(`${key}/text/1`)).toBeInTheDocument();
+});
+
 it("omits hidden content by default and requires a fresh review after inclusion", async () => {
   mockListing();
   const original = invoke.getMockImplementation()!;

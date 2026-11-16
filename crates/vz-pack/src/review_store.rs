@@ -304,6 +304,13 @@ pub struct NativePackReview<'a> {
 }
 
 impl NativePackReview<'_> {
+    /// Local UI mapping only; never serialized into a review or payload.
+    pub fn source_mapping(&self, current: &CurrentReview) -> Result<BTreeMap<String, String>> {
+        self.inspect(current)?;
+        let (_, private) = self.edit_origin(current)?;
+        Ok(serde_json::from_value(private["mapping"].clone())?)
+    }
+
     pub(crate) fn edit_origin(
         &self,
         current: &CurrentReview,

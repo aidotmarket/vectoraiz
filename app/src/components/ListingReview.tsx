@@ -6,7 +6,7 @@ interface Entry { location: string; kind: string; value: string | null; warning:
 interface Review { metadata_inventory: Entry[]; projection_inventory?: Entry[]; warnings: string[]; exclusions: string[]; accepted_review_hash: string | null }
 interface Source { source: string; artifact: string; format: string; supported: boolean; refusal?: string | null; projection_summary?: {mandatory_drops: Record<string, number>; hidden_locations: string[]} }
 interface Sources { pack_id: string; sources: Source[]; protected_columns: string[] }
-interface Built { current: Current; review: Review }
+interface Built { current: Current; review: Review; source_mapping?: Record<string, string> }
 const PAGE = 50;
 const failure = (cause: unknown) => typeof cause === "object" && cause !== null && "reason" in cause ? String(cause.reason) : String(cause);
 function editable(entry: Entry, protectedColumns: string[] | undefined) {
@@ -98,7 +98,7 @@ export function ListingReview() {
   const needle = search.toLocaleLowerCase();
   const entries = (privateProjection ? built?.review.projection_inventory : built?.review.metadata_inventory)?.filter(entry => `${entry.location} ${entry.kind} ${entry.value ?? "Unknown / absent"}`.toLocaleLowerCase().includes(needle)) ?? [];
   const warnings = built?.review.warnings.filter(warning => warning.toLocaleLowerCase().includes(needle)) ?? [];
-  const sourceEntries = sources?.sources.filter(source => `${source.source} ${source.format} ${source.artifact} ${source.refusal ?? ""}`.toLocaleLowerCase().includes(sourceSearch.toLocaleLowerCase())) ?? [];
+  const sourceEntries = sources?.sources.filter(source => `${source.source} ${source.format} ${built?.source_mapping?.[source.source] ?? source.artifact} ${source.refusal ?? ""}`.toLocaleLowerCase().includes(sourceSearch.toLocaleLowerCase())) ?? [];
   const unsupported = sources?.sources.some(source => !source.supported && !excluded.includes(source.source));
   const allExcluded = sources?.sources.every(source => excluded.includes(source.source));
   return <section className="card stack" aria-labelledby="listing-review-title" aria-busy={busy}>
@@ -114,7 +114,7 @@ export function ListingReview() {
         <p>{sourceEntries.length} source documents</p>
         {sourceEntries.slice(sourcePage * PAGE, (sourcePage + 1) * PAGE).map(source => <div key={source.source}><label>
           <input type="checkbox" checked={!excluded.includes(source.source)} onChange={event => {changed(); setExcluded(old => event.target.checked ? old.filter(value => value !== source.source) : [...old, source.source]);}} />
-          Include {source.source} → {source.artifact} ({source.supported ? "supported" : `unsupported: ${source.refusal ?? "exclude or re-ingest"}`})
+          Include {source.source} → {built?.source_mapping?.[source.source] ?? source.artifact} ({source.supported ? "supported" : `unsupported: ${source.refusal ?? "exclude or re-ingest"}`})
         </label>{source.projection_summary && <ProjectionSummary summary={source.projection_summary} />}</div>)}
         <button disabled={sourcePage === 0} onClick={() => setSourcePage(value => value - 1)}>Previous documents</button>
         <button disabled={(sourcePage + 1) * PAGE >= sourceEntries.length} onClick={() => setSourcePage(value => value + 1)}>More documents</button>
