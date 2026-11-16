@@ -1694,7 +1694,8 @@ mod tests {
             .iter()
             .any(|e| e.kind.contains("hidden") && e.kind.ends_with("omitted")));
         let inputs = f.engine.texts.lock().unwrap();
-        assert!(inputs.iter().any(|s| s.contains("Annual\nRevenue")));
+        // Chunking normalizes the projected line break to a word separator.
+        assert!(inputs.iter().any(|s| s.contains("Annual Revenue")));
         assert!(inputs
             .iter()
             .all(|s| !s.contains("AnnualRevenue") && !s.contains("Rev enue")));
