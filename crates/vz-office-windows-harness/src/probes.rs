@@ -1070,6 +1070,9 @@ struct UnixConnect {
     address: UnixAddress,
 }
 const _: () = {
+    assert!(size_of::<UnixAddress>() == 110);
+    assert!(size_of::<UnixBind>() == 116);
+    assert!(size_of::<UnixConnect>() == 136);
     assert!(std::mem::offset_of!(UnixBind, address) == 4);
     assert!(std::mem::offset_of!(UnixConnect, address) == 24);
 };
@@ -1159,6 +1162,8 @@ fn afd_ioctl<T>(
     result["io_status_hex"] = json!(format!("0x{:08X}", iosb.status as u32));
     result["timed_out"] = json!(timed_out);
     result["cancellation_status"] = json!(cancellation);
+    result["ioctl_code"] = json!(code);
+    result["io_information"] = json!(iosb.information);
     result["input_bytes"] = json!(length);
     result["output_bytes"] = json!(output_length);
     Ok(result)
@@ -1296,6 +1301,54 @@ fn unix_winsock(path: &[u8], connect_to: bool, abstract_name: bool) -> Result<Va
     );
     unsafe { closesocket(socket) };
     Ok(json!({"route":"Winsock","creation":creation,"operation":operation}))
+}
+
+// Control-only differential: keep the exact direct bind packet/IOCTL but
+// replace NtCreateFile endpoint creation with socket(). Never select this as an
+// LPAC route or use its success to calibrate the confined NtCreateFile route.
+fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
+    let mut attempts = Vec::new();
+    for short in [false, true] {
+        let path = scratch.join(if short { "w-short.sock" } else { "w-full.sock" });
+        let bytes = path
+            .to_str()
+            .context("endpoint comparison encoding")?
+            .as_bytes();
+        let (address, _) = unix_address(bytes, false)?;
+        let length = if short {
+            2 + bytes.len() + 1
+        } else {
+            size_of::<UnixAddress>()
+        };
+        let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
+        let creation = wsa("socket(AF_UNIX)", socket as i64, socket != INVALID_SOCKET);
+        let operation = if socket != INVALID_SOCKET {
+            let result = afd_ioctl(
+                socket as HANDLE,
+                0x12003,
+                &UnixBind { share: 0, address },
+                4 + length,
+                110,
+            );
+            unsafe { closesocket(socket) };
+            result?
+        } else {
+            json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
+        };
+        attempts.push(json!({"short":short,"path_bytes":bytes.len(),
+            "creation":creation,"operation":operation}));
+    }
+    let path = scratch.join("w-api.sock");
+    let winsock = unix_winsock(
+        path.to_str()
+            .context("Winsock comparison encoding")?
+            .as_bytes(),
+        false,
+        false,
+    )?;
+    Ok(json!({"diagnostic_only":true,"namespace":"filesystem",
+        "endpoint":"Winsock socket; direct AFD bind packet unchanged",
+        "direct_bind":attempts,"winsock_bind":winsock}))
 }
 
 // Alternative confined route: supply the successful control's protocol record
@@ -1452,6 +1505,11 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
     } else {
         v["explicit_protocol"].clone()
     };
+    let endpoint_comparison = if v["route"] == "control" {
+        unix_endpoint_comparison(scratch)?
+    } else {
+        Value::Null
+    };
     let scratch_access = self::scratch(v)?;
     let mut calibration = Vec::new();
     let mut selected = v["calibrated_variants"].clone();
@@ -1597,6 +1655,7 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
         json!({"diagnostic_only":true,"startup":startup,"outcomes":outcomes,
         "calibration":calibration,"calibrated_variants":selected,"control_direct":control_direct,
         "explicit_protocol":protocol,"alternative":alternative,"scratch_access":scratch_access,
+        "control_endpoint_comparison":endpoint_comparison,
         "filesystem_path_bytes":inside.to_string_lossy().len(),
         "scratch_grant":if v["route"] == "control" { "unconfined; no package grant" } else { "package SID FILE_ALL_ACCESS including FILE_ADD_FILE; inherited; low integrity" },
         "messages_sent":0}),
@@ -2199,7 +2258,9 @@ fn mapping(reserve: bool, v: &Value, file_backed: bool) -> Result<Value> {
     result["touch_completed"] = json!(held == target);
     result["max_observed_working_set_bytes"] = json!(max_ws);
     result["working_set_within_1_5_gib"] = json!(max_ws.map(|ws| ws <= MEMORY as u64 + 4096));
-    result["paging_note"] = json!("Completed touch under resident cap is consistent with eviction; pagefile writes are not directly measured");
+    result["paging_note"] = json!(
+        "Completed touch under resident cap is consistent with eviction; pagefile writes are not directly measured"
+    );
     result["before"] = before;
     result["after_creation"] = after_creation;
     result["after_mapping"] = after_mapping;
@@ -2421,5 +2482,21 @@ mod tests {
             row("socket", -1, false, WSAEACCES as u32, "winsock")["explicit_denial"],
             true
         );
+    }
+}
+
+#[cfg(test)]
+mod unix_layout_tests {
+    use super::*;
+
+    #[test]
+    fn bind_packet_fixture() {
+        let (address, _) = unix_address(b"fixture.sock", false).unwrap();
+        let packet = UnixBind { share: 0, address };
+        assert_eq!(packet.address.family.to_le_bytes(), [1, 0]);
+        assert_eq!(&packet.address.path[..13], b"fixture.sock\0");
+        assert!(packet.address.path[13..].iter().all(|b| *b == 0));
+        assert_eq!(4 + size_of::<UnixAddress>(), 114);
+        assert_eq!(4 + 2 + b"fixture.sock".len() + 1, 19);
     }
 }

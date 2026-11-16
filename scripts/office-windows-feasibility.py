@@ -1184,7 +1184,10 @@ def unix_call_diagnostics(result):
     Keep source layout sizes distinct from the actual lengths passed to AFD.
     No address bytes, paths, protocol records or command lines are published.
     """
-    probe = result.get("response", {}).get("probe", {})
+    response = result.get("response")
+    if not isinstance(response, dict) or not isinstance(response.get("probe"), dict):
+        return
+    probe = response["probe"]
     probe["source_layout"] = {
         "source": "vz-office-windows-harness probes.rs; Windows x64 repr(C)",
         "sockaddr_un_bytes": 110, "sun_path_bytes": 108,
@@ -1199,7 +1202,7 @@ def unix_call_diagnostics(result):
             api = value.get("api")
             offset = {"NtDeviceIoControlFile(AFD_BIND)": 4,
                       "NtDeviceIoControlFile(AFD_CONNECT)": 24}.get(api)
-            if offset is not None and isinstance(value.get("input_bytes"), int):
+            if offset is not None and type(value.get("input_bytes")) is int:
                 value["address_bytes"] = value["input_bytes"] - offset
                 value["address_offset"] = offset
             for child in value.values():
@@ -1702,7 +1705,16 @@ def assemble_manifest(manifest):
                           for status in ROW_STATUSES}
 
 
+def windows_elevated():
+    import ctypes
+    return bool(ctypes.windll.shell32.IsUserAnAdmin())
+
+
 def run_suite(args):
+    # Refuse before recovery, output creation, loader work or audit mutation.
+    if sys.platform == "win32" and not windows_elevated():
+        print("Harness run requires elevation; run from an elevated PowerShell", file=sys.stderr)
+        return 1
     global RESOURCE_OUT, LAUNCHER
     out = outside(args.out)
     out.mkdir(parents=True, exist_ok=False)
@@ -2085,38 +2097,21 @@ def assembly_self_test():
     from types import SimpleNamespace
     from unittest.mock import patch
 
-    # Exercise the real run loop with an offline kit and no elevation. No
-    # omitted row, compiler, fixture module, IP endpoint or git may be invoked.
-    with tempfile.TemporaryDirectory(prefix="kit-assembly-self-test-",
+    # A non-elevated run must refuse before any recovery or audit operation,
+    # and must not manufacture an all-unrun manifest.
+    with tempfile.TemporaryDirectory(prefix="elevation-self-test-",
                                      dir=os.environ.get("OFFICE_EVIDENCE_DIR")) as temporary:
-        folder = outside(Path(temporary))
-        worker = folder / "vz-parser-worker.exe"
-        worker.write_bytes(b"synthetic")
-        args = SimpleNamespace(out=folder / "evidence", worker=worker, launcher=worker,
-                               pdfium=None, kit_dir=folder, rows="shell")
-        def audit(mode, *unused, **kwargs):
-            return {"success": mode == "host", "elevation_required": mode == "setup",
-                    "product_type": 1, "build": "26200", "edition": "Windows 11 Home", "interactive_session": True}
+        args = SimpleNamespace(out=Path(temporary) / "refused")
         with patch.object(sys, "platform", "win32"), \
-             patch.object(Path, "home", return_value=folder), \
-             patch(__name__ + ".audit_call", side_effect=audit), \
-             patch(__name__ + ".loader_files", return_value=(None, [], [], [])) as loader, \
-             patch(__name__ + ".launch_diagnostic"), \
-             patch(__name__ + ".RunUnixListener"), \
-             patch(__name__ + ".UnixListeners") as listeners, \
-             patch(__name__ + ".Endpoints") as endpoints, \
-             patch(__name__ + ".command", return_value=1), \
-             patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
+             patch(__name__ + ".windows_elevated", return_value=False), \
+             patch(__name__ + ".audit_call") as audit, \
+             patch(__name__ + ".recover_run") as recovery, \
+             patch(__name__ + ".loader_files") as loader:
             assert run_suite(args) == 1
-            observed = json.loads((args.out / "manifest.json").read_text())
-            validate_manifest(observed)
-            loader.assert_called_once_with(worker, None, args.out, portable=True)
-            endpoints.assert_not_called()
-            listeners.assert_not_called()
-            assert observed["windows_11_client_requirement"]["status"] == "MET"
-            assert all(row["status"] == Status.UNRUN for row in observed["rows"])
-            assert next(row for row in observed["rows"] if row["id"] == "shell")["reason"].startswith("Security 4688 audit setup requires elevation")
-            assert all(row["reason"] == NOT_SELECTED for row in observed["rows"] if row["id"] != "shell")
+            assert not args.out.exists()
+            audit.assert_not_called()
+            recovery.assert_not_called()
+            loader.assert_not_called()
 
     # Even an exception immediately after audit mutation must restore policy;
     # a restoration failure makes the manifest fail closed and keeps the state.
@@ -2137,6 +2132,7 @@ def assembly_self_test():
                 assert mode == "restore" and arguments["State"].exists()
                 return {"success": restored_ok}
             with patch.object(sys, "platform", "win32"), \
+                 patch(__name__ + ".windows_elevated", return_value=True), \
                  patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
                  patch(__name__ + ".audit_call", side_effect=interrupted_audit):
                 assert run_suite(args) == 1
@@ -2172,6 +2168,7 @@ def assembly_self_test():
                     raise OSError("injected failure-report creation error")
                 return original_write(path, *a, **kw)
             with patch.object(sys, "platform", "win32"), \
+                 patch(__name__ + ".windows_elevated", return_value=True), \
                  patch.object(Path, "home", return_value=root), \
                  patch.object(Path, "write_text", new=write), \
                  patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
@@ -2532,6 +2529,8 @@ def audit_readback_self_test():
     # Prefer the same Windows PowerShell executable as the real setup path and CI.
     powershell = shutil.which("powershell.exe") or os.environ.get("OFFICE_TEST_POWERSHELL") or shutil.which("pwsh")
     if not powershell:
+        if sys.platform == "win32":
+            raise AssertionError("PowerShell required for Windows audit parser self-test")
         print("audit readback parser tests skipped: PowerShell unavailable")
         return
     # Literal auditpol /backup CSV format; fixture identities are non-sensitive.
@@ -2548,7 +2547,10 @@ TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Failure,,
              for fixture, expected in ((success, "success"), (both, "success-and-failure"),
                                        (disabled, None), (failure, None))
              for ending in ("", "\r\n\r\n")]
+    per_user = success.splitlines()[1].replace(",System,", ",S-1-5-21-1-2-3-1001,")
     cases.extend([
+        {"csv": success + "\n" + per_user, "expected": "success"},
+        {"csv": success.splitlines()[0] + "\n" + per_user, "expected": None},
         {"csv": "\n\n" + success + "\n \n", "expected": "success"},
         {"csv": success.replace("Process Creation", '"Process, Creation"'), "expected": "success"},
         {"csv": success.replace("Machine Name,Policy Target,Subcategory,Subcategory GUID,Inclusion Setting,Exclusion Setting,Setting Value",
@@ -2609,6 +2611,16 @@ Write-Output "audit readback parser tests passed: $executed fixtures; PowerShell
 
 def audit_diagnostics_self_test():
     from copy import deepcopy
+    from unittest.mock import patch
+    with patch.object(sys, "platform", "win32"), \
+         patch.object(shutil, "which", return_value=None), \
+         patch.dict(os.environ, {"OFFICE_TEST_POWERSHELL": ""}):
+        try:
+            audit_readback_self_test()
+        except AssertionError as error:
+            assert "PowerShell required" in str(error)
+        else:
+            raise AssertionError("Windows parser test silently skipped")
     safe = {"success": False, "error": "auditpol verification backup failed"}
     assert public_audit_error(safe) == safe["error"]
     for private in ('<Event><CommandLine>secret</CommandLine></Event>',
@@ -2650,9 +2662,27 @@ def audit_diagnostics_self_test():
         "output_bytes": 0, "success": False, "literal_status_hex": "0xC000000D"}}}],
         "control_direct": {"abstract_connect": {"operation": {
             "api": "NtDeviceIoControlFile(AFD_CONNECT)", "input_bytes": 40}}}}}}
+    for malformed in ({"response": None}, {"response": []}, {"response": 1},
+                      {"response": {"probe": None}}, {"response": {"probe": []}}):
+        unix_call_diagnostics(malformed)
+    boolean = {"response": {"probe": {"api": "NtDeviceIoControlFile(AFD_BIND)", "input_bytes": True}}}
+    unix_call_diagnostics(boolean)
+    assert "address_bytes" not in boolean["response"]["probe"]
     original = deepcopy(sample)
     unix_call_diagnostics(sample)
     probe = sample["response"]["probe"]
+    # A successful comparison endpoint is diagnostic only; it cannot qualify
+    # the unchanged confined direct route or overwrite failed calibration.
+    probe["control_endpoint_comparison"] = {
+        "diagnostic_only": True,
+        "direct_bind": [{"operation": {"api": "NtDeviceIoControlFile(AFD_BIND)",
+                        "input_bytes": 114, "ioctl_code": 0x12003,
+                        "io_information": 110, "success": True}}],
+        "winsock_bind": {"operation": {"success": True}},
+    }
+    unix_call_diagnostics(sample)
+    assert probe["control_endpoint_comparison"]["direct_bind"][0]["operation"]["address_bytes"] == 110
+    assert unix_namespace_status({"control": original}) == unix_namespace_status({"control": sample})
     call = probe["calibration"][0]["result"]["operation"]
     assert call["address_bytes"] == 110 and call["address_offset"] == 4
     assert call["success"] is False and call["literal_status_hex"] == "0xC000000D"
@@ -3230,6 +3260,7 @@ def self_test():
              patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=shell_command), \
              patch.object(sys, "platform", "win32"), \
+             patch(__name__ + ".windows_elevated", return_value=True), \
              patch.object(Path, "home", return_value=folder), \
              patch.object(shutil, "rmtree", side_effect=cleanup), \
              patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
@@ -3266,6 +3297,7 @@ def self_test():
              patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=peak_command), \
              patch.object(sys, "platform", "win32"), \
+             patch(__name__ + ".windows_elevated", return_value=True), \
              patch.object(Path, "home", return_value=folder), \
              patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
             run_args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker, pdfium=None)
@@ -3308,6 +3340,7 @@ def self_test():
              patch(__name__ + ".audit_call", return_value={"success": False}), \
              patch(__name__ + ".command", side_effect=inventory_command), \
              patch.object(sys, "platform", "win32"), \
+             patch(__name__ + ".windows_elevated", return_value=True), \
              patch.object(Path, "home", return_value=folder), \
              patch.dict(os.environ, {"SOURCE_SHA": "synthetic"}):
             run_args = SimpleNamespace(out=folder / "run", worker=worker, launcher=worker, pdfium=None)

@@ -121,7 +121,43 @@ expected for this partial run; successful manifest validation confirms structure
 and redaction, not passing outcomes or qualification. Individual missing controls
 remain unrun. Shell rows report edition/build and the client-SKU check; a Server
 build can never satisfy the Windows 11 client requirement. Without elevation,
-shell rows and the audit-dependent UNIX 2c row say why they are unrun.
+the runner exits nonzero before recovery, audit changes or manifest creation;
+restart from an elevated PowerShell.
+
+Recorded fold-21 winmax run (kit 43707991165, source 3275159d; Windows 11
+Home 26200, elevated session, Edge HTTP handler, 2026-11-16): the four shell
+rows passed three pairs each, with confined API success and no open observed
+in ten seconds. This records one host/handler configuration; the manifest alone
+cannot exclude a prompt in an existing process. Expected binary hashes below
+are transcribed from the redacted manifest (the operator reported kit hashes
+checked on the PC); this checkout has not independently inspected the kit files.
+For that historical kit, compare SHA256SUMS and binaries against these values
+(a newly built fold-22 kit will have different worker/launcher hashes):
+
+| Artifact | SHA256 |
+| --- | --- |
+| manifest.json | `6b9f3f98752dcd253271502396753d83e8b3a6e616d29b4439b17ba6041c01a7` |
+| vz-parser-worker.exe | `21feabc5f9754b52879de68b7aa17eb9e7962dd56b1cb5cc2f2fb6bb272ad77e` |
+| vz-office-windows-launch.exe | `b747ab9f574927f7c61fb82fffc95c723831ee8b6e5b28095458d5e5c8fe6608` |
+| pdfium.dll | `a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f` |
+
+Fold 22 keeps the confined AF_UNIX measurement and all calibration requirements
+unchanged. The bind/connect IOCTLs and TLI field offsets match the referenced
+phnt definitions; that does not identify the cause of the failed unconfined
+filesystem bind on build 26200 (all 16 control variants failed, despite successful
+endpoint opens; the recorded filesystem path length was 84 bytes, and six
+abstract variants did bind successfully). The next run adds control-only
+`control_endpoint_comparison`: full/short direct AFD bind packets on fresh
+Winsock-created endpoints, plus a fresh ordinary Winsock bind. Compare these with
+`calibration` (NtCreateFile-created endpoints, same packets). Winsock direct
+success with NtCreateFile failure isolates endpoint creation; ordinary bind
+success with both direct paths failing points to direct packet/ABI requirements.
+Literal IOCTL code, completion information and lengths are retained without
+addresses. These diagnostics never select a confined route or qualify a row.
+The compile-time layout assertions and Windows Rust fixture check sockaddr size,
+bind/connect offsets, zero termination and full/short input lengths. Actual
+control success and unix-2a/2b/2d outcomes, and 2c's connect dependency, still
+require a winmax rerun. No repaired ABI or successful control is claimed here.
 
 Cleanup and undo: on normal completion or Ctrl+C, the runner closes its local
 HTTP/AF_UNIX listeners, removes scratch/sentinel directories, and restores the
@@ -244,8 +280,10 @@ Three separate shell rows exercise ShellExecuteW and ShellExecuteExW with
 SEE_MASK_NOASYNC, once with FLAG_NO_UI and once without. They open a unique
 http loopback URL against the harness listener, run confined before control and
 retain nonce-correlated GET observations. A control must report API success and
-receive GET. Confined API success or a GET fails. No GET alone cannot pass:
-explicit broker denial is still required. Last error after TRUE is ignored.
+receive GET. Confined API success is allowed: the claim is no open observed, requiring no
+confined GET and no nonce-bearing process start in the shared Security capture,
+a successful nonce-bearing control start, contiguous ten-second observation
+windows and Windows 11 interactive-client coverage. Last error after TRUE is ignored.
 Process snapshots are supplementary and cannot rule out short-lived dispatch
 or existing-handler reuse. A UI prompt can time out and fail the invocation.
 

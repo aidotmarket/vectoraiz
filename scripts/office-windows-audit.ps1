@@ -9,7 +9,7 @@ function Convert-AuditBackupReadback([string[]]$Csv) {
     # Avoid the case-insensitive automatic $Matches variable; absent CSV fields are null.
     $rowsForGuid = @($rows | Where-Object {
         $fields = @($_.PSObject.Properties)
-        $fields.Count -eq 7 -and ([string]$fields[3].Value).Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
+        $fields.Count -eq 7 -and ([string]$fields[1].Value).Trim() -ieq 'System' -and ([string]$fields[3].Value).Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
     })
     if ($rowsForGuid.Count -ne 1) { throw 'auditpol backup readback must contain one Process Creation subcategory' }
     $fields = @($rowsForGuid[0].PSObject.Properties)
@@ -42,8 +42,19 @@ try {
             if ($LASTEXITCODE -ne 0) { throw 'audit policy backup failed; no settings changed' }
             $saved | Export-Clixml -LiteralPath $State
             # Process Creation subcategory GUID avoids localized auditpol names.
-            $output = & auditpol /set /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' /success:enable 2>&1
-            if ($LASTEXITCODE -ne 0) { throw 'auditpol set failed' }
+            # PS 5.1 can turn native stderr into a terminating ErrorRecord with
+            # Stop. Capture it privately even when auditpol exits unsuccessfully.
+            $savedPreference = $ErrorActionPreference
+            try {
+                $ErrorActionPreference = 'Continue'
+                $output = & auditpol /set /subcategory:'{0CCE922B-69AE-11D9-BED3-505054503030}' /success:enable 2>&1
+                $setExitCode = $LASTEXITCODE
+            } finally {
+                $ErrorActionPreference = $savedPreference
+            }
+            # State lives only under the private evidence root; never emit raw output as JSON.
+            $output | Out-File -LiteralPath "$State.set.log" -Encoding UTF8
+            if ($setExitCode -ne 0) { throw 'auditpol set failed' }
             $key = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Policies\System\Audit'
             New-Item $key -Force | Out-Null
             New-ItemProperty $key -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -PropertyType DWord -Force | Out-Null
