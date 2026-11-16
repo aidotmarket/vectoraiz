@@ -2133,11 +2133,18 @@ def assembly_self_test():
                 return {"success": restored_ok}
             with patch.object(sys, "platform", "win32"), \
                  patch(__name__ + ".windows_elevated", return_value=True), \
-                 patch(__name__ + ".loader_files", return_value=(None, [], [], [])), \
+                 patch(__name__ + ".loader_files", return_value=(None, [], [], [])) as loader, \
+                 patch(__name__ + ".Endpoints") as endpoints, \
+                 patch(__name__ + ".UnixListeners") as listeners, \
                  patch(__name__ + ".audit_call", side_effect=interrupted_audit):
                 assert run_suite(args) == 1
+                loader.assert_called_once_with(worker, None, args.out.resolve(), portable=True)
+                endpoints.assert_not_called()
+                listeners.assert_not_called()
             observed = json.loads((args.out / "manifest.json").read_text())
             validate_manifest(observed)
+            assert all(row["reason"] == NOT_SELECTED for row in
+                       observed["rows"] + observed["diagnostics"] if row["id"] not in observed["selected_rows"])
             assert modes == ["setup", "restore"]
             assert observed["audit_restoration"]["success"] is restored_ok
             assert bool(observed.get("cleanup_error")) is not restored_ok
@@ -2550,6 +2557,9 @@ TEST-PC,System,Process Creation,{0CCE922B-69AE-11D9-BED3-505054503030},Failure,,
     per_user = success.splitlines()[1].replace(",System,", ",S-1-5-21-1-2-3-1001,")
     cases.extend([
         {"csv": success + "\n" + per_user, "expected": "success"},
+        {"csv": success.replace(",System,", ",Sistema,"), "expected": "success"},
+        {"csv": success.replace(",System,", ",Sistema,") + "\n" + per_user, "expected": "success"},
+        {"csv": success.splitlines()[0] + "\n" + per_user.replace("S-1-", " s-1-"), "expected": None},
         {"csv": success.splitlines()[0] + "\n" + per_user, "expected": None},
         {"csv": "\n\n" + success + "\n \n", "expected": "success"},
         {"csv": success.replace("Process Creation", '"Process, Creation"'), "expected": "success"},
@@ -2675,13 +2685,13 @@ def audit_diagnostics_self_test():
     # the unchanged confined direct route or overwrite failed calibration.
     probe["control_endpoint_comparison"] = {
         "diagnostic_only": True,
-        "direct_bind": [{"operation": {"api": "NtDeviceIoControlFile(AFD_BIND)",
+        "direct_bind": {"operation": {"api": "NtDeviceIoControlFile(AFD_BIND)",
                         "input_bytes": 114, "ioctl_code": 0x12003,
-                        "io_information": 110, "success": True}}],
-        "winsock_bind": {"operation": {"success": True}},
+                        "io_information": 110, "success": True}},
+        "address_readback": {"returned_length": 110, "class": "same-as-input"},
     }
     unix_call_diagnostics(sample)
-    assert probe["control_endpoint_comparison"]["direct_bind"][0]["operation"]["address_bytes"] == 110
+    assert probe["control_endpoint_comparison"]["direct_bind"]["operation"]["address_bytes"] == 110
     assert unix_namespace_status({"control": original}) == unix_namespace_status({"control": sample})
     call = probe["calibration"][0]["result"]["operation"]
     assert call["address_bytes"] == 110 and call["address_offset"] == 4

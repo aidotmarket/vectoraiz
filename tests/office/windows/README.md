@@ -132,7 +132,7 @@ cannot exclude a prompt in an existing process. Expected binary hashes below
 are transcribed from the redacted manifest (the operator reported kit hashes
 checked on the PC); this checkout has not independently inspected the kit files.
 For that historical kit, compare SHA256SUMS and binaries against these values
-(a newly built fold-22 kit will have different worker/launcher hashes):
+(a newly built fold-23 kit will have different worker/launcher hashes):
 
 | Artifact | SHA256 |
 | --- | --- |
@@ -141,23 +141,43 @@ For that historical kit, compare SHA256SUMS and binaries against these values
 | vz-office-windows-launch.exe | `b747ab9f574927f7c61fb82fffc95c723831ee8b6e5b28095458d5e5c8fe6608` |
 | pdfium.dll | `a318c39c137482dc4687c2973b7ec1c27fc1c20253cf2dc31928f922eab89e8f` |
 
-Fold 22 keeps the confined AF_UNIX measurement and all calibration requirements
+Fold 23 keeps the confined AF_UNIX measurement and all calibration requirements
 unchanged. The bind/connect IOCTLs and TLI field offsets match the referenced
 phnt definitions; that does not identify the cause of the failed unconfined
 filesystem bind on build 26200 (all 16 control variants failed, despite successful
 endpoint opens; the recorded filesystem path length was 84 bytes, and six
-abstract variants did bind successfully). The next run adds control-only
-`control_endpoint_comparison`: full/short direct AFD bind packets on fresh
-Winsock-created endpoints, plus a fresh ordinary Winsock bind. Compare these with
-`calibration` (NtCreateFile-created endpoints, same packets). Winsock direct
-success with NtCreateFile failure isolates endpoint creation; ordinary bind
-success with both direct paths failing points to direct packet/ABI requirements.
+abstract variants did bind successfully). The historical control calibration
+shows the following synchronous versus pended pattern for NtCreateFile endpoints:
+
+| Variant | Abstract | Filesystem |
+| --- | --- | --- |
+| Output buffer 0 | `0xC000000D` at submission | `0xC000000D` at submission |
+| Short address length | `0xC0000141` at submission | `0xC0000141` at submission |
+| Full 110-byte address, output 110 or more | Pends, completes `0x00000000` | Pends, completes `0xC000000D` |
+
+The next run is diagnostic narrowing, not a guaranteed root-cause determination.
+Its control-only `control_endpoint_comparison` keeps one full direct AFD bind on
+a fresh Winsock-created endpoint. Compare this with `calibration` (NtCreateFile
+endpoints, same packet). Success only on the Winsock endpoint would implicate
+endpoint creation. On another fresh socket, an ordinary Winsock bind is followed
+by direct `IOCTL_AFD_GET_ADDRESS` (`0x1202F`) readback. Only its returned length
+and address class (`same-as-input`, `\??\-prefixed`, `wide-char`, or `other`) are
+published, alongside operation status; no address bytes or paths are published.
+The classifier compares a complete returned sockaddr with the input, recognizes
+an NT prefix or the input encoded as UTF-16LE, and otherwise reports `other`.
+Readback may retain the caller's form rather than any translated form, so it may
+not distinguish translation from another Winsock prerequisite. The repeated
+ordinary-bind result and short direct-bind attempt are omitted. The comparison
+runs after the outcomes loop, and a comparison error is recorded without
+propagating a recoverable error out of the control probe.
+
 Literal IOCTL code, completion information and lengths are retained without
 addresses. These diagnostics never select a confined route or qualify a row.
-The compile-time layout assertions and Windows Rust fixture check sockaddr size,
-bind/connect offsets, zero termination and full/short input lengths. Actual
-control success and unix-2a/2b/2d outcomes, and 2c's connect dependency, still
-require a winmax rerun. No repaired ABI or successful control is claimed here.
+The compile-time layout assertions and Windows Rust fixtures check sockaddr
+size, bind/connect offsets, encoder output (full, short and NT-prefixed), zero
+termination, and readback classification. Actual control success and
+unix-2a/2b/2d outcomes, and 2c's connect dependency, still require a winmax rerun.
+No repaired ABI or successful control is claimed here.
 
 Cleanup and undo: on normal completion or Ctrl+C, the runner closes its local
 HTTP/AF_UNIX listeners, removes scratch/sentinel directories, and restores the

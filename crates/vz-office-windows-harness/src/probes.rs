@@ -1099,6 +1099,17 @@ fn afd_ioctl<T>(
     length: usize,
     output_length: usize,
 ) -> Result<Value> {
+    afd_ioctl_output(handle, code, input, length, output_length, &mut [0u8; 256])
+}
+fn afd_ioctl_output<T>(
+    handle: HANDLE,
+    code: u32,
+    input: &T,
+    length: usize,
+    output_length: usize,
+    output: &mut [u8; 256],
+) -> Result<Value> {
+    anyhow::ensure!(output_length <= output.len(), "AFD output length");
     let event = unsafe { CreateEventW(null(), 1, 0, null()) };
     anyhow::ensure!(!event.is_null(), "AFD operation event");
     let event = Handle(event);
@@ -1106,7 +1117,6 @@ fn afd_ioctl<T>(
         status: 0x103,
         information: 0,
     };
-    let mut output = [0u8; 256];
     let rc = unsafe {
         NtDeviceIoControlFile(
             handle,
@@ -1151,6 +1161,7 @@ fn afd_ioctl<T>(
             0x12003 => "NtDeviceIoControlFile(AFD_BIND)",
             0x1200B => "NtDeviceIoControlFile(AFD_START_LISTEN)",
             0x1200C => "NtDeviceIoControlFile(AFD_WAIT_FOR_LISTEN)",
+            0x1202F => "NtDeviceIoControlFile(AFD_GET_ADDRESS)",
             _ => "NtDeviceIoControlFile(AFD_CONNECT)",
         },
         status as i32 as i64,
@@ -1186,6 +1197,19 @@ fn unix_address(path: &[u8], abstract_name: bool) -> Result<(UnixAddress, usize)
     };
     Ok((address, length))
 }
+fn unix_encode(path: &[u8], abstract_name: bool, variant: &Value) -> Result<(UnixAddress, usize)> {
+    let path = if variant["nt_path"] == true && !abstract_name {
+        [b"\x5c??\x5c".as_slice(), path].concat()
+    } else {
+        path.to_vec()
+    };
+    let (address, _) = unix_address(&path, abstract_name)?;
+    let mut length = size_of::<UnixAddress>();
+    if variant["short"] == true {
+        length = 2 + usize::from(abstract_name) + path.len() + usize::from(!abstract_name);
+    }
+    Ok((address, length))
+}
 fn unix_direct(
     path: &[u8],
     local: Option<&[u8]>,
@@ -1193,26 +1217,13 @@ fn unix_direct(
     variant: &Value,
 ) -> Result<Value> {
     let (creation, handle) = afd_open(&json!({"family":1,"transport":"stream"}))?;
-    let encode = |path: &[u8], abstract_name: bool| -> Result<(UnixAddress, usize)> {
-        let path = if variant["nt_path"] == true && !abstract_name {
-            [b"\x5c??\x5c".as_slice(), path].concat()
-        } else {
-            path.to_vec()
-        };
-        let (address, _) = unix_address(&path, abstract_name)?;
-        let mut length = size_of::<UnixAddress>();
-        if variant["short"] == true {
-            length = 2 + usize::from(abstract_name) + path.len() + usize::from(!abstract_name);
-        }
-        Ok((address, length))
-    };
-    let (address, target_length) = encode(path, abstract_name)?;
+    let (address, target_length) = unix_encode(path, abstract_name, variant)?;
     let output = variant["output"].as_u64().unwrap_or(0) as usize;
     let mut prerequisite = Value::Null;
     let mut listener = Value::Null;
     let operation = if let Some(handle) = handle {
         if let Some(local) = local {
-            let (local_address, length) = encode(local, abstract_name)?;
+            let (local_address, length) = unix_encode(local, abstract_name, variant)?;
             prerequisite = afd_ioctl(
                 handle.0,
                 0x12003,
@@ -1303,52 +1314,106 @@ fn unix_winsock(path: &[u8], connect_to: bool, abstract_name: bool) -> Result<Va
     Ok(json!({"route":"Winsock","creation":creation,"operation":operation}))
 }
 
+// Classify only complete successful SOCKADDR readbacks. Never serialize bytes.
+fn unix_address_class(output: &[u8], input: &UnixAddress) -> &'static str {
+    if output.len() < 2 || output[..2] != input.family.to_ne_bytes() {
+        return "other";
+    }
+    let path = &output[2..];
+    if path == input.path {
+        "same-as-input"
+    } else if path.starts_with(b"\x5c??\x5c") {
+        "\\??\\-prefixed"
+    } else if path.len() >= 4 && path.len().is_multiple_of(2) {
+        // Recognize the input path encoded as UTF-16LE, optionally NT-prefixed;
+        // avoid labelling arbitrary binary output as wide-character text.
+        let end = input
+            .path
+            .iter()
+            .position(|b| *b == 0)
+            .unwrap_or(input.path.len());
+        let Ok(text) = std::str::from_utf8(&input.path[..end]) else {
+            return "other";
+        };
+        let wide: Vec<u8> = text
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let wide_path = path.strip_prefix(b"\x5c\0?\0?\0\x5c\0").unwrap_or(path);
+        if wide_path.starts_with(&wide) && wide_path[wide.len()..].iter().all(|b| *b == 0) {
+            "wide-char"
+        } else {
+            "other"
+        }
+    } else {
+        "other"
+    }
+}
 // Control-only differential: keep the exact direct bind packet/IOCTL but
 // replace NtCreateFile endpoint creation with socket(). Never select this as an
 // LPAC route or use its success to calibrate the confined NtCreateFile route.
 fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
-    let mut attempts = Vec::new();
-    for short in [false, true] {
-        let path = scratch.join(if short { "w-short.sock" } else { "w-full.sock" });
-        let bytes = path
-            .to_str()
-            .context("endpoint comparison encoding")?
-            .as_bytes();
-        let (address, _) = unix_address(bytes, false)?;
-        let length = if short {
-            2 + bytes.len() + 1
-        } else {
-            size_of::<UnixAddress>()
-        };
-        let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
-        let creation = wsa("socket(AF_UNIX)", socket as i64, socket != INVALID_SOCKET);
-        let operation = if socket != INVALID_SOCKET {
-            let result = afd_ioctl(
-                socket as HANDLE,
-                0x12003,
-                &UnixBind { share: 0, address },
-                4 + length,
-                110,
-            );
-            unsafe { closesocket(socket) };
-            result?
-        } else {
-            json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
-        };
-        attempts.push(json!({"short":short,"path_bytes":bytes.len(),
-            "creation":creation,"operation":operation}));
-    }
+    let path = scratch.join("w-full.sock");
+    let bytes = path
+        .to_str()
+        .context("endpoint comparison encoding")?
+        .as_bytes();
+    let (address, length) = unix_address(bytes, false)?;
+    let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
+    let creation = wsa("socket(AF_UNIX)", socket as i64, socket != INVALID_SOCKET);
+    let operation = if socket != INVALID_SOCKET {
+        let result = afd_ioctl(
+            socket as HANDLE,
+            0x12003,
+            &UnixBind { share: 0, address },
+            4 + length,
+            110,
+        );
+        unsafe { closesocket(socket) };
+        result?
+    } else {
+        json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
+    };
     let path = scratch.join("w-api.sock");
-    let winsock = unix_winsock(
+    let (address, length) = unix_address(
         path.to_str()
             .context("Winsock comparison encoding")?
             .as_bytes(),
         false,
-        false,
     )?;
+    let socket = unsafe { windows_sys::Win32::Networking::WinSock::socket(1, SOCK_STREAM, 0) };
+    let readback = if socket != INVALID_SOCKET {
+        let rc = unsafe {
+            bind(
+                socket,
+                (&address as *const UnixAddress).cast(),
+                length as i32,
+            )
+        };
+        let result = if rc == 0 {
+            let mut output = [0u8; 256];
+            // phnt/ntafd.h: AFD_GET_ADDRESS=11, METHOD_NEITHER => 0x1202F.
+            afd_ioctl_output(socket as HANDLE, 0x1202F, &0u8, 0, 256, &mut output).map(|result| {
+                let returned = result["io_information"].as_u64().unwrap_or(0) as usize;
+                let class = if result["success"] == true && returned <= output.len() {
+                    unix_address_class(&output[..returned], &address)
+                } else {
+                    "other"
+                };
+                json!({"operation":result,"returned_length":returned,"class":class})
+            })
+        } else {
+            Ok(json!({"attempted":false,"reason":"Winsock bind prerequisite failed"}))
+        };
+        unsafe { closesocket(socket) };
+        result?
+    } else {
+        json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
+    };
     Ok(json!({"diagnostic_only":true,"namespace":"filesystem",
         "endpoint":"Winsock socket; direct AFD bind packet unchanged",
-        "direct_bind":attempts,"winsock_bind":winsock}))
+        "direct_bind":{"creation":creation,"operation":operation},"address_readback":readback}))
 }
 
 // Alternative confined route: supply the successful control's protocol record
@@ -1505,11 +1570,6 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
     } else {
         v["explicit_protocol"].clone()
     };
-    let endpoint_comparison = if v["route"] == "control" {
-        unix_endpoint_comparison(scratch)?
-    } else {
-        Value::Null
-    };
     let scratch_access = self::scratch(v)?;
     let mut calibration = Vec::new();
     let mut selected = v["calibrated_variants"].clone();
@@ -1648,6 +1708,13 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
             }
         };
     }
+    let endpoint_comparison = if v["route"] == "control" {
+        unix_endpoint_comparison(scratch).unwrap_or_else(
+            |_| json!({"diagnostic_only":true,"error":"control endpoint comparison failed"}),
+        )
+    } else {
+        Value::Null
+    };
     if rc == 0 {
         unsafe { WSACleanup() };
     }
@@ -2490,13 +2557,49 @@ mod unix_layout_tests {
     use super::*;
 
     #[test]
+    fn address_readback_classes() {
+        let (input, _) = unix_address(b"fixture.sock", false).unwrap();
+        let mut full = vec![1, 0];
+        full.extend_from_slice(&input.path);
+        assert_eq!(unix_address_class(&full, &input), "same-as-input");
+        assert_eq!(
+            unix_address_class(b"\x01\0\x5c??\x5cfixture.sock\0", &input),
+            "\\??\\-prefixed"
+        );
+        let mut wide = vec![1, 0];
+        wide.extend("fixture.sock\0".encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(unix_address_class(&wide, &input), "wide-char");
+        for other in [
+            b"".as_slice(),
+            b"\x01",
+            b"\x02\0fixture.sock\0",
+            b"\x01\0bad\0",
+        ] {
+            assert_eq!(unix_address_class(other, &input), "other");
+        }
+    }
+
+    #[test]
     fn bind_packet_fixture() {
-        let (address, _) = unix_address(b"fixture.sock", false).unwrap();
+        let (address, length) = unix_encode(b"fixture.sock", false, &json!({})).unwrap();
         let packet = UnixBind { share: 0, address };
         assert_eq!(packet.address.family.to_le_bytes(), [1, 0]);
         assert_eq!(&packet.address.path[..13], b"fixture.sock\0");
         assert!(packet.address.path[13..].iter().all(|b| *b == 0));
-        assert_eq!(4 + size_of::<UnixAddress>(), 114);
-        assert_eq!(4 + 2 + b"fixture.sock".len() + 1, 19);
+        assert_eq!(4 + length, 114);
+        let (short, length) = unix_encode(b"fixture.sock", false, &json!({"short":true})).unwrap();
+        assert_eq!(4 + length, 19);
+        assert_eq!(short.path, packet.address.path);
+        let (nt, length) = unix_encode(b"fixture.sock", false, &json!({"nt_path":true})).unwrap();
+        assert_eq!(4 + length, 114);
+        assert_eq!(&nt.path[..17], b"\x5c??\x5cfixture.sock\0");
+        assert!(nt.path[17..].iter().all(|b| *b == 0));
+        let (_, length) = unix_encode(
+            b"fixture.sock",
+            false,
+            &json!({"nt_path":true,"short":true}),
+        )
+        .unwrap();
+        assert_eq!(4 + length, 23);
     }
 }

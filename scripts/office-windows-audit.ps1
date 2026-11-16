@@ -6,10 +6,11 @@ function Convert-AuditBackupReadback([string[]]$Csv) {
     # /get /r has only six columns. /backup adds numeric Setting Value.
     # Use documented column positions: headings and display values can localize.
     $rows = @($Csv | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ConvertFrom-Csv)
+    # Policy Target may localize; SID targets identify per-user overrides.
     # Avoid the case-insensitive automatic $Matches variable; absent CSV fields are null.
     $rowsForGuid = @($rows | Where-Object {
         $fields = @($_.PSObject.Properties)
-        $fields.Count -eq 7 -and ([string]$fields[1].Value).Trim() -ieq 'System' -and ([string]$fields[3].Value).Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
+        $fields.Count -eq 7 -and ([string]$fields[1].Value).Trim() -notmatch '^S-1-' -and ([string]$fields[3].Value).Trim() -ieq '{0CCE922B-69AE-11D9-BED3-505054503030}'
     })
     if ($rowsForGuid.Count -ne 1) { throw 'auditpol backup readback must contain one Process Creation subcategory' }
     $fields = @($rowsForGuid[0].PSObject.Properties)
