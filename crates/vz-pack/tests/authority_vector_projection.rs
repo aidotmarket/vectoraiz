@@ -403,7 +403,7 @@ fn projection_real_powerpoint_slide_and_notes() {
 }
 #[test]
 fn projection_xlsx_empty_cache_comments_extensions_and_dimensions() {
-    let p = extract("xlsx", &workbook("visible", r#"<cols><col min="2" max="2" width="0"/></cols><sheetData><row r="1" ht="0"><c r="A1" t="str"><v>ZERO_HEIGHT</v></c></row><row r="2"><c r="A2" t="str"><f>FORMULA_CANARY</f><v></v></c><c r="B2" t="str"><v>ZERO_WIDTH</v></c></row></sheetData><headerFooter><oddHeader>HEADER_CANARY</oddHeader></headerFooter><extLst><ext xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:conditionalFormattings/><x14:sparklineGroups/></ext></extLst>"#)).unwrap();
+    let p = extract("xlsx", &workbook("visible", r#"<cols><col min="2" max="2" width="0"/></cols><sheetData><row r="1" ht="0"><c r="A1" t="str"><v>ZERO_HEIGHT</v></c></row><row r="2"><c r="A2" t="str"><f>FORMULA_CANARY</f><v></v></c><c r="B2" t="str"><v>ZERO_WIDTH</v></c></row></sheetData><headerFooter><oddHeader>HEADER_CANARY</oddHeader></headerFooter><extLst><ext xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main"><x14:conditionalFormattings><x14:conditionalFormatting><x14:cfRule><x14:formula>RULE_FORMULA_CANARY</x14:formula></x14:cfRule></x14:conditionalFormatting></x14:conditionalFormattings><x14:sparklineGroups><x14:sparklineGroup xmlns:xm="http://schemas.microsoft.com/office/excel/2006/main"><xm:f>SPARK_FORMULA_CANARY</xm:f></x14:sparklineGroup></x14:sparklineGroups></ext></extLst>"#)).unwrap();
     assert!(!text(&p).contains("CANARY"));
     assert!(p
         .nodes
@@ -412,6 +412,7 @@ fn projection_xlsx_empty_cache_comments_extensions_and_dimensions() {
         .all(|n| n.hidden));
     assert_eq!(p.drops["comments"], 0);
     assert_eq!(p.drops["headers-footers"], 1);
+    assert_eq!(p.drops["formulas"], 4);
     let bytes = workbook(
         "visible",
         r#"<extLst><ext><unknown><text>UNSUPPORTED</text></unknown></ext></extLst>"#,

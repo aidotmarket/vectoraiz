@@ -555,11 +555,14 @@ class NoticeGenerators(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
         notices = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(notices)
-        for failing in range(3):
+        for failing in range(4):
             with self.subTest(generator=failing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 output = root / 'THIRD_PARTY_NOTICES'
                 output.write_text('prior output')
+                folder = root / 'docs/native-worker-licenses'
+                folder.mkdir(parents=True)
+                (folder / 'manifest.json').write_text('[]')
                 calls = []
 
                 def generate(argv, **kwargs):
@@ -567,7 +570,9 @@ class NoticeGenerators(unittest.TestCase):
                     if len(calls) - 1 == failing:
                         raise subprocess.CalledProcessError(1, argv)
                     if '-o' in argv:
-                        Path(argv[argv.index('-o') + 1]).write_text('Rust licence')
+                        Path(argv[argv.index('-o') + 1]).write_text('Rust licence\n- dependency 1.0\n')
+                    elif argv[:2] == ['cargo', 'tree']:
+                        return subprocess.CompletedProcess(argv, 0, stdout='dependency v1.0\n')
                     else:
                         kwargs['stdout'].write(b'licence')
 
@@ -577,6 +582,18 @@ class NoticeGenerators(unittest.TestCase):
                     notices.main()
                 self.assertEqual(len(calls), failing + 1)
                 self.assertEqual(output.read_text(), 'prior output')
+
+    def test_worker_notices_cover_bundle_and_refuse_unlisted_dependencies(self):
+        spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        tree = 'vz-parser-worker v0.0.26 (/private/workspace)\nrust-ini v0.21.3\nordered-multimap v0.7.3\ndlv-list v0.5.2\nserde v1.0.229 (*)\n'
+        text = notices.complete_worker_notices('- serde 1.0.229\n', tree)
+        for dependency in ['rust-ini 0.21.3', 'ordered-multimap 0.7.3', 'dlv-list 0.5.2']:
+            self.assertIn('- ' + dependency, text)
+        self.assertEqual(notices.complete_worker_notices(text, tree), text)
+        with self.assertRaisesRegex(SystemExit, 'missing from third-party notices'):
+            notices.complete_worker_notices(text, tree + 'unknown v1.0.0\n')
 
 
 class HelperDiagnostics(unittest.TestCase):

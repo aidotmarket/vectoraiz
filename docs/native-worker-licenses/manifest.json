@@ -1,0 +1,29 @@
+[
+  {
+    "name": "dlv-list",
+    "version": "0.5.2",
+    "license": "MIT",
+    "file": "dlv-list-0.5.2-MIT.txt",
+    "license_sha256": "77adcddfe9e50acd2df63ddbb8e566bb8d34b4d02a9d92e7a5c1b9c2225eda9f",
+    "crate_checksum": "442039f5147480ba31067cb00ada1adae6892028e40e45fc5de7b7df6dcc1b5f",
+    "source": "https://crates.io/crates/dlv-list/0.5.2"
+  },
+  {
+    "name": "ordered-multimap",
+    "version": "0.7.3",
+    "license": "MIT",
+    "file": "ordered-multimap-0.7.3-MIT.txt",
+    "license_sha256": "047c1d2f1c28c30ced89bd0740ff251d8f51512e81b142711f958a0551729ec4",
+    "crate_checksum": "49203cdcae0030493bad186b28da2fa25645fa276a51b6fec8010d281e02ef79",
+    "source": "https://crates.io/crates/ordered-multimap/0.7.3"
+  },
+  {
+    "name": "rust-ini",
+    "version": "0.21.3",
+    "license": "MIT",
+    "file": "rust-ini-0.21.3-MIT.txt",
+    "license_sha256": "ccf6244964385d34fef3799aa7792e9f8d35517de026f39a4f43f0e89b2079eb",
+    "crate_checksum": "796e8d2b6696392a43bea58116b667fb4c29727dc5abd27d6acf338bb4f688c7",
+    "source": "https://crates.io/crates/rust-ini/0.21.3"
+  }
+]

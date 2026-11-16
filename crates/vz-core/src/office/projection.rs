@@ -903,6 +903,15 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
     }
     // Count formula-bearing metadata without ever extracting it as content.
     for (part, root) in trees {
+        for ns in [X14, XM] {
+            for local in ["f", "formula", "formula1", "formula2"] {
+                let mut nodes = Vec::new();
+                descendants(root, ns, local, &mut nodes);
+                for (i, _) in nodes.iter().enumerate() {
+                    out.drop_at("formulas", &format!("{part}/{{{ns}}}{local}[{i}]"))?;
+                }
+            }
+        }
         for local in ["definedName", "formula", "formula1", "formula2"] {
             let mut nodes = Vec::new();
             descendants(root, S, local, &mut nodes);
@@ -986,14 +995,18 @@ fn walk_slide(
         return Ok(());
     }
     if n.local == "extLst"
+        && n.ns == A
+        && !literal_text(n)
         && path.contains("/cNvPr[")
         && n.children.iter().all(|ext| {
-            ext.children.iter().all(|entry| {
-                entry.ns == "http://schemas.microsoft.com/office/drawing/2014/main"
-                    && entry.local == "creationId"
-                    && entry.children.is_empty()
-                    && entry.text.trim().is_empty()
-            })
+            ext.ns == A
+                && ext.local == "ext"
+                && ext.children.iter().all(|entry| {
+                    entry.ns == "http://schemas.microsoft.com/office/drawing/2014/main"
+                        && entry.local == "creationId"
+                        && entry.children.is_empty()
+                        && entry.text.trim().is_empty()
+                })
         })
     {
         return Ok(());
