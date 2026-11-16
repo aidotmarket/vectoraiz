@@ -2688,7 +2688,9 @@ def audit_diagnostics_self_test():
         "direct_bind": {"operation": {"api": "NtDeviceIoControlFile(AFD_BIND)",
                         "input_bytes": 114, "ioctl_code": 0x12003,
                         "io_information": 110, "success": True}},
-        "address_readback": {"returned_length": 110, "class": "same-as-input"},
+        "address_readback": {"returned_length": 110, "input_path_length": 12,
+                             "family_matches": True, "matched_offset": 0,
+                             "class": "same-as-input"},
     }
     unix_call_diagnostics(sample)
     assert probe["control_endpoint_comparison"]["direct_bind"]["operation"]["address_bytes"] == 110
@@ -2701,6 +2703,24 @@ def audit_diagnostics_self_test():
     # Diagnostic metadata cannot change either exit or namespace verdicts.
     for label in ("2a", "2b", "2c", "2d"):
         assert unix_exit({"control": original}, label) == unix_exit({"control": sample}, label)
+    direct_bind = deepcopy(probe["control_endpoint_comparison"]["direct_bind"])
+    for readback in (
+        {"returned_length": 15, "input_path_length": 12, "family_matches": True,
+         "matched_offset": 0, "class": "same-as-input"},
+        {"returned_length": 19, "input_path_length": 12, "family_matches": False,
+         "matched_offset": 4, "class": "same-as-input"},
+        {"returned_length": 10, "input_path_length": 12, "family_matches": False,
+         "matched_offset": None, "class": "other"},
+        *({"diagnostic_only": True, "error": cause} for cause in
+          ("path_encoding", "event_creation", "output_length", "other")),
+    ):
+        probe["control_endpoint_comparison"]["address_readback"] = deepcopy(readback)
+        unix_call_diagnostics(sample)
+        assert probe["control_endpoint_comparison"]["address_readback"] == readback
+        assert probe["control_endpoint_comparison"]["direct_bind"] == direct_bind
+        assert unix_namespace_status({"control": original}) == unix_namespace_status({"control": sample})
+        for label in ("2a", "2b", "2c", "2d"):
+            assert unix_exit({"control": original}, label) == unix_exit({"control": sample}, label)
     print("audit diagnostics tests passed: setup/cursor/window/capture failures; redaction; AF_UNIX layouts")
 
 

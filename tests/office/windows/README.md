@@ -160,16 +160,22 @@ Its control-only `control_endpoint_comparison` keeps one full direct AFD bind on
 a fresh Winsock-created endpoint. Compare this with `calibration` (NtCreateFile
 endpoints, same packet). Success only on the Winsock endpoint would implicate
 endpoint creation. On another fresh socket, an ordinary Winsock bind is followed
-by direct `IOCTL_AFD_GET_ADDRESS` (`0x1202F`) readback. Only its returned length
-and address class (`same-as-input`, `\??\-prefixed`, `wide-char`, or `other`) are
-published, alongside operation status; no address bytes or paths are published.
-The classifier compares a complete returned sockaddr with the input, recognizes
-an NT prefix or the input encoded as UTF-16LE, and otherwise reports `other`.
+by direct `IOCTL_AFD_GET_ADDRESS` (`0x1202F`) readback. It publishes the returned
+length, integer `input_path_length`, boolean `family_matches` (the first two
+returned bytes equal AF_UNIX), and `matched_offset` (0, 4, or null for no match),
+alongside operation status and address class (`same-as-input`, `\\??\\-prefixed`,
+`wide-char`, or `other`). No address bytes or paths are published. The classifier
+checks sockaddr offsets 0 then 4, accepting the full input path or a trimmed
+NUL-terminated path with an all-zero tail, recognizing an NT prefix or the input
+encoded as UTF-16LE, and otherwise reporting `other`. The matched offset is the
+first offset with a recognized class.
 Readback may retain the caller's form rather than any translated form, so it may
 not distinguish translation from another Winsock prerequisite. The repeated
 ordinary-bind result and short direct-bind attempt are omitted. The comparison
 runs after the outcomes loop, and a comparison error is recorded without
-propagating a recoverable error out of the control probe.
+propagating a recoverable error out of the control probe. Readback errors stay
+inside `address_readback`, preserving the completed `direct_bind`. Errors use
+fixed labels: `path_encoding`, `event_creation`, `output_length`, or `other`.
 
 Literal IOCTL code, completion information and lengths are retained without
 addresses. These diagnostics never select a confined route or qualify a row.

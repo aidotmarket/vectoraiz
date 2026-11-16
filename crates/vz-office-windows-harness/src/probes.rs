@@ -1314,13 +1314,50 @@ fn unix_winsock(path: &[u8], connect_to: bool, abstract_name: bool) -> Result<Va
     Ok(json!({"route":"Winsock","creation":creation,"operation":operation}))
 }
 
-// Classify only complete successful SOCKADDR readbacks. Never serialize bytes.
+// Classify successful SOCKADDR readbacks. Never serialize bytes or paths.
+fn unix_address_readback(output: &[u8], input: &UnixAddress) -> Value {
+    let family_matches = output.get(..2) == Some(input.family.to_ne_bytes().as_slice());
+    let mut matched_offset = None;
+    let mut class = "other";
+    for offset in [0, 4] {
+        if let Some(address) = output.get(offset..) {
+            let candidate = unix_address_class(address, input);
+            if candidate != "other" {
+                matched_offset = Some(offset);
+                class = candidate;
+                break;
+            }
+        }
+    }
+    json!({"input_path_length":input.path.iter().position(|b| *b == 0).unwrap_or(input.path.len()),
+        "family_matches":family_matches,"matched_offset":matched_offset,"class":class})
+}
+
+fn unix_comparison_error(error: anyhow::Error) -> Value {
+    let cause = match error.to_string().as_str() {
+        "endpoint comparison encoding" | "Winsock comparison encoding" | "unix address length" => {
+            "path_encoding"
+        }
+        "AFD operation event" => "event_creation",
+        "AFD output length" => "output_length",
+        _ => "other",
+    };
+    json!({"diagnostic_only":true,"error":cause})
+}
 fn unix_address_class(output: &[u8], input: &UnixAddress) -> &'static str {
     if output.len() < 2 || output[..2] != input.family.to_ne_bytes() {
         return "other";
     }
     let path = &output[2..];
-    if path == input.path {
+    let end = input
+        .path
+        .iter()
+        .position(|b| *b == 0)
+        .unwrap_or(input.path.len());
+    if path.len() > end
+        && path.starts_with(&input.path[..end])
+        && path[end..].iter().all(|b| *b == 0)
+    {
         "same-as-input"
     } else if path.starts_with(b"\x5c??\x5c") {
         "\\??\\-prefixed"
@@ -1375,6 +1412,13 @@ fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
     } else {
         json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
     };
+    let readback = unix_endpoint_readback(scratch).unwrap_or_else(unix_comparison_error);
+    Ok(json!({"diagnostic_only":true,"namespace":"filesystem",
+        "endpoint":"Winsock socket; direct AFD bind packet unchanged",
+        "direct_bind":{"creation":creation,"operation":operation},"address_readback":readback}))
+}
+
+fn unix_endpoint_readback(scratch: &std::path::Path) -> Result<Value> {
     let path = scratch.join("w-api.sock");
     let (address, length) = unix_address(
         path.to_str()
@@ -1396,12 +1440,17 @@ fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
             // phnt/ntafd.h: AFD_GET_ADDRESS=11, METHOD_NEITHER => 0x1202F.
             afd_ioctl_output(socket as HANDLE, 0x1202F, &0u8, 0, 256, &mut output).map(|result| {
                 let returned = result["io_information"].as_u64().unwrap_or(0) as usize;
-                let class = if result["success"] == true && returned <= output.len() {
-                    unix_address_class(&output[..returned], &address)
-                } else {
-                    "other"
-                };
-                json!({"operation":result,"returned_length":returned,"class":class})
+                let mut readback = unix_address_readback(
+                    if result["success"] == true && returned <= output.len() {
+                        &output[..returned]
+                    } else {
+                        &[]
+                    },
+                    &address,
+                );
+                readback["operation"] = result;
+                readback["returned_length"] = json!(returned);
+                readback
             })
         } else {
             Ok(json!({"attempted":false,"reason":"Winsock bind prerequisite failed"}))
@@ -1411,9 +1460,7 @@ fn unix_endpoint_comparison(scratch: &std::path::Path) -> Result<Value> {
     } else {
         json!({"attempted":false,"reason":"Winsock endpoint creation failed"})
     };
-    Ok(json!({"diagnostic_only":true,"namespace":"filesystem",
-        "endpoint":"Winsock socket; direct AFD bind packet unchanged",
-        "direct_bind":{"creation":creation,"operation":operation},"address_readback":readback}))
+    Ok(readback)
 }
 
 // Alternative confined route: supply the successful control's protocol record
@@ -1709,9 +1756,7 @@ fn unix_outcomes(v: &Value) -> Result<Value> {
         };
     }
     let endpoint_comparison = if v["route"] == "control" {
-        unix_endpoint_comparison(scratch).unwrap_or_else(
-            |_| json!({"diagnostic_only":true,"error":"control endpoint comparison failed"}),
-        )
+        unix_endpoint_comparison(scratch).unwrap_or_else(unix_comparison_error)
     } else {
         Value::Null
     };
@@ -2562,6 +2607,35 @@ mod unix_layout_tests {
         let mut full = vec![1, 0];
         full.extend_from_slice(&input.path);
         assert_eq!(unix_address_class(&full, &input), "same-as-input");
+        for bytes in [&full[..], b"\x01\0fixture.sock\0".as_slice()] {
+            let result = unix_address_readback(bytes, &input);
+            assert_eq!(
+                result,
+                json!({"input_path_length":12,"family_matches":true,
+                "matched_offset":0,"class":"same-as-input"})
+            );
+            let mut header = vec![0xff; 4];
+            header.extend_from_slice(bytes);
+            assert_eq!(
+                unix_address_readback(&header, &input),
+                json!({"input_path_length":12,"family_matches":false,
+                    "matched_offset":4,"class":"same-as-input"})
+            );
+        }
+        let mut padded = full.clone();
+        padded.extend_from_slice(&[0; 8]);
+        assert_eq!(unix_address_class(&padded, &input), "same-as-input");
+        for unrelated in [
+            b"\x01\0fixture".as_slice(),
+            b"\x01\0fixture.sock",
+            b"\x01\0fixture.sock\0bad",
+            b"\x01\0unrelated.sock\0",
+        ] {
+            let result = unix_address_readback(unrelated, &input);
+            assert_eq!(result["class"], "other");
+            assert_eq!(result["family_matches"], true);
+            assert!(result["matched_offset"].is_null());
+        }
         assert_eq!(
             unix_address_class(b"\x01\0\x5c??\x5cfixture.sock\0", &input),
             "\\??\\-prefixed"
@@ -2576,6 +2650,26 @@ mod unix_layout_tests {
             b"\x01\0bad\0",
         ] {
             assert_eq!(unix_address_class(other, &input), "other");
+            let result = unix_address_readback(other, &input);
+            assert_eq!(result["class"], "other");
+            assert!(result["matched_offset"].is_null());
+        }
+    }
+
+    #[test]
+    fn comparison_errors_use_fixed_labels() {
+        for (message, label) in [
+            ("endpoint comparison encoding", "path_encoding"),
+            ("Winsock comparison encoding", "path_encoding"),
+            ("unix address length", "path_encoding"),
+            ("AFD operation event", "event_creation"),
+            ("AFD output length", "output_length"),
+            ("private path or unexpected error", "other"),
+        ] {
+            assert_eq!(
+                unix_comparison_error(anyhow::anyhow!(message)),
+                json!({"diagnostic_only":true,"error":label})
+            );
         }
     }
 
