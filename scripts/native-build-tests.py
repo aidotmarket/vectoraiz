@@ -349,11 +349,11 @@ class UiTestShippingGate(unittest.TestCase):
             else:
                 shutil.copy2(source, dest)
 
-    def invoke(self):
+    def invoke(self, stdout=''):
         # Dependency resolution is exercised by the real CI gate; these tests
         # isolate feature discovery and rejection without invoking Cargo.
         with patch.object(self.gate, 'ROOT', self.root), \
-                patch.object(self.gate.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='')) as cargo, \
+                patch.object(self.gate.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=stdout)) as cargo, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.gate.main()
         return cargo
@@ -367,6 +367,38 @@ class UiTestShippingGate(unittest.TestCase):
 
     def test_unchanged_shipping_inputs_pass(self):
         self.assertGreater(self.invoke().call_count, 0)
+
+    def test_crate_test_features_are_not_app_features(self):
+        cargo = self.invoke()
+        for call in cargo.call_args_list:
+            self.assertNotIn(ListingOriginalsBuildGate.feature, ' '.join(call.args[0]))
+
+    def test_only_standalone_other_package_tests_are_excluded(self):
+        for command, expected in [
+            ('cargo test --locked -p vz-pack --features crate-only office_', []),
+            ('cargo test --package=vz-pack --features crate-only', []),
+            ('cargo test -p vectoraiz --features app-feature', ['app-feature']),
+            ('cargo test --features app-feature', ['app-feature']),
+            ('cargo test --workspace -p vz-pack --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack -p vectoraiz --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack; cargo build --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack --features app-feature \\', ['app-feature']),
+            ('cargo test -p vz-pack $(cargo build --features app-feature)', ['app-feature']),
+            ('cargo build -p vectoraiz --features app-feature', ['app-feature']),
+            ('npm run tauri -- build --features app-feature', ['app-feature']),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(list(self.gate.shipping_cli_features('run: ' + command)), expected)
+
+    def test_crate_test_cannot_hide_ui_test(self):
+        path = self.root / '.github/workflows/crate-test.yml'
+        path.write_text('      - run: cargo test -p vz-pack --features ui-test\n')
+        with self.assertRaisesRegex(AssertionError, 'Shipping workflow enables ui-test'):
+            self.invoke()
+
+    def test_transitive_webdriver_fails(self):
+        with self.assertRaisesRegex(AssertionError, 'WebDriver linked'):
+            self.invoke(stdout='tauri-plugin-wdio-webdriver v0.1.0')
 
     def test_base_config_ui_test_fails(self):
         self.add_features('tauri.conf.json', ['ui-test'])
