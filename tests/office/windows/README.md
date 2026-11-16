@@ -452,6 +452,21 @@ remain diagnostic; unsupported namespaces or unsuccessful controls establish no
 policy denial. No socket payload is sent. `afd-unix-tcp`, `rpc-alpc` and shell
 judgment rules are unchanged. No qualification is claimed.
 
+Filesystem-namespace AF_UNIX rows `unix-2a`, `unix-2b`, `unix-2d` and dependent
+`unix-2c` are **UNMEASURED, known limit** under S1961: Minerva's decision with
+Mars concurrence, bus #37311, within Max's "judge by outcome" option A. Evidence:
+winmax manifest SHA-256
+`fe6fd34e9564781cab820073a9fb262781acf5c9616322ab5c90fc3024cb47df`
+(fold 24 kit, 2026-11-16); fold 25 refuted the used-length sockaddr hypothesis
+(CI 43918367445, synchronous `0xC0000141`); fold 26 (CI 43928341849) observed
+Winsock's own AFD_BIND `0x12003` packet (114/110), identical to the harness
+packet, plus `0x120BF`, `0x12037` and `0x12047`, with a direct replica still
+failing `0xC000000D`. The confined LPAC worker fails WSAStartup with 10107 and
+explicit-protocol construction with 10093. See runbooks
+`vectoraiz-native-test-builds.md`, item 27. This records a known measurement
+limit; it establishes neither filesystem policy denial nor platform
+unavailability and changes no verdict rule.
+
 Fold 11 adds a diagnostic AFD stream family sweep, families 0 through 40 with
 protocol 0, plus protocol 1 for family 34, in all three token modes. Literal
 statuses remain diagnostic only. Diagnostic completion requires a successful
@@ -506,8 +521,9 @@ server harness. It does not establish the delta 6 exit evidence on client builds
   capture evidence remain in the manifest. A future PASS needs a control-mode
   connect to the same listener construction that completes the wait. An observed
   connection still fails the row. These limitations do not change the delta 6
-  judgement rule. Rows 2a/2b and filesystem calibration remain open per the
-  delta 6 Open item: LPAC WSAStartup fails with 10107 before the explicit-protocol
+  judgement rule. Rows 2a/2b and filesystem calibration remain UNMEASURED under
+  the S1961 known limit recorded in the AF_UNIX section above: LPAC WSAStartup
+  fails with 10107 before the explicit-protocol
   constructor fails with 10093, and unconfined direct filesystem binds fail with
   `0xC000000D` / `0xC0000141`. None establishes filesystem policy denial or
   platform unavailability.
