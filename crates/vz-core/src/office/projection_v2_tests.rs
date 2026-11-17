@@ -138,6 +138,16 @@ fn projection_format_limits_pdf_refusals_and_public_fixture() {
 
 #[test]
 fn projection_exclusion_canaries_html_and_hidden_seller_choice() {
+    for kind in ["html", "htm"] {
+        assert!(extract(
+            kind,
+            include_bytes!("../../../../spike/fixtures/documents/boats.pdf")
+        )
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("CONTAINER_MISMATCH"));
+    }
     let p = extract(
         "html",
         include_bytes!("../../tests/fixtures/projection-v2.html"),

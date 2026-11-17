@@ -10,6 +10,15 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
     );
     let text = std::str::from_utf8(input)
         .context("PROJECTION_HTML_ENCODING_UNSUPPORTED: save UTF-8 or exclude document")?;
+    ensure!(
+        !text
+            .trim_start_matches('\u{feff}')
+            .trim_start()
+            .starts_with("%PDF")
+            && !input.starts_with(b"PK")
+            && !input.starts_with(&[0xd0, 0xcf, 0x11, 0xe0]),
+        "PROJECTION_HTML_CONTAINER_MISMATCH: container disguised as HTML"
+    );
     ensure!(!text.contains('\0'), "PROJECTION_HTML_MALFORMED: NUL byte");
     let html = Html::parse_document(text);
     out.parts = 1;
