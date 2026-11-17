@@ -1379,3 +1379,36 @@ fn projection_pdf_nul_delimited_inline_image_refuses_by_name() {
     let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
     assert!(format!("{error:#}").contains("PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"));
 }
+
+#[test]
+fn projection_pdf_type3_width_operators_are_valid_content_syntax() {
+    for width in ["1000 0 d0", "1000 0 0 0 1000 1000 d1"] {
+        let mut doc = Document::load_mem(&pdf(
+            &["BT /F1 12 Tf 30 700 Td (d0 d1 VISIBLE) Tj ET BT /T3 12 Tf 30 600 Td (a) Tj ET"],
+            false,
+        ))
+        .unwrap();
+        let glyph = doc.add_object(Stream::new(
+            dictionary! {},
+            format!("{width} 0 0 500 500 re f").into_bytes(),
+        ));
+        let font = doc.add_object(dictionary! {
+            "Type"=>"Font", "Subtype"=>"Type3", "FontBBox"=>vec![0.into(),0.into(),1000.into(),1000.into()],
+            "FontMatrix"=>vec![0.001.into(),0.into(),0.into(),0.001.into(),0.into(),0.into()],
+            "CharProcs"=>dictionary! {"a"=>glyph}, "Encoding"=>dictionary! {"Type"=>"Encoding", "Differences"=>vec![97.into(),Object::Name(b"a".to_vec())]},
+            "FirstChar"=>97, "LastChar"=>97, "Widths"=>vec![1000.into()],
+        });
+        let page = *doc.get_pages().values().next().unwrap();
+        let mut resources = super::pdf::test_resources(&doc, page);
+        let mut fonts = resources.get(b"Font").unwrap().as_dict().unwrap().clone();
+        fonts.set("T3", font);
+        resources.set("Font", fonts);
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+        let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+        assert!(values(&p).contains("d0 d1 VISIBLE"));
+    }
+}

@@ -111,7 +111,8 @@ retaining depth checks. All accounted page content, resource-reachable Forms
 (including unused Forms), and Type3 CharProcs receive the same content syntax
 validation, independently of invocation reachability. Page Contents arrays are
 joined before syntax validation because operators can span stream boundaries;
-each entry also receives the inline-image scan. Subtypes accept resolved
+each entry also receives the inline-image scan. Type3 width operators d0/d1
+are recognized during syntax validation. Subtypes accept resolved
 names or strings. Resource lookup uses the Form category dictionary when present,
 otherwise the page category dictionary, for Do, BDC and DP.
 

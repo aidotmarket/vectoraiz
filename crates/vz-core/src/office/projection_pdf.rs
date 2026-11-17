@@ -523,15 +523,26 @@ fn refuse_inline_images(content: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
+fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<Vec<lopdf::content::Operation>> {
     refuse_inline_images(content)?;
     // The decoder accepts parsed prefixes. A private trailing sentinel proves
     // that malformed original bytes were not silently ignored.
     // Avoid inserting a second blank line after a trailing comment: lopdf's
     // operation parser consumes the comment newline but not a following blank.
     let mut bytes = content.trim_ascii_end().to_vec();
+    // lopdf's operator lexer accepts alphabetic names only. PDF's Type3 d0/d1
+    // operators contain digits: adapt only those complete tokens for syntax
+    // parsing, without touching names, strings, comments or PDFium's input.
+    let mut pos = 0;
+    while let Some((a, b)) = pdf_token(content, &mut pos) {
+        match &content[a..b] {
+            b"d0" => bytes[a + 1] = b'Z',
+            b"d1" => bytes[a + 1] = b'O',
+            _ => (),
+        }
+    }
     bytes.extend_from_slice(b"\nVZSaleProjectionEnd\n");
-    let operations = lopdf::content::Content::decode(&bytes)
+    let mut operations = lopdf::content::Content::decode(&bytes)
         .map_err(|_| {
             anyhow::anyhow!(
                 "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: invalid page content syntax",
@@ -578,7 +589,8 @@ fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
         id.0,
         id.1
     );
-    Ok(())
+    operations.pop(); // private sentinel
+    Ok(operations)
 }
 
 fn page_tree(
@@ -1013,8 +1025,7 @@ fn validate_forms(
         depth <= 8 && validation.active.insert(id),
         "PROJECTION_PDF_FORM_UNPROVEN: Form depth/cycle"
     );
-    validate_content(content, id)?;
-    let operations = lopdf::content::Content::decode(content)?.operations;
+    let operations = validate_content(content, id)?;
     let mut result = FormResult {
         actual_text: false,
         cost: FormCost::default(),
