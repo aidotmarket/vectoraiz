@@ -84,42 +84,21 @@ drawing paragraphs currently use the `slide paragraph` inventory label.
 
 ## Known limits
 
-M6's three Type3 routes are now counted: glyph-owned /Resources, font-resource
-fallback inside a glyph, and padded Tf operands with an inherited font. The
-crafted 2.5 KB attacks refuse by name before PDFium; the original issue was
-resource exhaustion, not a leak. L6's padded Do and BDC/DP operands retain the
-ActualText flag.
+Some PDFs are too complex to prepare for sale. Documents with excessive nested
+forms, repeating custom-font glyphs, uncertain resource cycles, or unsupported
+inline images are refused with a reason rather than producing a sale copy.
+The preparation step limits memory, processing time and repeated content work.
+If a document exceeds those limits, the seller sees a named memory or processing
+time refusal and can exclude the document from the pack.
 
-The resource bound retains candidate dictionaries across invoking streams,
-fonts and pages, including saved font scopes from earlier selections when a
-Type3 font has no Resources dictionary. It removes edges proven impossible by
-pinned PDFium rules:
-a local XObject category shadows fallback categories, Do reads its final
-operand, and an explicit, successfully loaded Type1 font cannot execute Type3
-glyphs. Unresolved names and unproven/inherited fonts retain the conservative
-superset. This refines the literal unrestricted BETTER union so the required
-bounded controls pass. L4-style unproven branching cycles still refuse as
-`PROJECTION_PDF_FORM_GRAPH_UNBOUNDED`, separately from exceeded numeric budgets.
+Text supplied through PDF accessibility replacements is flagged for review,
+including replacements inside nested forms. Sellers should check these flags
+before approving the sale copy. Image-only PDFs still need OCR; this projection
+profile does not provide it.
 
-L5's non-cyclic bounds are memoised by stream and complete resource scope.
-Compact lexical summaries are cached, and the joined page operations are shared
-between checks. The former 67-second, 1,000-page guard probe now passes in about
-0.12 seconds. The 100,000-invocation document budget is unchanged; direct/split
-8x6, Type3 3x3 and p11 controls remain required passes.
-
-Projection deadlines return `PROJECTION_RESOURCE_LIMIT`; RSS watchdog refusals
-retain `PROJECTION_MEMORY_LIMIT_EXCEEDED`. A dedicated test executable bypasses
-the guard for synthetic resource probes and proves the hook ran. macOS and
-Windows CI exercise both named seller-review refusals without aborts or crash
-dialogs. The shipping parser contains no resource-probe hook.
-
-The full 141/100/526 corpus gate remains unverified because source files were
-removed. The November 17 snapshot, including hash-verified public-corpus
-recovery, has 126 real PDFs, 100 synthetic PDFs and 404 HTML files. Acceptance is
-101/60/396, identical to fold 3 on those same inputs; passing node, character,
-ActualText and drop counts are unchanged. Fifteen real-PDF paths and 122 HTML
-paths remain unavailable (including five HTTP 403 PDF sources and 109 HTTP 429
-HTML sources). The original required full-list counts remain 115/60/510; this
-subset is not a substitute for that gate. Seller enablement remains blocked
-until the complete corpus gate is verified. See [PR #145](https://github.com/aidotmarket/vectoraiz/pull/145)
-for validation and CI status.
+The corpus gate compares each change against its base using the files still
+available. The latest reviewer comparison passed 103 of 128 real PDFs, 60 of
+100 synthetic PDFs and 505 of 513 HTML files, with identical results and text
+counts on both versions. Thirteen original PDFs and thirteen HTML files are
+unavailable. See [the projection profile](docs/vector-pack-v2.md) for the gate
+and technical limits.
