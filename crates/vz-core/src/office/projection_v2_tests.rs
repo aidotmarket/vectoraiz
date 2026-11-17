@@ -1435,8 +1435,10 @@ fn routed_invocation_pdf(route: &str, width: usize, levels: usize, actual: bool)
             dictionary! {"Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),612.into(),792.into()]};
         if route != "parent" {
             let mut own = resources.clone();
-            if let Some(id) = next {
-                own.set("XObject", dictionary! {format!("L{}",level+1)=>id});
+            if route != "glyph-font-fallback" {
+                if let Some(id) = next {
+                    own.set("XObject", dictionary! {format!("L{}",level+1)=>id});
+                }
             }
             dict.set("Resources", own);
         }
@@ -1450,7 +1452,7 @@ fn routed_invocation_pdf(route: &str, width: usize, levels: usize, actual: bool)
     );
     let top = if route == "parent" {
         let mut own = resources.clone();
-        own.set("XObject", names);
+        own.set("XObject", names.clone());
         doc.add_object(Stream::new(
             dictionary! {"Subtype"=>"Form", "Resources"=>own},
             b"/L0 Do".to_vec(),
@@ -1469,15 +1471,25 @@ fn routed_invocation_pdf(route: &str, width: usize, levels: usize, actual: bool)
             .set("Contents", vec![first.into(), second.into()]);
     }
     if route.starts_with("glyph") {
+        if route == "glyph-font-fallback" {
+            names.set("Top", top);
+            resources.set("XObject", names);
+        }
+        let mut glyph_dict = dictionary! {};
+        let mut font_resources = resources.clone();
+        if route == "glyph-own" {
+            glyph_dict.set("Resources", resources.clone());
+            font_resources.remove(b"XObject");
+        }
         let glyph = doc.add_object(Stream::new(
-            dictionary! {},
+            glyph_dict,
             format!("1000 0 d0 {}", "/Top Do ".repeat(width)).into_bytes(),
         ));
         let font = doc.add_object(dictionary! {
             "Type"=>"Font", "Subtype"=>"Type3", "FontBBox"=>vec![0.into(),0.into(),1000.into(),1000.into()],
             "FontMatrix"=>vec![0.001.into(),0.into(),0.into(),0.001.into(),0.into()],
             "CharProcs"=>dictionary! {"a"=>glyph}, "Encoding"=>dictionary! {"Type"=>"Encoding", "Differences"=>vec![97.into(),Object::Name(b"a".to_vec())]},
-            "FirstChar"=>97, "LastChar"=>97, "Widths"=>vec![1000.into()], "Resources"=>resources.clone(),
+            "FirstChar"=>97, "LastChar"=>97, "Widths"=>vec![1000.into()], "Resources"=>font_resources,
         });
         let mut fonts = resources.get(b"Font").unwrap().as_dict().unwrap().clone();
         fonts.set("T3", font);
@@ -1489,7 +1501,7 @@ fn routed_invocation_pdf(route: &str, width: usize, levels: usize, actual: bool)
                 b"BT (a) Tj ET".to_vec(),
             ));
             resources.set("XObject", dictionary! {"Top"=>top,"Wrapper"=>wrapper});
-            b"BT /T3 12 Tf ET /Wrapper Do".to_vec()
+            b"BT /Decoy /T3 12 Tf ET /Wrapper Do".to_vec()
         } else {
             b"BT /T3 12 Tf 30 600 Td (a) Tj ET".to_vec()
         };
@@ -1513,6 +1525,8 @@ fn projection_pdf_parent_split_and_type3_invocations_refuse_by_leading_code() {
         ("parent", 12, 7),
         ("split", 12, 7),
         ("glyph", 20, 5),
+        ("glyph-own", 20, 5),
+        ("glyph-font-fallback", 20, 5),
         ("glyph", 40, 4),
         ("glyph-inherited", 40, 4),
     ] {
@@ -1522,7 +1536,7 @@ fn projection_pdf_parent_split_and_type3_invocations_refuse_by_leading_code() {
         assert!(
             error
                 .to_string()
-                .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
+                .starts_with("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
             "{route}: {error:#}"
         );
         assert!(start.elapsed().as_secs_f64() < 1.0);
@@ -1641,7 +1655,7 @@ fn projection_pdf_type3_oversized_shown_codes_refuse_by_name() {
         assert!(
             error
                 .to_string()
-                .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
+                .starts_with("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
             "{selection}: {error:#}"
         );
     }
@@ -1702,16 +1716,27 @@ fn projection_pdf_padded_operands_keep_actualtext_flags() {
     }
 }
 
-// This acceptance gate deliberately remains strict while the literal resource
-// superset conflicts with the follow-up's required bounded controls. Do not
-// turn conservative refusals into passing expectations to qualify sellers.
+// Required seller-enablement controls: preserve acceptance while bounding the
+// executable resource superset, including inherited Type3 fonts.
 #[test]
 fn projection_pdf_followup_required_bounded_controls_pass() {
     let mut failures = Vec::new();
     for (name, bytes) in [
-        ("direct 8x6", invocation_pdf(8, 6, 0, 1)),
+        ("direct 8x6", routed_invocation_pdf("direct", 8, 6, false)),
         ("split 8x6", routed_invocation_pdf("split", 8, 6, false)),
         ("Type3 3x3", routed_invocation_pdf("glyph", 3, 3, false)),
+        (
+            "glyph-owned resources 3x3",
+            routed_invocation_pdf("glyph-own", 3, 3, false),
+        ),
+        (
+            "font resource fallback 3x3",
+            routed_invocation_pdf("glyph-font-fallback", 3, 3, false),
+        ),
+        (
+            "padded inherited font 3x3",
+            routed_invocation_pdf("glyph-inherited", 3, 3, false),
+        ),
     ] {
         if let Err(error) = super::pdf::metadata(&bytes, &mut Projection::new()) {
             failures.push(format!("{name}: {error:#}"));
@@ -1721,5 +1746,17 @@ fn projection_pdf_followup_required_bounded_controls_pass() {
         failures.is_empty(),
         "seller enablement control gate: {}",
         failures.join("; ")
+    );
+    // invocation_pdf repeats the page's Top Do eight times as well: that is
+    // 299,592 invocations, versus CC's single-root 8x6 control's 37,449.
+    // Keep the oversized shape refused; fixing the fixture must not relax
+    // the 100,000-invocation document budget.
+    let error =
+        super::pdf::metadata(&invocation_pdf(8, 6, 0, 1), &mut Projection::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .starts_with("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
+        "{error:#}"
     );
 }
