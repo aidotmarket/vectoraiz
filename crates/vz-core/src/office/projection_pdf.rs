@@ -5,6 +5,7 @@ use super::*;
 use lopdf::{Document, Object};
 use pdfium_render::prelude::*;
 use std::io::Read;
+static PDFIUM_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub(super) fn extract(
     input: &[u8],
@@ -12,6 +13,11 @@ pub(super) fn extract(
     out: &mut Projection,
 ) -> Result<()> {
     metadata(input, out)?;
+    // PDFium's process-global initialization/destruction cannot overlap when
+    // this API is exercised directly by concurrent tests. Workers do one job.
+    let _guard = PDFIUM_LOCK
+        .lock()
+        .map_err(|_| anyhow::anyhow!("PROJECTION_PDFIUM_UNAVAILABLE: prior PDFium failure"))?;
     let library = library.context(
         "PROJECTION_PDFIUM_UNAVAILABLE: PDFium library required; no search/OCR fallback",
     )?;
@@ -41,7 +47,7 @@ pub(super) fn extract(
             .with_context(|| format!("PROJECTION_PDF_PAGE_UNREADABLE at {at}"))?;
         let chars = text.chars();
         ensure!(
-            chars.len() as usize <= MAX_VALUES,
+            chars.len() <= MAX_VALUES,
             "PROJECTION_INVENTORY_LIMIT_EXCEEDED at {at}: {} / {MAX_VALUES}",
             chars.len()
         );

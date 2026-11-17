@@ -1753,7 +1753,7 @@ async fn listing_sources<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, vz_pack::listing_commands::ListingFailure> {
     let (_, library, source) = listing_context(&app)?;
-    let pdfium = installed_assets(&app)
+    let pdfium = model_dir(&app)
         .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::anyhow!(e)))?
         .join(if cfg!(windows) {
             "pdfium/bin/pdfium.dll"

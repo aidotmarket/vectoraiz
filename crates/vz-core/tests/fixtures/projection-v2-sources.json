@@ -1,0 +1,14 @@
+[
+  {
+    "file": "projection-v2.html",
+    "sha256": "24c5781c83ef8ed0bf3bc4047e1b4a584e15d51f15a09943c1fec8d3cd49bbc2",
+    "license": "CC0-1.0",
+    "source": "Public project-authored projection contract fixture; see LICENSE-projection-v2"
+  },
+  {
+    "file": "projection-v2.pdf",
+    "sha256": "31e8f0b314497f525ecc98229ba0a977b607af13439e4710b16189a3fcdbdf8e",
+    "license": "CC0-1.0",
+    "source": "Public project-authored projection contract fixture; see LICENSE-projection-v2"
+  }
+]

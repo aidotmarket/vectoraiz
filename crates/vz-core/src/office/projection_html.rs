@@ -49,10 +49,19 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                         }));
                 if !dropped {
                     // Form control state is never a supported content label.
+                    let control =
+                        matches!(name, "input" | "textarea" | "select" | "button" | "output");
+                    let own_hidden =
+                        element.attr("hidden").is_some() || style.is_some_and(inline_hidden);
+                    let hidden_form = control
+                        && (hidden
+                            || own_hidden
+                            || element
+                                .attr("type")
+                                .is_some_and(|t| t.eq_ignore_ascii_case("hidden")));
+                    ensure!(!control || hidden_form, "PROJECTION_HTML_FORM_UNSUPPORTED at {at}: visible {name} state requires a supported static value projection; exclude document");
                     let category = match name {
-                        "input" | "textarea" | "select" | "button" | "output" => {
-                            Some("hidden-form-data")
-                        }
+                        _ if hidden_form => Some("hidden-form-data"),
                         "script" | "noscript" | "iframe" | "object" | "embed" | "applet" => {
                             Some("active-markup")
                         }
@@ -66,9 +75,14 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                             dropped = true;
                         }
                     }
-                    for (key, _) in element.attrs() {
+                    for (key, value) in element.attrs() {
                         if key.to_ascii_lowercase().starts_with("on")
                             || matches!(key, "srcdoc" | "action" | "formaction")
+                            || (matches!(key, "href" | "src" | "xlink:href")
+                                && value
+                                    .trim_start()
+                                    .to_ascii_lowercase()
+                                    .starts_with("javascript:"))
                         {
                             out.drop_at("active-markup", &format!("{at}/@{key}"))?;
                         }

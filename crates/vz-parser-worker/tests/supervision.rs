@@ -355,3 +355,67 @@ fn projection_memory_cap_has_named_refusal() {
         "{error}"
     );
 }
+
+#[test]
+fn projection_pdf_and_html_memory_profiles_are_distinct() {
+    for (kind, expected) in [
+        ("pdf", vz_core::worker::MEMORY_BYTES),
+        ("html", vz_core::worker::OFFICE_MEMORY_BYTES),
+        ("htm", vz_core::worker::OFFICE_MEMORY_BYTES),
+    ] {
+        let request = Request {
+            path: "unused".into(),
+            pdfium: None,
+            office: None,
+            readback: None,
+            projection: Some(vz_core::worker::ProjectionJob {
+                kind: kind.into(),
+                output: "unused".into(),
+            }),
+        };
+        assert_eq!(request.memory_bytes(), expected);
+    }
+}
+
+#[test]
+fn projection_html_resource_network_trap() {
+    let port = std::env::var("KD_BRIDGE_PORT_BASE")
+        .ok()
+        .map(|p| p.parse::<u16>().unwrap() + 1)
+        .unwrap_or(0);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/trap",
+        listener.local_addr().unwrap().port()
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trap.html");
+    std::fs::write(&path, format!(r#"<link rel="stylesheet" href="{url}"><style>@import url({url});</style><script src="{url}">DROP</script><iframe src="{url}">DROP</iframe><img src="{url}"><p style="background:url({url})">INERT_BODY</p>"#)).unwrap();
+    let request = Request {
+        path,
+        pdfium: None,
+        office: None,
+        readback: None,
+        projection: Some(vz_core::worker::ProjectionJob {
+            kind: "html".into(),
+            output: dir.path().into(),
+        }),
+    };
+    run(
+        Path::new(env!("CARGO_BIN_EXE_vz-parser-worker")),
+        &request,
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    let p: vz_core::office::projection::Projection =
+        serde_json::from_slice(&std::fs::read(dir.path().join("projection.json")).unwrap())
+            .unwrap();
+    assert_eq!(p.nodes.len(), 1);
+    assert_eq!(p.nodes[0].text, "INERT_BODY");
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "sale extraction must not fetch resources"
+    );
+}

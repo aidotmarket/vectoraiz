@@ -750,6 +750,22 @@ mod tests {
         texts: Mutex<Vec<String>>,
     }
     impl BuildEngine for FakeEngine {
+        #[cfg(not(feature = "listing-originals"))]
+        fn pdfium(&self) -> Option<std::path::PathBuf> {
+            Some(
+                std::env::var_os("VZ_TEST_PDFIUM")
+                    .map(Into::into)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../.assets")
+                            .join(if cfg!(windows) {
+                                "pdfium/bin/pdfium.dll"
+                            } else {
+                                "pdfium/lib/libpdfium.dylib"
+                            })
+                    }),
+            )
+        }
         fn recipe(&self) -> &vz_core::engine::Recipe {
             &self.recipe
         }
@@ -1795,6 +1811,92 @@ mod tests {
             .iter()
             .filter_map(|e| e.value.as_ref())
             .all(|s| !s.contains("private-source")));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn projection_v2_embedding_inputs_and_seller_hidden_choice() {
+        let f = Fixture::new();
+        index_poisoned_projection(
+            &f,
+            "html",
+            include_bytes!("../../vz-core/tests/fixtures/projection-v2.html"),
+        );
+        index_poisoned_projection(
+            &f,
+            "pdf",
+            include_bytes!("../../vz-core/tests/fixtures/projection-v2.pdf"),
+        );
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let mut changes = Fixture::changes();
+        let first = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        let review = guard.inspect(&first).unwrap();
+        let inputs = f.engine.texts.lock().unwrap().join("\n");
+        assert!(
+            inputs.contains("VISIBLE_PDF")
+                && inputs.contains("INVISIBLE_PDF")
+                && inputs.contains("OFFPAGE_PDF")
+        );
+        assert!(inputs.contains("STYLESHEET_CONTENT"));
+        assert!(
+            !inputs.contains("CANARY")
+                && !inputs.contains("_HIDDEN")
+                && !inputs.contains("INDEX_POISON")
+        );
+        assert!(review
+            .projection_inventory
+            .iter()
+            .any(|e| e.kind.contains("off-page")));
+        assert!(review
+            .warnings
+            .iter()
+            .any(|s| s.contains("no-text-pages: 1")));
+        guard.accept(&first).unwrap();
+        changes.origin = Some(first.clone());
+        changes.include_hidden = true;
+        f.engine.texts.lock().unwrap().clear();
+        let second = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert_ne!(first.generation, second.generation);
+        assert!(guard.check_accepted(&first).is_err());
+        let inputs = f.engine.texts.lock().unwrap().join("\n");
+        for hidden in [
+            "ATTR_HIDDEN",
+            "DISPLAY_HIDDEN",
+            "VISIBILITY_HIDDEN",
+            "TEMPLATE_HIDDEN",
+            "INHERITED_HIDDEN",
+            "ESCAPED_HIDDEN",
+        ] {
+            assert!(inputs.contains(hidden), "{hidden}");
+        }
+        assert!(!inputs.contains("CANARY") && !inputs.contains("INDEX_POISON"));
+        guard.accept(&second).unwrap();
+        let (payload, _) = guard.reviewed_payload(&second).unwrap();
+        crate::vector_payload::verify(&payload).unwrap();
+        assert_eq!(crate::verify(&payload).unwrap()["originals"], false);
+        for entry in guard.inspect(&second).unwrap().metadata_inventory {
+            assert!(!entry.value.unwrap_or_default().contains("CANARY"));
+        }
     }
 
     #[test]
