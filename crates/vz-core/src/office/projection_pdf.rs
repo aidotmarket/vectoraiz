@@ -338,28 +338,44 @@ fn metadata_document(
         consumed: BTreeSet::new(),
         active: BTreeSet::new(),
         memo: BTreeMap::new(),
+        invoked: BTreeSet::new(),
+        stream_counts: BTreeMap::new(),
     };
     for id in content_ids {
-        validate_content(&guarded_content(&doc, id, &mut validation)?, id)?;
+        let ops = validate_content(&guarded_content(&doc, id, &mut validation)?, id)?;
+        validation.stream_counts.insert(id, operator_counts(&ops));
     }
     let mut invocations = FormCost::default();
+    let mut structural_invocations = 0u64;
     for (index, id) in doc.get_pages().values().enumerate() {
-        // Page fallback is part of the memo context; never reuse across pages.
-        validation.memo.clear();
         let mut content = Vec::new();
         for stream_id in doc.get_page_contents(*id) {
             let bytes = guarded_content(&doc, stream_id, &mut validation)?;
             refuse_inline_images(&bytes)?;
             content.extend(bytes);
+            content.push(b' ');
         }
-        let resources = inherited(&doc, *id, b"Resources")?
-            .unwrap_or(Object::Dictionary(lopdf::Dictionary::new()));
+        let resources = inherited(&doc, *id, b"Resources")?.unwrap_or(&Object::Null);
+        if STRUCTURAL_FORM_BACKSTOP {
+            structural_invocations = structural_invocations.saturating_add(structural_form_bound(
+                &doc,
+                &content,
+                resources,
+                resources,
+                &mut validation,
+            )?);
+            ensure!(
+                structural_invocations <= MAX_FORM_INVOCATIONS,
+                "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"
+            );
+        }
         let result = validate_forms(
             &doc,
             &content,
             *id,
-            &resources,
-            &resources,
+            resources,
+            resources,
+            None,
             0,
             &mut validation,
         )?;
@@ -707,7 +723,11 @@ fn resolve<'a>(doc: &'a Document, value: &'a Object) -> Result<&'a Object> {
     anyhow::bail!("PROJECTION_PDF_DEPTH_EXCEEDED: indirect reference cycle")
 }
 
-fn inherited(doc: &Document, mut id: lopdf::ObjectId, key: &[u8]) -> Result<Option<Object>> {
+fn inherited<'a>(
+    doc: &'a Document,
+    mut id: lopdf::ObjectId,
+    key: &[u8],
+) -> Result<Option<&'a Object>> {
     let mut seen = BTreeSet::new();
     for _ in 0..=8 {
         ensure!(
@@ -718,7 +738,7 @@ fn inherited(doc: &Document, mut id: lopdf::ObjectId, key: &[u8]) -> Result<Opti
         if let Ok(value) = dict.get(key) {
             let value = resolve(doc, value)?;
             if !matches!(value, Object::Null) {
-                return Ok(Some(value.clone()));
+                return Ok(Some(value));
             }
         }
         match dict.get(b"Parent").and_then(Object::as_reference) {
@@ -871,7 +891,7 @@ fn decoded_stream_ids(
             collect(doc, contents, 0, &mut seen, &mut decoded, &mut content)?;
         }
         if let Some(resources) = inherited(doc, *id, b"Resources")? {
-            collect_resources(doc, &resources, 0, &mut seen, &mut decoded, &mut content)?;
+            collect_resources(doc, resources, 0, &mut seen, &mut decoded, &mut content)?;
         }
     }
     // Page Contents arrays are one logical stream and may split operators or
@@ -930,6 +950,37 @@ fn guarded_content(
     anyhow::bail!("PROJECTION_PDF_DEPTH_EXCEEDED: content reference cycle")
 }
 
+// Syntax scans account for each stream once; invocation costs account for
+// expansion. Decoding a memo miss must not charge that invocation again.
+fn form_content(
+    doc: &Document,
+    id: lopdf::ObjectId,
+    validation: &mut FormValidation<'_>,
+) -> Result<Vec<u8>> {
+    validation.consumed.remove(&id);
+    guarded_content(doc, id, validation)
+}
+
+fn charge_first_invocation(id: lopdf::ObjectId, validation: &mut FormValidation<'_>) -> Result<()> {
+    if validation.invoked.insert(id) {
+        validation.expanded_bytes = validation.expanded_bytes.saturating_sub(
+            *validation
+                .receipts
+                .get(&id)
+                .context("PROJECTION_PDF_STREAM_UNACCOUNTED")?,
+        );
+    }
+    Ok(())
+}
+
+fn text_string_bytes(object: &Object) -> u64 {
+    match object {
+        Object::String(bytes, _) => bytes.len() as u64,
+        Object::Array(values) => values.iter().map(text_string_bytes).sum(),
+        _ => 0,
+    }
+}
+
 // PDFium falls back to the page only when the Form's category is absent,
 // not when an individual name is missing from an existing category.
 fn resource<'a>(
@@ -955,6 +1006,17 @@ fn resource<'a>(
         .unwrap_or(&Object::Null))
 }
 
+fn form_resources<'a>(
+    doc: &'a Document,
+    stream: &'a lopdf::Stream,
+    parent: &'a Object,
+) -> Result<&'a Object> {
+    match stream.dict.get(b"Resources").ok() {
+        Some(own) if !matches!(resolve(doc, own)?, Object::Null) => Ok(own),
+        _ => Ok(parent),
+    }
+}
+
 fn subtype(doc: &Document, stream: &lopdf::Stream, expected: &[u8]) -> Result<bool> {
     let Ok(value) = stream.dict.get(b"Subtype") else {
         return Ok(false);
@@ -963,6 +1025,197 @@ fn subtype(doc: &Document, stream: &lopdf::Stream, expected: &[u8]) -> Result<bo
         Object::Name(name) | Object::String(name, _) => name == expected,
         _ => false,
     })
+}
+
+// Name-independent resource-graph bound, qualified against the corpus lists.
+const STRUCTURAL_FORM_BACKSTOP: bool = true;
+
+fn operator_counts(ops: &[lopdf::content::Operation]) -> (u64, u64) {
+    let draws = ops.iter().filter(|op| op.operator == "Do").count() as u64;
+    let text = ops
+        .iter()
+        .filter(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
+        .flat_map(|op| &op.operands)
+        .map(text_string_bytes)
+        .sum();
+    (draws, text)
+}
+
+fn resource_category<'a>(
+    doc: &'a Document,
+    own: &'a Object,
+    page: &'a Object,
+    key: &[u8],
+) -> Result<Option<&'a Object>> {
+    let category = |resources| -> Result<Option<&'a Object>> {
+        Ok(resolve(doc, resources)?
+            .as_dict()
+            .ok()
+            .and_then(|d| d.get(key).ok()))
+    };
+    Ok(category(own)?.or(category(page)?))
+}
+
+#[derive(Default)]
+struct StructuralBound {
+    active: BTreeMap<lopdf::ObjectId, usize>,
+    branching: usize,
+    cyclic: bool,
+    steps: usize,
+}
+
+// Count direct Type3 dictionaries, including inline fonts. References are
+// counted at their object definitions, so resource cycles cannot recurse here.
+fn type3_fonts(object: &Object) -> u64 {
+    match object {
+        Object::Dictionary(dict) => {
+            u64::from(dict.has(b"CharProcs"))
+                + dict
+                    .iter()
+                    .map(|(_, value)| type3_fonts(value))
+                    .sum::<u64>()
+        }
+        Object::Stream(stream) => type3_fonts(&Object::Dictionary(stream.dict.clone())),
+        Object::Array(values) => values.iter().map(type3_fonts).sum(),
+        _ => 0,
+    }
+}
+
+fn structural_form_bound(
+    doc: &Document,
+    content: &[u8],
+    resources: &Object,
+    page: &Object,
+    validation: &mut FormValidation<'_>,
+) -> Result<u64> {
+    let mut state = StructuralBound::default();
+    let counts = operator_counts(&validate_content(content, (0, 0))?);
+    let mut bound = structural_cost(doc, counts, resources, page, &mut state, validation)?;
+    if state.cyclic {
+        // Pinned chromium/8111: streamcontentparser kMaxFormLevel=40;
+        // type3font kMaxType3FormLevel=4 per font. A glyph starts its own
+        // Form recursion state. Allow two extra Form levels conservatively.
+        // https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/8111/core/fpdfapi/page/cpdf_streamcontentparser.cpp
+        // https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/8111/core/fpdfapi/font/cpdf_type3font.cpp
+        let fonts = doc.objects.values().map(type3_fonts).sum::<u64>();
+        bound = bound.saturating_mul(42u64.saturating_mul(1 + 4 * fonts));
+    }
+    Ok(bound.min(MAX_FORM_INVOCATIONS + 1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn structural_stream_bound(
+    doc: &Document,
+    id: lopdf::ObjectId,
+    resources: &Object,
+    page: &Object,
+    fanout: u64,
+    state: &mut StructuralBound,
+    validation: &mut FormValidation<'_>,
+) -> Result<u64> {
+    state.steps += 1;
+    // Refuse an unproved bound rather than letting dense resource dictionaries
+    // turn the guard itself into an exponential graph traversal.
+    if state.steps > 100_000 || state.active.len() >= 32 {
+        return Ok(MAX_FORM_INVOCATIONS + 1);
+    }
+    let branching = state.branching + usize::from(fanout > 1);
+    if let Some(previous) = state.active.get(&id) {
+        if branching > *previous {
+            return Ok(MAX_FORM_INVOCATIONS + 1);
+        }
+        state.cyclic = true;
+        return Ok(0);
+    }
+    let counts = if let Some(counts) = validation.stream_counts.get(&id) {
+        *counts
+    } else {
+        let counts = operator_counts(&validate_content(&form_content(doc, id, validation)?, id)?);
+        validation.stream_counts.insert(id, counts);
+        counts
+    };
+    state.active.insert(id, branching);
+    let previous = state.branching;
+    state.branching = branching;
+    let bound = structural_cost(doc, counts, resources, page, state, validation);
+    state.branching = previous;
+    state.active.remove(&id);
+    bound
+}
+
+fn structural_cost(
+    doc: &Document,
+    (draws, text): (u64, u64),
+    resources: &Object,
+    page: &Object,
+    state: &mut StructuralBound,
+    validation: &mut FormValidation<'_>,
+) -> Result<u64> {
+    if draws == 0 && text == 0 {
+        return Ok(0);
+    }
+    let fonts = resource_category(doc, resources, page, b"Font")?;
+    let has_glyphs = if let Some(fonts) = fonts {
+        resolve(doc, fonts)?.as_dict()?.iter().any(|(_, font)| {
+            resolve(doc, font).is_ok_and(|v| v.as_dict().is_ok_and(|d| d.has(b"CharProcs")))
+        })
+    } else {
+        false
+    };
+    let fanout = draws.saturating_add(if has_glyphs { text } else { 0 });
+    let mut form_max = 1;
+    let mut glyph_max = 0;
+    if draws > 0 {
+        if let Some(map) = resource_category(doc, resources, page, b"XObject")? {
+            for (_, object) in resolve(doc, map)?.as_dict()?.iter() {
+                let value = resolve(doc, object)?;
+                if let Ok(stream) = value.as_stream() {
+                    if subtype(doc, stream, b"Form")? {
+                        form_max = form_max.max(
+                            1 + structural_stream_bound(
+                                doc,
+                                object.as_reference()?,
+                                form_resources(doc, stream, resources)?,
+                                page,
+                                fanout,
+                                state,
+                                validation,
+                            )?,
+                        );
+                        if draws.saturating_mul(form_max) > MAX_FORM_INVOCATIONS {
+                            return Ok(MAX_FORM_INVOCATIONS + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if text > 0 && has_glyphs {
+        for (_, font) in resolve(doc, fonts.unwrap())?.as_dict()?.iter() {
+            if let Ok(font) = resolve(doc, font)?.as_dict() {
+                if let Ok(procs) = font.get(b"CharProcs") {
+                    for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
+                        glyph_max = glyph_max.max(structural_stream_bound(
+                            doc,
+                            glyph.as_reference()?,
+                            font.get(b"Resources").unwrap_or(page),
+                            page,
+                            fanout,
+                            state,
+                            validation,
+                        )?);
+                        if text.saturating_mul(glyph_max) > MAX_FORM_INVOCATIONS {
+                            return Ok(MAX_FORM_INVOCATIONS + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(draws
+        .saturating_mul(form_max)
+        .saturating_add(text.saturating_mul(glyph_max))
+        .min(MAX_FORM_INVOCATIONS + 1))
 }
 
 const MAX_FORM_INVOCATIONS: u64 = 100_000;
@@ -995,27 +1248,75 @@ struct FormResult {
     depth: usize,
 }
 
+type FormMemoKey = (lopdf::ObjectId, usize, usize, usize);
+
+fn form_memo_key(
+    doc: &Document,
+    id: lopdf::ObjectId,
+    resources: &Object,
+    page: &Object,
+    font: Option<&Object>,
+) -> Result<FormMemoKey> {
+    let identity = |object| resolve(doc, object).map(|v| v as *const Object as usize);
+    Ok((
+        id,
+        identity(resources)?,
+        identity(page)?,
+        font.map(identity).transpose()?.unwrap_or(0),
+    ))
+}
+
 struct FormValidation<'a> {
     receipts: &'a BTreeMap<lopdf::ObjectId, u64>,
     expanded_bytes: u64,
     consumed: BTreeSet<lopdf::ObjectId>,
     active: BTreeSet<lopdf::ObjectId>,
     // Stable object identity avoids formatting resources per invocation.
-    // The memo is page-local, giving page fallback a stable context too.
-    memo: BTreeMap<(lopdf::ObjectId, usize), FormResult>,
+    // Both dictionaries live in the document. Page fallback is part of the
+    // effective resource context, even when a Form has its own resources.
+    memo: BTreeMap<FormMemoKey, FormResult>,
+    invoked: BTreeSet<lopdf::ObjectId>,
+    stream_counts: BTreeMap<lopdf::ObjectId, (u64, u64)>,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn validate_forms(
-    doc: &Document,
-    content: &[u8],
+fn validate_form_stream<'a>(
+    doc: &'a Document,
     id: lopdf::ObjectId,
-    resources: &Object,
-    page_resources: &Object,
+    resources: &'a Object,
+    page: &'a Object,
+    font: Option<&'a Object>,
     depth: usize,
     validation: &mut FormValidation<'_>,
 ) -> Result<FormResult> {
-    let key = (id, resources as *const Object as usize);
+    let key = form_memo_key(doc, id, resources, page, font)?;
+    if let Some(result) = validation.memo.get(&key).filter(|r| depth <= r.depth) {
+        return Ok(*result);
+    }
+    validate_forms(
+        doc,
+        &form_content(doc, id, validation)?,
+        id,
+        resources,
+        page,
+        font,
+        depth,
+        validation,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_forms<'a>(
+    doc: &'a Document,
+    content: &[u8],
+    id: lopdf::ObjectId,
+    resources: &'a Object,
+    page_resources: &'a Object,
+    initial_font: Option<&'a Object>,
+    depth: usize,
+    validation: &mut FormValidation<'_>,
+) -> Result<FormResult> {
+    let key = form_memo_key(doc, id, resources, page_resources, initial_font)?;
     if let Some(result) = validation.memo.get(&key) {
         if depth <= result.depth {
             return Ok(*result);
@@ -1031,7 +1332,73 @@ fn validate_forms(
         cost: FormCost::default(),
         depth,
     };
+    let mut font = initial_font;
+    let mut font_stack = Vec::new();
     for op in &operations {
+        match op.operator.as_str() {
+            "q" => font_stack.push(font),
+            "Q" => {
+                if let Some(saved) = font_stack.pop() {
+                    font = saved;
+                }
+            }
+            "Tf" => {
+                font = match op.operands.first().and_then(|v| v.as_name().ok()) {
+                    Some(name) => Some(resource(doc, resources, page_resources, b"Font", name)?),
+                    None => None,
+                };
+            }
+            "gs" => {
+                if let Some(name) = op.operands.first().and_then(|v| v.as_name().ok()) {
+                    let state = resource(doc, resources, page_resources, b"ExtGState", name)?;
+                    if let Ok(dict) = resolve(doc, state)?.as_dict() {
+                        if let Ok(value) = dict.get(b"Font") {
+                            font = resolve(doc, value)?.as_array()?.first();
+                        }
+                    }
+                }
+            }
+            "Tj" | "TJ" | "\'" | "\"" => {
+                if let Some(object) = font {
+                    if let Ok(dict) = resolve(doc, object)?.as_dict() {
+                        if dict.get(b"Subtype").ok().is_some_and(|v| {
+                            resolve(doc, v)
+                                .is_ok_and(|v| matches!(v, Object::Name(n) | Object::String(n, _) if n == b"Type3"))
+                        }) {
+                            let codes = op.operands.iter().map(text_string_bytes).sum::<u64>();
+                            if codes == 0 { continue; }
+                            let glyph_resources = dict.get(b"Resources").unwrap_or(page_resources);
+                            let mut glyph_cost = FormCost::default();
+                            if let Ok(procs) = dict.get(b"CharProcs") {
+                                for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
+                                    let glyph_id = glyph.as_reference()?;
+                                    let glyph_result = validate_form_stream(
+                                        doc,
+                                        glyph_id,
+                                        glyph_resources,
+                                        page_resources,
+                                        font,
+                                        depth + 1,
+                                        validation,
+                                    )?;
+                                    result.actual_text |= glyph_result.actual_text;
+                                    glyph_cost.add(glyph_result.cost)?;
+                                }
+                            }
+                            // A Type3 code occupies one byte. Charge all possible
+                            // CharProcs per byte, independent of font encoding.
+                            // Summing also keeps the one-time stream credit valid
+                            // when different glyphs invoke different Forms.
+                            result.cost.add(FormCost {
+                                count: glyph_cost.count.saturating_mul(codes),
+                                bytes: glyph_cost.bytes.saturating_mul(codes),
+                            })?;
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
         if matches!(op.operator.as_str(), "BDC" | "DP") {
             if let Some(properties) = op.operands.get(1) {
                 let properties = if let Object::Name(name) = properties {
@@ -1068,27 +1435,17 @@ fn validate_forms(
                     _ => break,
                 }
             }
-            let own = stream.dict.get(b"Resources").unwrap_or(&Object::Null);
-            let child_key = (form_id, own as *const Object as usize);
-            let cached = validation
-                .memo
-                .get(&child_key)
-                .copied()
-                .filter(|r| depth < r.depth);
-            let child = if let Some(cached) = cached {
-                cached
-            } else {
-                validate_forms(
-                    doc,
-                    &guarded_content(doc, form_id, validation)?,
-                    form_id,
-                    own,
-                    page_resources,
-                    depth + 1,
-                    validation,
-                )
-                .context("PROJECTION_PDF_FORM_UNPROVEN: invoked Form content")?
-            };
+            let own = form_resources(doc, stream, resources)?;
+            let child = validate_form_stream(
+                doc,
+                form_id,
+                own,
+                page_resources,
+                font,
+                depth + 1,
+                validation,
+            )?;
+            charge_first_invocation(form_id, validation)?;
             result.actual_text |= child.actual_text;
             result.cost.add(FormCost {
                 count: 1,
@@ -1348,6 +1705,152 @@ pub(super) fn test_resources(doc: &Document, page: lopdf::ObjectId) -> lopdf::Di
 #[cfg(test)]
 mod character_tests {
     #[test]
+    fn type3_resolver_charges_font_then_page_resources_without_backstop() {
+        for font_resources in [true, false] {
+            let mut doc = lopdf::Document::new();
+            let form = doc.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Subtype"=>"Form"},
+                b"q Q".to_vec(),
+            ));
+            let page_form = doc.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {"Subtype"=>"Form"},
+                b"q  Q".to_vec(),
+            ));
+            let glyph = doc.add_object(lopdf::Stream::new(
+                lopdf::dictionary! {},
+                b"1000 0 d0 /Target Do /Target Do".to_vec(),
+            ));
+            let mut font = lopdf::dictionary! {"Subtype"=>"Type3", "CharProcs"=>lopdf::dictionary! {"a"=>glyph}};
+            if font_resources {
+                font.set(
+                    "Resources",
+                    lopdf::dictionary! {"XObject"=>lopdf::dictionary! {"Target"=>form}},
+                );
+            }
+            let font = doc.add_object(font);
+            let resources = lopdf::Object::Dictionary(
+                lopdf::dictionary! {"Font"=>lopdf::dictionary! {"T3"=>font}, "XObject"=>lopdf::dictionary! {"Target"=>page_form}},
+            );
+            let receipts = [form, page_form, glyph]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        doc.get_object(id)
+                            .unwrap()
+                            .as_stream()
+                            .unwrap()
+                            .content
+                            .len() as u64,
+                    )
+                })
+                .collect();
+            let mut validation = super::FormValidation {
+                receipts: &receipts,
+                expanded_bytes: 100,
+                consumed: Default::default(),
+                active: Default::default(),
+                memo: Default::default(),
+                invoked: Default::default(),
+                stream_counts: Default::default(),
+            };
+            for (id, content, count) in [
+                ((0, 0), b"BT /T3 12 Tf (a) Tj ET".as_slice(), 2),
+                ((0, 1), b"BT /T3 12 Tf [(a) 0 (aa)] TJ ET".as_slice(), 6),
+            ] {
+                let result = super::validate_forms(
+                    &doc,
+                    content,
+                    id,
+                    &resources,
+                    &resources,
+                    None,
+                    0,
+                    &mut validation,
+                )
+                .unwrap();
+                assert_eq!(result.cost.count, count);
+                assert_eq!(
+                    result.cost.bytes,
+                    count * if font_resources { 3 } else { 4 }
+                );
+            }
+            assert_eq!(validation.invoked.len(), 1);
+            assert!(validation
+                .invoked
+                .contains(&if font_resources { form } else { page_form }));
+            assert_eq!(
+                validation.expanded_bytes,
+                if font_resources { 97 } else { 96 }
+            );
+        }
+    }
+
+    #[test]
+    fn structural_bound_counts_do_operands_without_resolving_names() {
+        let mut doc = lopdf::Document::new();
+        let leaf = doc.add_object(lopdf::Stream::new(
+            lopdf::dictionary! {"Subtype"=>"Form"},
+            b"q Q".to_vec(),
+        ));
+        let middle = doc.add_object(lopdf::Stream::new(lopdf::dictionary! {"Subtype"=>"Form", "Resources"=>lopdf::dictionary! {"XObject"=>lopdf::dictionary! {"Leaf"=>leaf}}}, "/Unknown Do ".repeat(400).into_bytes()));
+        let resources = lopdf::Object::Dictionary(
+            lopdf::dictionary! {"XObject"=>lopdf::dictionary! {"Middle"=>middle}},
+        );
+        let receipts = [leaf, middle]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    doc.get_object(id)
+                        .unwrap()
+                        .as_stream()
+                        .unwrap()
+                        .content
+                        .len() as u64,
+                )
+            })
+            .collect();
+        let mut validation = super::FormValidation {
+            receipts: &receipts,
+            expanded_bytes: 0,
+            consumed: Default::default(),
+            active: Default::default(),
+            memo: Default::default(),
+            invoked: Default::default(),
+            stream_counts: Default::default(),
+        };
+        let content = "/Unknown Do ".repeat(400);
+        assert!(
+            super::structural_form_bound(
+                &doc,
+                content.as_bytes(),
+                &resources,
+                &resources,
+                &mut validation
+            )
+            .unwrap()
+                > super::MAX_FORM_INVOCATIONS
+        );
+        assert_eq!(
+            super::validate_forms(
+                &doc,
+                content.as_bytes(),
+                (0, 0),
+                &resources,
+                &resources,
+                None,
+                0,
+                &mut validation
+            )
+            .unwrap()
+            .cost
+            .count,
+            0
+        );
+    }
+
+    #[test]
     fn repeat_decode_budget_is_checked_before_allocating() {
         let mut doc = lopdf::Document::new();
         let stream = lopdf::Stream::new(lopdf::dictionary! {}, b"q Q".to_vec());
@@ -1361,6 +1864,8 @@ mod character_tests {
             consumed: Default::default(),
             active: Default::default(),
             memo: Default::default(),
+            invoked: Default::default(),
+            stream_counts: Default::default(),
         };
         assert_eq!(
             super::guarded_content(&doc, alias, &mut validation).unwrap(),
@@ -1376,6 +1881,8 @@ mod character_tests {
             consumed: Default::default(),
             active: Default::default(),
             memo: Default::default(),
+            invoked: Default::default(),
+            stream_counts: Default::default(),
         };
         assert!(super::guarded_content(&doc, alias, &mut unaccounted)
             .unwrap_err()

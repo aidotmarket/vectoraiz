@@ -1412,3 +1412,249 @@ fn projection_pdf_type3_width_operators_are_valid_content_syntax() {
         assert!(values(&p).contains("d0 d1 VISIBLE"));
     }
 }
+
+// The three PDFium execution routes from CC M5. The guard runs without loading
+// PDFium on the large shapes, so regressions cannot exhaust the test runner.
+fn routed_invocation_pdf(route: &str, width: usize, levels: usize, actual: bool) -> Vec<u8> {
+    let mut doc = Document::load_mem(&pdf(&["/Top Do"], false)).unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let mut resources = super::pdf::test_resources(&doc, page);
+    let mut names = lopdf::Dictionary::new();
+    let mut next = None;
+    for level in (0..levels).rev() {
+        let name = format!("L{level}");
+        let body = match next {
+            Some(_) => format!("/L{} Do ", level + 1).repeat(width),
+            None if actual => "/Span /P1 BDC BT /F1 12 Tf 30 700 Td (SHOWN) Tj ET EMC".into(),
+            None => "BT /F1 12 Tf 30 700 Td (LEAF) Tj ET".into(),
+        };
+        let mut dict =
+            dictionary! {"Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),612.into(),792.into()]};
+        if route != "parent" {
+            let mut own = resources.clone();
+            if let Some(id) = next {
+                own.set("XObject", dictionary! {format!("L{}",level+1)=>id});
+            }
+            dict.set("Resources", own);
+        }
+        let form = doc.add_object(Stream::new(dict, body.into_bytes()));
+        names.set(name, form);
+        next = Some(form);
+    }
+    resources.set(
+        "Properties",
+        dictionary! {"P1"=>dictionary! {"ActualText"=>Object::string_literal("REPLACEMENT")}},
+    );
+    let top = if route == "parent" {
+        let mut own = resources.clone();
+        own.set("XObject", names);
+        doc.add_object(Stream::new(
+            dictionary! {"Subtype"=>"Form", "Resources"=>own},
+            b"/L0 Do".to_vec(),
+        ))
+    } else {
+        next.unwrap()
+    };
+    resources.set("XObject", dictionary! {"Top"=>top});
+    if route == "split" {
+        let second = doc.add_object(Stream::new(dictionary! {}, b"n".to_vec()));
+        let first = doc.get_page_contents(page)[0];
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Contents", vec![first.into(), second.into()]);
+    }
+    if route.starts_with("glyph") {
+        let glyph = doc.add_object(Stream::new(
+            dictionary! {},
+            format!("1000 0 d0 {}", "/Top Do ".repeat(width)).into_bytes(),
+        ));
+        let font = doc.add_object(dictionary! {
+            "Type"=>"Font", "Subtype"=>"Type3", "FontBBox"=>vec![0.into(),0.into(),1000.into(),1000.into()],
+            "FontMatrix"=>vec![0.001.into(),0.into(),0.into(),0.001.into(),0.into()],
+            "CharProcs"=>dictionary! {"a"=>glyph}, "Encoding"=>dictionary! {"Type"=>"Encoding", "Differences"=>vec![97.into(),Object::Name(b"a".to_vec())]},
+            "FirstChar"=>97, "LastChar"=>97, "Widths"=>vec![1000.into()], "Resources"=>resources.clone(),
+        });
+        let mut fonts = resources.get(b"Font").unwrap().as_dict().unwrap().clone();
+        fonts.set("T3", font);
+        resources.set("Font", fonts);
+        let content = doc.get_page_contents(page)[0];
+        let body = if route == "glyph-inherited" {
+            let wrapper = doc.add_object(Stream::new(
+                dictionary! {"Subtype"=>"Form"},
+                b"BT (a) Tj ET".to_vec(),
+            ));
+            resources.set("XObject", dictionary! {"Top"=>top,"Wrapper"=>wrapper});
+            b"BT /T3 12 Tf ET /Wrapper Do".to_vec()
+        } else {
+            b"BT /T3 12 Tf 30 600 Td (a) Tj ET".to_vec()
+        };
+        doc.get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(body);
+    }
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Resources", resources);
+    save_pdf(doc)
+}
+
+#[test]
+fn projection_pdf_parent_split_and_type3_invocations_refuse_by_leading_code() {
+    for (route, width, levels) in [
+        ("parent", 12, 7),
+        ("split", 12, 7),
+        ("glyph", 20, 5),
+        ("glyph", 40, 4),
+        ("glyph-inherited", 40, 4),
+    ] {
+        let bytes = routed_invocation_pdf(route, width, levels, false);
+        let start = std::time::Instant::now();
+        let error = super::pdf::metadata(&bytes, &mut Projection::new()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED",
+            "{route}: {error:#}"
+        );
+        assert!(start.elapsed().as_secs_f64() < 1.0);
+    }
+}
+
+#[test]
+fn projection_pdf_parent_and_split_actualtext_are_flagged() {
+    for route in ["parent", "split"] {
+        let bytes = routed_invocation_pdf(route, 1, 1, true);
+        let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+        assert!(
+            p.nodes.iter().any(|n| n.kind.contains("ActualText")),
+            "{route}"
+        );
+    }
+}
+
+#[test]
+fn projection_pdf_shared_form_has_one_byte_charge_per_invocation() {
+    let mut doc = Document::load_mem(&invocation_pdf(1, 1, 300_000, 1000)).unwrap();
+    let pages = doc.get_pages();
+    let resources = super::pdf::test_resources(&doc, *pages.values().next().unwrap());
+    let parent = doc
+        .get_object(*pages.values().next().unwrap())
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Parent")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    doc.get_object_mut(parent)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Resources", resources);
+    for page in pages.values() {
+        doc.get_object_mut(*page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Resources");
+    }
+    let bytes = save_pdf(doc);
+    let mut p = Projection::new();
+    assert_eq!(super::pdf::metadata(&bytes, &mut p).unwrap(), 1000);
+    assert!(p.expanded_bytes < 310_000_000, "{}", p.expanded_bytes);
+}
+
+#[test]
+fn projection_pdf_document_memo_keeps_page_property_fallback_context() {
+    let mut doc = Document::load_mem(&pdf(&["/Top Do", "/Top Do"], false)).unwrap();
+    let form=doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {}, "BBox"=>vec![0.into(),0.into(),612.into(),792.into()]},b"/Span /P1 BDC BT /F1 12 Tf 30 700 Td (SHOWN) Tj ET EMC".to_vec()));
+    for (index, page) in doc.get_pages().values().enumerate() {
+        let mut resources = super::pdf::test_resources(&doc, *page);
+        resources.set("XObject", dictionary! {"Top"=>form});
+        if index == 1 {
+            resources.set("Properties",dictionary! {"P1"=>dictionary! {"ActualText"=>Object::string_literal("REPLACEMENT")}});
+        }
+        doc.get_object_mut(*page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+    }
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    let flagged = p
+        .nodes
+        .iter()
+        .filter(|n| n.kind.contains("ActualText"))
+        .collect::<Vec<_>>();
+    assert!(!flagged.is_empty());
+    assert!(
+        flagged.iter().all(|n| n.location.contains("page[2]")),
+        "{:?}",
+        flagged
+    );
+}
+
+#[test]
+fn projection_pdf_type3_budget_multiplies_by_shown_codes() {
+    for selection in ["Tf", "gs", "underflow"] {
+        let mut doc = Document::load_mem(&routed_invocation_pdf("glyph", 8, 5, false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let mut resources = super::pdf::test_resources(&doc, page);
+        let font = resources
+            .get(b"Font")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"T3")
+            .unwrap()
+            .clone();
+        resources.set(
+            "ExtGState",
+            dictionary! {"State"=>dictionary! {"Font"=>vec![font,12.into()]}},
+        );
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+        let content = doc.get_page_contents(page)[0];
+        let select = match selection {
+            "gs" => "/State gs",
+            "underflow" => "/T3 12 Tf Q",
+            _ => "/T3 12 Tf",
+        };
+        doc.get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(format!("BT {select} 30 600 Td [(a) 0 (aa)] TJ ET").into_bytes());
+        let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED",
+            "{selection}"
+        );
+    }
+}
+
+#[test]
+fn projection_pdf_structural_backstop_charges_unresolved_do_names() {
+    let mut doc = Document::load_mem(&routed_invocation_pdf("parent", 2, 1, false)).unwrap();
+    for object in doc.objects.values_mut() {
+        if let Object::Stream(stream) = object {
+            if stream.content.windows(4).any(|v| v == b"LEAF") {
+                stream.set_plain_content(b"/Unresolved Do /Unresolved Do".to_vec());
+            }
+        }
+    }
+    let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"
+    );
+}

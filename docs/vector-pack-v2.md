@@ -105,19 +105,27 @@ Fold 2 decoding rules: only streams reached as image XObjects and their image
 masks avoid decoded accounting; a content, Form, font or CMap stream cannot opt
 out with an Image label or a resource name. Each page/Form decompression requires
 a bounded-decode receipt; absolute per-stream and document caps and the aggregate
-100:1 expansion bound apply before content parsing or PDFium loading. Form syntax
-validation is memoized by Form and resource object identity within each page,
-retaining depth checks. All accounted page content, resource-reachable Forms
+100:1 expansion bound apply before content parsing or PDFium loading. Form
+validation is memoized across the document by object and effective resource
+context (including page fallback and inherited font state), retaining depth checks. All accounted page content, resource-reachable Forms
 (including unused Forms), and Type3 CharProcs receive the same content syntax
 validation, independently of invocation reachability. Page Contents arrays are
-joined before syntax validation because operators can span stream boundaries;
+joined with a space before syntax validation, matching PDFium's stream joining;
 each entry also receives the inline-image scan. Type3 width operators d0/d1
 are recognized during syntax validation. Subtypes accept resolved
-names or strings. Resource lookup uses the Form category dictionary when present,
-otherwise the page category dictionary, for Do, BDC and DP.
+names or strings. Resource lookup uses the Form resources, or the invoking
+parent resources when the Form has none, then the page category dictionary
+when that category is absent, for Do, BDC and DP. Type3 glyph Do chains use the font resources then
+the page resources. A second, name-independent resource-graph bound counts all
+Do operators, including unresolved names, and uses the largest possible child
+cost down each chain. Branching cycles refuse; single-call cycles are bounded
+using the pinned PDFium Form and Type3 recursion limits. Lexical stream costs
+are cached document-wide. The bound may conservatively refuse a dictionary
+that permits a branching cycle even when the resolved route is in budget.
+The corpus acceptance lists are unchanged.
 
 Each Form invocation charges its full descendant invocation count and decoded
-bytes, including memo hits, against document budgets of 100,000 invocations and
+bytes once per invocation, including memo hits, against document budgets of 100,000 invocations and
 512,000,000 expanded bytes. Exceeding the count refuses with
 `PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED`; exceeding expanded bytes refuses with
 `PROJECTION_DOCUMENT_BYTES_EXCEEDED`. Memo entries carry both costs so repeated
