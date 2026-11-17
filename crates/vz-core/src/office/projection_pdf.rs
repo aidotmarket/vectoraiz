@@ -228,7 +228,7 @@ fn metadata_document(
         .values()
         .chain(std::iter::once(&Object::Dictionary(doc.trailer.clone())))
     {
-        referenced_objects(object, &mut referenced);
+        referenced_objects(object, &mut referenced, 0)?;
     }
     for (id, entry) in &doc.reference_table.entries {
         match entry {
@@ -364,28 +364,33 @@ fn projected_character(value: Option<char>) -> Option<char> {
     }
 }
 
-fn referenced_objects(object: &Object, referenced: &mut BTreeSet<u32>) {
+fn referenced_objects(object: &Object, referenced: &mut BTreeSet<u32>, depth: usize) -> Result<()> {
+    ensure!(
+        depth <= 8,
+        "PROJECTION_PDF_DEPTH_EXCEEDED: reference inventory"
+    );
     match object {
         Object::Reference(id) => {
             referenced.insert(id.0);
         }
         Object::Array(values) => {
             for value in values {
-                referenced_objects(value, referenced);
+                referenced_objects(value, referenced, depth + 1)?;
             }
         }
         Object::Dictionary(dict) => {
             for (_, value) in dict.iter() {
-                referenced_objects(value, referenced);
+                referenced_objects(value, referenced, depth + 1)?;
             }
         }
         Object::Stream(stream) => {
             for (_, value) in stream.dict.iter() {
-                referenced_objects(value, referenced);
+                referenced_objects(value, referenced, depth + 1)?;
             }
         }
         _ => (),
     }
+    Ok(())
 }
 
 fn decoded_size(stream: &lopdf::Stream, at: &str) -> Result<u64> {
