@@ -1,6 +1,6 @@
 //! PDFium text/object path only. The metadata guard never extracts sale text.
-//! Layered, incremental and compressed-xref PDFs refuse until default-state and
-//! bounded object-stream decoding can be proven. No active-state inference.
+//! lopdf validates metadata and final-revision structure, including object/xref
+//! streams. Optional-content state remains unproven. No active-state inference.
 use super::*;
 use lopdf::{Document, Object};
 use pdfium_render::prelude::*;
@@ -128,7 +128,7 @@ pub(super) fn extract(
     Ok(())
 }
 
-fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
+pub(super) fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
     ensure!(
         input.len() as u64 <= PART_BYTES,
         "PROJECTION_PART_BYTES_EXCEEDED at pdf: {} / {PART_BYTES}",
@@ -140,8 +140,6 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
     );
     // Conservative lexical preflight, including escaped PDF names. This scans
     // streams/strings too: false positives refuse; they never admit ambiguity.
-    // Prevent lopdf's automatic unbounded object/xref-stream decompression and
-    // historical-revision merge before invoking it on this restricted profile.
     for name in input.split(|b| *b == b'/').skip(1) {
         let raw: Vec<_> = name
             .iter()
@@ -152,12 +150,18 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
         let mut i = 0;
         while i < raw.len() {
             if raw[i] == b'#' && i + 2 < raw.len() {
-                let value = std::str::from_utf8(&raw[i + 1..i + 3])
+                if let Some(value) = std::str::from_utf8(&raw[i + 1..i + 3])
                     .ok()
                     .and_then(|s| u8::from_str_radix(s, 16).ok())
-                    .context("PROJECTION_PDF_MALFORMED: escaped name")?;
-                decoded.push(value);
-                i += 3;
+                {
+                    decoded.push(value);
+                    i += 3;
+                } else {
+                    // Binary stream data is not PDF name syntax. Let lopdf
+                    // validate actual names rather than rejecting random '#'.
+                    decoded.push(raw[i]);
+                    i += 1;
+                }
             } else {
                 decoded.push(raw[i]);
                 i += 1;
@@ -170,26 +174,36 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
             ),
             "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN: layered PDF; exclude document"
         );
-        ensure!(!matches!(decoded.as_slice(), b"Prev" | b"XRefStm" | b"ObjStm" | b"XRef"), "PROJECTION_PDF_STRUCTURE_UNSUPPORTED: incremental/object/xref stream; save a classic unlayered PDF or exclude document");
+        // lopdf can automatically decode these in xref/object streams before
+        // the object filter runs. This profile only admits raw/FlateDecode.
+        ensure!(
+            !matches!(decoded.as_slice(), b"LZWDecode" | b"ASCII85Decode"),
+            "PROJECTION_PDF_STREAM_UNSUPPORTED: only raw/FlateDecode streams are bounded"
+        );
         ensure!(
             decoded != b"Encrypt",
             "PROJECTION_PDF_ENCRYPTED: exclude document"
         );
     }
-    let marker = input
-        .windows(9)
-        .rposition(|s| s == b"startxref")
-        .context("PROJECTION_PDF_MALFORMED: startxref")?;
-    let offset: usize = std::str::from_utf8(&input[marker + 9..])?
-        .split_whitespace()
-        .next()
-        .context("PDF xref offset")?
-        .parse()?;
-    ensure!(
-        input.get(offset..offset.saturating_add(4)) == Some(b"xref"),
-        "PROJECTION_PDF_STRUCTURE_UNSUPPORTED: classic xref required"
-    );
-    let doc = Document::load_mem(input).context("PROJECTION_PDF_MALFORMED: metadata graph")?;
+    bound_flate_payloads(input)?;
+    // The metadata parser merges revisions; none of their strings are emitted.
+    // PDFium alone supplies final-revision page text. Bound object streams in
+    // the load filter before lopdf automatically expands them.
+    let doc = lopdf::Reader {
+        buffer: input,
+        document: Document::new(),
+        encryption_state: None,
+        raw_objects: BTreeMap::new(),
+    }
+    .read(Some(guard_object_stream))
+    .context("PROJECTION_PDF_MALFORMED: metadata graph")?;
+    for object in doc.objects.values() {
+        if let Ok(dict) = object.as_dict() {
+            if let Ok(error) = dict.get(b"VZGuardFailure") {
+                anyhow::bail!("{}", String::from_utf8_lossy(error.as_str()?));
+            }
+        }
+    }
     ensure!(!doc.is_encrypted(), "PROJECTION_PDF_ENCRYPTED");
     ensure!(
         doc.objects.len() <= 10_000,
@@ -205,8 +219,31 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
                     "PROJECTION_PDF_MALFORMED at pdf/object[{id}]: missing object"
                 );
             }
-            lopdf::xref::XrefEntry::Compressed { .. } => {
-                anyhow::bail!("PROJECTION_PDF_STRUCTURE_UNSUPPORTED: compressed object")
+            lopdf::xref::XrefEntry::Compressed { container, index } => {
+                let stream = doc.get_object((*container, 0))?.as_stream()?;
+                ensure!(
+                    stream.dict.has_type(b"ObjStm") && doc.objects.contains_key(&(*id, 0)),
+                    "PROJECTION_PDF_MALFORMED at pdf/object[{id}]: missing compressed object"
+                );
+                // lopdf recovers partial object streams. Require the xref's
+                // container/index to identify the same object in its header.
+                let first = usize::try_from(stream.dict.get(b"First")?.as_i64()?)?;
+                let header = std::str::from_utf8(
+                    stream
+                        .content
+                        .get(..first)
+                        .context("PROJECTION_PDF_MALFORMED: object stream header")?,
+                )?;
+                let entries = header
+                    .split_whitespace()
+                    .map(str::parse::<u32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                ensure!(
+                    entries.len()
+                        == usize::try_from(stream.dict.get(b"N")?.as_i64()?)?.saturating_mul(2)
+                        && entries.get(usize::from(*index) * 2) == Some(id),
+                    "PROJECTION_PDF_MALFORMED at pdf/object[{id}]: compressed xref index"
+                );
             }
             _ => (),
         }
@@ -224,24 +261,7 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
         let at = format!("pdf/object[{}:{}]", id.0, id.1);
         walk(object, &at, 0, &doc, out)?;
         if let Object::Stream(stream) = object {
-            let decoded = match stream.dict.get(b"Filter") {
-                Err(_) => stream.content.len() as u64,
-                Ok(Object::Name(name)) if name == b"FlateDecode" => {
-                    ensure!(stream.dict.get(b"DecodeParms").is_err(), "PROJECTION_PDF_STREAM_UNSUPPORTED at {at}: DecodeParms");
-                    let mut decoder = flate2::read::ZlibDecoder::new(stream.content.as_slice()).take(PART_BYTES + 1);
-                    std::io::copy(&mut decoder, &mut std::io::sink()).with_context(|| format!("PROJECTION_PDF_MALFORMED at {at}: FlateDecode"))?
-                }
-                _ => anyhow::bail!("PROJECTION_PDF_STREAM_UNSUPPORTED at {at}: only raw/FlateDecode streams are bounded"),
-            };
-            ensure!(
-                decoded <= PART_BYTES,
-                "PROJECTION_PART_BYTES_EXCEEDED at {at}: {decoded} / {PART_BYTES}"
-            );
-            ensure!(
-                decoded <= (stream.content.len() as u64).saturating_mul(100),
-                "PROJECTION_EXPANSION_RATIO_EXCEEDED at {at}: {decoded} / {} (100:1)",
-                stream.content.len()
-            );
+            let decoded = decoded_size(stream, &at)?;
             out.expanded_bytes += decoded;
             ensure!(
                 out.expanded_bytes <= DOCUMENT_BYTES,
@@ -273,6 +293,134 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+// Xref streams are decoded inside Reader before its object callback. Preflight
+// every possible zlib payload after a stream header, including old revisions,
+// with a capped streaming decoder. This intentionally over-approximates PDF
+// syntax: ambiguous matches may refuse, but cannot bypass allocation limits.
+fn bound_flate_payloads(input: &[u8]) -> Result<()> {
+    let mut total = input.len() as u64;
+    let mut streams = 0;
+    for (offset, word) in input.windows(6).enumerate() {
+        if word != b"stream" {
+            continue;
+        }
+        let mut start = offset + 6;
+        while matches!(input.get(start), Some(b' ' | b'\t')) {
+            start += 1;
+        }
+        match input.get(start) {
+            Some(b'\r') => {
+                start += 1;
+                if input.get(start) == Some(&b'\n') {
+                    start += 1;
+                }
+            }
+            Some(b'\n') => start += 1,
+            _ => continue,
+        }
+        let payload = &input[start..];
+        // RFC 1950 CMF/FLG. Every FlateDecode stream accepted by lopdf's
+        // ZlibDecoder has this header; raw streams require no expansion.
+        if payload.len() < 2
+            || payload[0] & 15 != 8
+            || payload[0] >> 4 > 7
+            || (u16::from(payload[0]) * 256 + u16::from(payload[1])) % 31 != 0
+        {
+            continue;
+        }
+        streams += 1;
+        ensure!(
+            streams <= 10_000,
+            "PROJECTION_PART_COUNT_EXCEEDED: PDF streams"
+        );
+        let mut decoder = flate2::read::ZlibDecoder::new(payload);
+        let decoded = std::io::copy(
+            &mut (&mut decoder).take(PART_BYTES + 1),
+            &mut std::io::sink(),
+        )
+        .context("PROJECTION_PDF_MALFORMED: FlateDecode preflight")?;
+        ensure!(
+            decoded <= PART_BYTES,
+            "PROJECTION_PART_BYTES_EXCEEDED: PDF stream preflight"
+        );
+        ensure!(
+            decoded <= decoder.total_in().saturating_mul(100),
+            "PROJECTION_EXPANSION_RATIO_EXCEEDED: PDF stream preflight (100:1)"
+        );
+        total += decoded;
+        ensure!(
+            total <= DOCUMENT_BYTES,
+            "PROJECTION_DOCUMENT_BYTES_EXCEEDED: PDF stream preflight"
+        );
+    }
+    Ok(())
+}
+
+// This callback runs before ObjectStream::new(), which mutates the stream to
+// decoded bytes. Preserve refusals as objects so the reader cannot hide
+// them by silently skipping a malformed stream.
+fn guard_object_stream(
+    id: lopdf::ObjectId,
+    object: &mut Object,
+) -> Option<(lopdf::ObjectId, Object)> {
+    if let Object::Stream(stream) = object {
+        if stream.dict.has_type(b"ObjStm") {
+            if let Err(error) = decoded_size(stream, "pdf/object-stream") {
+                *object = Object::Dictionary(lopdf::dictionary! {
+                    "VZGuardFailure" => Object::string_literal(error.to_string())
+                });
+            }
+        }
+    }
+    Some((id, object.clone()))
+}
+
+fn decoded_size(stream: &lopdf::Stream, at: &str) -> Result<u64> {
+    let decoded = match stream.dict.get(b"Filter") {
+        Err(_) => stream.content.len() as u64,
+        Ok(Object::Name(name)) if name == b"FlateDecode" => {
+            // Predictor parameters are admitted for xref streams only, where
+            // lopdf decodes them. The inflated bytes are bounded beforehand.
+            if let Ok(params) = stream.dict.get(b"DecodeParms") {
+                let params = params
+                    .as_dict()
+                    .context("PROJECTION_PDF_STREAM_UNSUPPORTED: DecodeParms")?;
+                let number = |key: &[u8], default| -> Result<i64> {
+                    Ok(match params.get(key) {
+                        Ok(value) => value.as_i64()?,
+                        Err(_) => default,
+                    })
+                };
+                ensure!(
+                    stream.dict.has_type(b"XRef")
+                        && matches!(number(b"Predictor", 1)?, 1 | 10..=15)
+                        && (1..=32).contains(&number(b"Columns", 1)?)
+                        && number(b"Colors", 1)? == 1
+                        && number(b"BitsPerComponent", 8)? == 8,
+                    "PROJECTION_PDF_STREAM_UNSUPPORTED at {at}: DecodeParms"
+                );
+            }
+            let mut decoder =
+                flate2::read::ZlibDecoder::new(stream.content.as_slice()).take(PART_BYTES + 1);
+            std::io::copy(&mut decoder, &mut std::io::sink())
+                .with_context(|| format!("PROJECTION_PDF_MALFORMED at {at}: FlateDecode"))?
+        }
+        _ => anyhow::bail!(
+            "PROJECTION_PDF_STREAM_UNSUPPORTED at {at}: only raw/FlateDecode streams are bounded"
+        ),
+    };
+    ensure!(
+        decoded <= PART_BYTES,
+        "PROJECTION_PART_BYTES_EXCEEDED at {at}: {decoded} / {PART_BYTES}"
+    );
+    ensure!(
+        decoded <= (stream.content.len() as u64).saturating_mul(100),
+        "PROJECTION_EXPANSION_RATIO_EXCEEDED at {at}: {decoded} / {} (100:1)",
+        stream.content.len()
+    );
+    Ok(decoded)
 }
 
 fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
@@ -377,6 +525,13 @@ fn walk(
             }
             None
         }
+        Object::Name(name) => {
+            ensure!(
+                !matches!(name.as_slice(), b"OCG" | b"OCMD"),
+                "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN: layered PDF; exclude document"
+            );
+            None
+        }
         Object::Reference(id) => {
             ensure!(
                 doc.objects.contains_key(id),
@@ -390,6 +545,14 @@ fn walk(
     };
     if let Some(dict) = dict {
         for (key, value) in dict.iter() {
+            ensure!(
+                !matches!(key.as_slice(), b"OCProperties" | b"OCG" | b"OCMD" | b"OC"),
+                "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN: layered PDF; exclude document"
+            );
+            ensure!(
+                key != b"Encrypt",
+                "PROJECTION_PDF_ENCRYPTED: exclude document"
+            );
             let category = match key.as_slice() {
                 b"Info" | b"Metadata" => Some("properties"),
                 b"Annots" => Some("annotations"),
