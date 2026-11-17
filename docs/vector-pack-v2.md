@@ -13,19 +13,29 @@ html5ever 0.35.0 (MIT/Apache-2.0), cssparser 0.35.0 (MPL-2.0), lopdf 0.38.0
 making it direct permits bounded declaration tokenization, including comments,
 CSS escapes and `!important`, without interpreting CSS layout.
 
-The new lopdf dependency is used only for the metadata guard and source carrier
-counts. It never supplies sale text. Its automatic compressed-object/xref-stream
-decoding and revision merging are outside this bounded profile: a conservative
-escaped-name preflight refuses those structures before loading. Only classic
-xref PDFs proceed, and every live xref object must be present after load because
-lopdf can otherwise skip malformed objects. Every indirect reference must resolve,
-and the bounded page tree must agree with its declared and PDFium page counts.
-Page content syntax is checked through a private trailing parser sentinel,
-preventing prefix-only parser recovery from certifying an omitted page. The stream guard counts actual raw
-or bounded FlateDecode bytes, enforces per-stream/document/100:1 limits, and
-refuses filters/predictors that do not have a bounded implementation. References
-are not recursively expanded when counting dictionaries; direct nesting is
-limited to eight. The existing supervised worker bounds memory and CPU time.
+The lopdf dependency is used only for the metadata guard and source carrier
+counts. It never supplies sale text. Classic xref tables, object streams, xref
+streams and incremental updates proceed when the final merged graph validates.
+Text comes exclusively from PDFium's final revision; Info, XMP, annotations,
+actions and other metadata from every revision are never delivered. Replacing
+or removing a carrier in a later revision does not turn its old strings into
+projected page text.
+
+A conservative escaped-name preflight rejects encryption and unbounded filters.
+Before lopdf loads xref streams, a streaming zlib preflight caps possible Flate
+payloads in every revision. An object callback checks object-stream filters and
+limits before lopdf automatically expands them. Every live xref object must be
+present after load because lopdf can otherwise skip malformed objects; compressed
+xref entries must match their object-stream header indices. Every indirect
+reference must resolve, and the bounded page tree must agree with its declared
+and PDFium page counts. Page content syntax is checked through a private trailing
+parser sentinel, preventing prefix-only parser recovery from certifying an
+omitted page. The stream guard counts actual raw or bounded FlateDecode bytes,
+enforces per-stream/document/100:1 limits, and refuses unsupported
+filters/predictors. Limited PNG predictor parameters are admitted for xref
+streams. References are not recursively expanded when counting dictionaries;
+direct nesting is limited to eight. The existing supervised worker bounds memory
+and CPU time. Conservative byte scanning may refuse ambiguous stream data.
 
 The pinned PDFium API exposes character render modes, character rectangles and
 page boxes. It does not expose a proof of the document's optional-content default
@@ -60,6 +70,8 @@ These canaries do not qualify corpus capacity or installed delivery journeys.
 Full command/corpus evidence belongs outside the checkout.
 
 Real corpus regressions include 1,236 projected nodes from a Wikipedia page and
-two NASA NTRS PDFs that explicitly refuse unsupported structures. Their source
+two NASA NTRS PDFs that refuse the expansion-ratio limit and unsupported decode
+parameters, respectively. Object/xref streams and incremental revisions are
+covered with locally generated canary fixtures. Their source
 URLs, exact fixture hashes, licences and the HTML re-recording note accompany the
 fixtures. These observed refusals are coverage limits, not a PDF capacity claim.
