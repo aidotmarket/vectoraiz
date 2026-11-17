@@ -1278,10 +1278,10 @@ fn all_type3_glyphs<'a>(object: &'a Object, glyphs: &mut Vec<(&'a Object, Option
     }
 }
 
-// Type3::SetPageResources saves the dictionary used when Tf selects the font.
-// A later gs Font selection does not refresh it. For fonts without Resources,
-// glyph fallback can therefore retain a dictionary from a different stream or
-// page, rather than one in the current invocation chain.
+// Type3::SetPageResources saves the dictionary used when a font is selected.
+// Selecting a shared font in a sibling Form changes that saved dictionary even
+// after the Form's graphics state is restored. For fonts without Resources,
+// glyph fallback can therefore retain a scope outside the invocation chain.
 fn all_resource_scopes<'a>(object: &'a Object, scope: &mut Vec<&'a Object>) {
     match object {
         Object::Dictionary(dict) => {
@@ -2260,8 +2260,8 @@ mod character_tests {
         for _ in 0..5 {
             form = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"XObject"=>dictionary! {"Child"=>form}}}, "/Child Do ".repeat(12).into_bytes()));
         }
-        // Tf can save this scope on an earlier page without loading a glyph.
-        // A later gs selects the same font while retaining that saved scope.
+        // A sibling Form can select the shared font without loading a glyph.
+        // Parent text then uses that saved scope, outside its invocation chain.
         doc.add_object(
             dictionary! {"Resources"=>dictionary! {"XObject"=>dictionary! {"Hidden"=>form}}},
         );
@@ -2271,9 +2271,7 @@ mod character_tests {
         ));
         let font =
             doc.add_object(dictionary! {"Subtype"=>"Type3", "CharProcs"=>dictionary! {"a"=>glyph}});
-        let page = Object::Dictionary(
-            dictionary! {"ExtGState"=>dictionary! {"State"=>dictionary! {"Font"=>vec![font.into(), 12.into()]}}},
-        );
+        let page = Object::Dictionary(dictionary! {"Font"=>dictionary! {"T3"=>font}});
         let receipts = doc
             .objects
             .iter()
@@ -2297,7 +2295,7 @@ mod character_tests {
         };
         let bound = super::structural_form_bound(
             &doc,
-            b"/State gs BT (a) Tj ET",
+            b"BT /T3 12 Tf (a) Tj ET",
             &page,
             &page,
             &mut validation,

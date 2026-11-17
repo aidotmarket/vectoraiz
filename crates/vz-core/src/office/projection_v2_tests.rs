@@ -1662,6 +1662,56 @@ fn projection_pdf_type3_oversized_shown_codes_refuse_by_name() {
 }
 
 #[test]
+fn projection_pdf_type3_shared_font_retains_sibling_form_resources() {
+    for width in [3, 20] {
+        let mut doc = Document::load_mem(&routed_invocation_pdf("glyph", width, 5, false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let mut resources = super::pdf::test_resources(&doc, page);
+        let fonts = resources.get(b"Font").unwrap().as_dict().unwrap().clone();
+        let font = fonts.get(b"T3").unwrap().as_reference().unwrap();
+        let mut saved = doc
+            .get_object_mut(font)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .remove(b"Resources")
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .clone();
+        saved.set("Font", fonts);
+        // No glyph is shown in Setter. Selecting the shared font mutates its
+        // saved fallback resources; returning restores only the graphics state.
+        let setter = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),612.into(),792.into()], "Resources"=>saved}, b"BT /T3 12 Tf ET".to_vec()));
+        resources.set("XObject", dictionary! {"Setter"=>setter});
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+        let content = doc.get_page_contents(page)[0];
+        doc.get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(b"BT /T3 12 Tf ET /Setter Do BT 30 600 Td (a) Tj ET".to_vec());
+        let bytes = save_pdf(doc);
+        if width == 3 {
+            super::pdf::metadata(&bytes, &mut Projection::new()).unwrap();
+            extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+        } else {
+            let error = super::pdf::metadata(&bytes, &mut Projection::new()).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .starts_with("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
+                "{error:#}"
+            );
+        }
+    }
+}
+
+#[test]
 fn projection_pdf_structural_backstop_charges_unresolved_do_names() {
     let mut doc = Document::load_mem(&routed_invocation_pdf("parent", 2, 1, false)).unwrap();
     for object in doc.objects.values_mut() {
