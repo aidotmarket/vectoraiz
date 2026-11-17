@@ -274,6 +274,8 @@ fn decode_html(input: &[u8]) -> Result<String> {
         // HTML meta UTF-16 labels mean UTF-8; only a BOM selects UTF-16.
         let enc = if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
             UTF_8
+        } else if enc == encoding_rs::X_USER_DEFINED {
+            encoding_rs::WINDOWS_1252
         } else {
             enc
         };

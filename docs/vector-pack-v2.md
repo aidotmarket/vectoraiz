@@ -106,17 +106,32 @@ masks avoid decoded accounting; a content, Form, font or CMap stream cannot opt
 out with an Image label or a resource name. Each page/Form decompression requires
 a bounded-decode receipt; absolute per-stream and document caps and the aggregate
 100:1 expansion bound apply before content parsing or PDFium loading. Form syntax
-validation is memoized by Form and effective resources, retaining depth checks.
+validation is memoized by Form and resource object identity within each page,
+retaining depth checks. All accounted page content, resource-reachable Forms
+(including unused Forms), and Type3 CharProcs receive the same content syntax
+validation, independently of invocation reachability. Page Contents arrays are
+joined before syntax validation because operators can span stream boundaries;
+each entry also receives the inline-image scan. Subtypes accept resolved
+names or strings. Resource lookup uses the Form category dictionary when present,
+otherwise the page category dictionary, for Do, BDC and DP.
+
+Each Form invocation charges its full descendant invocation count and decoded
+bytes, including memo hits, against document budgets of 100,000 invocations and
+512,000,000 expanded bytes. Exceeding the count refuses with
+`PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED`; exceeding expanded bytes refuses with
+`PROJECTION_DOCUMENT_BYTES_EXCEEDED`. Memo entries carry both costs so repeated
+Form graphs are checked without exponential traversal.
 Inline images remain outside this profile and refuse with
 `PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED` before PDFium loading.
 
-PDF text maps non-whitespace C0 controls, including NUL, to counted U+FFFD
+PDF text maps non-whitespace C0 controls, including NUL, and U+007F–U+009F
+controls to counted U+FFFD
 unmapped-glyph replacements. U+0002 is PDFium's line-end hyphen marker and is
-removed to join the word. Page visibility uses the intersection of normalized
+removed to join the word and counted as an unmapped-glyph drop. Page visibility uses the intersection of normalized
 MediaBox and CropBox bounds. Undefined, unreferenced Quartz xref entries at offset
 zero are treated as free; referenced entries still refuse.
 
 HTML meta declarations resolving to UTF-16LE/BE select UTF-8; a UTF-16 BOM remains
-authoritative. Progress and meter fallback text shares the UA-hidden handling:
+authoritative. Meta x-user-defined selects windows-1252. Progress and meter fallback text shares the UA-hidden handling:
 omitted by default, counted, and seller-includable. Details, summary, center,
 dialog and option establish block boundaries.

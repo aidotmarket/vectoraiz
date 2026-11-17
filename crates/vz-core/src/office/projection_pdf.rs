@@ -52,6 +52,7 @@ pub(super) fn extract(
         for j in 0..chars.len() {
             let character = chars.get(j)?;
             let Some(value) = projected_character(character.unicode_char()) else {
+                out.drop_at("unmapped-glyphs", &format!("{at}/char[{j}]"))?;
                 continue;
             };
             if value == '\u{fffd}' {
@@ -291,7 +292,7 @@ fn metadata_document(
         &doc,
         out,
     )?;
-    let decoded_ids = decoded_stream_ids(&doc)?;
+    let (decoded_ids, content_ids) = decoded_stream_ids(&doc)?;
     let mut expanded = STRUCTURAL_GUARD.with(|state| state.borrow().0);
     let mut encoded = STRUCTURAL_GUARD.with(|state| state.borrow().3);
     let mut receipts = BTreeMap::new();
@@ -338,18 +339,40 @@ fn metadata_document(
         active: BTreeSet::new(),
         memo: BTreeMap::new(),
     };
+    for id in content_ids {
+        validate_content(&guarded_content(&doc, id, &mut validation)?, id)?;
+    }
+    let mut invocations = FormCost::default();
     for (index, id) in doc.get_pages().values().enumerate() {
+        // Page fallback is part of the memo context; never reuse across pages.
+        validation.memo.clear();
         let mut content = Vec::new();
         for stream_id in doc.get_page_contents(*id) {
-            content.extend(guarded_content(&doc, stream_id, &mut validation)?);
+            let bytes = guarded_content(&doc, stream_id, &mut validation)?;
+            refuse_inline_images(&bytes)?;
+            content.extend(bytes);
         }
         let resources = inherited(&doc, *id, b"Resources")?
             .unwrap_or(Object::Dictionary(lopdf::Dictionary::new()));
-        if validate_forms(&doc, &content, *id, &resources, 0, &mut validation)? {
+        let result = validate_forms(
+            &doc,
+            &content,
+            *id,
+            &resources,
+            &resources,
+            0,
+            &mut validation,
+        )?;
+        invocations.add(result.cost)?;
+        if result.actual_text {
             actual_pages.insert(index);
         }
     }
-    out.expanded_bytes = validation.expanded_bytes;
+    invocations.add(FormCost {
+        count: 0,
+        bytes: validation.expanded_bytes,
+    })?;
+    out.expanded_bytes = invocations.bytes;
     Ok((doc, count, actual_pages))
 }
 
@@ -359,7 +382,12 @@ fn metadata_document(
 fn projected_character(value: Option<char>) -> Option<char> {
     match value {
         Some('\u{0002}') => None,
-        Some(c) if c < ' ' && !matches!(c, '\t' | '\r' | '\n') => Some('\u{fffd}'),
+        Some(c)
+            if (c < ' ' && !matches!(c, '\t' | '\r' | '\n'))
+                || ('\u{007f}'..='\u{009f}').contains(&c) =>
+        {
+            Some('\u{fffd}')
+        }
         value => Some(value.unwrap_or('\u{fffd}')),
     }
 }
@@ -482,7 +510,7 @@ fn decoded_size(stream: &lopdf::Stream, at: &str) -> Result<u64> {
     Ok(decoded)
 }
 
-fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
+fn refuse_inline_images(content: &[u8]) -> Result<()> {
     // Inline image decoding is outside the supported text-only profile.
     // Tokenize to avoid mistaking BI inside strings/comments for an operator.
     let mut pos = 0;
@@ -492,6 +520,11 @@ fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
             "PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"
         );
     }
+    Ok(())
+}
+
+fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
+    refuse_inline_images(content)?;
     // The decoder accepts parsed prefixes. A private trailing sentinel proves
     // that malformed original bytes were not silently ignored.
     // Avoid inserting a second blank line after a trailing comment: lopdf's
@@ -732,36 +765,49 @@ fn inherited_boxes(doc: &Document) -> Result<Vec<[f32; 4]>> {
         .collect()
 }
 
-fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
+fn decoded_stream_ids(
+    doc: &Document,
+) -> Result<(BTreeSet<lopdf::ObjectId>, BTreeSet<lopdf::ObjectId>)> {
     fn collect(
         doc: &Document,
         object: &Object,
         depth: usize,
         seen: &mut BTreeSet<lopdf::ObjectId>,
         decoded: &mut BTreeSet<lopdf::ObjectId>,
+        content: &mut BTreeSet<lopdf::ObjectId>,
     ) -> Result<()> {
         ensure!(depth <= 32, "PROJECTION_PDF_DEPTH_EXCEEDED: resource graph");
         match object {
             Object::Reference(id) => {
                 if seen.insert(*id) {
                     let value = doc.objects.get(id).unwrap_or(&Object::Null);
-                    if matches!(value, Object::Stream(_)) {
+                    if let Object::Stream(stream) = value {
                         decoded.insert(*id);
+                        if subtype(doc, stream, b"Form")? {
+                            content.insert(*id);
+                        }
                     }
-                    collect(doc, value, depth + 1, seen, decoded)?;
+                    collect(doc, value, depth + 1, seen, decoded, content)?;
                 }
             }
             Object::Array(values) => {
                 for value in values {
-                    collect(doc, value, depth + 1, seen, decoded)?;
+                    collect(doc, value, depth + 1, seen, decoded, content)?;
                 }
             }
             Object::Dictionary(dict) => {
+                if let Ok(procs) = dict.get(b"CharProcs") {
+                    for (_, value) in resolve(doc, procs)?.as_dict()?.iter() {
+                        if let Ok(id) = value.as_reference() {
+                            content.insert(id);
+                        }
+                    }
+                }
                 for (key, value) in dict.iter() {
                     if key == b"Resources" {
-                        collect_resources(doc, value, depth + 1, seen, decoded)?;
+                        collect_resources(doc, value, depth + 1, seen, decoded, content)?;
                     } else {
-                        collect(doc, value, depth + 1, seen, decoded)?;
+                        collect(doc, value, depth + 1, seen, decoded, content)?;
                     }
                 }
             }
@@ -771,6 +817,7 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
                 depth + 1,
                 seen,
                 decoded,
+                content,
             )?,
             _ => (),
         }
@@ -782,39 +829,58 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
         depth: usize,
         seen: &mut BTreeSet<lopdf::ObjectId>,
         decoded: &mut BTreeSet<lopdf::ObjectId>,
+        content: &mut BTreeSet<lopdf::ObjectId>,
     ) -> Result<()> {
         ensure!(depth <= 32, "PROJECTION_PDF_DEPTH_EXCEEDED: resources");
         for (category, map) in resolve(doc, object)?.as_dict()?.iter() {
             if category == b"XObject" {
                 for (_, entry) in resolve(doc, map)?.as_dict()?.iter() {
-                    let image = resolve(doc, entry)?.as_stream().is_ok_and(|s| {
-                        s.dict
-                            .get(b"Subtype")
-                            .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Image"))
-                    });
+                    let image = match resolve(doc, entry)?.as_stream() {
+                        Ok(stream) => subtype(doc, stream, b"Image")?,
+                        Err(_) => false,
+                    };
                     // Only this role exempts images (and their masks). Do not
                     // mark them seen: another role may require decoding them.
                     if !image {
-                        collect(doc, entry, depth + 1, seen, decoded)?;
+                        collect(doc, entry, depth + 1, seen, decoded, content)?;
                     }
                 }
             } else {
-                collect(doc, map, depth + 1, seen, decoded)?;
+                collect(doc, map, depth + 1, seen, decoded, content)?;
             }
         }
         Ok(())
     }
     let mut decoded = BTreeSet::new();
+    let mut content = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for id in doc.get_pages().values() {
         if let Ok(contents) = doc.get_object(*id)?.as_dict()?.get(b"Contents") {
-            collect(doc, contents, 0, &mut seen, &mut decoded)?;
+            collect(doc, contents, 0, &mut seen, &mut decoded, &mut content)?;
         }
         if let Some(resources) = inherited(doc, *id, b"Resources")? {
-            collect_resources(doc, &resources, 0, &mut seen, &mut decoded)?;
+            collect_resources(doc, &resources, 0, &mut seen, &mut decoded, &mut content)?;
         }
     }
-    Ok(decoded)
+    // Page Contents arrays are one logical stream and may split operators or
+    // text objects across entries. Their syntax is checked after concatenation;
+    // each entry still receives the inline-image scan before joining.
+    // Resolve aliases before intersecting with the accounted stream set.
+    let mut resolved = BTreeSet::new();
+    for mut id in content {
+        for _ in 0..=8 {
+            match doc.objects.get(&id) {
+                Some(Object::Reference(next)) => id = *next,
+                _ => {
+                    if decoded.contains(&id) {
+                        resolved.insert(id);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    Ok((decoded, resolved))
 }
 
 // Every unbounded lopdf decompression is behind the actual stream's size
@@ -852,25 +918,94 @@ fn guarded_content(
     anyhow::bail!("PROJECTION_PDF_DEPTH_EXCEEDED: content reference cycle")
 }
 
+// PDFium falls back to the page only when the Form's category is absent,
+// not when an individual name is missing from an existing category.
+fn resource<'a>(
+    doc: &'a Document,
+    own: &'a Object,
+    page: &'a Object,
+    category: &[u8],
+    name: &[u8],
+) -> Result<&'a Object> {
+    let category_value = |resources: &'a Object| -> Result<Option<&'a Object>> {
+        match resolve(doc, resources)? {
+            Object::Null => Ok(None),
+            value => Ok(value.as_dict()?.get(category).ok()),
+        }
+    };
+    let map = category_value(own)?.or(category_value(page)?);
+    let Some(map) = map else {
+        return Ok(&Object::Null);
+    };
+    Ok(resolve(doc, map)?
+        .as_dict()?
+        .get(name)
+        .unwrap_or(&Object::Null))
+}
+
+fn subtype(doc: &Document, stream: &lopdf::Stream, expected: &[u8]) -> Result<bool> {
+    let Ok(value) = stream.dict.get(b"Subtype") else {
+        return Ok(false);
+    };
+    Ok(match resolve(doc, value)? {
+        Object::Name(name) | Object::String(name, _) => name == expected,
+        _ => false,
+    })
+}
+
+const MAX_FORM_INVOCATIONS: u64 = 100_000;
+
+#[derive(Clone, Copy, Default)]
+struct FormCost {
+    count: u64,
+    bytes: u64,
+}
+impl FormCost {
+    fn add(&mut self, other: Self) -> Result<()> {
+        self.count = self.count.saturating_add(other.count);
+        self.bytes = self.bytes.saturating_add(other.bytes);
+        ensure!(
+            self.count <= MAX_FORM_INVOCATIONS,
+            "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"
+        );
+        ensure!(
+            self.bytes <= DOCUMENT_BYTES,
+            "PROJECTION_DOCUMENT_BYTES_EXCEEDED: expanded Form invocations"
+        );
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct FormResult {
+    actual_text: bool,
+    cost: FormCost,
+    depth: usize,
+}
+
 struct FormValidation<'a> {
     receipts: &'a BTreeMap<lopdf::ObjectId, u64>,
     expanded_bytes: u64,
     consumed: BTreeSet<lopdf::ObjectId>,
     active: BTreeSet<lopdf::ObjectId>,
-    memo: BTreeMap<(lopdf::ObjectId, String), (bool, usize)>,
+    // Stable object identity avoids formatting resources per invocation.
+    // The memo is page-local, giving page fallback a stable context too.
+    memo: BTreeMap<(lopdf::ObjectId, usize), FormResult>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn validate_forms(
     doc: &Document,
     content: &[u8],
     id: lopdf::ObjectId,
     resources: &Object,
+    page_resources: &Object,
     depth: usize,
     validation: &mut FormValidation<'_>,
-) -> Result<bool> {
-    let key = (id, format!("{resources:?}"));
-    if let Some((result, validated_depth)) = validation.memo.get(&key) {
-        if depth <= *validated_depth {
+) -> Result<FormResult> {
+    let key = (id, resources as *const Object as usize);
+    if let Some(result) = validation.memo.get(&key) {
+        if depth <= result.depth {
             return Ok(*result);
         }
     }
@@ -880,23 +1015,20 @@ fn validate_forms(
     );
     validate_content(content, id)?;
     let operations = lopdf::content::Content::decode(content)?.operations;
-    let mut actual_text = false;
+    let mut result = FormResult {
+        actual_text: false,
+        cost: FormCost::default(),
+        depth,
+    };
     for op in &operations {
         if matches!(op.operator.as_str(), "BDC" | "DP") {
             if let Some(properties) = op.operands.get(1) {
                 let properties = if let Object::Name(name) = properties {
-                    resolve(doc, resources)?
-                        .as_dict()?
-                        .get(b"Properties")
-                        .ok()
-                        .and_then(|p| resolve(doc, p).ok())
-                        .and_then(|p| p.as_dict().ok())
-                        .and_then(|p| p.get(name).ok())
-                        .unwrap_or(&Object::Null)
+                    resource(doc, resources, page_resources, b"Properties", name)?
                 } else {
                     properties
                 };
-                actual_text |= resolve(doc, properties)?
+                result.actual_text |= resolve(doc, properties)?
                     .as_dict()
                     .is_ok_and(|p| p.has(b"ActualText"));
             }
@@ -909,50 +1041,57 @@ fn validate_forms(
             .first()
             .context("PROJECTION_PDF_FORM_UNPROVEN: missing Do operand")?
             .as_name()?;
-        let dict = resolve(doc, resources)?.as_dict()?;
-        let Ok(xobjects) = dict.get(b"XObject") else {
-            continue;
-        };
-        let xobjects = resolve(doc, xobjects)?.as_dict()?;
-        let Ok(object) = xobjects.get(name) else {
-            continue;
-        };
+        let object = resource(doc, resources, page_resources, b"XObject", name)?;
         let value = resolve(doc, object)?;
         if matches!(value, Object::Null) {
             continue;
         }
         let stream = value.as_stream()?;
-        if stream
-            .dict
-            .get(b"Subtype")
-            .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Form"))
-        {
-            let form_id = object
+        if subtype(doc, stream, b"Form")? {
+            let mut form_id = object
                 .as_reference()
                 .context("PROJECTION_PDF_FORM_UNPROVEN: direct Form stream")?;
-            let own = stream.dict.get(b"Resources").unwrap_or(resources);
-            if let Some((result, validated_depth)) =
-                validation.memo.get(&(form_id, format!("{own:?}")))
-            {
-                if depth < *validated_depth {
-                    actual_text |= *result;
-                    continue;
+            for _ in 0..=8 {
+                match doc.objects.get(&form_id) {
+                    Some(Object::Reference(next)) => form_id = *next,
+                    _ => break,
                 }
             }
-            actual_text |= validate_forms(
-                doc,
-                &guarded_content(doc, form_id, validation)?,
-                form_id,
-                own,
-                depth + 1,
-                validation,
-            )
-            .context("PROJECTION_PDF_FORM_UNPROVEN: invoked Form content")?;
+            let own = stream.dict.get(b"Resources").unwrap_or(&Object::Null);
+            let child_key = (form_id, own as *const Object as usize);
+            let cached = validation
+                .memo
+                .get(&child_key)
+                .copied()
+                .filter(|r| depth < r.depth);
+            let child = if let Some(cached) = cached {
+                cached
+            } else {
+                validate_forms(
+                    doc,
+                    &guarded_content(doc, form_id, validation)?,
+                    form_id,
+                    own,
+                    page_resources,
+                    depth + 1,
+                    validation,
+                )
+                .context("PROJECTION_PDF_FORM_UNPROVEN: invoked Form content")?
+            };
+            result.actual_text |= child.actual_text;
+            result.cost.add(FormCost {
+                count: 1,
+                bytes: *validation
+                    .receipts
+                    .get(&form_id)
+                    .context("PROJECTION_PDF_STREAM_UNACCOUNTED")?,
+            })?;
+            result.cost.add(child.cost)?;
         }
     }
     validation.active.remove(&id);
-    validation.memo.insert(key, (actual_text, depth));
-    Ok(actual_text)
+    validation.memo.insert(key, result);
+    Ok(result)
 }
 
 // This tokenizer skips strings, hex strings and comments so the word `stream`
@@ -960,7 +1099,7 @@ fn validate_forms(
 // parsed by lopdf in a stream-free envelope; no parser expansion occurs there.
 fn pdf_token(input: &[u8], pos: &mut usize) -> Option<(usize, usize)> {
     while *pos < input.len() {
-        if input[*pos].is_ascii_whitespace() {
+        if input[*pos].is_ascii_whitespace() || input[*pos] == 0 {
             *pos += 1;
             continue;
         }
@@ -1002,6 +1141,7 @@ fn pdf_token(input: &[u8], pos: &mut usize) -> Option<(usize, usize)> {
         _ => {
             while *pos < input.len()
                 && !input[*pos].is_ascii_whitespace()
+                && input[*pos] != 0
                 && !b"()<>[]{}/%".contains(&input[*pos])
             {
                 *pos += 1;
@@ -1234,7 +1374,7 @@ mod character_tests {
 
     #[test]
     fn controls_are_counted_replacements_and_hyphen_marker_joins() {
-        for code in 0..32 {
+        for code in (0..32).chain(127..=159) {
             let c = char::from(code);
             let expected = match c {
                 '\u{0002}' => None,

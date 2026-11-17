@@ -536,7 +536,7 @@ fn projection_pdf_nested_forms_validate_before_text_loading() {
             // and therefore precedes all downstream embedding work.
             let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
             assert!(
-                format!("{error:#}").contains("PROJECTION_PDF_FORM_UNPROVEN"),
+                format!("{error:#}").contains("PROJECTION_PDF_MALFORMED"),
                 "{error:#}"
             );
         } else {
@@ -1199,4 +1199,183 @@ fn projection_pdf_actualtext_in_named_form_and_property_operands() {
         .nodes
         .iter()
         .any(|n| n.text.contains("ORDINARY") && !n.kind.contains("ActualText")));
+}
+
+// Synthetic equivalents of CC r1/r2/r3/s1: no external fixture bytes.
+#[test]
+fn projection_pdf_all_accounted_content_routes_refuse_inline_and_bad_syntax() {
+    for route in ["fallback", "indirect", "string", "glyph", "unused"] {
+        for body in [b"BI /W 1 /H 1 ID x EI".as_slice(), b"BT (unterminated"] {
+            let mut doc = Document::load_mem(&pdf(&["/Outer Do"], false)).unwrap();
+            let inner = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form"}, body.to_vec()));
+            let page = *doc.get_pages().values().next().unwrap();
+            let mut resources = super::pdf::test_resources(&doc, page);
+            let mut xobjects = dictionary! {"Outer"=>inner};
+            match route {
+                "fallback" => {
+                    let outer = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"Font"=>dictionary!{}}}, b"/Inner Do".to_vec()));
+                    xobjects.set("Outer", outer);
+                    xobjects.set("Inner", inner);
+                }
+                "indirect" | "string" => {
+                    let subtype = if route == "indirect" {
+                        Object::Reference(doc.add_object(Object::Name(b"Form".to_vec())))
+                    } else {
+                        Object::string_literal("Form")
+                    };
+                    doc.get_object_mut(inner)
+                        .unwrap()
+                        .as_stream_mut()
+                        .unwrap()
+                        .dict
+                        .set("Subtype", subtype);
+                }
+                "glyph" => {
+                    doc.get_object_mut(inner)
+                        .unwrap()
+                        .as_stream_mut()
+                        .unwrap()
+                        .dict
+                        .remove(b"Subtype");
+                    let procs = doc.add_object(dictionary! {"a"=>inner});
+                    let font = doc.add_object(dictionary! {"Subtype"=>"Type3", "CharProcs"=>procs});
+                    resources.set("Font", dictionary! {"T3"=>font});
+                    xobjects = dictionary! {};
+                }
+                "unused" => {
+                    xobjects = dictionary! {"Unused"=>inner};
+                }
+                _ => unreachable!(),
+            }
+            resources.set("XObject", xobjects);
+            doc.get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Resources", resources);
+            let error = extract_with_pdfium("pdf", &save_pdf(doc), None)
+                .err()
+                .unwrap();
+            let reason = if body.starts_with(b"BI") {
+                "PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"
+            } else {
+                "PROJECTION_PDF_MALFORMED"
+            };
+            assert!(format!("{error:#}").contains(reason), "{route}: {error:#}");
+        }
+    }
+}
+
+fn invocation_pdf(width: usize, levels: usize, leaf_bytes: usize, pages: usize) -> Vec<u8> {
+    let body = "/Top Do ".repeat(width);
+    let mut doc = Document::load_mem(&pdf(&vec![body.as_str(); pages], false)).unwrap();
+    let mut leaf = b"BT /F1 12 Tf 30 700 Td (FORM_TEXT) Tj ET".to_vec();
+    leaf.resize(leaf.len().max(leaf_bytes), b' ');
+    let mut form = doc.add_object(Stream::new(
+        dictionary! {"Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),612.into(),792.into()]},
+        leaf,
+    ));
+    for _ in 1..levels {
+        form = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"XObject"=>dictionary! {"Child"=>form}}}, "/Child Do ".repeat(width).into_bytes()));
+    }
+    for page in doc.get_pages().values() {
+        let mut resources = super::pdf::test_resources(&doc, *page);
+        resources.set("XObject", dictionary! {"Top"=>form});
+        doc.get_object_mut(*page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+    }
+    save_pdf(doc)
+}
+
+#[test]
+fn projection_pdf_form_invocation_count_and_expanded_bytes_are_document_budgets() {
+    for width in [12, 40] {
+        let bytes = invocation_pdf(width, 7, 0, 1);
+        let start = std::time::Instant::now();
+        let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+        assert!(
+            format!("{error:#}").contains("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
+            "{error:#}"
+        );
+        assert!(start.elapsed().as_secs_f64() < 1.0);
+    }
+    // Count is document-wide, including when each page is individually below it.
+    let bytes = invocation_pdf(20_000, 1, 0, 6);
+    let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+    assert!(
+        format!("{error:#}").contains("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
+        "{error:#}"
+    );
+    let bytes = invocation_pdf(20_000, 1, 30_000, 1);
+    let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+    assert!(
+        format!("{error:#}").contains("PROJECTION_DOCUMENT_BYTES_EXCEEDED"),
+        "{error:#}"
+    );
+    let bytes = invocation_pdf(20_000, 1, 0, 1);
+    let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+    assert!(values(&p).contains("FORM_TEXT"));
+}
+
+#[test]
+fn projection_pdf_form_subtype_and_page_property_fallback_flag_actual_text() {
+    for indirect in [false, true] {
+        for operator in ["BDC", "DP"] {
+            let mut doc = Document::load_mem(&pdf(&["/Outer Do"], false)).unwrap();
+            let subtype = if indirect {
+                Object::Reference(doc.add_object(Object::Name(b"Form".to_vec())))
+            } else {
+                Object::string_literal("Form")
+            };
+            let body = format!(
+                "/Span /P1 {operator} BT /F1 12 Tf 30 700 Td (SHOWN) Tj ET {}",
+                if operator == "BDC" { "EMC" } else { "" }
+            );
+            let form = doc.add_object(Stream::new(dictionary! {"Subtype"=>subtype, "BBox"=>vec![0.into(),0.into(),612.into(),792.into()], "Resources"=>dictionary! {}}, body.into_bytes()));
+            let page = *doc.get_pages().values().next().unwrap();
+            let mut resources = super::pdf::test_resources(&doc, page);
+            resources.set("XObject", dictionary! {"Outer"=>form});
+            resources.set("Properties", dictionary! {"P1"=>dictionary! {"ActualText"=>Object::string_literal("REPLACEMENT")}});
+            doc.get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Resources", resources);
+            let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+            assert!(p.nodes.iter().any(|n| n.kind.contains("ActualText")));
+        }
+    }
+}
+
+#[test]
+fn projection_html_meta_x_user_defined_maps_to_windows_1252() {
+    assert_eq!(
+        values(&extract("html", b"<meta charset=x-user-defined><p>\x80\xe9</p>").unwrap()),
+        "€é"
+    );
+}
+
+#[test]
+fn projection_pdf_removed_hyphen_marker_and_c1_controls_are_counted() {
+    let mut doc =
+        Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (ABCD) Tj ET"], false)).unwrap();
+    let cmap = doc.add_object(Stream::new(dictionary! {}, b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap 1 begincodespacerange <00> <FF> endcodespacerange 4 beginbfchar <41> <0058> <42> <0002> <43> <007F> <44> <009F> endbfchar endcmap end end".to_vec()));
+    doc.get_object_mut((4, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("ToUnicode", cmap);
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert!(values(&p).contains("X\u{fffd}\u{fffd}"));
+    assert_eq!(p.drops["unmapped-glyphs"], 3);
+}
+
+#[test]
+fn projection_pdf_nul_delimited_inline_image_refuses_by_name() {
+    let bytes = pdf(&["q\0BI\0/W 1 /H 1 ID x EI Q"], false);
+    let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+    assert!(format!("{error:#}").contains("PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"));
 }
