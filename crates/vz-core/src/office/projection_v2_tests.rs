@@ -1812,7 +1812,7 @@ fn projection_pdf_followup_required_bounded_controls_pass() {
 }
 
 #[test]
-fn projection_pdf_stream_resource_scope_refuses_as_malformed() {
+fn projection_pdf_stream_resource_scope_refuses_as_non_dictionary() {
     // Hand-written classic PDF: a resource stream must not be treated as a
     // dictionary by the structural bound, even when its dictionary looks valid.
     let objects = [
@@ -1838,7 +1838,14 @@ fn projection_pdf_stream_resource_scope_refuses_as_malformed() {
     );
     let error = extract_with_pdfium("pdf", &bytes, Some(&library()))
         .err()
-        .unwrap()
-        .to_string();
-    assert!(error.contains("PROJECTION_PDF_MALFORMED"), "{error}");
+        .unwrap();
+    // Match resource()'s refusal family: a stream is not a resource dictionary.
+    assert!(
+        matches!(
+            error.downcast_ref::<lopdf::Error>(),
+            Some(lopdf::Error::ObjectType { expected, found })
+                if *expected == "Dictionary" && *found == "Stream"
+        ),
+        "{error:#}"
+    );
 }

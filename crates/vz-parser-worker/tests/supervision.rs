@@ -574,6 +574,7 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         }
         .unwrap_err();
         let reason = format!("{failure:#}");
+        eprintln!("projection resource probe (watchdog={watchdog:?}): {reason}");
         assert!(reason.contains(expected), "{reason}");
         assert!(!reason.contains("crashed"), "{reason}");
         assert!(vz_core::failures::is_content(&failure));
