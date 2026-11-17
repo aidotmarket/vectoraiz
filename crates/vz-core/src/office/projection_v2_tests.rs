@@ -1810,3 +1810,35 @@ fn projection_pdf_followup_required_bounded_controls_pass() {
         "{error:#}"
     );
 }
+
+#[test]
+fn projection_pdf_stream_resource_scope_refuses_as_malformed() {
+    // Hand-written classic PDF: a resource stream must not be treated as a
+    // dictionary by the structural bound, even when its dictionary looks valid.
+    let objects = [
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>",
+        "<< /Type /Page /Parent 2 0 R /Resources 4 0 R /Contents 5 0 R >>",
+        "<< /Length 0 /XObject << >> >>\nstream\n\nendstream",
+        "<< /Length 11 >>\nstream\n/Missing Do\nendstream",
+    ];
+    let mut bytes = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(b"xref\n0 6\n0000000000 65535 f \n");
+    for offset in offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!("trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n").as_bytes(),
+    );
+    let error = extract_with_pdfium("pdf", &bytes, Some(&library()))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(error.contains("PROJECTION_PDF_MALFORMED"), "{error}");
+}

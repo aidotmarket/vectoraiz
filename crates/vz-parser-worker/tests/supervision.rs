@@ -528,16 +528,24 @@ fn projection_pdf_resource_network_trap() {
 fn projection_resource_exhaustion_is_a_named_seller_refusal() {
     let dir = tempfile::tempdir().unwrap();
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
-    for (bytes, expected, timeout) in [
+    for (bytes, expected, timeout, watchdog) in [
         (
             b"VZ_RESOURCE_PROBE_RSS\n".as_slice(),
             "PROJECTION_MEMORY_LIMIT_EXCEEDED",
             Duration::from_secs(10),
+            Some(128 * 1024 * 1024),
+        ),
+        (
+            b"VZ_RESOURCE_PROBE_RSS\n".as_slice(),
+            "PROJECTION_MEMORY_LIMIT_EXCEEDED",
+            Duration::from_secs(10),
+            None,
         ),
         (
             b"VZ_RESOURCE_PROBE_DEADLINE\n".as_slice(),
             "PROJECTION_RESOURCE_LIMIT",
             Duration::from_secs(2),
+            Some(128 * 1024 * 1024),
         ),
     ] {
         let path = dir.path().join("resource-exhaustion.pdf");
@@ -557,9 +565,14 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
             }),
         };
         let start = std::time::Instant::now();
-        let failure =
-            vz_core::worker::run_with_watchdog_limit(worker, &request, timeout, 128 * 1024 * 1024)
-                .unwrap_err();
+        // None exercises the shipping entry point and production memory limit.
+        let failure = match watchdog {
+            Some(limit) => {
+                vz_core::worker::run_with_watchdog_limit(worker, &request, timeout, limit)
+            }
+            None => run(worker, &request, timeout),
+        }
+        .unwrap_err();
         let reason = format!("{failure:#}");
         assert!(reason.contains(expected), "{reason}");
         assert!(!reason.contains("crashed"), "{reason}");

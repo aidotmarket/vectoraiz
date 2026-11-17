@@ -35,7 +35,7 @@ fn main() {
         match bytes.as_slice() {
             b"VZ_RESOURCE_PROBE_RSS\n" => {
                 let mut buffers = Vec::new();
-                for _ in 0..16 {
+                for _ in 0..=request.memory_bytes() / (16 * 1024 * 1024) {
                     let mut bytes = Vec::new();
                     if let Err(error) = bytes.try_reserve_exact(16 * 1024 * 1024) {
                         let _ = vz_core::worker::write_frame(

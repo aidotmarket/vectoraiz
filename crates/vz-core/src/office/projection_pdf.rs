@@ -1227,7 +1227,9 @@ fn structural_targets(
     let mut all = BTreeSet::new();
     let mut matched = BTreeSet::new();
     for resources in scope {
-        if let Ok(dict) = resolve(doc, resources)?.as_dict() {
+        let resources = resolve(doc, resources)?;
+        if !matches!(resources, Object::Null) {
+            let dict = resources.as_dict()?;
             if let Ok(map) = dict.get(b"XObject") {
                 for (name, object) in resolve(doc, map)?.as_dict()?.iter() {
                     if let Ok(stream) = resolve(doc, object)?.as_stream() {
