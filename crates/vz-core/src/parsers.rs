@@ -384,6 +384,8 @@ mod tests {
                 path: file.path().to_owned(),
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             })
             .unwrap();
             assert_eq!(pages.len(), 12);
@@ -451,6 +453,8 @@ mod tests {
                 path: path.clone(),
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             })
             .unwrap();
             assert_eq!(
@@ -484,6 +488,8 @@ mod tests {
             path,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         })
         .unwrap();
         assert!(pages[0].text.contains("Searchable ordinary document"));

@@ -71,6 +71,75 @@ class DefaultPinsFold(unittest.TestCase):
         self.assertIn('build --debug --ci --features smoke-test,custom-protocol', workflow)
 
 
+class ListingOriginalsBuildGate(unittest.TestCase):
+    feature = 'listing-originals'
+    dedicated = 'run: cargo test --locked -p vz-pack --features listing-originals office_'
+
+    def check_inputs(self, root):
+        allowed = []
+        for path in [*root.glob('.github/workflows/*'), *root.glob('scripts/**/*')]:
+            if not path.is_file() or path.suffix not in {'.yml', '.yaml', '.py', '.sh', '.ps1', '.js', '.mjs', '.cjs', '.swift', '.bat', '.cmd'}:
+                continue
+            if path == root / 'scripts/native-build-tests.py':
+                continue
+            for line in path.read_text().splitlines():
+                if self.feature in line:
+                    self.assertEqual(path, root / '.github/workflows/native-ci.yml', str(path))
+                    self.assertEqual(line.strip(), self.dedicated, line)
+                    allowed.append(line)
+        package = root / 'app/package.json'
+        if package.exists():
+            for name, command in json.loads(package.read_text()).get('scripts', {}).items():
+                self.assertNotIn(self.feature, command, f'{package}: {name}')
+        self.assertEqual(len(allowed), 1)
+        for path in root.rglob('Cargo.toml'):
+            if any(part in {'target', 'node_modules'} for part in path.parts):
+                continue
+            config = tomllib.loads(path.read_text())
+            features = config.get('features', {})
+            if self.feature in features:
+                self.assertEqual(path, root / 'crates/vz-pack/Cargo.toml')
+                self.assertEqual(features[self.feature], [])
+            def reject_forwarding(table):
+                for key, value in table.items():
+                    if isinstance(value, list):
+                        self.assertFalse(any(isinstance(v, str) and self.feature in v for v in value), str(path))
+                    elif isinstance(value, dict):
+                        reject_forwarding(value)
+            reject_forwarding(config)
+        for path in (root / 'app/src-tauri').rglob('*.json'):
+            if 'node_modules' not in path.parts:
+                self.assertNotIn(self.feature, path.read_text(), str(path))
+
+    def test_originals_only_in_dedicated_test_command(self):
+        self.check_inputs(version.ROOT)
+
+    def test_originals_gate_rejects_shipping_and_forwarding(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / '.github/workflows').mkdir(parents=True)
+            workflow = root / '.github/workflows/native-ci.yml'
+            workflow.write_text(self.dedicated)
+            self.check_inputs(root)
+            workflow.write_text(self.dedicated + '\nrun: cargo build --features listing-originals')
+            with self.assertRaises(AssertionError):
+                self.check_inputs(root)
+            workflow.write_text(self.dedicated)
+            package = root / 'app/package.json'
+            package.parent.mkdir(parents=True)
+            package.write_text(json.dumps({'scripts': {'build': 'cargo build --features listing-originals'}}))
+            with self.assertRaises(AssertionError):
+                self.check_inputs(root)
+            package.write_text(json.dumps({'scripts': {'build': 'vite build'}}))
+            cargo = root / 'Cargo.toml'
+            for text in ['[features]\ndefault=["listing-originals"]',
+                         '[features]\nother=["vz-pack/listing-originals"]',
+                         '[dependencies.vz-pack]\nfeatures=["listing-originals"]']:
+                cargo.write_text(text)
+                with self.assertRaises(AssertionError):
+                    self.check_inputs(root)
+
+
 class ListingPreviewBuildGate(unittest.TestCase):
     feature = 'listing-preview-test-switch'
 
@@ -187,8 +256,8 @@ class ModelTLSFixture(unittest.TestCase):
         with patch('socket.getfqdn', side_effect=AssertionError('reverse DNS requested')):
             # Negative control: the inherited HTTPServer bind really calls DNS.
             with self.assertRaisesRegex(AssertionError, 'reverse DNS requested'):
-                fixture.http.server.ThreadingHTTPServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler)
-            with fixture.LoopbackServer(('127.0.0.1', 0), fixture.http.server.BaseHTTPRequestHandler) as server:
+                fixture.http.server.ThreadingHTTPServer(('127.0.0.1', int(os.environ.get('KD_BRIDGE_PORT_BASE', '0'))), fixture.http.server.BaseHTTPRequestHandler)
+            with fixture.LoopbackServer(('127.0.0.1', int(os.environ.get('KD_BRIDGE_PORT_BASE', '0'))), fixture.http.server.BaseHTTPRequestHandler) as server:
                 self.assertEqual(server.server_name, 'localhost')
                 self.assertGreater(server.server_port, 0)
 
@@ -290,11 +359,11 @@ class UiTestShippingGate(unittest.TestCase):
             else:
                 shutil.copy2(source, dest)
 
-    def invoke(self):
+    def invoke(self, stdout=''):
         # Dependency resolution is exercised by the real CI gate; these tests
         # isolate feature discovery and rejection without invoking Cargo.
         with patch.object(self.gate, 'ROOT', self.root), \
-                patch.object(self.gate.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout='')) as cargo, \
+                patch.object(self.gate.subprocess, 'run', return_value=subprocess.CompletedProcess([], 0, stdout=stdout)) as cargo, \
                 contextlib.redirect_stdout(io.StringIO()):
             self.gate.main()
         return cargo
@@ -308,6 +377,38 @@ class UiTestShippingGate(unittest.TestCase):
 
     def test_unchanged_shipping_inputs_pass(self):
         self.assertGreater(self.invoke().call_count, 0)
+
+    def test_crate_test_features_are_not_app_features(self):
+        cargo = self.invoke()
+        for call in cargo.call_args_list:
+            self.assertNotIn(ListingOriginalsBuildGate.feature, ' '.join(call.args[0]))
+
+    def test_only_standalone_other_package_tests_are_excluded(self):
+        for command, expected in [
+            ('cargo test --locked -p vz-pack --features crate-only office_', []),
+            ('cargo test --package=vz-pack --features crate-only', []),
+            ('cargo test -p vectoraiz --features app-feature', ['app-feature']),
+            ('cargo test --features app-feature', ['app-feature']),
+            ('cargo test --workspace -p vz-pack --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack -p vectoraiz --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack; cargo build --features app-feature', ['app-feature']),
+            ('cargo test -p vz-pack --features app-feature \\', ['app-feature']),
+            ('cargo test -p vz-pack $(cargo build --features app-feature)', ['app-feature']),
+            ('cargo build -p vectoraiz --features app-feature', ['app-feature']),
+            ('npm run tauri -- build --features app-feature', ['app-feature']),
+        ]:
+            with self.subTest(command=command):
+                self.assertEqual(list(self.gate.shipping_cli_features('run: ' + command)), expected)
+
+    def test_crate_test_cannot_hide_ui_test(self):
+        path = self.root / '.github/workflows/crate-test.yml'
+        path.write_text('      - run: cargo test -p vz-pack --features ui-test\n')
+        with self.assertRaisesRegex(AssertionError, 'Shipping workflow enables ui-test'):
+            self.invoke()
+
+    def test_transitive_webdriver_fails(self):
+        with self.assertRaisesRegex(AssertionError, 'WebDriver linked'):
+            self.invoke(stdout='tauri-plugin-wdio-webdriver v0.1.0')
 
     def test_base_config_ui_test_fails(self):
         self.add_features('tauri.conf.json', ['ui-test'])
@@ -454,11 +555,14 @@ class NoticeGenerators(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
         notices = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(notices)
-        for failing in range(3):
+        for failing in range(4):
             with self.subTest(generator=failing), tempfile.TemporaryDirectory() as temporary:
                 root = Path(temporary)
                 output = root / 'THIRD_PARTY_NOTICES'
                 output.write_text('prior output')
+                folder = root / 'docs/native-worker-licenses'
+                folder.mkdir(parents=True)
+                (folder / 'manifest.json').write_text('[]')
                 calls = []
 
                 def generate(argv, **kwargs):
@@ -466,7 +570,9 @@ class NoticeGenerators(unittest.TestCase):
                     if len(calls) - 1 == failing:
                         raise subprocess.CalledProcessError(1, argv)
                     if '-o' in argv:
-                        Path(argv[argv.index('-o') + 1]).write_text('Rust licence')
+                        Path(argv[argv.index('-o') + 1]).write_text('Rust licence\n- dependency 1.0\n')
+                    elif argv[:2] == ['cargo', 'tree']:
+                        return subprocess.CompletedProcess(argv, 0, stdout='dependency v1.0\n')
                     else:
                         kwargs['stdout'].write(b'licence')
 
@@ -476,6 +582,41 @@ class NoticeGenerators(unittest.TestCase):
                     notices.main()
                 self.assertEqual(len(calls), failing + 1)
                 self.assertEqual(output.read_text(), 'prior output')
+
+    def test_worker_notice_hashes_accept_crlf_and_reject_changed_text(self):
+        spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            folder = root / 'docs/native-worker-licenses'
+            folder.mkdir(parents=True)
+            source = b'MIT licence\nCopyright holder\n'
+            (folder / 'manifest.json').write_text(json.dumps([{
+                'name': 'dependency', 'version': '1.0', 'file': 'license.txt',
+                'license_sha256': hashlib.sha256(source).hexdigest(),
+            }]))
+            with patch.object(notices, 'ROOT', root):
+                for data in [source, source.replace(b'\n', b'\r\n')]:
+                    (folder / 'license.txt').write_bytes(data)
+                    result = notices.complete_worker_notices('', 'dependency v1.0\n')
+                    self.assertIn(source.decode(), result)
+                    self.assertNotIn('\r', result)
+                (folder / 'license.txt').write_bytes(source + b'changed')
+                with self.assertRaisesRegex(SystemExit, 'Worker licence text changed'):
+                    notices.complete_worker_notices('', 'dependency v1.0\n')
+
+    def test_worker_notices_cover_bundle_and_refuse_unlisted_dependencies(self):
+        spec = importlib.util.spec_from_file_location('notices', Path(__file__).with_name('native-generate-notices.py'))
+        notices = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(notices)
+        tree = 'vz-parser-worker v0.0.26 (/private/workspace)\nrust-ini v0.21.3\nordered-multimap v0.7.3\ndlv-list v0.5.2\nserde v1.0.229 (*)\n'
+        text = notices.complete_worker_notices('- serde 1.0.229\n', tree)
+        for dependency in ['rust-ini 0.21.3', 'ordered-multimap 0.7.3', 'dlv-list 0.5.2']:
+            self.assertIn('- ' + dependency, text)
+        self.assertEqual(notices.complete_worker_notices(text, tree), text)
+        with self.assertRaisesRegex(SystemExit, 'missing from third-party notices'):
+            notices.complete_worker_notices(text, tree + 'unknown v1.0.0\n')
 
 
 class HelperDiagnostics(unittest.TestCase):

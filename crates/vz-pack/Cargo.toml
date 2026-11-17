@@ -7,6 +7,8 @@ publish.workspace = true
 
 [features]
 default = []
+# Frozen original-file delivery; dedicated regression tests only.
+listing-originals = []
 # Enabled solely by scripts/pipeline-e2e.py's explicit acceptance build.
 listing-preview-harness = []
 # Opt-in exposure for debug desktop Stage 1 bundles only.

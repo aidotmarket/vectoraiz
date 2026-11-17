@@ -49,7 +49,7 @@ try:
         assert 'thirty days' in body.lower(), body
         numbers = [int(n) for n in re.findall(r'\[(\d+)\]', footer)]
         assert numbers and numbers == [c['number'] for c in answer['citations']], answer
-        def office_reviewed_journey(output):
+        def vector_reviewed_journey(output):
             source = journey_source
             changes = Path(temp) / "changes.json"
             changes.write_text(json.dumps({"edits": {"documents.parquet/column/2/name": "reviewed_title", "documents.parquet/column/5/name": "reviewed_language"}, "exclusions": [p.name for p in source.iterdir() if p.suffix not in (".txt", ".md", ".markdown", ".docx", ".xlsx", ".pptx")], "identity_terms": ["private-fixture-identity"]}))
@@ -64,8 +64,8 @@ try:
             # Each format takes the actual reviewed edit/rebuild path before
             # the shared folder, live SFTP and MinIO transfer assertions below.
             office_edits = {}
-            for ext in ("docx", "xlsx", "pptx"):
-                entry = next(e for e in review["metadata_inventory"] if f".{ext}!" in e["location"] and e["kind"] == "Office text" and e["value"])
+            for ext, directory in [("docx", "word"), ("xlsx", "xl"), ("pptx", "ppt")]:
+                entry = next(e for e in review["projection_inventory"] if f"/{directory}/" in e["location"] and e["kind"].startswith("projection ") and e["kind"].endswith(": included") and e["value"])
                 office_edits[entry["location"]] = f"Reviewed {ext} Office content"
             requested = json.loads(changes.read_text())
             requested["origin"] = reference["current"]
@@ -76,10 +76,12 @@ try:
             current_path.write_text(json.dumps(reference["current"]))
             review = cli("review", "--store", reference["store"], "--current", str(current_path))
             for location, value in office_edits.items():
-                assert any(e["location"] == location and e["value"] == value for e in review["metadata_inventory"])
+                assert any(e["location"] == location and e["value"] == value for e in review["projection_inventory"])
             accepted = cli("review", "--store", reference["store"], "--current", str(current_path), "--accept")
             assert accepted["accepted_review_hash"] == reference["current"]["review_hash"]
             manifest = cli("--review-reference", str(reference_path), "pack", str(output), "--query", query)
+            assert manifest["originals"] is False
+            assert {p.relative_to(output).as_posix() for p in output.rglob("*") if p.is_file()} == {"manifest.json", "chunks.parquet", "documents.parquet", "README.md", "examples/query.py", "examples/query.json"}
             for path in output.rglob("*"):
                 if path.is_file():
                     assert b"private-fixture-identity" not in path.read_bytes()
@@ -141,7 +143,7 @@ try:
                 else: os.killpg(server.pid, signal.SIGTERM)
                 server.wait(timeout=15)
             return manifest, reference_path
-        manifest, reference_path = office_reviewed_journey(pack)
+        manifest, reference_path = vector_reviewed_journey(pack)
         # object_pairs_hook runs bottom-up, including objects nested inside arrays.
         def sorted_object(pairs):
             keys = [key for key, _ in pairs]
@@ -216,7 +218,7 @@ try:
         assert pointer == {'dir': f'indexes/{recipe_id}', 'recipe_id': recipe_id}, pointer
         assert cli('search', query), 'search after migration'
         assert cli('ask', query)['citations'], 'Ask after migration'
-        assert office_reviewed_journey(Path(temp) / 'migrated-pack')[0]['embedding_recipe'] == recipe
+        assert vector_reviewed_journey(Path(temp) / 'migrated-pack')[0]['embedding_recipe'] == recipe
         assert cli('index', str(journey_source))['skipped'] == 21
         assert (library / 'active-index.json').read_bytes() == pointer_bytes
         assert (legacy / 'recipe.json').read_bytes() == old_bytes

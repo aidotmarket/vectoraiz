@@ -3,8 +3,10 @@
 Uses Python's TLS server and the OpenSSL already supplied by macOS/Git for Windows.
 No certificate, key or trust override is shipped in the application.
 """
+import errno
 import http.server
 import json
+import os
 from pathlib import Path
 import shutil
 import ssl
@@ -37,7 +39,8 @@ def main():
     config.write_text('[req]\ndistinguished_name=dn\nx509_extensions=ext\nprompt=no\n'
                       f'[dn]\nCN=localhost\n[ext]\nsubjectAltName=DNS:localhost,{provider_names},IP:127.0.0.1\n'
                       'basicConstraints=critical,CA:TRUE\nkeyUsage=digitalSignature,keyEncipherment,keyCertSign\nextendedKeyUsage=serverAuth\n')
-    subprocess.run([openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+    rtk = ['rtk', 'proxy'] if shutil.which('rtk') else []
+    subprocess.run([*rtk, openssl, 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
                     '-config', str(config), '-keyout', str(root / 'key.pem'),
                     '-out', str(root / 'cert.pem')], check=True, stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL)
@@ -122,7 +125,18 @@ def main():
             except (BrokenPipeError, ConnectionError, ssl.SSLError):
                 pass
 
-    server = LoopbackServer(('127.0.0.1', 0), Handler)
+    # Assigned bridge jobs must keep disposable listeners within their range.
+    base = int(os.environ.get('KD_BRIDGE_PORT_BASE', '0'))
+    count = int(os.environ.get('KD_BRIDGE_PORT_COUNT', '1')) if base else 1
+    for port in range(base, base + count):
+        try:
+            server = LoopbackServer(('127.0.0.1', port), Handler)
+            break
+        except OSError as error:
+            if error.errno != errno.EADDRINUSE or port == base + count - 1:
+                raise
+    else:
+        raise RuntimeError('empty TLS fixture port range')
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(root / 'cert.pem', root / 'key.pem')
     server.socket = context.wrap_socket(server.socket, server_side=True)

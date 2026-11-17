@@ -1791,7 +1791,11 @@ async fn listing_rebuild<R: tauri::Runtime>(
             &current,
             false,
         )?;
-        Ok(serde_json::json!({"current":current,"review":review}))
+        let reviews = vz_pack::review_store::ReviewStore::open(&store)?;
+        let guard =
+            reviews.lock_native_current(vz_pack::listing_policy::system(), &current, &library)?;
+        let source_mapping = guard.source_mapping(&current)?;
+        Ok(serde_json::json!({"current":current,"review":review,"source_mapping":source_mapping}))
     })
     .await
     .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::Error::from(e)))?

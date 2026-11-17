@@ -9,9 +9,11 @@ use hmac::{Hmac, Mac};
 use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use sha2::Sha256;
+#[cfg(any(test, feature = "listing-originals"))]
+use std::io::Cursor;
 use std::{
     collections::BTreeMap,
-    io::{Cursor, Read, Write},
+    io::{Read, Write},
     path::Path,
 };
 use uuid::Uuid;
@@ -28,28 +30,40 @@ pub struct Candidate {
     pub format: String,
     pub supported: bool,
     pub refusal: Option<String>,
+    /// Private source-only summary, available even when all text is hidden.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection_summary: Option<serde_json::Value>,
 }
+
+#[cfg(not(feature = "listing-originals"))]
+#[path = "review_vector.rs"]
+mod vector;
+#[cfg(not(feature = "listing-originals"))]
+use vector::build;
 
 pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
     let policy = crate::listing_policy::system();
     policy.require_preview()?;
     let lease = policy.policy_lease()?;
     let source = source.canonicalize()?;
+    let started = std::time::Instant::now();
     let candidates = crate::review_store::NativeIndexFence::candidate_documents(library, &source)?
         .into_iter()
         .enumerate()
         .map(|(position, doc)| {
-            let artifact = format!(
-                "originals-0001.zip!document-{:04}.{}",
-                position + 1,
-                doc.kind
-            );
+            let artifact = candidate_location(position, &doc.kind);
             lease.check(policy)?;
             let mut budget = Budget::default();
             budget.enable_office();
+            budget.started = Some(started);
             budget.cancel = Some(lease.cancellation_token());
             let refusal = preparation_refusal(&doc, &artifact, &mut budget);
+            #[cfg(not(feature = "listing-originals"))]
+            let projection_summary = budget.projection.as_ref().map(|projection| json!({"mandatory_drops":projection.drops,"hidden_locations":projection.nodes.iter().filter(|n|n.hidden).map(|n|&n.location).collect::<Vec<_>>()}));
+            #[cfg(feature = "listing-originals")]
+            let projection_summary = None;
             Ok(Candidate {
+                projection_summary,
                 source: Path::new(&doc.path)
                     .strip_prefix(&source)?
                     .to_str()
@@ -64,6 +78,18 @@ pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
         .collect::<Result<Vec<_>>>()?;
     lease.check(policy)?;
     Ok(candidates)
+}
+
+fn candidate_location(position: usize, kind: &str) -> String {
+    #[cfg(feature = "listing-originals")]
+    {
+        format!("originals-0001.zip!document-{:04}.{kind}", position + 1)
+    }
+    #[cfg(not(feature = "listing-originals"))]
+    {
+        let _ = kind;
+        format!("projection/document-{:04}", position + 1)
+    }
 }
 
 // Run the production rebuild worker, including its independent readback and
@@ -87,8 +113,20 @@ fn preparation_refusal(
                 64 * 1024 * 1024
             },
         )?;
+        #[cfg(feature = "listing-originals")]
         if office {
             sanitize::office_worker(artifact, &bytes, budget, false)?;
+        }
+        #[cfg(not(feature = "listing-originals"))]
+        {
+            budget.projection = Some(vector::project(
+                artifact,
+                &doc.kind,
+                &bytes,
+                budget.cancel.clone(),
+                budget.started.unwrap_or_else(std::time::Instant::now),
+                std::time::Duration::ZERO,
+            )?);
         }
         Ok(())
     })();
@@ -137,6 +175,7 @@ fn put(root: &Path, name: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "listing-originals")]
 fn build(
     pack: &NativePackReview<'_>,
     source: &Path,
@@ -567,6 +606,7 @@ fn build(
             staged_artifacts: Vec::new(),
             metadata_inventory_schema_version: 1,
             metadata_inventory: inventory,
+            projection_inventory: Vec::new(),
             source_revision: String::new(),
             index_revision: String::new(),
             embedding_recipe_sha256: "0".repeat(64).try_into().map_err(anyhow::Error::msg)?,
@@ -612,6 +652,7 @@ mod tests {
     use crate::listing_policy::{ListingPolicy, ManagedPolicy, PolicySource};
     use std::sync::{Arc, Mutex};
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn preparation_reports_every_refusal_with_production_worker_reasons() {
         let temp = tempfile::tempdir().unwrap();
         let cases: &[(&str, &[u8])] = &[
@@ -776,6 +817,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn path_ids_are_private_and_independent_packs_cannot_be_linked_by_id() {
         let f = Fixture::with_path_ids(true);
         let source_id = sha256(
@@ -838,6 +880,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn title_edit_follows_document_after_exclusion_and_heading_retarget_refuses() {
         let f = Fixture::new();
         let mut state = State::open(&f.root.join("index")).unwrap();
@@ -954,6 +997,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn delivered_inventory_roundtrip_native_generation_and_changed_embeddings() {
         let f = Fixture::new();
         let id = Uuid::new_v4();
@@ -1051,6 +1095,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn chart_source_bindings_survive_private_review_generations() {
         let f = Fixture::new();
         let marker = "private-S1934-charted-cell-marker";
@@ -1167,6 +1212,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn office_removals_stay_linear_across_edit_generations() {
         let f = Fixture::new();
         let source = f.root.join("source");
@@ -1255,6 +1301,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn build_reports_hidden_sheet_at_preserved_attribute_without_private_values() {
         use std::io::{Read, Write};
         let f = Fixture::new();
@@ -1334,6 +1381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "listing-originals")]
     fn office_edit_exclusion_rechunk_and_generation_binding() {
         let f = Fixture::new();
         let bytes = include_bytes!("../../../spike/fixtures/documents/library.docx");
@@ -1412,6 +1460,490 @@ mod tests {
             build(&guard, &source, id, &f.engine, "query", &changes).is_err(),
             "restoring bytes cannot revive a revoked Office edit origin"
         );
+    }
+
+    #[cfg(not(feature = "listing-originals"))]
+    fn projection_fixture(f: &Fixture) -> Vec<u8> {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:r><w:t>DISPLAYED_RESULT</w:t></w:r><w:r><w:t> con</w:t></w:r><w:r><w:t>fidential agree</w:t></w:r><w:r><w:t>ment Ac</w:t></w:r><w:r><w:t>me</w:t></w:r><w:del><w:r><w:delText>DELETION_CANARY</w:delText></w:r></w:del><w:moveFrom><w:r><w:t>MOVED_CANARY</w:t></w:r></w:moveFrom><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:sdt><w:sdtContent><w:r><w:t>INSTRUCTION_CANARY</w:t></w:r></w:sdtContent></w:sdt><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>FIELD_RESULT</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>HIDDEN_CANARY</w:t></w:r></w:p><w:tbl><w:tr><w:trPr><w:del/></w:trPr><w:tc><w:p><w:r><w:t>DELETED_ROW_CANARY</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:tcPr><w:cellDel/></w:tcPr><w:p><w:r><w:t>DELETED_CELL_CANARY</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p><w:r><w:drawing><pic:pic><pic:nvPicPr><pic:cNvPr descr="Acme PICTURE_ALT_CANARY" title="PICTURE_TITLE_CANARY"/></pic:nvPicPr></pic:pic><dgm:relIds r:dm="model"/></w:drawing></w:r></w:p></w:body></w:document>"#;
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (name, text) in [
+            ("word/document.xml", xml),
+            (
+                "word/_rels/document.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="model" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/diagramData" Target="diagrams/data1.xml"/></Relationships>"#,
+            ),
+            (
+                "word/diagrams/data1.xml",
+                r#"<dgm:dataModel xmlns:dgm="http://schemas.openxmlformats.org/drawingml/2006/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram"><dgm:ptLst><dgm:pt modelId="node"><dgm:t><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dgm:t></dgm:pt></dgm:ptLst><dsp:dataModelExt relId="cache"/></dgm:dataModel>"#,
+            ),
+            (
+                "word/diagrams/_rels/data1.xml.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="cache" Type="http://schemas.microsoft.com/office/2007/relationships/diagramDrawing" Target="drawing1.xml"/></Relationships>"#,
+            ),
+            (
+                "word/diagrams/drawing1.xml",
+                r#"<dsp:drawing xmlns:dsp="http://schemas.microsoft.com/office/drawing/2008/diagram" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><dsp:sp modelId="node"><dsp:nvSpPr><dsp:cNvPr descr="Acme SMARTART_ALT_CANARY" title="SMARTART_TITLE_CANARY"/></dsp:nvSpPr><a:p><a:r><a:t>PAIRED_TEXT</a:t></a:r></a:p></dsp:sp></dsp:drawing>"#,
+            ),
+            ("word/comments.xml", "<comments>COMMENT_CANARY</comments>"),
+            (
+                "docProps/core.xml",
+                "<properties>PROPERTY_CANARY</properties>",
+            ),
+            (
+                "_rels/.rels",
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#,
+            ),
+        ] {
+            zip.start_file(name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(text.as_bytes()).unwrap();
+        }
+        let bytes = zip.finish().unwrap().into_inner();
+        index_poisoned_projection(f, "docx", &bytes);
+        bytes
+    }
+
+    #[cfg(not(feature = "listing-originals"))]
+    fn index_poisoned_projection(f: &Fixture, kind: &str, bytes: &[u8]) {
+        let path = f.root.join(format!("source/private-source.{kind}"));
+        std::fs::write(&path, bytes).unwrap();
+        let id = format!("poisoned-{kind}");
+        let mut doc = vz_core::pipeline::Document {
+            doc_id: id.clone(),
+            path: path.to_str().unwrap().into(),
+            sha256: sha256(bytes),
+            bytes: bytes.len() as u64,
+            pages: 1,
+            kind: kind.into(),
+            needs_ocr_pages: vec![],
+            chunks: chunk(&id, &[Page {
+                page: 1,
+                text: "DELETION_CANARY MOVED_CANARY INSTRUCTION_CANARY COMMENT_CANARY PROPERTY_CANARY FORMULA_CANARY INDEX_POISON".into(),
+                needs_ocr: false,
+            }]),
+        };
+        for c in &mut doc.chunks {
+            c.embedding = vec![999.; 3];
+        }
+        let index = f.root.join("index");
+        let mut state = State::open(&index).unwrap();
+        let generation = Uuid::new_v4().to_string();
+        let directory = index.join("generations").join(&generation);
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(
+            directory.join("document.json"),
+            serde_json::to_vec(&doc).unwrap(),
+        )
+        .unwrap();
+        state.commit(&doc, "poisoned", &generation).unwrap();
+    }
+
+    #[cfg(not(feature = "listing-originals"))]
+    fn other_office_projection_fixtures(f: &Fixture) {
+        for (kind, main, parts) in [
+            (
+                "xlsx",
+                "xl/workbook.xml",
+                vec![
+                    (
+                        "xl/workbook.xml",
+                        r#"<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Reviewed sheet" sheetId="1" r:id="sheet"/></sheets></workbook>"#,
+                    ),
+                    (
+                        "xl/_rels/workbook.xml.rels",
+                        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="sheet" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#,
+                    ),
+                    (
+                        "xl/worksheets/sheet1.xml",
+                        r#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="str"><f>FORMULA_CANARY</f><v>CACHED_RESULT</v></c><c r="B1" t="e"><f>ERROR_FORMULA_CANARY</f><v>#DIV/0!</v></c></row></sheetData></worksheet>"#,
+                    ),
+                    ("xl/comments1.xml", "<comments>COMMENT_CANARY</comments>"),
+                ],
+            ),
+            (
+                "pptx",
+                "ppt/presentation.xml",
+                vec![
+                    (
+                        "ppt/presentation.xml",
+                        r#"<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId id="1" r:id="slide"/></p:sldIdLst></p:presentation>"#,
+                    ),
+                    (
+                        "ppt/_rels/presentation.xml.rels",
+                        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="slide" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#,
+                    ),
+                    (
+                        "ppt/charts/chart1.xml",
+                        r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:r><a:t>Annual</a:t></a:r><a:br/><a:r><a:t>Rev</a:t></a:r><a:r><a:t>enue</a:t></a:r></a:p></c:rich></c:tx></c:title></c:chart></c:chartSpace>"#,
+                    ),
+                    (
+                        "ppt/slides/slide1.xml",
+                        r#"<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="chart"/><p:sp><p:txBody><a:p><a:r><a:t>SLIDE_RESULT con</a:t></a:r><a:r><a:t>fidential agree</a:t></a:r><a:r><a:t>ment Ac</a:t></a:r><a:r><a:t>me</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#,
+                    ),
+                    (
+                        "ppt/slides/_rels/slide1.xml.rels",
+                        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="chart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart1.xml"/><Relationship Id="notes" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/notesSlide" Target="../notesSlides/notes1.xml"/></Relationships>"#,
+                    ),
+                    (
+                        "ppt/notesSlides/notes1.xml",
+                        r#"<p:notes xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:p><a:r><a:t>NOTES_RESULT</a:t></a:r></a:p></p:notes>"#,
+                    ),
+                    (
+                        "ppt/comments/comment1.xml",
+                        "<comments>COMMENT_CANARY</comments>",
+                    ),
+                ],
+            ),
+        ] {
+            let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            let root = format!(
+                r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="root" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{main}"/></Relationships>"#
+            );
+            for (name, text) in parts.into_iter().chain([
+                ("_rels/.rels", root.as_str()),
+                (
+                    "docProps/core.xml",
+                    "<properties>PROPERTY_CANARY</properties>",
+                ),
+            ]) {
+                zip.start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                zip.write_all(text.as_bytes()).unwrap();
+            }
+            index_poisoned_projection(f, kind, &zip.finish().unwrap().into_inner());
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn vector_only_payload_contract_and_projection_exclusion_canaries() {
+        let f = Fixture::new();
+        let source_bytes = projection_fixture(&f);
+        other_office_projection_fixtures(&f);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let mut changes = Fixture::changes();
+        changes.identity_terms = vec!["Acme".into()];
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        let review = guard.inspect(&current).unwrap();
+        for marker in [
+            "DELETION_CANARY",
+            "DELETED_ROW_CANARY",
+            "DELETED_CELL_CANARY",
+            "MOVED_CANARY",
+            "INSTRUCTION_CANARY",
+            "COMMENT_CANARY",
+            "PROPERTY_CANARY",
+            "FORMULA_CANARY",
+            "HIDDEN_CANARY",
+            "INDEX_POISON",
+        ] {
+            assert!(
+                f.engine
+                    .texts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .all(|s| !s.contains(marker)),
+                "embedding input: {marker}"
+            );
+            assert!(
+                review
+                    .metadata_inventory
+                    .iter()
+                    .filter_map(|e| e.value.as_ref())
+                    .all(|s| !s.contains(marker)),
+                "delivered inventory: {marker}"
+            );
+        }
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("FIELD_RESULT")));
+        for retained in ["CACHED_RESULT", "#DIV/0!", "SLIDE_RESULT", "NOTES_RESULT"] {
+            assert!(
+                f.engine
+                    .texts
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.contains(retained)),
+                "missing embedding input: {retained}"
+            );
+        }
+        assert!(review
+            .warnings
+            .iter()
+            .any(|s| s.contains("mandatory drop deletions: 3")));
+        assert!(review
+            .projection_inventory
+            .iter()
+            .any(|e| e.kind.contains("hidden") && e.kind.ends_with("omitted")));
+        let inputs = f.engine.texts.lock().unwrap();
+        // Chunking normalizes the projected line break to a word separator.
+        assert!(inputs.iter().any(|s| s.contains("Annual Revenue")));
+        assert!(inputs
+            .iter()
+            .all(|s| !s.contains("AnnualRevenue") && !s.contains("Rev enue")));
+        assert!(
+            inputs
+                .iter()
+                .filter(|s| s.contains("confidential agreement Acme"))
+                .count()
+                >= 2
+        );
+        for marker in [
+            "PICTURE_ALT_CANARY",
+            "PICTURE_TITLE_CANARY",
+            "SMARTART_ALT_CANARY",
+            "SMARTART_TITLE_CANARY",
+        ] {
+            assert!(
+                inputs.iter().any(|s| s.contains(marker)),
+                "embedding input: {marker}"
+            );
+            assert!(
+                review
+                    .projection_inventory
+                    .iter()
+                    .any(|e| e.kind.contains("alt text")
+                        && e.value.as_ref().is_some_and(|s| s.contains(marker))
+                        && e.warning),
+                "private inventory: {marker}"
+            );
+        }
+        assert!(review
+            .projection_inventory
+            .iter()
+            .filter(|e| e
+                .value
+                .as_ref()
+                .is_some_and(|s| s.contains("confidential agreement Acme")))
+            .all(|e| e.warning));
+        assert!(review.metadata_inventory.iter().any(|e| e.warning
+            && e.value
+                .as_ref()
+                .is_some_and(|s| s.contains("confidential agreement Acme"))));
+        let mapping = guard.source_mapping(&current).unwrap();
+        assert!(review
+            .projection_inventory
+            .iter()
+            .any(|e| e.location.starts_with(&mapping["private-source.docx"])));
+        drop(inputs);
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        crate::vector_payload::verify(&payload).unwrap();
+        assert_eq!(crate::verify(&payload).unwrap()["originals"], false);
+        assert!(!payload.join("originals-0001.zip").exists());
+        crate::review_transfer::package(&guard, &current, &payload, &f.root.join("delivery"))
+            .unwrap();
+        assert_eq!(
+            std::fs::read(f.root.join("source/private-source.docx")).unwrap(),
+            source_bytes
+        );
+        assert!(review
+            .metadata_inventory
+            .iter()
+            .filter_map(|e| e.value.as_ref())
+            .all(|s| !s.contains("private-source")));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn projection_hidden_seller_choice_and_edit_generation_binding() {
+        let f = Fixture::new();
+        projection_fixture(&f);
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let mut changes = Fixture::changes();
+        let first = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        guard.accept(&first).unwrap();
+        f.engine.texts.lock().unwrap().clear();
+        changes.include_hidden = true;
+        let second = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(guard.check_accepted(&first).is_err());
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("HIDDEN_CANARY")));
+        let review = guard.inspect(&second).unwrap();
+        for marker in ["DELETED_ROW_CANARY", "DELETED_CELL_CANARY"] {
+            assert!(f
+                .engine
+                .texts
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|s| !s.contains(marker)));
+            assert!(review
+                .metadata_inventory
+                .iter()
+                .filter_map(|e| e.value.as_ref())
+                .all(|s| !s.contains(marker)));
+        }
+
+        let hidden = review
+            .projection_inventory
+            .iter()
+            .find(|e| e.value.as_deref() == Some("HIDDEN_CANARY"))
+            .unwrap();
+        let key = hidden.location.clone();
+        changes.origin = Some(second.clone());
+        changes
+            .edits
+            .insert(key.clone(), "Reviewed hidden replacement ".repeat(600));
+        f.engine.texts.lock().unwrap().clear();
+        let third = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s.contains("Reviewed hidden replacement")));
+        assert!(guard
+            .inspect(&third)
+            .unwrap()
+            .projection_inventory
+            .iter()
+            .any(|e| e.location == key && e.value.as_ref() == changes.edits.get(&key)));
+        assert!(
+            build(
+                &guard,
+                &f.root.join("source"),
+                id,
+                &f.engine,
+                "query",
+                &changes
+            )
+            .is_err(),
+            "stale origin cannot edit another generation"
+        );
+        changes.origin = Some(third);
+        changes.edits.clear();
+        changes.exclusions.insert(key);
+        f.engine.texts.lock().unwrap().clear();
+        let fourth = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| !s.contains("HIDDEN_CANARY")));
+        guard.accept(&fourth).unwrap();
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn legacy_originals_generation_refused_at_package_and_transfer() {
+        let f = Fixture::new();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let current = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &Fixture::changes(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        let legacy = f.root.join("legacy");
+        std::fs::create_dir(&legacy).unwrap();
+        for name in crate::vector_payload::FILES {
+            put(&legacy, name, &std::fs::read(payload.join(name)).unwrap()).unwrap();
+        }
+        put(&legacy, "originals-0001.zip", b"legacy source bytes").unwrap();
+        let mut manifest = crate::verify(&legacy).unwrap();
+        manifest["originals"] = json!(true);
+        manifest["files"]["originals-0001.zip"] = json!(sha256(b"legacy source bytes"));
+        std::fs::write(
+            legacy.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut review = guard.inspect(&current).unwrap();
+        review.accepted_review_hash = None;
+        review.completed_transfer_fingerprint = None;
+        let legacy_current = guard
+            .freeze_sanitized(
+                guard.capture(&f.root.join("source")).unwrap(),
+                review,
+                &legacy,
+                json!({"identity_terms":[]}),
+            )
+            .unwrap();
+        guard.accept(&legacy_current).unwrap(); // simulate a locally accepted pre-upgrade generation
+        assert!(guard.reviewed_payload(&legacy_current).is_err());
+        assert!(crate::review_transfer::package(
+            &guard,
+            &legacy_current,
+            &legacy,
+            &f.root.join("refused")
+        )
+        .is_err());
+        assert!(
+            crate::review_transfer::check_input(&guard, &legacy_current, &legacy, &legacy).is_err()
+        );
+        assert!(!f.root.join("refused").exists());
     }
 
     #[test]

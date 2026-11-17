@@ -29,6 +29,8 @@ fn main() -> anyhow::Result<()> {
             path: path.clone(),
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         });
         let (pages, error) = match result {
             Ok(pages) => (pages.len(), None),

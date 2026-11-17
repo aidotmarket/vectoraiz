@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tomllib
 
@@ -13,6 +14,22 @@ def cargo_features(values):
     """Normalize Tauri/CLI feature lists, including workspace-qualified names."""
     return {feature.removeprefix("vectoraiz/")
             for value in values for feature in re.split(r"[,\s]+", value) if feature}
+
+
+def shipping_cli_features(content):
+    """Keep app feature checks separate from explicitly scoped crate tests."""
+    for line in content.splitlines():
+        command = line.strip().removeprefix("run:").strip()
+        if (command.startswith("cargo test ")
+                and not any(character in command for character in ";&|\\\n$`<>()")):
+            args = shlex.split(command)
+            packages = re.findall(r"(?:^|\s)(?:-p|--package)[ =]+([\w-]+)(?=\s|$)", command)
+            # Only omit standalone tests explicitly selecting other packages.
+            # Unscoped/workspace/app tests and compound commands stay checked.
+            if (packages and "vectoraiz" not in packages
+                    and "--workspace" not in args):
+                continue
+        yield from re.findall(r"--features[ =]+([\w,/-]+)", line)
 
 
 def shipping_config_features():
@@ -44,7 +61,7 @@ def main():
         if path.name == "native-ci.yml":
             content = content.split("  ui-test-macos:", 1)[0]
         assert "ui-test" not in content, f"Shipping workflow enables ui-test: {path}"
-        for features in re.findall(r"--features[ =]+([\w,/-]+)", content):
+        for features in shipping_cli_features(content):
             feature_sets[features] = str(path.relative_to(ROOT))
     for cli_features, label in feature_sets.items():
         # Conservatively include every shipping overlay, even if an overlay

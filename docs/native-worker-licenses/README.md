@@ -1,0 +1,1 @@
+Pinned MIT licence texts from the crates.io packages identified in manifest.json and Cargo.lock. dlv-list is dual licensed; this listing selects MIT. These supplement three dependencies omitted by cargo-about from the worker graph. The notice generator checks the actual worker dependency tree and refuses any remaining missing attribution. No worker code is vendored here.

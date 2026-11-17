@@ -15,6 +15,8 @@ fn failed_file_does_not_prevent_next_worker() {
             path: bad,
             pdfium: None,
             office: None,
+            projection: None,
+            readback: None,
         },
         Duration::from_secs(10),
     )
@@ -27,6 +29,8 @@ fn failed_file_does_not_prevent_next_worker() {
                 path: good,
                 pdfium: None,
                 office: None,
+                projection: None,
+                readback: None,
             },
             Duration::from_secs(10)
         )
@@ -43,6 +47,8 @@ fn office_time_and_cancel_bounds() {
     let request = Request {
         path: "timeout".into(),
         pdfium: None,
+        projection: None,
+        readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "fixture.docx".into(),
             output: "unused".into(),
@@ -57,6 +63,8 @@ fn office_time_and_cancel_bounds() {
         let mut request = Request {
             path: request.path.clone(),
             pdfium: None,
+            projection: None,
+            readback: None,
             office: Some(vz_core::worker::OfficeJob {
                 name: "fixture.docx".into(),
                 output: "unused".into(),
@@ -93,6 +101,8 @@ fn timeout_and_crash() {
         path: path.into(),
         pdfium: None,
         office: None,
+        projection: None,
+        readback: None,
     };
     for (path, expected, timeout) in [
         ("timeout", "timeout", Duration::from_millis(500)),
@@ -117,13 +127,22 @@ fn timeout_and_crash() {
 #[test]
 fn macos_worker_denies_outbound_network() {
     use std::process::{Command, Stdio};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = std::net::TcpListener::bind((
+        "127.0.0.1",
+        std::env::var("KD_BRIDGE_PORT_BASE")
+            .ok()
+            .map(|p| p.parse::<u16>().expect("reserved test port"))
+            .unwrap_or(0),
+    ))
+    .unwrap();
     let port = listener.local_addr().unwrap().port();
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
     let request = Request {
         path: format!("network:{port}").into(),
         pdfium: None,
         office: None,
+        projection: None,
+        readback: None,
     };
     let mut baseline = Command::new(worker)
         .stdin(Stdio::piped())
@@ -151,6 +170,8 @@ fn macos_memory_budget_kills_worker() {
         path: "memory".into(),
         pdfium: None,
         office: None,
+        projection: None,
+        readback: None,
     };
     let error = run(
         Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe")),
@@ -167,6 +188,8 @@ fn office_memory_cap_has_named_refusal() {
     let request = Request {
         path: "memory".into(),
         pdfium: None,
+        projection: None,
+        readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "capacity.xlsx".into(),
             output: "unused".into(),
@@ -232,6 +255,8 @@ fn pages_without_text_use_platform_ocr_policy() {
             path,
             pdfium: Some(library.canonicalize().unwrap()),
             office: None,
+            projection: None,
+            readback: None,
         },
         Duration::from_secs(60),
     )
@@ -248,6 +273,8 @@ fn pdfium_io_and_spawn_failure_remain_infrastructure_through_transport() {
         path: "pdfium-io".into(),
         pdfium: None,
         office: None,
+        projection: None,
+        readback: None,
     };
     let failure = run(worker, &request, Duration::from_secs(5)).unwrap_err();
     assert!(!vz_core::failures::is_content(&failure));
@@ -259,4 +286,72 @@ fn pdfium_io_and_spawn_failure_remain_infrastructure_through_transport() {
     )
     .unwrap_err();
     assert!(!vz_core::failures::is_content(&failure));
+}
+
+#[test]
+fn projection_worker_time_and_cancel_bounds() {
+    use std::time::Instant;
+    let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
+    for readback in [false, true] {
+        let request = Request {
+            path: "timeout".into(),
+            pdfium: None,
+            office: None,
+            projection: (!readback).then(|| vz_core::worker::ProjectionJob {
+                kind: "docx".into(),
+                output: "unused".into(),
+            }),
+            readback: readback.then(|| vz_core::worker::ReadbackJob {
+                name: "chunks.parquet".into(),
+                output: "unused".into(),
+                identity_terms: vec![],
+            }),
+        };
+        let start = Instant::now();
+        assert!(run(worker, &request, Duration::from_millis(100))
+            .unwrap_err()
+            .to_string()
+            .contains("timeout"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let start = Instant::now();
+        let error =
+            vz_core::worker::run_cancellable(worker, &request, Duration::from_secs(120), || {
+                if start.elapsed() > Duration::from_millis(50) {
+                    Err(std::io::Error::other("projection cancel").into())
+                } else {
+                    Ok(())
+                }
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("projection cancel"));
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn projection_memory_cap_has_named_refusal() {
+    let request = Request {
+        path: "memory".into(),
+        pdfium: None,
+        office: None,
+        readback: None,
+        projection: Some(vz_core::worker::ProjectionJob {
+            kind: "capacity.xlsx".into(),
+            output: "unused".into(),
+        }),
+    };
+    let error = run(
+        Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe")),
+        &request,
+        Duration::from_secs(30),
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("PROJECTION_MEMORY_LIMIT_EXCEEDED")
+            && error.contains("1073741824")
+            && error.contains("last observed"),
+        "{error}"
+    );
 }
