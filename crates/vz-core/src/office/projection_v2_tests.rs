@@ -569,8 +569,20 @@ fn projection_pdf_inherited_boxes_null_refs_actualtext_and_annotation_counts() {
     doc.catalog_mut()
         .unwrap()
         .set("VZGuardFailure", Object::string_literal("FORGED_REASON"));
+    // A structure attribute dictionary is not an action. A link action is.
+    doc.catalog_mut().unwrap().set("StructTreeRoot", dictionary! {"K"=>dictionary!{"Type"=>"StructElem","S"=>"P","A"=>dictionary!{"O"=>"Layout"}}});
+    let page = *doc.get_pages().values().next().unwrap();
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "A",
+            dictionary! {"S"=>"URI","URI"=>Object::string_literal("https://example.invalid/")},
+        );
     let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
     assert_eq!(p.drops["annotations"], 2);
+    assert_eq!(p.drops["actions"], 1);
     assert!(p
         .nodes
         .iter()

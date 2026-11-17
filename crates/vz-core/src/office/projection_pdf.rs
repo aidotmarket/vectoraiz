@@ -578,7 +578,10 @@ fn walk(
                             }
                         }
                     }
-                } else if key != b"A" || dict.get(b"S").is_ok_and(|s| matches!(s, Object::Name(_)))
+                } else if key != b"A"
+                    || resolve(doc, value)?.as_dict().is_ok_and(|action| {
+                        action.get(b"S").is_ok_and(|s| matches!(s, Object::Name(_)))
+                    })
                 {
                     out.drop_at(category, &location)?;
                 }
