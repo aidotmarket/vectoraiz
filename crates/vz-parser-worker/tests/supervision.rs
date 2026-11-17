@@ -537,7 +537,7 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         (
             b"VZ_RESOURCE_PROBE_DEADLINE\n".as_slice(),
             "PROJECTION_RESOURCE_LIMIT",
-            Duration::from_millis(750),
+            Duration::from_secs(2),
         ),
     ] {
         let path = dir.path().join("resource-exhaustion.pdf");

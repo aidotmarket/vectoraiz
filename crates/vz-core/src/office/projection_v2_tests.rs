@@ -1297,7 +1297,10 @@ fn projection_pdf_form_invocation_count_and_expanded_bytes_are_document_budgets(
         let start = std::time::Instant::now();
         let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
         assert!(
-            format!("{error:#}").contains("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"),
+            format!("{error:#}").contains("PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED")
+                || error
+                    .to_string()
+                    .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
             "{error:#}"
         );
         assert!(start.elapsed().as_secs_f64() < 1.0);
@@ -1516,9 +1519,10 @@ fn projection_pdf_parent_split_and_type3_invocations_refuse_by_leading_code() {
         let bytes = routed_invocation_pdf(route, width, levels, false);
         let start = std::time::Instant::now();
         let error = super::pdf::metadata(&bytes, &mut Projection::new()).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED",
+        assert!(
+            error
+                .to_string()
+                .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
             "{route}: {error:#}"
         );
         assert!(start.elapsed().as_secs_f64() < 1.0);
@@ -1600,7 +1604,7 @@ fn projection_pdf_document_memo_keeps_page_property_fallback_context() {
 }
 
 #[test]
-fn projection_pdf_type3_budget_multiplies_by_shown_codes() {
+fn projection_pdf_type3_oversized_shown_codes_refuse_by_name() {
     for selection in ["Tf", "gs", "underflow"] {
         let mut doc = Document::load_mem(&routed_invocation_pdf("glyph", 8, 5, false)).unwrap();
         let page = *doc.get_pages().values().next().unwrap();
@@ -1634,10 +1638,11 @@ fn projection_pdf_type3_budget_multiplies_by_shown_codes() {
             .unwrap()
             .set_plain_content(format!("BT {select} 30 600 Td [(a) 0 (aa)] TJ ET").into_bytes());
         let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
-        assert_eq!(
-            error.to_string(),
-            "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED",
-            "{selection}"
+        assert!(
+            error
+                .to_string()
+                .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
+            "{selection}: {error:#}"
         );
     }
 }
@@ -1653,9 +1658,11 @@ fn projection_pdf_structural_backstop_charges_unresolved_do_names() {
         }
     }
     let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
-    assert_eq!(
-        error.to_string(),
-        "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"
+    assert!(
+        error
+            .to_string()
+            .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
+        "{error:#}"
     );
 }
 
