@@ -214,6 +214,16 @@ fn load_model(
         .map_err(Into::into)
 }
 impl Engines {
+    pub fn pdfium_library(&self) -> PathBuf {
+        self.assets.join(if cfg!(windows) {
+            "pdfium/bin/pdfium.dll"
+        } else if cfg!(target_os = "macos") {
+            "pdfium/lib/libpdfium.dylib"
+        } else {
+            "pdfium/lib/libpdfium.so"
+        })
+    }
+
     /// Preserve eager loading for existing CLI/MCP callers.
     pub fn load(assets: &Path, pins: &Path, cpu: bool) -> Result<Self> {
         let engines = Self::load_embedding(assets, pins, cpu)?;

@@ -1,11 +1,18 @@
 //! Source-only sale projection v1. Does not call search, rebuild or readback.
 //! Private node locations and omission records must never enter the payload.
 use super::*;
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 const PART_BYTES: u64 = 256_000_000;
 const DOCUMENT_BYTES: u64 = 512_000_000;
+#[path = "projection_html.rs"]
+mod html;
+#[path = "projection_pdf.rs"]
+mod pdf;
 #[path = "projection_graphics.rs"]
 mod projected_graphics;
+#[cfg(test)]
+#[path = "projection_v2_tests.rs"]
+mod v2_tests;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ProjectionNode {
@@ -39,6 +46,13 @@ impl Projection {
                 "hidden-form-data",
                 "unread-parts",
                 "headers-footers",
+                "metadata",
+                "active-markup",
+                "attachments",
+                "actions",
+                "annotations",
+                "no-text-pages",
+                "extension-data",
             ]
             .map(|k| (k.into(), 0))
             .into(),
@@ -76,13 +90,25 @@ impl Projection {
 }
 
 pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
+    extract_with_pdfium(kind, input, None)
+}
+
+pub fn extract_with_pdfium(
+    kind: &str,
+    input: &[u8],
+    library: Option<&std::path::Path>,
+) -> Result<Projection> {
     ensure!(
         input.len() as u64 <= DOCUMENT_BYTES,
         "PROJECTION_INPUT_BYTES_EXCEEDED: {} / {DOCUMENT_BYTES}",
         input.len()
     );
     let mut out = Projection::new();
-    if ["txt", "md", "markdown"].contains(&kind) {
+    if ["html", "htm"].contains(&kind) {
+        html::extract(input, &mut out)?;
+    } else if kind == "pdf" {
+        pdf::extract(input, library, &mut out)?;
+    } else if ["txt", "md", "markdown"].contains(&kind) {
         ensure!(
             !input.starts_with(b"PK")
                 && !input.starts_with(b"%PDF")
@@ -97,7 +123,7 @@ pub fn extract(kind: &str, input: &[u8]) -> Result<Projection> {
     } else {
         ensure!(
             ["docx", "xlsx", "pptx"].contains(&kind),
-            "PROJECTION_FORMAT_UNSUPPORTED: {kind}; exclude this document (PDF/HTML require V2)"
+            "PROJECTION_FORMAT_UNSUPPORTED: {kind}; exclude this document"
         );
         // Reuse only bounded container/XML decoding, never the originals serializer.
         // Preflight tighter ingestion limits before allocating any expanded part.
@@ -636,12 +662,7 @@ fn walk_word(
         && fields.moved.is_empty()
         && !fields.fields.iter().any(|field| !field.0)
     {
-        out.add(
-            path,
-            "inline control",
-            if n.local == "tab" { "\t" } else { "\n" }.into(),
-            hidden,
-        )?;
+        out.add(path, "inline control", "\n".into(), hidden)?;
     }
     if (n.local == "docPr" && n.ns == WP) || (n.local == "cNvPr" && n.ns == PIC) {
         for key in ["descr", "title"] {
@@ -788,6 +809,16 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
         descendants(root, S, "extLst", &mut extensions);
         let mut rules = Vec::new();
         descendants(root, S, "cfRule", &mut rules);
+        let data_bar_extensions: std::collections::HashSet<*const Node> = rules
+            .iter()
+            .filter(|rule| rule.attr("type") == Some("dataBar"))
+            .flat_map(|rule| {
+                rule.children
+                    .iter()
+                    .filter(|child| child.ns == S && child.local == "extLst")
+                    .map(|child| child as *const Node)
+            })
+            .collect();
         for extension in extensions {
             ensure!(
                 extension
@@ -799,16 +830,23 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
                             .contains(&entry.local.as_str())
                             || (entry.local == "id"
                                 && entry.children.is_empty()
-                                && rules.iter().any(|rule| rule.attr("type")
-                                    == Some("dataBar")
-                                    && rule
-                                        .children
-                                        .iter()
-                                        .any(|child| std::ptr::eq(child, extension)))))
+                                && data_bar_extensions.contains(&(extension as *const Node))))
                         && !has(entry, S, "t")
                         && !has(entry, A, "t"))),
                 "PROJECTION_CONTENT_UNSUPPORTED at {target}: content-bearing worksheet extension"
             );
+            for entry in extension
+                .children
+                .iter()
+                .flat_map(|ext| &ext.children)
+                .filter(|entry| entry.local == "id" && !entry.text.is_empty())
+            {
+                let _ = entry;
+                out.drop_at(
+                    "extension-data",
+                    &format!("{target}/x14:id[{}]", out.drops["extension-data"] + 1),
+                )?;
+            }
         }
         let mut formats = Vec::new();
         descendants(root, S, "sheetFormatPr", &mut formats);
@@ -1052,6 +1090,9 @@ fn walk_slide(
     // PowerPoint writes creation IDs, hyperlink colours and media metadata here.
     // Any literal text still refuses rather than disappearing from projection.
     if n.local == "extLst" && [P, A].contains(&n.ns.as_str()) {
+        let mut charts = Vec::new();
+        descendants(n, graphics::C, "chart", &mut charts);
+        ensure!(charts.is_empty(), "PROJECTION_CONTENT_UNSUPPORTED at {path}: {} chart references only in slide/drawing extLst", charts.len());
         ensure!(
             !literal_text(n),
             "PROJECTION_CONTENT_UNSUPPORTED at {path}: text-bearing drawing/slide extension"

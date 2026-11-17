@@ -8,14 +8,50 @@ AI apps use the bundled `vectoraiz-mcp --client <client_id>` stdio bridge. The b
 
 The access-control boundary is the current operating-system user account. A program already running as that user can use a stolen client id. Other users are excluded by the socket directory and peer-uid check, or the pipe DACL and server-SID check. Treat the client id as local access material. Removal cancels pending deliveries before it returns. A result already handed to the bridge may still reach the AI app afterward. If saving removal fails, access remains blocked in this running app, but can return after restart unless Retry saves the change.
 
-Vector pack V1 projection uses saved spreadsheet caches without recalculation.
+Vector pack V2 accepts TXT/MD, DOCX/XLSX/PPTX, PDF and HTML/HTM through a
+source-only sale projection worker. Buyers receive exactly the six generated
+vector-pack files, with `originals:false`; source bytes and private omission
+records stay local. Fresh embeddings use reviewed projection text, never search
+index text. Hidden content is omitted by default and can be included by the
+seller; mandatory exclusions cannot be included. The review lists per-document
+formats, omission counts, hidden locations and named refusals.
+
+PDF uses PDFium character text/render-mode and page geometry inspection without
+rendering or OCR. Invisible (mode 3) and off-page text remain flagged content,
+editable/excludable by the seller. No-text pages are counted omissions; all-no-text
+documents refuse with `PROJECTION_PDF_NEEDS_OCR`. Properties, annotations,
+attachments, actions/JavaScript and form state never become sale text. Layered
+PDFs refuse with `PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN`; the pinned API
+cannot prove their default visibility. Incremental/object/xref-stream PDFs and
+streams other than raw/FlateDecode without predictors currently refuse with
+`PROJECTION_PDF_STRUCTURE_UNSUPPORTED` or `PROJECTION_PDF_STREAM_UNSUPPORTED`.
+Encrypted, malformed and unclassifiable PDFs refuse without a search fallback.
+
+HTML parses inert UTF-8 bytes through pinned scraper/html5ever. Only body,
+heading, table text and supported labels are projected. Metadata, active markup,
+comments, attributes and form state are omitted. Hidden attributes, inline
+`display:none`, inline `visibility:hidden` and template contents are inherited
+visibility signals. Stylesheets, classes and CSS layout are not evaluated; style
+carriers produce a per-document warning. No resource is fetched. SVG/MathML
+content refuses with `PROJECTION_HTML_CONTENT_UNSUPPORTED`.
+
+Projection uses ingestion limits: 256,000,000 bytes per part/input PDF or HTML,
+512,000,000 per document, 10,000 parts, 5,000,000 inventory entries, and 100:1
+stream/archive expansion. HTML depth is bounded to 256; PDF direct-object depth
+to 8. Pack limits remain 2 GiB expanded, 20,000,000 entries and 100,000 parts.
+Each worker has a 120-second deadline; extraction and generated readback share
+a cumulative and wall-clock 1,200-second pack deadline. Cancellation kills the
+worker group and prevents promotion.
+
+Spreadsheet projection uses saved spreadsheet caches without recalculation.
 Numeric date cells retain Excel serial numbers; cell number formats are not applied.
 Worksheet header/footer text is dropped and counted privately. Paragraphs are
 editable units; visibility changes within a paragraph retain separate segments.
 VML and AlternateContent text boxes refuse with `PROJECTION_WORD_TEXTBOX_UNSUPPORTED`
 until branch selection and visibility can be proven.
 
-Projection and readback workers are limited to 1 GiB. Each delivered artifact is
+Projection and readback workers are limited to 1 GiB, except PDF projection
+workers, which retain the ingestion worker cap of 1,536 MiB. Each delivered artifact is
 currently read whole, so an artifact near the cap can refuse with
 `PROJECTION_MEMORY_LIMIT_EXCEEDED`; the payload byte limit is not a promise that
 an artifact of that size can be reviewed. Capacity and installed Office rendering

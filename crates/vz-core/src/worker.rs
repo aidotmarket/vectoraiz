@@ -45,6 +45,15 @@ pub struct Request {
     pub readback: Option<ReadbackJob>,
 }
 impl Request {
+    pub fn memory_bytes(&self) -> u64 {
+        if self.projection.as_ref().is_some_and(|j| j.kind == "pdf")
+            || self.office_label().is_none()
+        {
+            MEMORY_BYTES
+        } else {
+            OFFICE_MEMORY_BYTES
+        }
+    }
     pub fn office_label(&self) -> Option<&str> {
         if let Some(job) = &self.readback {
             return Some(&job.name);
@@ -194,14 +203,7 @@ fn run_command_checked(
         let _ = diagnostic_tx.send(diagnostic);
     });
     #[cfg(windows)]
-    let _job = windows_limit(
-        &child,
-        if request.office_label().is_some() {
-            OFFICE_MEMORY_BYTES
-        } else {
-            MEMORY_BYTES
-        },
-    )?;
+    let _job = windows_limit(&child, request.memory_bytes())?;
     let mut stdin = child.stdin.take().context("worker stdin")?;
     // A wrapper can exit before consuming the request. Inspect its status and
     // stdout before classifying a broken pipe as a document failure.
@@ -216,6 +218,7 @@ fn run_command_checked(
     });
     let start = Instant::now();
     let mut last_usage = 0;
+    let memory_limit = request.memory_bytes();
     let memory_prefix = if request.projection.is_some() || request.readback.is_some() {
         "PROJECTION"
     } else {
@@ -249,7 +252,7 @@ fn run_command_checked(
                             .windows(b"bytes failed".len())
                             .any(|w| w == b"bytes failed")
                     {
-                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {OFFICE_MEMORY_BYTES} bytes; last observed {last_usage} bytes; allocation denied")));
+                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {memory_limit} bytes; last observed {last_usage} bytes; allocation denied")));
                     }
                 }
                 #[cfg(windows)]
@@ -258,7 +261,7 @@ fn run_command_checked(
                         .code()
                         .is_some_and(|c| matches!(c as u32, 0xc0000017 | 0xc000009a))
                     {
-                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {OFFICE_MEMORY_BYTES} bytes; last observed {last_usage} bytes; allocation denied")));
+                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {memory_limit} bytes; last observed {last_usage} bytes; allocation denied")));
                     }
                 }
                 if sandboxed
@@ -289,19 +292,13 @@ fn run_command_checked(
             return Ok(response.pages);
         }
         last_usage = resident_bytes(child.id());
-        if last_usage
-            > if request.office_label().is_some() {
-                OFFICE_MEMORY_BYTES
-            } else {
-                MEMORY_BYTES
-            }
-        {
+        if last_usage > request.memory_bytes() {
             let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
             return Err(crate::failures::content(
                 if let Some(label) = request.office_label() {
-                    format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {}: limit {OFFICE_MEMORY_BYTES} bytes; last observed {usage} bytes",label)
+                    format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {}: limit {memory_limit} bytes; last observed {usage} bytes",label)
                 } else {
                     "worker resident memory exceeds 1.5 GiB".into()
                 },

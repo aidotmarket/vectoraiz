@@ -42,6 +42,14 @@ mod vector;
 use vector::build;
 
 pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
+    candidates_with_pdfium(library, source, None)
+}
+
+pub fn candidates_with_pdfium(
+    library: &Path,
+    source: &Path,
+    pdfium: Option<&Path>,
+) -> Result<Vec<Candidate>> {
     let policy = crate::listing_policy::system();
     policy.require_preview()?;
     let lease = policy.policy_lease()?;
@@ -57,7 +65,7 @@ pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
             budget.enable_office();
             budget.started = Some(started);
             budget.cancel = Some(lease.cancellation_token());
-            let refusal = preparation_refusal(&doc, &artifact, &mut budget);
+            let refusal = preparation_refusal_with_pdfium(&doc, &artifact, &mut budget, pdfium);
             #[cfg(not(feature = "listing-originals"))]
             let projection_summary = budget.projection.as_ref().map(|projection| json!({"mandatory_drops":projection.drops,"hidden_locations":projection.nodes.iter().filter(|n|n.hidden).map(|n|&n.location).collect::<Vec<_>>()}));
             #[cfg(feature = "listing-originals")]
@@ -94,21 +102,39 @@ fn candidate_location(position: usize, kind: &str) -> String {
 
 // Run the production rebuild worker, including its independent readback and
 // resource limits. Parser success or an extension alone cannot certify a file.
+#[cfg(all(test, feature = "listing-originals"))]
 fn preparation_refusal(
     doc: &vz_core::pipeline::Document,
     artifact: &str,
     budget: &mut Budget,
 ) -> Option<String> {
+    preparation_refusal_with_pdfium(doc, artifact, budget, None)
+}
+
+fn preparation_refusal_with_pdfium(
+    doc: &vz_core::pipeline::Document,
+    artifact: &str,
+    budget: &mut Budget,
+    pdfium: Option<&Path>,
+) -> Option<String> {
     let result = (|| -> Result<()> {
+        let supported =
+            ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
+        #[cfg(not(feature = "listing-originals"))]
+        let supported = supported || ["pdf", "html", "htm"].contains(&doc.kind.as_str());
+        #[cfg(feature = "listing-originals")]
+        let _ = pdfium;
         ensure!(
-            ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str()),
+            supported,
             "original format has no proven rewrite handler; exclude or re-ingest as text"
         );
         let office = ["docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
         let bytes = source_bytes(
             doc,
             if office {
-                512 * 1024 * 1024
+                512_000_000
+            } else if ["pdf", "html", "htm"].contains(&doc.kind.as_str()) {
+                256_000_000
             } else {
                 64 * 1024 * 1024
             },
@@ -123,6 +149,7 @@ fn preparation_refusal(
                 artifact,
                 &doc.kind,
                 &bytes,
+                pdfium,
                 budget.cancel.clone(),
                 budget.started.unwrap_or_else(std::time::Instant::now),
                 std::time::Duration::ZERO,
@@ -634,10 +661,18 @@ fn build(
 }
 
 trait BuildEngine {
+    #[cfg(not(feature = "listing-originals"))]
+    fn pdfium(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     fn recipe(&self) -> &vz_core::engine::Recipe;
     fn vector(&self, text: &str, query: bool) -> Result<Vec<f32>>;
 }
 impl BuildEngine for Engines {
+    #[cfg(not(feature = "listing-originals"))]
+    fn pdfium(&self) -> Option<std::path::PathBuf> {
+        Some(self.pdfium_library())
+    }
     fn recipe(&self) -> &vz_core::engine::Recipe {
         &self.recipe
     }

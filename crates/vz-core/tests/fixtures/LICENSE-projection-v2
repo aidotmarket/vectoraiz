@@ -1,0 +1,7 @@
+projection-v2.html and generated projection_v2_tests.rs PDF variations are
+dedicated to the public domain under CC0 1.0 Universal.
+https://creativecommons.org/publicdomain/zero/1.0/
+
+The existing public PDF/HTML fixtures (boats.pdf and gardens.html) retain their
+CC0 provenance and SHA256 in spike/fixtures/SOURCES.md. No fixture contains real
+company data. These small canaries establish behavior, not corpus capacity.
