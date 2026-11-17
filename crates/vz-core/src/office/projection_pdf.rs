@@ -1043,9 +1043,11 @@ fn operator_counts(ops: &[lopdf::content::Operation]) -> (u64, u64) {
     (draws, text)
 }
 
+type StructuralMemoKey = (lopdf::ObjectId, Vec<usize>);
+
 #[derive(Default)]
 struct StructuralBound {
-    active: BTreeMap<lopdf::ObjectId, usize>,
+    active: BTreeMap<StructuralMemoKey, usize>,
     branching: usize,
     cyclic: bool,
     steps: usize,
@@ -1143,15 +1145,6 @@ fn structural_stream_bound<'a>(
         "PROJECTION_PDF_FORM_GRAPH_UNBOUNDED: traversal budget"
     );
     let branching = state.branching + usize::from(fanout > 1);
-    if let Some(previous) = state.active.get(&id) {
-        ensure!(
-            branching <= *previous,
-            "PROJECTION_PDF_FORM_GRAPH_UNBOUNDED: branching resource cycle"
-        );
-        state.cyclic = true;
-        state.cycles += 1;
-        return Ok(0);
-    }
     let stream = doc.get_object(id)?.as_stream()?;
     let mut scope = scope.to_vec();
     if let Ok(own) = stream.dict.get(b"Resources") {
@@ -1162,6 +1155,17 @@ fn structural_stream_bound<'a>(
         id,
         scope.iter().map(|v| *v as *const Object as usize).collect(),
     );
+    // Revisiting a stream with a larger scope can expose new targets. It is
+    // a cycle only when both the stream and its complete candidate scope recur.
+    if let Some(previous) = state.active.get(&key) {
+        ensure!(
+            branching <= *previous,
+            "PROJECTION_PDF_FORM_GRAPH_UNBOUNDED: branching resource cycle"
+        );
+        state.cyclic = true;
+        state.cycles += 1;
+        return Ok(0);
+    }
     if let Some(bound) = validation.structural_memo.get(&key) {
         return Ok(*bound);
     }
@@ -1172,13 +1176,13 @@ fn structural_stream_bound<'a>(
         validation.stream_counts.insert(id, counts);
         counts
     };
-    state.active.insert(id, branching);
+    state.active.insert(key.clone(), branching);
     let previous = state.branching;
     let cycles = state.cycles;
     state.branching = branching;
     let bound = structural_cost(doc, counts, &scope, state, validation);
     state.branching = previous;
-    state.active.remove(&id);
+    state.active.remove(&key);
     if cycles == state.cycles {
         if let Ok(bound) = &bound {
             validation.structural_memo.insert(key, *bound);
@@ -1318,7 +1322,7 @@ struct FormValidation<'a> {
     memo: BTreeMap<FormMemoKey, FormResult>,
     invoked: BTreeSet<lopdf::ObjectId>,
     stream_counts: BTreeMap<lopdf::ObjectId, (u64, u64)>,
-    structural_memo: BTreeMap<(lopdf::ObjectId, Vec<usize>), u64>,
+    structural_memo: BTreeMap<StructuralMemoKey, u64>,
     has_type3: Option<bool>,
 }
 
@@ -1979,6 +1983,70 @@ mod character_tests {
             .count,
             0
         );
+    }
+
+    #[test]
+    fn structural_cycle_identity_includes_the_expanding_resource_scope() {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut doc = Document::new();
+        let glyph = doc.add_object(Stream::new(
+            dictionary! {"Subtype"=>"Form"},
+            b"/Next Do".to_vec(),
+        ));
+        let branch = doc.add_object(Stream::new(
+            dictionary! {"Subtype"=>"Form"},
+            "/Unknown Do ".repeat(100_001).into_bytes(),
+        ));
+        let text = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"XObject"=>dictionary! {"Branch"=>branch}}}, b"BT (a) Tj ET".to_vec()));
+        doc.get_object_mut(glyph)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .dict
+            .set(
+                "Resources",
+                dictionary! {"XObject"=>dictionary! {"Next"=>text}},
+            );
+        doc.add_object(dictionary! {"Subtype"=>"Type3", "CharProcs"=>dictionary! {"a"=>glyph}});
+        let page = Object::Dictionary(dictionary! {"XObject"=>dictionary! {"Glyph"=>glyph}});
+        let receipts = [glyph, branch, text]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    doc.get_object(id)
+                        .unwrap()
+                        .as_stream()
+                        .unwrap()
+                        .content
+                        .len() as u64,
+                )
+            })
+            .collect();
+        let mut validation = super::FormValidation {
+            receipts: &receipts,
+            expanded_bytes: 2_000_000,
+            consumed: Default::default(),
+            active: Default::default(),
+            memo: Default::default(),
+            invoked: Default::default(),
+            stream_counts: Default::default(),
+            structural_memo: Default::default(),
+            has_type3: None,
+        };
+        // The glyph is revisited from text with a new Branch resource in scope.
+        // Treating its object ID alone as a cycle would skip that new target.
+        let result =
+            super::structural_form_bound(&doc, b"/Glyph Do", &page, &page, &mut validation);
+        match result {
+            Ok(bound) => assert!(bound > super::MAX_FORM_INVOCATIONS),
+            Err(error) => assert!(
+                error
+                    .to_string()
+                    .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"),
+                "{error:#}"
+            ),
+        }
     }
 
     #[test]
