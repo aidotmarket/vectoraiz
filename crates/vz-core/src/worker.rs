@@ -165,7 +165,16 @@ fn run_command_checked(
     sandboxed: bool,
     check: impl Fn() -> Result<()>,
 ) -> Result<Vec<Page>> {
-    #[cfg(unix)]
+    #[cfg(all(unix, test))]
+    {
+        use std::os::unix::process::CommandExt;
+        // Unit tests launch shell fixtures from a multithreaded libtest process.
+        // pre_exec forces fork and can trip macOS libSystem's atfork os_once
+        // guard before exec. The equivalent process group attribute allows
+        // posix_spawn; keep the shipping supervisor unchanged in this test fix.
+        cmd.process_group(0);
+    }
+    #[cfg(all(unix, not(test)))]
     {
         use std::os::unix::process::CommandExt;
         // A parser and its OCR descendants form one killable process group.

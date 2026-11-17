@@ -95,6 +95,27 @@ fn office_time_and_cancel_bounds() {
     }
 }
 #[test]
+fn crash_probe_exits_without_an_os_exception() {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"))
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    vz_core::worker::write_frame(
+        child.stdin.take().unwrap(),
+        &Request {
+            path: "crash".into(),
+            pdfium: None,
+            office: None,
+            projection: None,
+            readback: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(child.wait().unwrap().code(), Some(86));
+}
+
+#[test]
 fn timeout_and_crash() {
     let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
     let request = |path: &str| Request {
