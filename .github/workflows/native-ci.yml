@@ -31,6 +31,8 @@ jobs:
         shell: ${{ matrix.os == 'windows-2022' && 'pwsh' || 'bash' }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify byte-sensitive fixture checkout
+        run: python scripts/native-fixture-bytes.py
       - uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
