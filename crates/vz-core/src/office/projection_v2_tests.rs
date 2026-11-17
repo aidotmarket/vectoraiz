@@ -487,3 +487,24 @@ fn projection_pdf_object_stream_decode_limits_are_not_bypassed() {
         assert!(error.to_string().contains(reason), "{error:#}");
     }
 }
+
+#[test]
+fn projection_pdf_xref_stream_expansion_is_bounded_before_loading() {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&vec![0; 100_000]).unwrap();
+    let compressed = encoder.finish().unwrap();
+    let mut bytes = b"%PDF-1.5\n".to_vec();
+    let offset = bytes.len();
+    bytes.extend_from_slice(format!("1 0 obj\n<< /Type /XRef /Filter /FlateDecode /W [1 4 2] /Size 2 /Length {} >>\nstream\n", compressed.len()).as_bytes());
+    bytes.extend_from_slice(&compressed);
+    bytes
+        .extend_from_slice(format!("\nendstream\nendobj\nstartxref\n{offset}\n%%EOF\n").as_bytes());
+    let error = super::pdf::metadata(&bytes, &mut Projection::new()).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("PROJECTION_EXPANSION_RATIO_EXCEEDED"),
+        "{error:#}"
+    );
+}
