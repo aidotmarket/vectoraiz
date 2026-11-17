@@ -5,3 +5,20 @@ https://creativecommons.org/publicdomain/zero/1.0/
 The existing public PDF/HTML fixtures (boats.pdf and gardens.html) retain their
 CC0 provenance and SHA256 in spike/fixtures/SOURCES.md. No fixture contains real
 company data. These small canaries establish behavior, not corpus capacity.
+
+Real public corpus fixtures and exact SHA256/source URLs are recorded in
+projection-v2-sources.json:
+- en-nasa-0003.pdf: NASA NTRS 20190032256, Factors that Influence Community’s
+  Acceptance of Noise: An Introduction for Urban Air Mobility.
+- en-nasa-0010.pdf: NASA NTRS 20160005872, Martian Atmospheric Dust Mitigation
+  for ISRU Intakes via Electrostatic Precipitation.
+  Public domain NASA works; NTRS GOV_PUBLIC_USE_PERMITTED determination, as
+  recorded in the existing project corpus manifest.
+  https://www.nasa.gov/nasa-brand-center/images-and-media/
+- wiki-current.html: Wikipedia contributors, “2010 Aaron’s 312”, revision
+  1318378930, CC BY-SA 4.0, https://creativecommons.org/licenses/by-sa/4.0/
+  Source: https://en.wikipedia.org/api/rest_v1/page/html/2010_Aaron%27s_312/1318378930
+  Modified only by the existing strip-mediawiki-render-id postprocessor. The
+  served bytes were re-recorded on 2026-11-17; see the manifest note and hash.
+  The HTML fixture remains available under CC BY-SA 4.0. No external images,
+  stylesheets or scripts are fetched by tests.

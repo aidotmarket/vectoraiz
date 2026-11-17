@@ -1,4 +1,4 @@
-//! Source-only sale projection v1. Does not call search, rebuild or readback.
+//! Source-only sale projection v2. Does not call search, rebuild or readback.
 //! Private node locations and omission records must never enter the payload.
 use super::*;
 pub const VERSION: u32 = 2;

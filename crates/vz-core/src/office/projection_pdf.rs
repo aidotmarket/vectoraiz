@@ -12,7 +12,7 @@ pub(super) fn extract(
     library: Option<&std::path::Path>,
     out: &mut Projection,
 ) -> Result<()> {
-    metadata(input, out)?;
+    let expected_pages = metadata(input, out)?;
     // PDFium's process-global initialization/destruction cannot overlap when
     // this API is exercised directly by concurrent tests. Workers do one job.
     let _guard = PDFIUM_LOCK
@@ -27,6 +27,7 @@ pub(super) fn extract(
         .load_pdf_from_byte_slice(input, None)
         .context("PROJECTION_PDF_MALFORMED_OR_ENCRYPTED")?;
     let count = document.pages().len();
+    ensure!(usize::from(count) == expected_pages, "PROJECTION_PDF_PAGE_TREE_UNPROVEN: PDFium page count {count} differs from validated {expected_pages}");
     ensure!(count > 0, "PROJECTION_PDF_MALFORMED: no pages");
     for i in 0..count {
         let at = format!("pdf/page[{}]", i + 1);
@@ -127,7 +128,7 @@ pub(super) fn extract(
     Ok(())
 }
 
-fn metadata(input: &[u8], out: &mut Projection) -> Result<()> {
+fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
     ensure!(
         input.len() as u64 <= PART_BYTES,
         "PROJECTION_PART_BYTES_EXCEEDED at pdf: {} / {PART_BYTES}",
@@ -216,11 +217,12 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<()> {
         &Object::Dictionary(doc.trailer.clone()),
         "pdf/trailer",
         0,
+        &doc,
         out,
     )?;
     for (id, object) in &doc.objects {
         let at = format!("pdf/object[{}:{}]", id.0, id.1);
-        walk(object, &at, 0, out)?;
+        walk(object, &at, 0, &doc, out)?;
         if let Object::Stream(stream) = object {
             let decoded = match stream.dict.get(b"Filter") {
                 Err(_) => stream.content.len() as u64,
@@ -248,10 +250,120 @@ fn metadata(input: &[u8], out: &mut Projection) -> Result<()> {
             );
         }
     }
+    let pages = doc
+        .catalog()
+        .context("PROJECTION_PDF_MALFORMED: catalog")?
+        .get(b"Pages")?
+        .as_reference()?;
+    let mut seen = BTreeSet::new();
+    let count = page_tree(&doc, pages, 0, &mut seen)?;
+    // All referenced streams have already passed bounded decode accounting.
+    // Check content syntax independently: PDFium can recover malformed content
+    // as an empty text page, which must not become a permitted omission.
+    for id in seen {
+        if doc.get_object(id)?.as_dict()?.get(b"Type")?.as_name()? == b"Page" {
+            let content = doc.get_page_content(id).map_err(|_| {
+                anyhow::anyhow!(
+                    "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: unreadable page content",
+                    id.0,
+                    id.1
+                )
+            })?;
+            validate_content(&content, id)?;
+        }
+    }
+    Ok(count)
+}
+
+fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
+    // The decoder accepts parsed prefixes. A private trailing sentinel proves
+    // that malformed original bytes were not silently ignored.
+    let mut bytes = content.to_vec();
+    bytes.extend_from_slice(b"\nVZSaleProjectionEnd\n");
+    let operations = lopdf::content::Content::decode(&bytes)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: invalid page content syntax",
+                id.0,
+                id.1
+            )
+        })?
+        .operations;
+    ensure!(
+        operations
+            .last()
+            .is_some_and(|op| op.operator == "VZSaleProjectionEnd" && op.operands.is_empty()),
+        "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: incomplete page content",
+        id.0,
+        id.1
+    );
+    let mut text_open = false;
+    for op in &operations[..operations.len() - 1] {
+        match op.operator.as_str() {
+            "BT" => {
+                ensure!(
+                    !text_open,
+                    "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: nested text object",
+                    id.0,
+                    id.1
+                );
+                text_open = true;
+            }
+            "ET" => {
+                ensure!(
+                    text_open,
+                    "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: unmatched text object",
+                    id.0,
+                    id.1
+                );
+                text_open = false;
+            }
+            _ => (),
+        }
+    }
+    ensure!(
+        !text_open,
+        "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: unclosed text object",
+        id.0,
+        id.1
+    );
     Ok(())
 }
 
-fn walk(object: &Object, at: &str, depth: usize, out: &mut Projection) -> Result<()> {
+fn page_tree(
+    doc: &Document,
+    id: lopdf::ObjectId,
+    depth: usize,
+    seen: &mut BTreeSet<lopdf::ObjectId>,
+) -> Result<usize> {
+    ensure!(
+        depth <= 8 && seen.insert(id),
+        "PROJECTION_PDF_PAGE_TREE_UNPROVEN at pdf/object[{}:{}]: depth/cycle/duplicate",
+        id.0,
+        id.1
+    );
+    let node = doc.get_object(id)?.as_dict()?;
+    match node.get(b"Type")?.as_name()? {
+        b"Page" => Ok(1),
+        b"Pages" => {
+            let mut count = 0;
+            for child in node.get(b"Kids")?.as_array()? {
+                count += page_tree(doc, child.as_reference()?, depth + 1, seen)?;
+            }
+            ensure!(node.get(b"Count")?.as_i64()? == count as i64, "PROJECTION_PDF_PAGE_TREE_UNPROVEN at pdf/object[{}:{}]: declared count differs from {count}", id.0, id.1);
+            Ok(count)
+        }
+        _ => anyhow::bail!("PROJECTION_PDF_PAGE_TREE_UNPROVEN: unknown page node"),
+    }
+}
+
+fn walk(
+    object: &Object,
+    at: &str,
+    depth: usize,
+    doc: &Document,
+    out: &mut Projection,
+) -> Result<()> {
     ensure!(
         depth <= 8,
         "PROJECTION_PDF_DEPTH_EXCEEDED at {at}: {depth} / 8"
@@ -261,8 +373,17 @@ fn walk(object: &Object, at: &str, depth: usize, out: &mut Projection) -> Result
         Object::Stream(stream) => Some(&stream.dict),
         Object::Array(values) => {
             for (i, value) in values.iter().enumerate() {
-                walk(value, &format!("{at}/item[{i}]"), depth + 1, out)?;
+                walk(value, &format!("{at}/item[{i}]"), depth + 1, doc, out)?;
             }
+            None
+        }
+        Object::Reference(id) => {
+            ensure!(
+                doc.objects.contains_key(id),
+                "PROJECTION_PDF_MALFORMED at {at}: dangling object {}:{}",
+                id.0,
+                id.1
+            );
             None
         }
         _ => None,
@@ -280,7 +401,7 @@ fn walk(object: &Object, at: &str, depth: usize, out: &mut Projection) -> Result
             if let Some(category) = category {
                 out.drop_at(category, &format!("{at}/{}", String::from_utf8_lossy(key)))?;
             }
-            walk(value, at, depth + 1, out)?;
+            walk(value, at, depth + 1, doc, out)?;
         }
     }
     Ok(())

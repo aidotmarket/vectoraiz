@@ -18,7 +18,10 @@ counts. It never supplies sale text. Its automatic compressed-object/xref-stream
 decoding and revision merging are outside this bounded profile: a conservative
 escaped-name preflight refuses those structures before loading. Only classic
 xref PDFs proceed, and every live xref object must be present after load because
-lopdf can otherwise skip malformed objects. The stream guard counts actual raw
+lopdf can otherwise skip malformed objects. Every indirect reference must resolve,
+and the bounded page tree must agree with its declared and PDFium page counts.
+Page content syntax is checked through a private trailing parser sentinel,
+preventing prefix-only parser recovery from certifying an omitted page. The stream guard counts actual raw
 or bounded FlateDecode bytes, enforces per-stream/document/100:1 limits, and
 refuses filters/predictors that do not have a bounded implementation. References
 are not recursively expanded when counting dictionaries; direct nesting is
@@ -55,3 +58,8 @@ no-text-page counts, named refusals, poisoned index text/vectors, captured fresh
 embedding inputs, generation invalidation, payload allowlisting and seller UI.
 These canaries do not qualify corpus capacity or installed delivery journeys.
 Full command/corpus evidence belongs outside the checkout.
+
+Real corpus regressions include 1,236 projected nodes from a Wikipedia page and
+two NASA NTRS PDFs that explicitly refuse unsupported structures. Their source
+URLs, exact fixture hashes, licences and the HTML re-recording note accompany the
+fixtures. These observed refusals are coverage limits, not a PDF capacity claim.

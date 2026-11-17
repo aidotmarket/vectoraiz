@@ -178,3 +178,116 @@ fn projection_exclusion_canaries_html_and_hidden_seller_choice() {
         .to_string()
         .contains("DEPTH_EXCEEDED"));
 }
+
+#[test]
+fn projection_real_public_corpus_and_recorded_licenses() {
+    let sources: serde_json::Value = serde_json::from_slice(include_bytes!(
+        "../../tests/fixtures/projection-v2-sources.json"
+    ))
+    .unwrap();
+    for (name, bytes) in [
+        (
+            "projection-v2.html",
+            include_bytes!("../../tests/fixtures/projection-v2.html").as_slice(),
+        ),
+        (
+            "projection-v2.pdf",
+            include_bytes!("../../tests/fixtures/projection-v2.pdf").as_slice(),
+        ),
+        (
+            "en-nasa-0003.pdf",
+            include_bytes!("../../tests/fixtures/en-nasa-0003.pdf").as_slice(),
+        ),
+        (
+            "en-nasa-0010.pdf",
+            include_bytes!("../../tests/fixtures/en-nasa-0010.pdf").as_slice(),
+        ),
+        (
+            "wiki-current.html",
+            include_bytes!("../../tests/fixtures/wiki-current.html").as_slice(),
+        ),
+    ] {
+        let source = sources
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["file"] == name || s["filename"] == name)
+            .unwrap();
+        assert_eq!(source["sha256"], crate::pipeline::sha256(bytes));
+        assert!(source["license"].as_str().is_some_and(|s| !s.is_empty()));
+        if name.starts_with("en-nasa") {
+            let error = extract_with_pdfium("pdf", bytes, Some(&library()))
+                .err()
+                .unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("PROJECTION_PDF_STRUCTURE_UNSUPPORTED"),
+                "{error:#}"
+            );
+        } else if name == "wiki-current.html" {
+            let p = extract("html", bytes).unwrap();
+            assert!(p.nodes.len() > 1_000);
+            assert!(values(&p).contains("2010"));
+        }
+    }
+}
+
+#[test]
+fn projection_pdf_malformed_graph_and_image_only_refusals() {
+    for bad in ["count", "dangling", "syntax"] {
+        let mut doc =
+            Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (TEXT) Tj ET"], false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        match bad {
+            "count" => doc
+                .get_object_mut((2, 0))
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Count", 9),
+            "dangling" => doc
+                .get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Contents", (99_999, 0)),
+            _ => {
+                let broken = doc.add_object(Stream::new(dictionary! {}, b"BT (unclosed".to_vec()));
+                doc.get_object_mut(page)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("Contents", broken);
+            }
+        }
+        let mut bytes = Vec::new();
+        doc.save_to(&mut bytes).unwrap();
+        let error = extract_with_pdfium("pdf", &bytes, Some(&library()))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains("MALFORMED") || error.contains("PAGE_TREE_UNPROVEN"),
+            "{bad}: {error}"
+        );
+    }
+    let mut doc = Document::load_mem(&pdf(&["q 100 0 0 100 30 30 cm /Im1 Do Q"], false)).unwrap();
+    let image = doc.add_object(Stream::new(dictionary! {"Type" => "XObject", "Subtype" => "Image", "Width" => 1, "Height" => 1, "ColorSpace" => "DeviceGray", "BitsPerComponent" => 8}, vec![0]));
+    let page = *doc.get_pages().values().next().unwrap();
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set(
+            "Resources",
+            dictionary! {"XObject" => dictionary! {"Im1" => image}},
+        );
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    assert!(extract_with_pdfium("pdf", &bytes, Some(&library()))
+        .err()
+        .unwrap()
+        .to_string()
+        .contains("PROJECTION_PDF_NEEDS_OCR"));
+}
