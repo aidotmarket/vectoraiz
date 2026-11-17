@@ -22,6 +22,16 @@ fn main() {
     // Resource probes use file bytes so the same supervisor/request boundary is
     // exercised without executing an actual hostile PDF or exhausting the OS.
     if let Ok(bytes) = std::fs::read(&request.path) {
+        if matches!(
+            bytes.as_slice(),
+            b"VZ_RESOURCE_PROBE_RSS\n" | b"VZ_RESOURCE_PROBE_DEADLINE\n"
+        ) {
+            let job = request
+                .projection
+                .as_ref()
+                .expect("projection resource probe");
+            std::fs::write(job.output.join("resource-probe-started"), &bytes).unwrap();
+        }
         match bytes.as_slice() {
             b"VZ_RESOURCE_PROBE_RSS\n" => {
                 let mut buffers = Vec::new();

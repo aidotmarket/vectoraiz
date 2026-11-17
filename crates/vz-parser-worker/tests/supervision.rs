@@ -537,10 +537,14 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         (
             b"VZ_RESOURCE_PROBE_DEADLINE\n".as_slice(),
             "PROJECTION_RESOURCE_LIMIT",
-            Duration::from_millis(250),
+            Duration::from_millis(750),
         ),
     ] {
         let path = dir.path().join("resource-exhaustion.pdf");
+        let receipt = dir.path().join("resource-probe-started");
+        if receipt.exists() {
+            std::fs::remove_file(&receipt).unwrap();
+        }
         std::fs::write(&path, bytes).unwrap();
         let request = Request {
             path,
@@ -554,12 +558,18 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         };
         let start = std::time::Instant::now();
         let failure =
-            vz_core::worker::run_with_watchdog_limit(worker, &request, timeout, 64 * 1024 * 1024)
+            vz_core::worker::run_with_watchdog_limit(worker, &request, timeout, 128 * 1024 * 1024)
                 .unwrap_err();
         let reason = format!("{failure:#}");
         assert!(reason.contains(expected), "{reason}");
         assert!(!reason.contains("crashed"), "{reason}");
         assert!(vz_core::failures::is_content(&failure));
+        assert_eq!(
+            std::fs::read(receipt).unwrap(),
+            bytes,
+            "test-only bypass must run before supervision refuses"
+        );
+        assert!(!dir.path().join("projection.json").exists());
         assert!(start.elapsed() < Duration::from_secs(12));
     }
     assert!(run(
