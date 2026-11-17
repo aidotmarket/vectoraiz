@@ -48,7 +48,15 @@ mod a9_control_tests {
     async fn pre_capture_socket_waits_then_sends() {
         use tokio::io::AsyncReadExt;
         let control = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind((
+            "127.0.0.1",
+            std::env::var("KD_BRIDGE_PORT_BASE")
+                .ok()
+                .map(|p| p.parse::<u16>().expect("reserved test port") + 3)
+                .unwrap_or(0),
+        ))
+        .await
+        .unwrap();
         std::fs::write(
             control.path().join("target"),
             listener.local_addr().unwrap().to_string(),
@@ -82,7 +90,15 @@ mod a9_marker_tests {
     #[tokio::test]
     async fn marker_is_published_complete_after_temporary_file() {
         let control = tempfile::tempdir().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind((
+            "127.0.0.1",
+            std::env::var("KD_BRIDGE_PORT_BASE")
+                .ok()
+                .map(|p| p.parse::<u16>().expect("reserved test port") + 4)
+                .unwrap_or(0),
+        ))
+        .await
+        .unwrap();
         std::fs::write(
             control.path().join("target"),
             listener.local_addr().unwrap().to_string(),

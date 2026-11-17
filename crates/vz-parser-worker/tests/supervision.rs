@@ -521,3 +521,67 @@ fn projection_pdf_resource_network_trap() {
         "PDF projection fetched a remote resource"
     );
 }
+
+// Runs on macOS and Windows CI. The fixture hook exists only in the test probe;
+// the shipping parser never accepts resource-probe bytes as PDF input.
+#[test]
+fn projection_resource_exhaustion_is_a_named_seller_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let worker = Path::new(env!("CARGO_BIN_EXE_vz-worker-test-probe"));
+    for (bytes, expected, timeout) in [
+        (
+            b"VZ_RESOURCE_PROBE_RSS\n".as_slice(),
+            "PROJECTION_MEMORY_LIMIT_EXCEEDED",
+            Duration::from_secs(10),
+        ),
+        (
+            b"VZ_RESOURCE_PROBE_DEADLINE\n".as_slice(),
+            "PROJECTION_RESOURCE_LIMIT",
+            Duration::from_secs(2),
+        ),
+    ] {
+        let path = dir.path().join("resource-exhaustion.pdf");
+        let receipt = dir.path().join("resource-probe-started");
+        if receipt.exists() {
+            std::fs::remove_file(&receipt).unwrap();
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let request = Request {
+            path,
+            pdfium: None,
+            office: None,
+            readback: None,
+            projection: Some(vz_core::worker::ProjectionJob {
+                kind: "pdf".into(),
+                output: dir.path().into(),
+            }),
+        };
+        let start = std::time::Instant::now();
+        let failure =
+            vz_core::worker::run_with_watchdog_limit(worker, &request, timeout, 128 * 1024 * 1024)
+                .unwrap_err();
+        let reason = format!("{failure:#}");
+        assert!(reason.contains(expected), "{reason}");
+        assert!(!reason.contains("crashed"), "{reason}");
+        assert!(vz_core::failures::is_content(&failure));
+        assert_eq!(
+            std::fs::read(receipt).unwrap(),
+            bytes,
+            "test-only bypass must run before supervision refuses"
+        );
+        assert!(!dir.path().join("projection.json").exists());
+        assert!(start.elapsed() < Duration::from_secs(12));
+    }
+    assert!(run(
+        worker,
+        &Request {
+            path: "ok".into(),
+            pdfium: None,
+            office: None,
+            projection: None,
+            readback: None
+        },
+        Duration::from_secs(5)
+    )
+    .is_ok());
+}
