@@ -30,6 +30,9 @@ pub struct Projection {
     pub warnings: Vec<String>,
     pub expanded_bytes: u64,
     pub parts: usize,
+    /// Local diagnostic: indexed data-bar rules and membership probes.
+    #[serde(skip)]
+    pub validation_operations: usize,
 }
 impl Projection {
     fn new() -> Self {
@@ -53,6 +56,9 @@ impl Projection {
                 "annotations",
                 "no-text-pages",
                 "extension-data",
+                "form-control-state",
+                "unsupported-markup",
+                "unmapped-glyphs",
             ]
             .map(|k| (k.into(), 0))
             .into(),
@@ -809,6 +815,7 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
         descendants(root, S, "extLst", &mut extensions);
         let mut rules = Vec::new();
         descendants(root, S, "cfRule", &mut rules);
+        out.validation_operations += rules.len();
         let data_bar_extensions: std::collections::HashSet<*const Node> = rules
             .iter()
             .filter(|rule| rule.attr("type") == Some("dataBar"))
@@ -820,6 +827,7 @@ fn sheets(trees: &BTreeMap<String, Node>, out: &mut Projection) -> Result<()> {
             })
             .collect();
         for extension in extensions {
+            out.validation_operations += 1;
             ensure!(
                 extension
                     .children

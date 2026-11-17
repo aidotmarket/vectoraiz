@@ -586,22 +586,14 @@ fn projection_data_bar_extension_scaling() {
     let rule = r#"<conditionalFormatting sqref="A1"><cfRule type="dataBar"><extLst><ext><x14:id xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">GUID</x14:id></ext></extLst></cfRule></conditionalFormatting>"#;
     let measure = |count| {
         let bytes = workbook("visible", &rule.repeat(count));
-        (0..2)
-            .map(|_| {
-                let start = std::time::Instant::now();
-                let p = extract("xlsx", &bytes).unwrap();
-                assert_eq!(p.drops["extension-data"], count);
-                start.elapsed()
-            })
-            .min()
-            .unwrap()
+        let p = extract("xlsx", &bytes).unwrap();
+        assert_eq!(p.drops["extension-data"], count);
+        p.validation_operations
     };
     let small = measure(4_000);
     let large = measure(16_000);
-    assert!(
-        large < small * 10,
-        "data-bar extension check must scale linearly: {small:?} -> {large:?}"
-    );
+    assert_eq!(small, 8_000);
+    assert_eq!(large, small * 4);
 }
 
 #[test]

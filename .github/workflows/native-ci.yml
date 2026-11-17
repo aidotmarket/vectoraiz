@@ -128,6 +128,8 @@ jobs:
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
+      - name: PDF projection render trap (positive control and regressions)
+        run: python scripts/projection-pdf-render-trap.py --library .assets/${{ runner.os == 'Windows' && 'pdfium/bin/pdfium.dll' || 'pdfium/lib/libpdfium.dylib' }} --scratch ${{ runner.temp }}/projection-render-trap
       - name: Frozen originals regression tests (test only)
         run: cargo test --locked -p vz-pack --features listing-originals office_
       - name: Validate generated MCPB manifest (pinned 2.1.2)

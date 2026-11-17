@@ -342,14 +342,25 @@ pub(super) fn build(
             doc.doc_id = public_id;
             doc.sha256 = sha256(text.as_bytes());
             doc.bytes = text.len() as u64;
-            doc.chunks = chunk(
-                &doc.doc_id,
-                &[Page {
+            // The search chunker normalizes line breaks. Give HTML block
+            // paragraphs separate inputs so inline joining and block boundaries
+            // survive all the way to the embedding calls.
+            let pages = if matches!(doc.kind.as_str(), "html" | "htm") {
+                text.lines()
+                    .map(|paragraph| Page {
+                        page: 1,
+                        text: paragraph.to_string(),
+                        needs_ocr: false,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![Page {
                     page: 1,
                     text,
                     needs_ocr: false,
-                }],
-            );
+                }]
+            };
+            doc.chunks = chunk(&doc.doc_id, &pages);
             if doc.chunks.is_empty() {
                 projection_warnings.push(format!("{location}: all projected text omitted by the hidden-content choice or explicit node exclusions; no chunks delivered"));
             }

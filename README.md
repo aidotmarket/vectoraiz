@@ -22,22 +22,33 @@ editable/excludable by the seller. No-text pages are counted omissions; all-no-t
 documents refuse with `PROJECTION_PDF_NEEDS_OCR`. Properties, annotations,
 attachments, actions/JavaScript and form state never become sale text. Layered
 PDFs refuse with `PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN`; the pinned API
-cannot prove their default visibility. Incremental/object/xref-stream PDFs and
-streams other than raw/FlateDecode without predictors currently refuse with
-`PROJECTION_PDF_STRUCTURE_UNSUPPORTED` or `PROJECTION_PDF_STREAM_UNSUPPORTED`.
+cannot prove their default visibility. Classic, incremental, object-stream and
+xref-stream PDFs proceed after bounded structural and nested Form validation.
+Image XObjects and soft masks are counted at raw length without decoding.
+Decoded text-path streams support raw, ASCII85 and Flate (including single-filter
+arrays and supported PNG predictors); other filters/parameters refuse with
+`PROJECTION_PDF_STREAM_UNSUPPORTED`. Inherited page boxes are resolved; undefined
+references are null. Unmapped glyphs are counted and replaced with U+FFFD.
+ActualText documents carry a conservative not-visible replacement-text flag.
 Encrypted, malformed and unclassifiable PDFs refuse without a search fallback.
 
-HTML parses inert UTF-8 bytes through pinned scraper/html5ever. Only body,
-heading, table text and supported labels are projected. Metadata, active markup,
-comments, attributes and form state are omitted. Hidden attributes, inline
-`display:none`, inline `visibility:hidden` and template contents are inherited
-visibility signals. Stylesheets, classes and CSS layout are not evaluated; style
-carriers produce a per-document warning. No resource is fetched. SVG/MathML
-content refuses with `PROJECTION_HTML_CONTENT_UNSUPPORTED`.
+HTML parses inert local bytes through pinned scraper/html5ever. UTF-8, declared
+common encodings (including Windows-1252 and ISO-8859 variants), and UTF-16 BOMs
+are supported; unknown/invalid encodings refuse by name. Only body, heading,
+table text and supported labels are projected, joining inline text within blocks.
+Metadata, active markup, comments, attributes and form state are omitted with
+counts. Visible buttons retain ordinary text children only; input, textarea,
+select and output values are mandatory drops. SVG/MathML subtrees are counted
+drops, including inside hidden content. Hidden attributes, inline `display:none`,
+inline `visibility:hidden`, template contents and browser fallback/inactive
+content are inherited visibility signals. Datalist, closed dialog, canvas,
+video/audio fallback, noembed, noframes and rp are hidden and seller-includable.
+Stylesheets, classes and CSS layout are not evaluated; style carriers produce a
+per-document warning. No resource is fetched.
 
 Projection uses ingestion limits: 256,000,000 bytes per part/input PDF or HTML,
 512,000,000 per document, 10,000 parts, 5,000,000 inventory entries, and 100:1
-stream/archive expansion. HTML depth is bounded to 256; PDF direct-object depth
+document decoded-PDF-stream/archive expansion. HTML depth is bounded to 256; PDF direct-object depth
 to 8. Pack limits remain 2 GiB expanded, 20,000,000 entries and 100,000 parts.
 Each worker has a 120-second deadline; extraction and generated readback share
 a cumulative and wall-clock 1,200-second pack deadline. Cancellation kills the

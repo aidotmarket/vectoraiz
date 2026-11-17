@@ -114,6 +114,7 @@ fn projection_format_limits_pdf_refusals_and_public_fixture() {
     for (name, reason) in [
         ("OCProperties", "OPTIONAL_CONTENT_STATE_UNPROVEN"),
         ("O#43Properties", "OPTIONAL_CONTENT_STATE_UNPROVEN"),
+        ("O#43", "OPTIONAL_CONTENT_STATE_UNPROVEN"),
         ("Encrypt", "ENCRYPTED"),
     ] {
         let mut bytes = pdf(&["BT /F1 12 Tf 30 750 Td (TEXT) Tj ET"], false);
@@ -178,7 +179,12 @@ fn projection_exclusion_canaries_html_and_hidden_seller_choice() {
         include_bytes!("../../../../spike/fixtures/documents/gardens.html")
     )
     .is_ok());
-    assert!(extract("html", b"<svg><text>unsupported</text></svg>").is_err());
+    assert_eq!(
+        extract("html", b"<p>visible</p><svg><text>unsupported</text></svg>")
+            .unwrap()
+            .drops["unsupported-markup"],
+        1
+    );
     let deep = format!("{}text{}", "<div>".repeat(260), "</div>".repeat(260));
     assert!(extract("html", deep.as_bytes())
         .err()
@@ -224,17 +230,8 @@ fn projection_real_public_corpus_and_recorded_licenses() {
         assert_eq!(source["sha256"], crate::pipeline::sha256(bytes));
         assert!(source["license"].as_str().is_some_and(|s| !s.is_empty()));
         if name.starts_with("en-nasa") {
-            // Public PDFs now reach the actual decoded-stream policy instead
-            // of being refused for their PDF 1.5 structure.
-            let error = extract_with_pdfium("pdf", bytes, Some(&library()))
-                .err()
-                .unwrap();
-            let reason = if name == "en-nasa-0003.pdf" {
-                "PROJECTION_EXPANSION_RATIO_EXCEEDED"
-            } else {
-                "PROJECTION_PDF_STREAM_UNSUPPORTED"
-            };
-            assert!(error.to_string().contains(reason), "{error:#}");
+            let p = extract_with_pdfium("pdf", bytes, Some(&library())).unwrap();
+            assert!(!values(&p).trim().is_empty());
         } else if name == "wiki-current.html" {
             let p = extract("html", bytes).unwrap();
             assert!(p.nodes.len() > 1_000);
@@ -278,7 +275,9 @@ fn projection_pdf_malformed_graph_and_image_only_refusals() {
             .unwrap()
             .to_string();
         assert!(
-            error.contains("MALFORMED") || error.contains("PAGE_TREE_UNPROVEN"),
+            error.contains("MALFORMED")
+                || error.contains("PAGE_TREE_UNPROVEN")
+                || (bad == "dangling" && error.contains("NEEDS_OCR")),
             "{bad}: {error}"
         );
     }
@@ -345,9 +344,7 @@ fn projection_pdf_metadata_corpus() {
     }
     println!("PDF metadata corpus: {} files; {counts:?}", paths.len());
     assert_eq!(paths.len(), 6);
-    assert_eq!(counts.get("PASS"), Some(&4));
-    assert_eq!(counts.get("PROJECTION_EXPANSION_RATIO_EXCEEDED"), Some(&1));
-    assert_eq!(counts.get("PROJECTION_PDF_STREAM_UNSUPPORTED"), Some(&1));
+    assert_eq!(counts.get("PASS"), Some(&6));
 }
 
 #[test]
@@ -466,7 +463,7 @@ fn projection_pdf_object_stream_decode_limits_are_not_bypassed() {
                 use std::io::Write;
                 let mut encoder =
                     flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
-                encoder.write_all(&vec![b' '; 100_000]).unwrap();
+                encoder.write_all(&vec![b' '; 5_000_000]).unwrap();
                 encoder.finish().unwrap()
             },
             "EXPANSION_RATIO_EXCEEDED",
@@ -505,6 +502,337 @@ fn projection_pdf_xref_stream_expansion_is_bounded_before_loading() {
         error
             .to_string()
             .contains("PROJECTION_EXPANSION_RATIO_EXCEEDED"),
+        "{error:#}"
+    );
+}
+
+fn save_pdf(mut doc: Document) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    bytes
+}
+
+#[test]
+fn projection_pdf_nested_forms_validate_before_text_loading() {
+    for malformed in [false, true] {
+        let mut doc = Document::load_mem(&pdf(
+            &["BT /F1 12 Tf 30 750 Td (MAIN_VISIBLE) Tj ET /Outer Do"],
+            false,
+        ))
+        .unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let resources = super::pdf::test_resources(&doc, page);
+        let inner = doc.add_object(Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),600.into(),800.into()], "Resources" => resources,
+        }, if malformed {b"BT /F1 12 Tf 30 650 Td (UNCLOSED".to_vec()} else {b"BT /F1 12 Tf 30 650 Td (FORM_VISIBLE) Tj ET".to_vec()}));
+        let outer = doc.add_object(Stream::new(dictionary! {
+            "Type" => "XObject", "Subtype" => "Form", "BBox" => vec![0.into(),0.into(),600.into(),800.into()],
+            "Resources" => dictionary! {"XObject" => dictionary! {"Inner" => inner}},
+        }, b"/Inner Do".to_vec()));
+        doc.get_object_mut(page).unwrap().as_dict_mut().unwrap().set("Resources", dictionary! {"Font" => super::pdf::test_resources(&Document::load_mem(&pdf(&[""], false)).unwrap(), (3,0)).get(b"Font").unwrap().clone(), "XObject" => dictionary! {"Outer" => outer}});
+        let bytes = save_pdf(doc);
+        if malformed {
+            // No library is supplied: the named refusal must precede PDFium,
+            // and therefore precedes all downstream embedding work.
+            let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+            assert!(
+                format!("{error:#}").contains("PROJECTION_PDF_FORM_UNPROVEN"),
+                "{error:#}"
+            );
+        } else {
+            let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+            assert!(values(&p).contains("MAIN_VISIBLE") && values(&p).contains("FORM_VISIBLE"));
+        }
+    }
+}
+
+#[test]
+fn projection_pdf_inherited_boxes_null_refs_actualtext_and_annotation_counts() {
+    let mut doc = Document::load_mem(&pdf(&["BT /F1 12 Tf 30 750 Td (VISIBLE) Tj ET BT /F1 12 Tf 400 600 Td (OFFPAGE) Tj ET /Span << /ActualText (REPLACEMENT) >> BDC BT /F1 12 Tf 30 650 Td (GLYPHS) Tj ET EMC"], false)).unwrap();
+    for id in doc.get_pages().values().copied().collect::<Vec<_>>() {
+        let page = doc.get_object_mut(id).unwrap().as_dict_mut().unwrap();
+        page.remove(b"MediaBox");
+        page.remove(b"CropBox");
+        page.set("Unused", (99_999, 0));
+        page.set(
+            "Annots",
+            vec![
+                Object::Dictionary(dictionary! {"Subtype"=>"Text"}),
+                Object::Dictionary(dictionary! {"Subtype"=>"Text"}),
+                Object::Reference((99_999, 0)),
+            ],
+        );
+    }
+    let pages = doc.get_object_mut((2, 0)).unwrap().as_dict_mut().unwrap();
+    pages.set("MediaBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+    pages.set("CropBox", vec![0.into(), 0.into(), 300.into(), 792.into()]);
+    doc.catalog_mut()
+        .unwrap()
+        .set("VZGuardFailure", Object::string_literal("FORGED_REASON"));
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert_eq!(p.drops["annotations"], 2);
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("OFFPAGE") && n.kind.contains("off-page")));
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("REPLACEMENT") && n.kind.contains("not-visible ActualText")));
+}
+
+fn image_pdf(contents: &[&str], filter: &str, data: Vec<u8>) -> Vec<u8> {
+    let mut doc = Document::load_mem(&pdf(contents, false)).unwrap();
+    let image = doc.add_object(Stream::new(dictionary! {"Type"=>"XObject", "Subtype"=>"Image", "Width"=>400, "Height"=>400, "ColorSpace"=>"DeviceGray", "BitsPerComponent"=>8, "Filter"=>filter}, data));
+    for id in doc.get_pages().values().copied().collect::<Vec<_>>() {
+        let mut resources = super::pdf::test_resources(&doc, id);
+        resources.set("XObject", dictionary! {"Im1"=>image});
+        doc.get_object_mut(id)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+    }
+    save_pdf(doc)
+}
+
+#[test]
+fn projection_pdf_image_decoders_are_not_needed_for_text_loading() {
+    // Each invoked image has a deliberately invalid encoded payload. A text
+    // projection must succeed independently of image decoder success. Includes
+    // codecs absent from lopdf and a Flate payload with no valid zlib stream.
+    for filter in [
+        "DCTDecode",
+        "CCITTFaxDecode",
+        "JBIG2Decode",
+        "JPXDecode",
+        "FlateDecode",
+        "UnsupportedImageCodec",
+    ] {
+        let bytes = image_pdf(
+            &[
+                "BT /F1 12 Tf 30 750 Td (VISIBLE) Tj ET q 400 0 0 400 0 0 cm /Im1 Do Q",
+                "q /Im1 Do Q",
+            ],
+            filter,
+            vec![0x78, 0x9c, 0xff, 0xff],
+        );
+        let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+        assert!(values(&p).contains("VISIBLE"), "{filter}");
+        assert_eq!(p.drops["no-text-pages"], 1, "{filter}");
+        let bytes = image_pdf(&["/Im1 Do"], filter, vec![0x78, 0x9c, 0xff, 0xff]);
+        let error = extract_with_pdfium("pdf", &bytes, Some(&library()))
+            .err()
+            .unwrap();
+        assert!(
+            error.to_string().contains("PROJECTION_PDF_NEEDS_OCR"),
+            "{filter}: {error:#}"
+        );
+    }
+    let bytes = image_pdf(
+        &["/Im1 Do BT /F1 12 Tf 3 Tr 30 700 Td (OCR_LAYER) Tj ET"],
+        "DCTDecode",
+        vec![0; 16],
+    );
+    let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("OCR_LAYER") && n.kind.contains("invisible")));
+}
+
+#[test]
+fn projection_pdf_single_filter_png_predictor_and_false_stream_word() {
+    use std::io::Write;
+    let content = b"BT /F1 12 Tf 30 700 Td (FILTER_ARRAY) Tj ET";
+    let mut doc = Document::load_mem(&pdf(&[""], false)).unwrap();
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&[vec![0], content.to_vec()].concat())
+        .unwrap();
+    let stream=doc.add_object(Stream::new(dictionary! {"Filter"=>vec![Object::Name(b"FlateDecode".to_vec())], "DecodeParms"=>dictionary! {"Predictor"=>12,"Columns"=>content.len() as i64}},encoder.finish().unwrap()));
+    let id = *doc.get_pages().values().next().unwrap();
+    doc.get_object_mut(id)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Contents", stream);
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert!(values(&p).contains("FILTER_ARRAY"));
+    let mut bytes = pdf(
+        &["BT /F1 12 Tf 30 700 Td (stream\n\\170\\234 fake payload) Tj ET"],
+        false,
+    );
+    bytes.extend_from_slice(b"\n% stream\nx\x9c invalid zlib-like bytes\n");
+    assert!(extract_with_pdfium("pdf", &bytes, Some(&library())).is_ok());
+}
+
+#[test]
+fn projection_html_controls_hidden_fallback_charsets_and_flow() {
+    let p=extract("html",br#"<p>Hello <b>bold</b>world</p><p>Next block</p><label>Label<input value="DROP_CANARY"></label><textarea>DROP_CANARY</textarea><select><option>DROP_CANARY</option></select><output>DROP_CANARY</output><button value="DROP_CANARY">Button text</button><svg><text>DROP_CANARY</text></svg><div hidden><math>DROP_CANARY</math></div><datalist>UA_HIDDEN</datalist><dialog>UA_HIDDEN</dialog><canvas>UA_HIDDEN</canvas><video>UA_HIDDEN</video><audio>UA_HIDDEN</audio><noembed>UA_HIDDEN</noembed><noframes>UA_HIDDEN</noframes><ruby>x<rp>UA_HIDDEN</rp></ruby><dialog open>OPEN_DIALOG</dialog>"#).unwrap();
+    assert!(!values(&p).contains("DROP_CANARY"));
+    assert!(values(&p).contains("Button text"));
+    assert_eq!(p.drops["form-control-state"], 5);
+    assert_eq!(p.drops["unsupported-markup"], 2);
+    assert_eq!(
+        p.nodes
+            .iter()
+            .filter(|n| n.text.contains("UA_HIDDEN") && n.hidden)
+            .count(),
+        8
+    );
+    let nodes: Vec<_> = p
+        .nodes
+        .iter()
+        .filter(|n| ["Hello ", "bold", "world"].contains(&n.text.as_str()))
+        .collect();
+    assert_eq!(nodes.len(), 3);
+    assert!(nodes
+        .iter()
+        .all(|n| n.location.rsplit_once("/flow[").unwrap().0
+            == nodes[0].location.rsplit_once("/flow[").unwrap().0));
+    for (bytes, expected) in [
+        (
+            b"<meta charset=windows-1252><p>caf\xe9 \x80</p>".as_slice(),
+            "café €",
+        ),
+        (b"<meta charset=iso-8859-2><p>\xa3</p>".as_slice(), "Ł"),
+    ] {
+        assert!(values(&extract("html", bytes).unwrap()).contains(expected));
+    }
+    let bytes: Vec<u8> = [
+        vec![0xff, 0xfe],
+        "<p>UTF16 café</p>"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect(),
+    ]
+    .concat();
+    assert!(values(&extract("html", &bytes).unwrap()).contains("UTF16 café"));
+    for bytes in [
+        b"<meta charset=unsupported><p>x</p>".as_slice(),
+        b"<p>\xff</p>",
+    ] {
+        assert!(extract("html", bytes)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("ENCODING_UNSUPPORTED"));
+    }
+}
+
+#[test]
+fn projection_pdf_real_jpeg_flat_image_and_document_ratio() {
+    use std::io::Write;
+    let mut jpeg = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new(&mut jpeg)
+        .encode(&[255, 255, 255], 1, 1, image::ExtendedColorType::Rgb8)
+        .unwrap();
+    let p = extract_with_pdfium(
+        "pdf",
+        &image_pdf(
+            &["BT /F1 12 Tf 30 700 Td (JPEG_TEXT) Tj ET /Im1 Do"],
+            "DCTDecode",
+            jpeg,
+        ),
+        Some(&library()),
+    )
+    .unwrap();
+    assert!(values(&p).contains("JPEG_TEXT"));
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::best());
+    encoder.write_all(&vec![255; 160_000]).unwrap();
+    let flat = encoder.finish().unwrap();
+    assert!(160_000 > flat.len() * 100);
+    let bytes = image_pdf(
+        &["/Im1 Do BT /F1 12 Tf 3 Tr 30 700 Td (FLAT_SCAN_OCR) Tj ET"],
+        "FlateDecode",
+        flat,
+    );
+    let mut doc = Document::load_mem(&bytes).unwrap();
+    let mask=doc.add_object(Stream::new(dictionary!{"Type"=>"XObject","Subtype"=>"Image","Width"=>400,"Height"=>400,"ColorSpace"=>"DeviceGray","BitsPerComponent"=>8,"Filter"=>"JPXDecode"},vec![0;8]));
+    let page = *doc.get_pages().values().next().unwrap();
+    let resources = super::pdf::test_resources(&doc, page);
+    let image_id = resources
+        .get(b"XObject")
+        .unwrap()
+        .as_dict()
+        .unwrap()
+        .get(b"Im1")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    doc.get_object_mut(image_id)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set("SMask", mask);
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("FLAT_SCAN_OCR") && n.kind.contains("invisible")));
+
+    for balanced in [false, true] {
+        let mut doc = Document::load_mem(&pdf(&[""], false)).unwrap();
+        let mut content = b"BT /F1 12 Tf 30 700 Td (RATIO_TEXT) Tj ET\n".to_vec();
+        content.extend(vec![b' '; 100_000]);
+        let mut compressed = Stream::new(dictionary! {}, content);
+        compressed.compress().unwrap();
+        let first = doc.add_object(compressed);
+        let mut contents = vec![Object::Reference(first)];
+        if balanced {
+            let second = doc.add_object(Stream::new(
+                dictionary! {},
+                format!("%{}\n", "x".repeat(4_000)).into_bytes(),
+            ));
+            contents.push(Object::Reference(second));
+        } else {
+            let unused = doc.add_object(Stream::new(
+                dictionary! {"Subtype"=>"Image"},
+                vec![0; 100_000],
+            ));
+            doc.catalog_mut().unwrap().set("UnusedImage", unused);
+        }
+        let page = *doc.get_pages().values().next().unwrap();
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Contents", contents);
+        let result = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library()));
+        if balanced {
+            assert!(values(&result.unwrap()).contains("RATIO_TEXT"));
+        } else {
+            assert!(result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("EXPANSION_RATIO_EXCEEDED"));
+        }
+    }
+}
+
+#[test]
+fn projection_pdf_xref_object_number_mismatch_has_precise_reason() {
+    let mut bytes = pdf(&["BT /F1 12 Tf 30 700 Td (TEXT) Tj ET"], false);
+    let doc = Document::load_mem(&bytes).unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let lopdf::xref::XrefEntry::Normal { offset, .. } = doc.reference_table.get(page.0).unwrap()
+    else {
+        panic!("classic fixture")
+    };
+    let old = format!("{offset:010} 00000 n ");
+    let at = bytes
+        .windows(old.len())
+        .position(|w| w == old.as_bytes())
+        .unwrap();
+    bytes[at..at + 10].copy_from_slice(b"0000000009");
+    let error = extract_with_pdfium("pdf", &bytes, None).err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("PROJECTION_PDF_XREF_OBJECT_MISMATCH"),
         "{error:#}"
     );
 }

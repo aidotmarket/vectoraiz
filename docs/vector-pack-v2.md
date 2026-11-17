@@ -21,21 +21,31 @@ actions and other metadata from every revision are never delivered. Replacing
 or removing a carrier in a later revision does not turn its old strings into
 projected page text.
 
-A conservative escaped-name preflight rejects encryption and unbounded filters.
-Before lopdf loads xref streams, a streaming zlib preflight caps possible Flate
-payloads in every revision. An object callback checks object-stream filters and
-limits before lopdf automatically expands them. Every live xref object must be
-present after load because lopdf can otherwise skip malformed objects; compressed
-xref entries must match their object-stream header indices. Every indirect
-reference must resolve, and the bounded page tree must agree with its declared
-and PDFium page counts. Page content syntax is checked through a private trailing
-parser sentinel, preventing prefix-only parser recovery from certifying an
-omitted page. The stream guard counts actual raw or bounded FlateDecode bytes,
-enforces per-stream/document/100:1 limits, and refuses unsupported
-filters/predictors. Limited PNG predictor parameters are admitted for xref
-streams. References are not recursively expanded when counting dictionaries;
-direct nesting is limited to eight. The existing supervised worker bounds memory
-and CPU time. Conservative byte scanning may refuse ambiguous stream data.
+An escaped-name preflight rejects encryption and optional content. Before lopdf
+loads xref streams, the guard follows actual final/previous/hybrid xref offsets
+and bounds their decoding. The synchronous object callback bounds object streams
+before expansion; failures are stored outside the input graph. An in-band
+`VZGuardFailure` key has no authority. Every live xref object must be present;
+xref/object number or generation disagreement refuses as
+`PROJECTION_PDF_XREF_OBJECT_MISMATCH`; other unparseable live objects refuse as `PROJECTION_PDF_OBJECT_UNREADABLE` (invalid
+offset or unsupported object syntax), and compressed xref entries must match
+object-stream header indices. Undefined references are null per ISO 32000.
+Required structure still has to validate. Page trees and inherited page boxes
+are bounded and must agree with PDFium's page count.
+
+Page content and recursively invoked Form content pass the same syntax/sentinel
+and text-object checks, with a depth-eight, cycle-safe traversal. Form recovery
+cannot silently discard text beside a surviving valid page. Only text-path
+content/resources, fonts/CMaps and structural streams undergo decode accounting.
+Image XObjects and soft masks are counted at raw length and never decoded by
+the guard, irrespective of filter/predictor. Other unused streams are raw counts.
+Raw/ASCII85/Flate streams (single-filter arrays included) are bounded; Flate
+supports PNG predictors 10–15 or identity, with bounded row geometry. Unsupported
+filters or predictors on decoded streams refuse by name. The 100:1 ratio applies
+to the aggregate decoded/encoded lengths of the streams actually decoded, with
+256,000,000 bytes per stream and 512,000,000 bytes per document retained.
+The guard follows xref offsets instead of searching for zlib-like bytes in text.
+Direct dictionary nesting is limited to eight; worker memory/CPU bounds remain.
 
 The pinned PDFium API exposes character render modes, character rectangles and
 page boxes. It does not expose a proof of the document's optional-content default
@@ -44,16 +54,25 @@ configuration. All layered PDFs therefore refuse with
 spellings. No object-active flag is used as a default-state oracle. Such PDFs
 cannot be included through the hidden-content toggle. Unlayered PDFs proceed;
 mode-3 and off-page text are flagged ordinary content and can be edited/excluded.
-Blank/image-only pages are counted omissions, while an entirely textless document
+Unmapped glyphs become U+FFFD with a mandatory-drop count at the character location.
+ActualText anywhere in decoded content/resources conservatively flags all text in
+that document as potentially not-visible replacement text; PDFium still supplies
+the text, and the seller may edit/exclude it. Annotation counts count array items
+rather than dictionary keys. Blank/image-only pages are counted omissions, while an entirely textless document
 refuses. There is no render/OCR fallback in this module.
 
-HTML uses an inert HTML5 tree with a 256-level traversal bound and UTF-8 input
-requirement. It outputs text nodes only, with body/heading/table/label kinds.
-The closed hidden signals are inherited. Hidden form control values are mandatory
-omissions, and unsupported visible interactive control state refuses with
-`PROJECTION_HTML_FORM_UNSUPPORTED`. SVG/MathML refuses rather than silently
-discarding unknown text semantics. CSS stylesheets/classes/layout are not
-evaluated. The per-document warning and generated README state that limitation.
+HTML uses an inert HTML5 tree with a 256-level traversal bound. A BOM wins over
+a declared meta charset; UTF-8 is the default, and encoding_rs handles common
+Windows/ISO encodings and UTF-16 BOMs. Unknown labels and invalid bytes refuse as
+`PROJECTION_HTML_ENCODING_UNSUPPORTED`. Text nodes share a flow within a block,
+preserving paragraph boundaries in captured embedding input. No attributes are
+projected. Form state is a mandatory counted drop: input/textarea/select/output
+subtrees disappear; visible buttons keep ordinary child text only. Hidden controls
+remain mandatory drops regardless of seller inclusion. SVG/MathML subtrees are
+counted mandatory drops even within hidden trees. Datalist, closed dialog,
+canvas/video/audio fallback, noembed, noframes and rp are inherited hidden content,
+omitted by default and seller-includable. Stylesheets/classes/layout are not
+evaluated; the document warning and generated README state that limitation.
 
 Both candidate and build paths invoke the confined projection worker. PDF jobs
 retain the existing 1,536 MiB cap; other projection/readback jobs retain 1 GiB.
@@ -69,9 +88,14 @@ embedding inputs, generation invalidation, payload allowlisting and seller UI.
 These canaries do not qualify corpus capacity or installed delivery journeys.
 Full command/corpus evidence belongs outside the checkout.
 
-Real corpus regressions include 1,236 projected nodes from a Wikipedia page and
-two NASA NTRS PDFs that refuse the expansion-ratio limit and unsupported decode
-parameters, respectively. Object/xref streams and incremental revisions are
-covered with locally generated canary fixtures. Their source
-URLs, exact fixture hashes, licences and the HTML re-recording note accompany the
-fixtures. These observed refusals are coverage limits, not a PDF capacity claim.
+Real corpus regressions include a Wikipedia page and two NASA NTRS PDFs;
+both NASA PDFs now pass the guard and text extraction. Object/xref streams and
+incremental revisions use locally generated canary fixtures. Source URLs, exact
+fixture hashes, licences and the HTML re-recording note accompany the fixtures.
+`projection-pdf-render-trap.py` builds forwarding PDFium libraries on macOS and
+Windows, verifies an exit-on-render positive control, then runs PDF regressions.
+The worker PDF network trap exercises URI actions and remote file references.
+Image-codec independence tests invoke invalid image payloads with six filters,
+require surviving text and exact omitted-page counts, and classify OCR layers.
+These tests and corpus counts are evidence of tested coverage, not capacity or
+installed-journey qualification.

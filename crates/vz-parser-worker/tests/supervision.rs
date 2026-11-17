@@ -419,3 +419,84 @@ fn projection_html_resource_network_trap() {
         "sale extraction must not fetch resources"
     );
 }
+
+#[test]
+fn projection_pdf_resource_network_trap() {
+    let port = std::env::var("KD_BRIDGE_PORT_BASE")
+        .ok()
+        .map(|p| p.parse::<u16>().unwrap() + 2)
+        .unwrap_or(0);
+    let listener = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let url = format!(
+        "http://127.0.0.1:{}/trap",
+        listener.local_addr().unwrap().port()
+    );
+    // A minimal classic PDF with URI action, remote GoTo, external stream and
+    // file specification. None is a supported sale-text resource fetch.
+    let objects = [
+        format!("<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /URI /URI ({url}) >> >>"),
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 /MediaBox [0 0 612 792] >>".into(),
+        format!("<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R /Annots [<< /Subtype /Link /Rect [0 0 10 10] /A << /S /URI /URI ({url}) >> >>] /AA << /O << /S /GoToR /F ({url}) >> >> >>"),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".into(),
+        { let content="BT /F1 12 Tf 30 700 Td (PDF_NETWORK_TRAP) Tj ET";format!("<< /Length {} >>\nstream\n{content}\nendstream",content.len()) },
+        format!("<< /Type /Filespec /FS /URL /F ({url}) >>"),
+    ];
+    let mut bytes = b"%PDF-1.4\n".to_vec();
+    let mut offsets = Vec::new();
+    for (i, object) in objects.iter().enumerate() {
+        offsets.push(bytes.len());
+        bytes.extend_from_slice(format!("{} 0 obj\n{object}\nendobj\n", i + 1).as_bytes());
+    }
+    let xref = bytes.len();
+    bytes.extend_from_slice(
+        format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1).as_bytes(),
+    );
+    for offset in offsets {
+        bytes.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    bytes.extend_from_slice(
+        format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        )
+        .as_bytes(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("trap.pdf");
+    std::fs::write(&path, bytes).unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let library = std::env::var_os("VZ_TEST_PDFIUM")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            root.join(".assets").join(if cfg!(windows) {
+                "pdfium/bin/pdfium.dll"
+            } else {
+                "pdfium/lib/libpdfium.dylib"
+            })
+        });
+    run(
+        Path::new(env!("CARGO_BIN_EXE_vz-parser-worker")),
+        &Request {
+            path,
+            pdfium: Some(library.canonicalize().unwrap()),
+            office: None,
+            readback: None,
+            projection: Some(vz_core::worker::ProjectionJob {
+                kind: "pdf".into(),
+                output: dir.path().into(),
+            }),
+        },
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let p: vz_core::office::projection::Projection =
+        serde_json::from_slice(&std::fs::read(dir.path().join("projection.json")).unwrap())
+            .unwrap();
+    assert!(p.nodes.iter().any(|n| n.text.contains("PDF_NETWORK_TRAP")));
+    assert_eq!(
+        listener.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "PDF projection fetched a remote resource"
+    );
+}

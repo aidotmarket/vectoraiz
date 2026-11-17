@@ -8,8 +8,7 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
         "PROJECTION_PART_BYTES_EXCEEDED at html: {} / {PART_BYTES}",
         input.len()
     );
-    let text = std::str::from_utf8(input)
-        .context("PROJECTION_HTML_ENCODING_UNSUPPORTED: save UTF-8 or exclude document")?;
+    let text = decode_html(input)?;
     ensure!(
         !text
             .trim_start_matches('\u{feff}')
@@ -20,7 +19,7 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
         "PROJECTION_HTML_CONTAINER_MISMATCH: container disguised as HTML"
     );
     ensure!(!text.contains('\0'), "PROJECTION_HTML_MALFORMED: NUL byte");
-    let html = Html::parse_document(text);
+    let html = Html::parse_document(&text);
     out.parts = 1;
     out.expanded_bytes = input.len() as u64;
     let mut states = BTreeMap::new();
@@ -35,8 +34,8 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
             .parent()
             .and_then(|p| states.get(&p.id()))
             .copied()
-            .unwrap_or((false, false, 0usize));
-        let (mut hidden, mut dropped, depth) = parent;
+            .unwrap_or((false, false, 0usize, 0usize));
+        let (mut hidden, mut dropped, depth, mut block) = parent;
         ensure!(
             depth < 256,
             "PROJECTION_HTML_DEPTH_EXCEEDED at html/node[{index}]: {depth} / 256"
@@ -48,6 +47,46 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
             }
             HtmlNode::Element(element) => {
                 let name = element.name();
+                if matches!(
+                    name,
+                    "address"
+                        | "article"
+                        | "aside"
+                        | "blockquote"
+                        | "body"
+                        | "div"
+                        | "dl"
+                        | "dt"
+                        | "dd"
+                        | "fieldset"
+                        | "figcaption"
+                        | "figure"
+                        | "footer"
+                        | "form"
+                        | "h1"
+                        | "h2"
+                        | "h3"
+                        | "h4"
+                        | "h5"
+                        | "h6"
+                        | "header"
+                        | "hr"
+                        | "li"
+                        | "main"
+                        | "nav"
+                        | "ol"
+                        | "p"
+                        | "pre"
+                        | "section"
+                        | "table"
+                        | "td"
+                        | "th"
+                        | "tr"
+                        | "ul"
+                        | "br"
+                ) {
+                    block = index;
+                }
                 let style = element.attr("style");
                 styled |= style.is_some()
                     || name == "style"
@@ -68,9 +107,16 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                             || element
                                 .attr("type")
                                 .is_some_and(|t| t.eq_ignore_ascii_case("hidden")));
-                    ensure!(!control || hidden_form, "PROJECTION_HTML_FORM_UNSUPPORTED at {at}: visible {name} state requires a supported static value projection; exclude document");
+                    if control && !hidden_form {
+                        out.drop_at("form-control-state", &at)?;
+                    }
                     let category = match name {
                         _ if hidden_form => Some("hidden-form-data"),
+                        "input" | "textarea" | "select" | "output" => {
+                            dropped = true;
+                            None
+                        }
+                        "svg" | "math" => Some("unsupported-markup"),
                         "script" | "noscript" | "iframe" | "object" | "embed" | "applet" => {
                             Some("active-markup")
                         }
@@ -96,16 +142,23 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                             out.drop_at("active-markup", &format!("{at}/@{key}"))?;
                         }
                     }
-                    ensure!(
-                        !matches!(name, "svg" | "math"),
-                        "PROJECTION_HTML_CONTENT_UNSUPPORTED at {at}: {name}"
-                    );
                     hidden |= element.attr("hidden").is_some()
-                        || name == "template"
+                        || matches!(
+                            name,
+                            "template"
+                                | "datalist"
+                                | "canvas"
+                                | "video"
+                                | "audio"
+                                | "noembed"
+                                | "noframes"
+                                | "rp"
+                        )
+                        || (name == "dialog" && element.attr("open").is_none())
                         || style.is_some_and(inline_hidden);
                 }
             }
-            HtmlNode::Text(value) if !dropped && !value.trim().is_empty() => {
+            HtmlNode::Text(value) if !dropped => {
                 let parent_name = node
                     .parent()
                     .and_then(|n| n.value().as_element().map(|e| e.name().to_string()))
@@ -116,11 +169,16 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                     "label" | "legend" | "caption" | "figcaption" => "HTML label",
                     _ => "HTML body text",
                 };
-                out.add(&at, kind, value.to_string(), hidden)?;
+                out.add(
+                    &format!("html/block[{block}]/flow[{index}]"),
+                    kind,
+                    value.to_string(),
+                    hidden,
+                )?;
             }
             _ => (),
         }
-        states.insert(node.id(), (hidden, dropped, depth + 1));
+        states.insert(node.id(), (hidden, dropped, depth + 1, block));
     }
     if styled {
         out.warnings.push("HTML visibility limitation: stylesheets, classes and CSS layout are not evaluated; only hidden, inline display:none, inline visibility:hidden and template contents are classified (inherited). No resources are fetched.".into());
@@ -154,4 +212,57 @@ fn inline_hidden(style: &str) -> bool {
         let _ = parser.expect_semicolon();
     }
     hidden
+}
+
+// BOM wins over metadata. Only a meta element can declare an encoding; body
+// text and arbitrary attributes cannot switch the decoder.
+fn decode_html(input: &[u8]) -> Result<String> {
+    use encoding_rs::{Encoding, UTF_8};
+    let (encoding, skip) = if let Some(bom) = Encoding::for_bom(input) {
+        bom
+    } else {
+        let sniff: String = input.iter().take(4096).map(|b| char::from(*b)).collect();
+        let tree = Html::parse_document(&sniff);
+        let selector = scraper::Selector::parse("meta").unwrap();
+        let mut label = None;
+        for meta in tree.select(&selector) {
+            if let Some(value) = meta.value().attr("charset") {
+                label = Some(value.to_string());
+                break;
+            }
+            if meta
+                .value()
+                .attr("http-equiv")
+                .is_some_and(|s| s.eq_ignore_ascii_case("content-type"))
+            {
+                if let Some(content) = meta.value().attr("content") {
+                    let lower = content.to_ascii_lowercase();
+                    if let Some((_, tail)) = lower.split_once("charset=") {
+                        label = Some(
+                            tail.trim()
+                                .trim_matches(['\'', '"'])
+                                .split(';')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string(),
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+        let enc = match label {
+            Some(label) => Encoding::for_label(label.as_bytes())
+                .context("PROJECTION_HTML_ENCODING_UNSUPPORTED: declared charset")?,
+            None => UTF_8,
+        };
+        (enc, 0)
+    };
+    let (text, errors) = encoding.decode_without_bom_handling(&input[skip..]);
+    ensure!(
+        !errors,
+        "PROJECTION_HTML_ENCODING_UNSUPPORTED: invalid encoded bytes"
+    );
+    Ok(text.into_owned())
 }
