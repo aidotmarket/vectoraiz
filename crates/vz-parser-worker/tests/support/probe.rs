@@ -36,7 +36,19 @@ fn main() {
             b"VZ_RESOURCE_PROBE_RSS\n" => {
                 let mut buffers = Vec::new();
                 for _ in 0..16 {
-                    let mut bytes = vec![0u8; 16 * 1024 * 1024];
+                    let mut bytes = Vec::new();
+                    if let Err(error) = bytes.try_reserve_exact(16 * 1024 * 1024) {
+                        let _ = vz_core::worker::write_frame(
+                            std::io::stdout().lock(),
+                            &vz_core::worker::Response {
+                                pages: vec![],
+                                error: Some(format!("TEST_PROBE_ALLOCATION_DENIED: {error}")),
+                                content_failure: false,
+                            },
+                        );
+                        return;
+                    }
+                    bytes.resize(16 * 1024 * 1024, 0u8);
                     for byte in bytes.iter_mut().step_by(4096) {
                         *byte = 42;
                     }

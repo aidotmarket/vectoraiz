@@ -1701,3 +1701,25 @@ fn projection_pdf_padded_operands_keep_actualtext_flags() {
         );
     }
 }
+
+// This acceptance gate deliberately remains strict while the literal resource
+// superset conflicts with the follow-up's required bounded controls. Do not
+// turn conservative refusals into passing expectations to qualify sellers.
+#[test]
+fn projection_pdf_followup_required_bounded_controls_pass() {
+    let mut failures = Vec::new();
+    for (name, bytes) in [
+        ("direct 8x6", invocation_pdf(8, 6, 0, 1)),
+        ("split 8x6", routed_invocation_pdf("split", 8, 6, false)),
+        ("Type3 3x3", routed_invocation_pdf("glyph", 3, 3, false)),
+    ] {
+        if let Err(error) = super::pdf::metadata(&bytes, &mut Projection::new()) {
+            failures.push(format!("{name}: {error:#}"));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "seller enablement control gate: {}",
+        failures.join("; ")
+    );
+}
