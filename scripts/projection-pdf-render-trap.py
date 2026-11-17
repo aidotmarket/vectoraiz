@@ -73,9 +73,9 @@ def main():
         run(["codesign", "--force", "--sign", "-", shim])
     child = "import ctypes,sys; ctypes.CDLL(sys.argv[1]).FPDF_RenderPageBitmap()"
     proxy = ["rtk", "run"] if shutil.which("rtk") else []
-    positive = subprocess.run(proxy + [sys.executable, "-c", child, str(shim.resolve())])
+    env = dict(os.environ, VZ_TEST_PDFIUM=str(shim.resolve()), PATH=str(args.scratch.resolve()) + os.pathsep + os.environ["PATH"])
+    positive = subprocess.run(proxy + [sys.executable, "-c", child, str(shim.resolve())], env=env)
     assert positive.returncode == 86, f"render trap positive control failed: {positive.returncode}"
-    env = dict(os.environ, VZ_TEST_PDFIUM=str(shim.resolve()))
     run(["cargo", "test", "-p", "vz-core", "--lib", "office::projection::v2_tests::projection_pdf_", "--", "--nocapture"], env=env)
     print(f"render trap: {len(traps)} APIs trapped; positive control and PDF projection regressions passed")
 

@@ -51,7 +51,7 @@ pub(super) fn extract(
         let mut segments: Vec<(bool, bool, String)> = Vec::new();
         for j in 0..chars.len() {
             let character = chars.get(j)?;
-            let value = character.unicode_char().unwrap_or_else(|| '\u{fffd}');
+            let value = character.unicode_char().unwrap_or('\u{fffd}');
             if value == '\u{fffd}' {
                 out.drop_at("unmapped-glyphs", &format!("{at}/char[{j}]"))?;
             }
@@ -626,8 +626,8 @@ fn inherited_boxes(doc: &Document) -> Result<Vec<[f32; 4]>> {
     doc.get_pages()
         .values()
         .map(|id| {
-            let value = inherited(&doc, *id, b"CropBox")?
-                .or(inherited(&doc, *id, b"MediaBox")?)
+            let value = inherited(doc, *id, b"CropBox")?
+                .or(inherited(doc, *id, b"MediaBox")?)
                 .context("PROJECTION_PDF_CLASSIFICATION_UNKNOWN: inherited page geometry")?;
             let values = value.as_array()?;
             ensure!(
@@ -636,7 +636,7 @@ fn inherited_boxes(doc: &Document) -> Result<Vec<[f32; 4]>> {
             );
             let mut bounds = [0f32; 4];
             for (i, value) in values.iter().enumerate() {
-                bounds[i] = resolve(&doc, value)?.as_float()?;
+                bounds[i] = resolve(doc, value)?.as_float()?;
             }
             ensure!(
                 bounds.iter().all(|n| n.is_finite())

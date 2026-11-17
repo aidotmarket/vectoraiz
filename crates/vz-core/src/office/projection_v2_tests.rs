@@ -836,3 +836,99 @@ fn projection_pdf_xref_object_number_mismatch_has_precise_reason() {
         "{error:#}"
     );
 }
+
+#[test]
+fn projection_pdf_form_cycle_refuses_before_pdfium() {
+    let mut doc = Document::load_mem(&pdf(
+        &["BT /F1 12 Tf 30 700 Td (SURVIVING_TEXT) Tj ET /Cycle Do"],
+        false,
+    ))
+    .unwrap();
+    let form=doc.add_object(Stream::new(dictionary!{"Type"=>"XObject","Subtype"=>"Form","BBox"=>vec![0.into(),0.into(),612.into(),792.into()]},b"/Again Do".to_vec()));
+    doc.get_object_mut(form)
+        .unwrap()
+        .as_stream_mut()
+        .unwrap()
+        .dict
+        .set(
+            "Resources",
+            dictionary! {"XObject"=>dictionary!{"Again"=>form}},
+        );
+    let page = *doc.get_pages().values().next().unwrap();
+    let mut resources = super::pdf::test_resources(&doc, page);
+    resources.set("XObject", dictionary! {"Cycle"=>form});
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Resources", resources);
+    let error = extract_with_pdfium("pdf", &save_pdf(doc), None)
+        .err()
+        .unwrap();
+    assert!(
+        format!("{error:#}").contains("Form depth/cycle"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn projection_pdf_unmapped_glyph_replaced_and_counted() {
+    let mut doc = Document::load_mem(&pdf(
+        &["BT /F1 12 Tf 30 700 Td (A SURVIVING_TEXT) Tj ET"],
+        false,
+    ))
+    .unwrap();
+    // A ToUnicode mapping to an isolated UTF-16 surrogate has a real glyph
+    // but no Unicode scalar. Keep neighboring readable text in the document.
+    let cmap=doc.add_object(Stream::new(dictionary!{},b"/CIDInit /ProcSet findresource begin 12 dict begin begincmap /CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def /CMapName /BadUnicode def /CMapType 2 def 1 begincodespacerange <00> <FF> endcodespacerange 1 beginbfchar <41> <D800> endbfchar endcmap CMapName currentdict /CMap defineresource pop end end".to_vec()));
+    doc.get_object_mut((4, 0))
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("ToUnicode", cmap);
+    let bytes = save_pdf(doc);
+    let p = extract_with_pdfium("pdf", &bytes, Some(&library())).unwrap();
+    assert!(values(&p).contains("SURVIVING_TEXT"));
+    assert!(p.drops["unmapped-glyphs"] > 0);
+    assert!(values(&p).contains('\u{fffd}'));
+}
+
+#[test]
+fn projection_pdf_malformed_decoded_flate_and_unsupported_predictor_refuse() {
+    for predictor in [1, 2] {
+        let mut doc =
+            Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (TEXT) Tj ET"], false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let content = doc
+            .get_object(page)
+            .unwrap()
+            .as_dict()
+            .unwrap()
+            .get(b"Contents")
+            .unwrap()
+            .as_reference()
+            .unwrap();
+        let stream = doc
+            .get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap();
+        stream.set_content(vec![0x78, 0x9c, 0xff, 0xff]);
+        stream.dict.set("Filter", "FlateDecode");
+        stream
+            .dict
+            .set("DecodeParms", dictionary! {"Predictor"=>predictor});
+        let error = extract_with_pdfium("pdf", &save_pdf(doc), None)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(
+            error.contains(if predictor == 1 {
+                "PROJECTION_PDF_MALFORMED"
+            } else {
+                "PROJECTION_PDF_STREAM_UNSUPPORTED"
+            }),
+            "{error}"
+        );
+    }
+}

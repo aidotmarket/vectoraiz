@@ -1827,7 +1827,7 @@ mod tests {
             "pdf",
             include_bytes!("../../vz-core/tests/fixtures/projection-v2.pdf"),
         );
-        index_poisoned_projection(&f, "htm", b"<p>Hello <b>bold</b>world</p><p>Next block</p><input value='CONTROL_CANARY'><button value='CONTROL_CANARY'>Button text</button>");
+        index_poisoned_projection(&f, "htm", b"<p>Hello <b>bold</b>world</p><p>Next block</p><p>Line<br>break</p><input value='CONTROL_CANARY'><button value='CONTROL_CANARY'>Button text</button>");
         let id = Uuid::new_v4();
         let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
         let guard = store
@@ -1865,6 +1865,8 @@ mod tests {
             .unwrap()
             .iter()
             .any(|s| s == "Next block"));
+        assert!(f.engine.texts.lock().unwrap().iter().any(|s| s == "Line"));
+        assert!(f.engine.texts.lock().unwrap().iter().any(|s| s == "break"));
         assert!(inputs.contains("Button text") && !inputs.contains("CONTROL_CANARY"));
         assert!(
             !inputs.contains("CANARY")

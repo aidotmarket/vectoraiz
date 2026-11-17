@@ -83,7 +83,6 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                         | "th"
                         | "tr"
                         | "ul"
-                        | "br"
                 ) {
                     block = index;
                 }
@@ -156,6 +155,14 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                         )
                         || (name == "dialog" && element.attr("open").is_none())
                         || style.is_some_and(inline_hidden);
+                }
+                if name == "br" && !dropped {
+                    out.add(
+                        &format!("html/block[{block}]/flow[{index}]"),
+                        "HTML body text",
+                        "\n".into(),
+                        hidden,
+                    )?;
                 }
             }
             HtmlNode::Text(value) if !dropped => {
