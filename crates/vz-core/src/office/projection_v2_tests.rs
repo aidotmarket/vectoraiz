@@ -1658,3 +1658,39 @@ fn projection_pdf_structural_backstop_charges_unresolved_do_names() {
         "PROJECTION_PDF_FORM_INVOCATIONS_EXCEEDED"
     );
 }
+
+#[test]
+fn projection_pdf_padded_operands_keep_actualtext_flags() {
+    for operator in ["BDC", "DP", "Do"] {
+        let mut doc =
+            Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (BODY) Tj ET"], false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let content = doc.get_page_contents(page)[0];
+        let body = if operator == "Do" {
+            let form = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),612.into(),792.into()]}, b"/Span <</ActualText (REPLACEMENT)>> BDC BT /F1 12 Tf 30 700 Td (BODY) Tj ET EMC".to_vec()));
+            let mut resources = super::pdf::test_resources(&doc, page);
+            resources.set("XObject", dictionary! {"Top"=>form});
+            doc.get_object_mut(page)
+                .unwrap()
+                .as_dict_mut()
+                .unwrap()
+                .set("Resources", resources);
+            b"/Decoy /Top Do".to_vec()
+        } else {
+            format!("0 /Span <</ActualText (REPLACEMENT)>> {operator} BT /F1 12 Tf 30 700 Td (BODY) Tj ET {}", if operator == "BDC" {"EMC"} else {""}).into_bytes()
+        };
+        doc.get_object_mut(content)
+            .unwrap()
+            .as_stream_mut()
+            .unwrap()
+            .set_plain_content(body);
+        let projection = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+        assert!(
+            projection
+                .nodes
+                .iter()
+                .any(|n| n.kind.contains("ActualText")),
+            "{operator}"
+        );
+    }
+}

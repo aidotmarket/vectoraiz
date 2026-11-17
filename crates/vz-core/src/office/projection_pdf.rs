@@ -340,6 +340,8 @@ fn metadata_document(
         memo: BTreeMap::new(),
         invoked: BTreeSet::new(),
         stream_counts: BTreeMap::new(),
+        structural_memo: BTreeMap::new(),
+        has_type3: None,
     };
     for id in content_ids {
         let ops = validate_content(&guarded_content(&doc, id, &mut validation)?, id)?;
@@ -1041,27 +1043,13 @@ fn operator_counts(ops: &[lopdf::content::Operation]) -> (u64, u64) {
     (draws, text)
 }
 
-fn resource_category<'a>(
-    doc: &'a Document,
-    own: &'a Object,
-    page: &'a Object,
-    key: &[u8],
-) -> Result<Option<&'a Object>> {
-    let category = |resources| -> Result<Option<&'a Object>> {
-        Ok(resolve(doc, resources)?
-            .as_dict()
-            .ok()
-            .and_then(|d| d.get(key).ok()))
-    };
-    Ok(category(own)?.or(category(page)?))
-}
-
 #[derive(Default)]
 struct StructuralBound {
     active: BTreeMap<lopdf::ObjectId, usize>,
     branching: usize,
     cyclic: bool,
     steps: usize,
+    cycles: usize,
 }
 
 // Count direct Type3 dictionaries, including inline fonts. References are
@@ -1090,7 +1078,9 @@ fn structural_form_bound(
 ) -> Result<u64> {
     let mut state = StructuralBound::default();
     let counts = operator_counts(&validate_content(content, (0, 0))?);
-    let mut bound = structural_cost(doc, counts, resources, page, &mut state, validation)?;
+    let mut scope = vec![resources, page];
+    canonical_scope(doc, &mut scope)?;
+    let mut bound = structural_cost(doc, counts, &scope, &mut state, validation)?;
     if state.cyclic {
         // Pinned chromium/8111: streamcontentparser kMaxFormLevel=40;
         // type3font kMaxType3FormLevel=4 per font. A glyph starts its own
@@ -1103,29 +1093,77 @@ fn structural_form_bound(
     Ok(bound.min(MAX_FORM_INVOCATIONS + 1))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn structural_stream_bound(
-    doc: &Document,
+// Resource identity is stable for the lifetime of the parsed document. Keep
+// every ancestor scope; selecting one dictionary would repeat the resolver's
+// fallback assumptions. Sorting also makes equivalent scope sets share a memo.
+fn canonical_scope<'a>(doc: &'a Document, scope: &mut Vec<&'a Object>) -> Result<()> {
+    for value in scope.iter_mut() {
+        *value = resolve(doc, value)?;
+    }
+    scope.sort_by_key(|v| *v as *const Object as usize);
+    scope.dedup_by_key(|v| *v as *const Object as usize);
+    Ok(())
+}
+
+fn all_type3_glyphs<'a>(object: &'a Object, glyphs: &mut Vec<(&'a Object, Option<&'a Object>)>) {
+    match object {
+        Object::Dictionary(dict) => {
+            if let Ok(procs) = dict.get(b"CharProcs") {
+                glyphs.push((procs, dict.get(b"Resources").ok()));
+            }
+            for (_, value) in dict.iter() {
+                all_type3_glyphs(value, glyphs);
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, value) in stream.dict.iter() {
+                all_type3_glyphs(value, glyphs);
+            }
+        }
+        Object::Array(values) => {
+            for value in values {
+                all_type3_glyphs(value, glyphs);
+            }
+        }
+        _ => (),
+    }
+}
+
+fn structural_stream_bound<'a>(
+    doc: &'a Document,
     id: lopdf::ObjectId,
-    resources: &Object,
-    page: &Object,
+    scope: &[&'a Object],
     fanout: u64,
     state: &mut StructuralBound,
     validation: &mut FormValidation<'_>,
 ) -> Result<u64> {
     state.steps += 1;
-    // Refuse an unproved bound rather than letting dense resource dictionaries
-    // turn the guard itself into an exponential graph traversal.
-    if state.steps > 100_000 || state.active.len() >= 32 {
-        return Ok(MAX_FORM_INVOCATIONS + 1);
-    }
+    ensure!(
+        state.steps <= 100_000 && state.active.len() < 32,
+        "PROJECTION_PDF_FORM_GRAPH_UNBOUNDED: traversal budget"
+    );
     let branching = state.branching + usize::from(fanout > 1);
     if let Some(previous) = state.active.get(&id) {
-        if branching > *previous {
-            return Ok(MAX_FORM_INVOCATIONS + 1);
-        }
+        ensure!(
+            branching <= *previous,
+            "PROJECTION_PDF_FORM_GRAPH_UNBOUNDED: branching resource cycle"
+        );
         state.cyclic = true;
+        state.cycles += 1;
         return Ok(0);
+    }
+    let stream = doc.get_object(id)?.as_stream()?;
+    let mut scope = scope.to_vec();
+    if let Ok(own) = stream.dict.get(b"Resources") {
+        scope.push(own);
+    }
+    canonical_scope(doc, &mut scope)?;
+    let key = (
+        id,
+        scope.iter().map(|v| *v as *const Object as usize).collect(),
+    );
+    if let Some(bound) = validation.structural_memo.get(&key) {
+        return Ok(*bound);
     }
     let counts = if let Some(counts) = validation.stream_counts.get(&id) {
         *counts
@@ -1136,79 +1174,82 @@ fn structural_stream_bound(
     };
     state.active.insert(id, branching);
     let previous = state.branching;
+    let cycles = state.cycles;
     state.branching = branching;
-    let bound = structural_cost(doc, counts, resources, page, state, validation);
+    let bound = structural_cost(doc, counts, &scope, state, validation);
     state.branching = previous;
     state.active.remove(&id);
+    if cycles == state.cycles {
+        if let Ok(bound) = &bound {
+            validation.structural_memo.insert(key, *bound);
+        }
+    }
     bound
 }
 
-fn structural_cost(
-    doc: &Document,
+fn structural_cost<'a>(
+    doc: &'a Document,
     (draws, text): (u64, u64),
-    resources: &Object,
-    page: &Object,
+    scope: &[&'a Object],
     state: &mut StructuralBound,
     validation: &mut FormValidation<'_>,
 ) -> Result<u64> {
     if draws == 0 && text == 0 {
         return Ok(0);
     }
-    let fonts = resource_category(doc, resources, page, b"Font")?;
-    let has_glyphs = if let Some(fonts) = fonts {
-        resolve(doc, fonts)?.as_dict()?.iter().any(|(_, font)| {
-            resolve(doc, font).is_ok_and(|v| v.as_dict().is_ok_and(|d| d.has(b"CharProcs")))
-        })
-    } else {
-        false
-    };
-    let fanout = draws.saturating_add(if has_glyphs { text } else { 0 });
+    let mut glyphs = Vec::new();
+    if text > 0
+        && *validation
+            .has_type3
+            .get_or_insert_with(|| doc.objects.values().any(|v| type3_fonts(v) > 0))
+    {
+        for object in doc.objects.values() {
+            all_type3_glyphs(object, &mut glyphs);
+        }
+    }
+    let fanout = draws.saturating_add(if glyphs.is_empty() { 0 } else { text });
     let mut form_max = 1;
     let mut glyph_max = 0;
     if draws > 0 {
-        if let Some(map) = resource_category(doc, resources, page, b"XObject")? {
-            for (_, object) in resolve(doc, map)?.as_dict()?.iter() {
-                let value = resolve(doc, object)?;
-                if let Ok(stream) = value.as_stream() {
-                    if subtype(doc, stream, b"Form")? {
-                        form_max = form_max.max(
-                            1 + structural_stream_bound(
-                                doc,
-                                object.as_reference()?,
-                                form_resources(doc, stream, resources)?,
-                                page,
-                                fanout,
-                                state,
-                                validation,
-                            )?,
-                        );
-                        if draws.saturating_mul(form_max) > MAX_FORM_INVOCATIONS {
-                            return Ok(MAX_FORM_INVOCATIONS + 1);
+        let mut targets = BTreeSet::new();
+        for resources in scope {
+            if let Ok(dict) = resolve(doc, resources)?.as_dict() {
+                if let Ok(map) = dict.get(b"XObject") {
+                    for (_, object) in resolve(doc, map)?.as_dict()?.iter() {
+                        if let Ok(stream) = resolve(doc, object)?.as_stream() {
+                            if subtype(doc, stream, b"Form")? {
+                                targets.insert(object.as_reference()?);
+                            }
                         }
                     }
                 }
             }
         }
+        for id in targets {
+            form_max = form_max
+                .max(1 + structural_stream_bound(doc, id, scope, fanout, state, validation)?);
+            if draws.saturating_mul(form_max) > MAX_FORM_INVOCATIONS {
+                return Ok(MAX_FORM_INVOCATIONS + 1);
+            }
+        }
     }
-    if text > 0 && has_glyphs {
-        for (_, font) in resolve(doc, fonts.unwrap())?.as_dict()?.iter() {
-            if let Ok(font) = resolve(doc, font)?.as_dict() {
-                if let Ok(procs) = font.get(b"CharProcs") {
-                    for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
-                        glyph_max = glyph_max.max(structural_stream_bound(
-                            doc,
-                            glyph.as_reference()?,
-                            font.get(b"Resources").unwrap_or(page),
-                            page,
-                            fanout,
-                            state,
-                            validation,
-                        )?);
-                        if text.saturating_mul(glyph_max) > MAX_FORM_INVOCATIONS {
-                            return Ok(MAX_FORM_INVOCATIONS + 1);
-                        }
-                    }
-                }
+    for (procs, resources) in glyphs {
+        let mut glyph_scope = scope.to_vec();
+        if let Some(resources) = resources {
+            glyph_scope.push(resources);
+        }
+        canonical_scope(doc, &mut glyph_scope)?;
+        for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
+            glyph_max = glyph_max.max(structural_stream_bound(
+                doc,
+                glyph.as_reference()?,
+                &glyph_scope,
+                fanout,
+                state,
+                validation,
+            )?);
+            if text.saturating_mul(glyph_max) > MAX_FORM_INVOCATIONS {
+                return Ok(MAX_FORM_INVOCATIONS + 1);
             }
         }
     }
@@ -1277,6 +1318,8 @@ struct FormValidation<'a> {
     memo: BTreeMap<FormMemoKey, FormResult>,
     invoked: BTreeSet<lopdf::ObjectId>,
     stream_counts: BTreeMap<lopdf::ObjectId, (u64, u64)>,
+    structural_memo: BTreeMap<(lopdf::ObjectId, Vec<usize>), u64>,
+    has_type3: Option<bool>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1343,7 +1386,13 @@ fn validate_forms<'a>(
                 }
             }
             "Tf" => {
-                font = match op.operands.first().and_then(|v| v.as_name().ok()) {
+                font = match op
+                    .operands
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .and_then(|v| v.as_name().ok())
+                {
                     Some(name) => Some(resource(doc, resources, page_resources, b"Font", name)?),
                     None => None,
                 };
@@ -1367,16 +1416,18 @@ fn validate_forms<'a>(
                         }) {
                             let codes = op.operands.iter().map(text_string_bytes).sum::<u64>();
                             if codes == 0 { continue; }
-                            let glyph_resources = dict.get(b"Resources").unwrap_or(page_resources);
+                            let glyph_fallback = dict.get(b"Resources").unwrap_or(page_resources);
                             let mut glyph_cost = FormCost::default();
                             if let Ok(procs) = dict.get(b"CharProcs") {
                                 for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
                                     let glyph_id = glyph.as_reference()?;
+                                    let glyph_stream = doc.get_object(glyph_id)?.as_stream()?;
+                                    let glyph_resources = glyph_stream.dict.get(b"Resources").unwrap_or(glyph_fallback);
                                     let glyph_result = validate_form_stream(
                                         doc,
                                         glyph_id,
                                         glyph_resources,
-                                        page_resources,
+                                        glyph_fallback,
                                         font,
                                         depth + 1,
                                         validation,
@@ -1400,7 +1451,7 @@ fn validate_forms<'a>(
             _ => (),
         }
         if matches!(op.operator.as_str(), "BDC" | "DP") {
-            if let Some(properties) = op.operands.get(1) {
+            if let Some(properties) = op.operands.last() {
                 let properties = if let Object::Name(name) = properties {
                     resource(doc, resources, page_resources, b"Properties", name)?
                 } else {
@@ -1416,7 +1467,7 @@ fn validate_forms<'a>(
         }
         let name = op
             .operands
-            .first()
+            .last()
             .context("PROJECTION_PDF_FORM_UNPROVEN: missing Do operand")?
             .as_name()?;
         let object = resource(doc, resources, page_resources, b"XObject", name)?;
@@ -1753,9 +1804,11 @@ mod character_tests {
                 memo: Default::default(),
                 invoked: Default::default(),
                 stream_counts: Default::default(),
+                structural_memo: Default::default(),
+                has_type3: None,
             };
             for (id, content, count) in [
-                ((0, 0), b"BT /T3 12 Tf (a) Tj ET".as_slice(), 2),
+                ((0, 0), b"BT /Decoy /T3 12 Tf (a) Tj ET".as_slice(), 2),
                 ((0, 1), b"BT /T3 12 Tf [(a) 0 (aa)] TJ ET".as_slice(), 6),
             ] {
                 let result = super::validate_forms(
@@ -1783,6 +1836,82 @@ mod character_tests {
                 validation.expanded_bytes,
                 if font_resources { 97 } else { 96 }
             );
+        }
+    }
+
+    #[test]
+    fn type3_glyph_own_resources_and_font_fallback_are_charged() {
+        use lopdf::{dictionary, Document, Object, Stream};
+        for own in [false, true] {
+            let mut doc = Document::new();
+            let leaf = doc.add_object(Stream::new(
+                dictionary! {"Subtype"=>"Form"},
+                b"q Q".to_vec(),
+            ));
+            // A Form inside the glyph has its own Font category but must still
+            // fall back to the font's XObject category, rather than the page's.
+            let wrapper = doc.add_object(Stream::new(
+                dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"Font"=>dictionary! {}}},
+                b"/Leaf Do".to_vec(),
+            ));
+            let font_resources =
+                dictionary! {"XObject"=>dictionary! {"Leaf"=>leaf, "Wrapper"=>wrapper}};
+            let mut glyph_dict = dictionary! {};
+            if own {
+                glyph_dict.set(
+                    "Resources",
+                    dictionary! {"XObject"=>dictionary! {"OnlyHere"=>wrapper}},
+                );
+            }
+            let glyph = doc.add_object(Stream::new(
+                glyph_dict,
+                if own {
+                    b"1000 0 d0 /OnlyHere Do".to_vec()
+                } else {
+                    b"1000 0 d0 /Wrapper Do".to_vec()
+                },
+            ));
+            let font = doc.add_object(dictionary! {"Subtype"=>"Type3", "Resources"=>font_resources, "CharProcs"=>dictionary! {"a"=>glyph}});
+            let page = Object::Dictionary(dictionary! {"Font"=>dictionary! {"T3"=>font}});
+            let receipts = [leaf, wrapper, glyph]
+                .into_iter()
+                .map(|id| {
+                    (
+                        id,
+                        doc.get_object(id)
+                            .unwrap()
+                            .as_stream()
+                            .unwrap()
+                            .content
+                            .len() as u64,
+                    )
+                })
+                .collect();
+            let mut validation = super::FormValidation {
+                receipts: &receipts,
+                expanded_bytes: 100,
+                consumed: Default::default(),
+                active: Default::default(),
+                memo: Default::default(),
+                invoked: Default::default(),
+                stream_counts: Default::default(),
+                structural_memo: Default::default(),
+                has_type3: None,
+            };
+            let result = super::validate_forms(
+                &doc,
+                b"BT /Decoy /T3 12 Tf (a) Tj ET",
+                (0, 0),
+                &page,
+                &page,
+                None,
+                0,
+                &mut validation,
+            )
+            .unwrap();
+            assert_eq!(result.cost.count, 2, "own glyph resources: {own}");
+            assert!(validation.invoked.contains(&leaf));
+            assert!(validation.invoked.contains(&wrapper));
         }
     }
 
@@ -1819,19 +1948,21 @@ mod character_tests {
             memo: Default::default(),
             invoked: Default::default(),
             stream_counts: Default::default(),
+            structural_memo: Default::default(),
+            has_type3: None,
         };
         let content = "/Unknown Do ".repeat(400);
-        assert!(
-            super::structural_form_bound(
-                &doc,
-                content.as_bytes(),
-                &resources,
-                &resources,
-                &mut validation
-            )
-            .unwrap()
-                > super::MAX_FORM_INVOCATIONS
-        );
+        let error = super::structural_form_bound(
+            &doc,
+            content.as_bytes(),
+            &resources,
+            &resources,
+            &mut validation,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .starts_with("PROJECTION_PDF_FORM_GRAPH_UNBOUNDED:"));
         assert_eq!(
             super::validate_forms(
                 &doc,
@@ -1866,6 +1997,8 @@ mod character_tests {
             memo: Default::default(),
             invoked: Default::default(),
             stream_counts: Default::default(),
+            structural_memo: Default::default(),
+            has_type3: None,
         };
         assert_eq!(
             super::guarded_content(&doc, alias, &mut validation).unwrap(),
@@ -1883,6 +2016,8 @@ mod character_tests {
             memo: Default::default(),
             invoked: Default::default(),
             stream_counts: Default::default(),
+            structural_memo: Default::default(),
+            has_type3: None,
         };
         assert!(super::guarded_content(&doc, alias, &mut unaccounted)
             .unwrap_err()

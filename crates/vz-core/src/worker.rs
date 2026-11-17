@@ -159,11 +159,48 @@ fn run_command(
     run_command_checked(cmd, request, timeout, sandboxed, || Ok(()))
 }
 fn run_command_checked(
+    cmd: Command,
+    request: &Request,
+    timeout: Duration,
+    sandboxed: bool,
+    check: impl Fn() -> Result<()>,
+) -> Result<Vec<Page>> {
+    run_command_with_watchdog(
+        cmd,
+        request,
+        timeout,
+        sandboxed,
+        check,
+        request.memory_bytes(),
+    )
+}
+
+/// Test-only seam: exercise the real supervisor below the OS allocation cap.
+/// The shipping entry points always use the request's full memory limit.
+#[cfg(feature = "test-support")]
+pub fn run_with_watchdog_limit(
+    worker: &Path,
+    request: &Request,
+    timeout: Duration,
+    watchdog_bytes: u64,
+) -> Result<Vec<Page>> {
+    run_command_with_watchdog(
+        command(worker),
+        request,
+        timeout,
+        cfg!(target_os = "macos"),
+        || Ok(()),
+        watchdog_bytes,
+    )
+}
+
+fn run_command_with_watchdog(
     mut cmd: Command,
     request: &Request,
     timeout: Duration,
     sandboxed: bool,
     check: impl Fn() -> Result<()>,
+    memory_limit: u64,
 ) -> Result<Vec<Page>> {
     #[cfg(all(unix, test))]
     {
@@ -227,7 +264,6 @@ fn run_command_checked(
     });
     let start = Instant::now();
     let mut last_usage = 0;
-    let memory_limit = request.memory_bytes();
     let memory_prefix = if request.projection.is_some() || request.readback.is_some() {
         "PROJECTION"
     } else {
@@ -301,7 +337,7 @@ fn run_command_checked(
             return Ok(response.pages);
         }
         last_usage = resident_bytes(child.id());
-        if last_usage > request.memory_bytes() {
+        if last_usage > memory_limit {
             let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
@@ -316,8 +352,13 @@ fn run_command_checked(
         if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
+            let prefix = if request.projection.is_some() || request.readback.is_some() {
+                "PROJECTION_RESOURCE_LIMIT: "
+            } else {
+                ""
+            };
             return Err(crate::failures::content(format!(
-                "worker timeout after {}ms",
+                "{prefix}worker timeout after {}ms",
                 timeout.as_millis()
             )));
         }

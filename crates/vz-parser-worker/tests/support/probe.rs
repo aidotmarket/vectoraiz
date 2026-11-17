@@ -18,6 +18,32 @@ fn main() {
         .unwrap();
         return;
     }
+    // Deliberately bypass the PDF guard in this separate test executable.
+    // Resource probes use file bytes so the same supervisor/request boundary is
+    // exercised without executing an actual hostile PDF or exhausting the OS.
+    if let Ok(bytes) = std::fs::read(&request.path) {
+        match bytes.as_slice() {
+            b"VZ_RESOURCE_PROBE_RSS\n" => {
+                let mut buffers = Vec::new();
+                for _ in 0..16 {
+                    let mut bytes = vec![0u8; 16 * 1024 * 1024];
+                    for byte in bytes.iter_mut().step_by(4096) {
+                        *byte = 42;
+                    }
+                    buffers.push(bytes);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                std::hint::black_box(&buffers);
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                return;
+            }
+            b"VZ_RESOURCE_PROBE_DEADLINE\n" => {
+                std::thread::sleep(std::time::Duration::from_secs(30));
+                return;
+            }
+            _ => (),
+        }
+    }
     match path {
         "pdfium-io" => {
             let error = vz_core::failures::parser(

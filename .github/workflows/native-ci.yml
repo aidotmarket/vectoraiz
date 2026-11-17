@@ -125,6 +125,8 @@ jobs:
         run: |
           mkdir -p target/debug
           swiftc scripts/vision-ocr.swift -O -o target/debug/vz-vision-ocr
+      - name: Projection worker RSS watchdog and deadline named refusals
+        run: cargo test --locked -p vz-parser-worker --test supervision projection_resource_exhaustion_is_a_named_seller_refusal -- --exact --nocapture
       - name: Rust tests
         timeout-minutes: 20
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
