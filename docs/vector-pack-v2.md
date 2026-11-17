@@ -144,3 +144,18 @@ HTML meta declarations resolving to UTF-16LE/BE select UTF-8; a UTF-16 BOM remai
 authoritative. Meta x-user-defined selects windows-1252. Progress and meter fallback text shares the UA-hidden handling:
 omitted by default, counted, and seller-includable. Details, summary, center,
 dialog and option establish block boundaries.
+
+## Known limits
+
+Seller enablement is blocked on the vector-pack V2 follow-up. M6 leaves three
+Type3 routes uncounted: a glyph stream's own /Resources, font-resource fallback
+inside a glyph, and padded Tf operands with an inherited font. A crafted 2.5 KB
+file reaches the worker RSS watchdog instead of a named guard refusal; this is
+resource exhaustion, not a leak. L4 conservatively refuses Forms that can see
+themselves with two or more Do operators, including Forms without /Resources.
+L5 leaves the backstop unmemoised: a crafted 1,000-page file spends about 67 s
+in the guard, bounded by the 120 s worker deadline. L6 misses the ActualText flag
+with padded operands. This PR fixes these limits when it lands: a resource-superset
+bound, memoised non-cyclic results, operands read from the end, a distinct named
+unbounded-graph refusal, and worker watchdog/deadline regression coverage.
+The conservative L4 acceptance restriction remains, with an accurate refusal code.
