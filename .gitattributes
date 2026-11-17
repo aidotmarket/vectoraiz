@@ -1,2 +1,13 @@
 # Licence manifest hashes are defined over LF text on every platform.
 docs/native-worker-licenses/*.txt text eol=lf
+
+# Preserve byte offsets, archive records, and fixture digests on every checkout.
+*.pdf binary
+*.parquet binary
+*.zip binary
+*.docx binary
+*.xlsx binary
+*.pptx binary
+# Text fixtures are hashed and some assertions use original byte offsets.
+spike/fixtures/documents/*.html text eol=lf
+crates/vz-core/tests/fixtures/*.html text eol=lf

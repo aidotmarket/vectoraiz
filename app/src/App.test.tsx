@@ -113,6 +113,26 @@ it("omits hidden content by default and requires a fresh review after inclusion"
   await waitFor(() => expect(invoke).toHaveBeenLastCalledWith("listing_rebuild", {packId: listingCurrent.pack_id, changes: {edits: {}, exclusions: ["unsupported.pdf"], identity_terms: [], origin: listingCurrent, include_hidden: true}}));
 });
 
+it("shows PDF and HTML extraction counts, hidden locations and named PDF refusals", async () => {
+  mockListing();
+  const original = invoke.getMockImplementation()!;
+  invoke.mockImplementation(async (command, args) => command === "listing_sources" ? {
+    pack_id: listingCurrent.pack_id, protected_columns: [], sources: [
+      {source: "text.pdf", artifact: "projection/document-0001", format: "pdf", supported: true, projection_summary: {mandatory_drops: {properties: 2, annotations: 1, "hidden-form-data": 0, "no-text-pages": 1}, hidden_locations: []}},
+      {source: "page.html", artifact: "projection/document-0002", format: "html", supported: true, projection_summary: {mandatory_drops: {comments: 1, "active-markup": 2, "hidden-form-data": 1}, hidden_locations: ["html/node[7]"]}},
+      {source: "layers.pdf", artifact: "projection/document-0003", format: "pdf", supported: false, refusal: "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN"},
+    ],
+  } : original(command, args));
+  const region = within(await openListing());
+  expect(region.getAllByText("Source format: PDF")).toHaveLength(2);
+  expect(region.getByText("Source format: HTML")).toBeInTheDocument();
+  expect(region.getByRole("checkbox", {name: /layers.pdf.*PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN/})).toBeChecked();
+  expect(region.getByText(/properties: 2; annotations: 1; hidden-form-data: 0; no-text-pages: 1/)).toBeInTheDocument();
+  expect(region.getByText("html/node[7]: hidden, omitted by default")).toBeInTheDocument();
+  expect(region.getByRole("checkbox", {name: /Include supported hidden content/})).not.toBeChecked();
+  expect(region.getByRole("button", {name: "Rebuild purchaser preview"})).toBeDisabled();
+});
+
 it("applies real edits through rebuild, invalidates acceptance, restores focus and surfaces stale-generation errors", async () => {
   mockListing();
   const region = within(await openListing());

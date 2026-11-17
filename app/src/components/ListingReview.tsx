@@ -115,7 +115,7 @@ export function ListingReview() {
         {sourceEntries.slice(sourcePage * PAGE, (sourcePage + 1) * PAGE).map(source => <div key={source.source}><label>
           <input type="checkbox" checked={!excluded.includes(source.source)} onChange={event => {changed(); setExcluded(old => event.target.checked ? old.filter(value => value !== source.source) : [...old, source.source]);}} />
           Include {source.source} → {built?.source_mapping?.[source.source] ?? source.artifact} ({source.supported ? "supported" : `unsupported: ${source.refusal ?? "exclude or re-ingest"}`})
-        </label>{source.projection_summary && <ProjectionSummary summary={source.projection_summary} />}</div>)}
+        </label><span> Source format: {source.format.toUpperCase()}</span>{source.projection_summary && <ProjectionSummary summary={source.projection_summary} />}</div>)}
         <button disabled={sourcePage === 0} onClick={() => setSourcePage(value => value - 1)}>Previous documents</button>
         <button disabled={(sourcePage + 1) * PAGE >= sourceEntries.length} onClick={() => setSourcePage(value => value + 1)}>More documents</button>
         <label><input type="checkbox" checked={includeHidden} onChange={event => {changed(); setIncludeHidden(event.target.checked);}} />Include supported hidden content (omitted by default). Rebuild and review its private locations before accepting.</label>

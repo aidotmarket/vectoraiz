@@ -1,0 +1,16 @@
+<!doctype html>
+<html><head><title>DROP_CANARY_TITLE</title><meta name="author" content="DROP_CANARY_META">
+<style>.secret {display:none} /* DROP_CANARY_STYLE */</style>
+<link rel="stylesheet" href="https://example.invalid/trap.css"></head><body>
+<!-- DROP_CANARY_COMMENT -->
+<h1>Visible heading</h1><p onclick="DROP_CANARY_EVENT">Visible body</p>
+<script src="https://example.invalid/trap.js">DROP_CANARY_SCRIPT</script>
+<iframe src="https://example.invalid/trap">DROP_CANARY_FRAME</iframe>
+<input type="hidden" value="DROP_CANARY_FORM"><textarea hidden>DROP_CANARY_TEXTAREA</textarea>
+<p hidden>ATTR_HIDDEN <span>INHERITED_HIDDEN</span></p>
+<p style="display: none">DISPLAY_HIDDEN</p><p style="visibility:hidden!important">VISIBILITY_HIDDEN</p>
+<template><p>TEMPLATE_HIDDEN</p></template>
+<p style="d\69splay:/**/none">ESCAPED_HIDDEN</p>
+<p class="secret">STYLESHEET_CONTENT</p><table><tr><td>Cell value</td></tr></table>
+<label>Supported label</label><img src="https://example.invalid/trap.png" alt="Attribute is not body text">
+</body></html>

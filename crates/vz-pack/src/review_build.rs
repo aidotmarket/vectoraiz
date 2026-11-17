@@ -42,6 +42,14 @@ mod vector;
 use vector::build;
 
 pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
+    candidates_with_pdfium(library, source, None)
+}
+
+pub fn candidates_with_pdfium(
+    library: &Path,
+    source: &Path,
+    pdfium: Option<&Path>,
+) -> Result<Vec<Candidate>> {
     let policy = crate::listing_policy::system();
     policy.require_preview()?;
     let lease = policy.policy_lease()?;
@@ -57,7 +65,7 @@ pub fn candidates(library: &Path, source: &Path) -> Result<Vec<Candidate>> {
             budget.enable_office();
             budget.started = Some(started);
             budget.cancel = Some(lease.cancellation_token());
-            let refusal = preparation_refusal(&doc, &artifact, &mut budget);
+            let refusal = preparation_refusal_with_pdfium(&doc, &artifact, &mut budget, pdfium);
             #[cfg(not(feature = "listing-originals"))]
             let projection_summary = budget.projection.as_ref().map(|projection| json!({"mandatory_drops":projection.drops,"hidden_locations":projection.nodes.iter().filter(|n|n.hidden).map(|n|&n.location).collect::<Vec<_>>()}));
             #[cfg(feature = "listing-originals")]
@@ -94,21 +102,39 @@ fn candidate_location(position: usize, kind: &str) -> String {
 
 // Run the production rebuild worker, including its independent readback and
 // resource limits. Parser success or an extension alone cannot certify a file.
+#[cfg(all(test, feature = "listing-originals"))]
 fn preparation_refusal(
     doc: &vz_core::pipeline::Document,
     artifact: &str,
     budget: &mut Budget,
 ) -> Option<String> {
+    preparation_refusal_with_pdfium(doc, artifact, budget, None)
+}
+
+fn preparation_refusal_with_pdfium(
+    doc: &vz_core::pipeline::Document,
+    artifact: &str,
+    budget: &mut Budget,
+    pdfium: Option<&Path>,
+) -> Option<String> {
     let result = (|| -> Result<()> {
+        let supported =
+            ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
+        #[cfg(not(feature = "listing-originals"))]
+        let supported = supported || ["pdf", "html", "htm"].contains(&doc.kind.as_str());
+        #[cfg(feature = "listing-originals")]
+        let _ = pdfium;
         ensure!(
-            ["txt", "md", "markdown", "docx", "xlsx", "pptx"].contains(&doc.kind.as_str()),
+            supported,
             "original format has no proven rewrite handler; exclude or re-ingest as text"
         );
         let office = ["docx", "xlsx", "pptx"].contains(&doc.kind.as_str());
         let bytes = source_bytes(
             doc,
             if office {
-                512 * 1024 * 1024
+                512_000_000
+            } else if ["pdf", "html", "htm"].contains(&doc.kind.as_str()) {
+                256_000_000
             } else {
                 64 * 1024 * 1024
             },
@@ -123,6 +149,7 @@ fn preparation_refusal(
                 artifact,
                 &doc.kind,
                 &bytes,
+                pdfium,
                 budget.cancel.clone(),
                 budget.started.unwrap_or_else(std::time::Instant::now),
                 std::time::Duration::ZERO,
@@ -634,10 +661,18 @@ fn build(
 }
 
 trait BuildEngine {
+    #[cfg(not(feature = "listing-originals"))]
+    fn pdfium(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     fn recipe(&self) -> &vz_core::engine::Recipe;
     fn vector(&self, text: &str, query: bool) -> Result<Vec<f32>>;
 }
 impl BuildEngine for Engines {
+    #[cfg(not(feature = "listing-originals"))]
+    fn pdfium(&self) -> Option<std::path::PathBuf> {
+        Some(self.pdfium_library())
+    }
     fn recipe(&self) -> &vz_core::engine::Recipe {
         &self.recipe
     }
@@ -715,6 +750,22 @@ mod tests {
         texts: Mutex<Vec<String>>,
     }
     impl BuildEngine for FakeEngine {
+        #[cfg(not(feature = "listing-originals"))]
+        fn pdfium(&self) -> Option<std::path::PathBuf> {
+            Some(
+                std::env::var_os("VZ_TEST_PDFIUM")
+                    .map(Into::into)
+                    .unwrap_or_else(|| {
+                        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                            .join("../../.assets")
+                            .join(if cfg!(windows) {
+                                "pdfium/bin/pdfium.dll"
+                            } else {
+                                "pdfium/lib/libpdfium.dylib"
+                            })
+                    }),
+            )
+        }
         fn recipe(&self) -> &vz_core::engine::Recipe {
             &self.recipe
         }
@@ -1760,6 +1811,110 @@ mod tests {
             .iter()
             .filter_map(|e| e.value.as_ref())
             .all(|s| !s.contains("private-source")));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn projection_v2_embedding_inputs_and_seller_hidden_choice() {
+        let f = Fixture::new();
+        index_poisoned_projection(
+            &f,
+            "html",
+            include_bytes!("../../vz-core/tests/fixtures/projection-v2.html"),
+        );
+        index_poisoned_projection(
+            &f,
+            "pdf",
+            include_bytes!("../../vz-core/tests/fixtures/projection-v2.pdf"),
+        );
+        index_poisoned_projection(&f, "htm", b"<p>Hello <b>bold</b>world</p><p>Next block</p><p>Line<br>break</p><input value='CONTROL_CANARY'><button value='CONTROL_CANARY'>Button text</button>");
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
+        let guard = store
+            .lock_native(&f.policy, id, &f.root.join("index"))
+            .unwrap();
+        let mut changes = Fixture::changes();
+        let first = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        let review = guard.inspect(&first).unwrap();
+        let inputs = f.engine.texts.lock().unwrap().join("\n");
+        assert!(
+            inputs.contains("VISIBLE_PDF")
+                && inputs.contains("INVISIBLE_PDF")
+                && inputs.contains("OFFPAGE_PDF")
+        );
+        assert!(inputs.contains("STYLESHEET_CONTENT"));
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "Hello boldworld"));
+        assert!(f
+            .engine
+            .texts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|s| s == "Next block"));
+        assert!(f.engine.texts.lock().unwrap().iter().any(|s| s == "Line"));
+        assert!(f.engine.texts.lock().unwrap().iter().any(|s| s == "break"));
+        assert!(inputs.contains("Button text") && !inputs.contains("CONTROL_CANARY"));
+        assert!(
+            !inputs.contains("CANARY")
+                && !inputs.contains("_HIDDEN")
+                && !inputs.contains("INDEX_POISON")
+        );
+        assert!(review
+            .projection_inventory
+            .iter()
+            .any(|e| e.kind.contains("off-page")));
+        assert!(review
+            .warnings
+            .iter()
+            .any(|s| s.contains("no-text-pages: 1")));
+        guard.accept(&first).unwrap();
+        changes.origin = Some(first.clone());
+        changes.include_hidden = true;
+        f.engine.texts.lock().unwrap().clear();
+        let second = build(
+            &guard,
+            &f.root.join("source"),
+            id,
+            &f.engine,
+            "query",
+            &changes,
+        )
+        .unwrap();
+        assert_ne!(first.generation, second.generation);
+        assert!(guard.check_accepted(&first).is_err());
+        let inputs = f.engine.texts.lock().unwrap().join("\n");
+        for hidden in [
+            "ATTR_HIDDEN",
+            "DISPLAY_HIDDEN",
+            "VISIBILITY_HIDDEN",
+            "TEMPLATE_HIDDEN",
+            "INHERITED_HIDDEN",
+            "ESCAPED_HIDDEN",
+        ] {
+            assert!(inputs.contains(hidden), "{hidden}");
+        }
+        assert!(!inputs.contains("CANARY") && !inputs.contains("INDEX_POISON"));
+        guard.accept(&second).unwrap();
+        let (payload, _) = guard.reviewed_payload(&second).unwrap();
+        crate::vector_payload::verify(&payload).unwrap();
+        assert_eq!(crate::verify(&payload).unwrap()["originals"], false);
+        for entry in guard.inspect(&second).unwrap().metadata_inventory {
+            assert!(!entry.value.unwrap_or_default().contains("CANARY"));
+        }
     }
 
     #[test]

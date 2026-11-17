@@ -3,7 +3,7 @@ fn main() {
     let result = vz_core::worker::apply_memory_limit().and_then(|_| {
         let request: vz_core::worker::Request =
             vz_core::worker::read_frame(std::io::stdin().lock())?;
-        if request.office_label().is_some() {
+        if request.memory_bytes() == vz_core::worker::OFFICE_MEMORY_BYTES {
             vz_core::worker::apply_office_memory_limit()?;
         }
         anyhow::ensure!(
@@ -25,7 +25,11 @@ fn main() {
         } else if let Some(job) = &request.projection {
             anyhow::ensure!(request.office.is_none(), "ambiguous worker request");
             let input = std::fs::read(&request.path)?;
-            let projection = vz_core::office::projection::extract(&job.kind, &input)?;
+            let projection = vz_core::office::projection::extract_with_pdfium(
+                &job.kind,
+                &input,
+                request.pdfium.as_deref(),
+            )?;
             std::fs::write(
                 job.output.join("projection.json"),
                 serde_json::to_vec(&projection)?,

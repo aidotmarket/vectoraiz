@@ -7,6 +7,7 @@ pub(super) fn project(
     name: &str,
     kind: &str,
     bytes: &[u8],
+    pdfium: Option<&Path>,
     cancel: Option<tokio_util::sync::CancellationToken>,
     started: Instant,
     spent: Duration,
@@ -27,7 +28,7 @@ pub(super) fn project(
         drop(file);
         let request = vz_core::worker::Request {
             path: input,
-            pdfium: None,
+            pdfium: pdfium.map(Path::to_path_buf),
             office: None,
             readback: None,
             projection: Some(vz_core::worker::ProjectionJob {
@@ -203,6 +204,7 @@ pub(super) fn build(
                 &location,
                 &doc.kind,
                 &bytes,
+                engines.pdfium().as_deref(),
                 Some(pack.cancellation_token()),
                 started,
                 spent,
@@ -340,14 +342,25 @@ pub(super) fn build(
             doc.doc_id = public_id;
             doc.sha256 = sha256(text.as_bytes());
             doc.bytes = text.len() as u64;
-            doc.chunks = chunk(
-                &doc.doc_id,
-                &[Page {
+            // The search chunker normalizes line breaks. Give HTML block
+            // paragraphs separate inputs so inline joining and block boundaries
+            // survive all the way to the embedding calls.
+            let pages = if matches!(doc.kind.as_str(), "html" | "htm") {
+                text.lines()
+                    .map(|paragraph| Page {
+                        page: 1,
+                        text: paragraph.to_string(),
+                        needs_ocr: false,
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                vec![Page {
                     page: 1,
                     text,
                     needs_ocr: false,
-                }],
-            );
+                }]
+            };
+            doc.chunks = chunk(&doc.doc_id, &pages);
             if doc.chunks.is_empty() {
                 projection_warnings.push(format!("{location}: all projected text omitted by the hidden-content choice or explicit node exclusions; no chunks delivered"));
             }
@@ -359,7 +372,7 @@ pub(super) fn build(
             // describes the projection with neutral names and no source hash.
             doc.pages = 1;
             doc.path = format!("document-{:04}", docs.len() + 1);
-            doc.kind = "projection-v1".into();
+            doc.kind = "projection-v2".into();
             docs.push(doc);
             ensure!(
                 started.elapsed().max(spent) < Duration::from_secs(1200),
@@ -439,7 +452,7 @@ pub(super) fn build(
             put(&work, name, &bytes)?;
         }
         let recipe_description = format!("\nParquet schema (column order; editable display names may differ):\ndocuments: neutral document ID, neutral projection reference, reviewed title, projection type, projection-text SHA256, language (und means unknown), projected pages, projected UTF-8 bytes.\nchunks: chunk ID, neutral document ID, reviewed text, projected page, heading path (JSON array), token count, float32 embedding vector.\nJoin on doc_id. References identify projections, not downloadable source files. Projection text is flattened to one page.\n\nEmbedding recipe (including model, normalization and dimensions):\n```json\n{}\n```\n", serde_json::to_string_pretty(&recipe)?);
-        for (name, bytes) in [("README.md", b"# vectorAIz vector pack\n\nLoad the Parquet files with Apache Arrow. The seller attests: chunks, embeddings and metadata; no source files are delivered. Text is customer data; vectors are not anonymization. Original names and file properties are absent. Source projections omit deletions, instructions, comments, properties and formulas. Spreadsheet cells use saved cached values only; formulas are never evaluated. Numeric dates retain Excel serial numbers; cell number formats are not applied. Worksheet header/footer text is dropped and counted privately. Hidden content is omitted unless the seller includes it. No OCR or resource fetching. PDF/HTML are unsupported in V1. Language and date ranges are unknown.\nRun examples/query.py with Python, numpy and pyarrow.\n".as_slice()), ("examples/query.py", include_bytes!("../../../scripts/pack-query.py").as_slice())] {
+        for (name, bytes) in [("README.md", b"# vectorAIz vector pack\n\nLoad the Parquet files with Apache Arrow. The seller attests: chunks, embeddings and metadata; no source files are delivered. Text is customer data; vectors are not anonymization. Original names and file properties are absent. Source projections omit deletions, instructions, comments, properties and formulas. Spreadsheet cells use saved cached values only; formulas are never evaluated. Numeric dates retain Excel serial numbers; cell number formats are not applied. Worksheet header/footer text is dropped and counted privately. Hidden content is omitted unless the seller includes it. No OCR or resource fetching. PDF uses text/object inspection only: no rendering or OCR. No-text pages are omitted and counted; all-no-text documents refuse. Invisible and off-page text remain flagged content. Layered PDFs refuse when default visibility cannot be proven. HTML omits metadata, active markup and form state. HTML visibility inspects only hidden, inline display:none, inline visibility:hidden and template contents, inherited. Stylesheets, classes and CSS layout are not evaluated; no resources are fetched. Language and date ranges are unknown.\nRun examples/query.py with Python, numpy and pyarrow.\n".as_slice()), ("examples/query.py", include_bytes!("../../../scripts/pack-query.py").as_slice())] {
             let bytes = if name == "README.md" { [bytes, recipe_description.as_bytes()].concat() } else { bytes.to_vec() };
             let rebuilt = sanitize::rewrite(name, &bytes, changes, &mut mapping, &mut budget)?;
             if name=="README.md" {

@@ -1753,9 +1753,16 @@ async fn listing_sources<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<serde_json::Value, vz_pack::listing_commands::ListingFailure> {
     let (_, library, source) = listing_context(&app)?;
+    let pdfium = model_dir(&app)
+        .map_err(|e| vz_pack::listing_commands::ListingFailure::from(anyhow::anyhow!(e)))?
+        .join(if cfg!(windows) {
+            "pdfium/bin/pdfium.dll"
+        } else {
+            "pdfium/lib/libpdfium.dylib"
+        });
     tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<serde_json::Value> {
         let pack_id = uuid::Uuid::new_v4();
-        let sources = vz_pack::review_build::candidates(&library, &source)?;
+        let sources = vz_pack::review_build::candidates_with_pdfium(&library, &source, Some(&pdfium))?;
         Ok(serde_json::json!({"pack_id":pack_id,"sources":sources,"protected_columns":vz_pack::sanitize::PROTECTED_COLUMNS}))
     })
     .await

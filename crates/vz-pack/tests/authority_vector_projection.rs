@@ -8,12 +8,19 @@ fn package(kind: &str, parts: &[(&str, &str)]) -> Vec<u8> {
         _ => "ppt/presentation.xml",
     };
     let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    zip.start_file("_rels/.rels", zip::write::SimpleFileOptions::default())
-        .unwrap();
+    zip.start_file(
+        "_rels/.rels",
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+    )
+    .unwrap();
     write!(zip,"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"main\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"{main}\"/></Relationships>").unwrap();
     for (name, xml) in parts {
-        zip.start_file(*name, zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(
+            *name,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
         zip.write_all(xml.as_bytes()).unwrap();
     }
     zip.finish().unwrap().into_inner()
@@ -176,8 +183,9 @@ fn projection_hidden_seller_choice_pptx_and_notes() {
 }
 #[test]
 fn projection_format_limits() {
-    for kind in ["pdf", "html", "htm"] {
-        assert!(extract(kind, b"text").is_err());
+    assert!(extract("pdf", b"text").is_err());
+    for kind in ["html", "htm"] {
+        assert_eq!(text(&extract(kind, b"text").unwrap()), "text");
     }
     assert!(extract("md", b"%PDF-hidden").is_err());
     assert!(extract("txt", b"PK\x03\x04").is_err());
@@ -521,7 +529,11 @@ fn projection_real_powerpoint_slide_level_creation_id_and_notes() {
             changed += 1;
         }
         output
-            .start_file(entry.name(), zip::write::SimpleFileOptions::default())
+            .start_file(
+                entry.name(),
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
             .unwrap();
         output.write_all(&bytes).unwrap();
     }
@@ -556,6 +568,10 @@ fn projection_local_dpi_and_data_bar_id_metadata() {
         text(&extract("xlsx", &workbook("visible", rule)).unwrap()),
         "Sheet"
     );
+    assert_eq!(
+        extract("xlsx", &workbook("visible", rule)).unwrap().drops["extension-data"],
+        1
+    );
     for bad in [
         rule.replace("type=\"dataBar\"", "type=\"expression\""),
         rule.replace("x14:id", "x14:dataValidations"),
@@ -563,4 +579,45 @@ fn projection_local_dpi_and_data_bar_id_metadata() {
     ] {
         assert!(extract("xlsx", &workbook("visible", &bad)).is_err());
     }
+}
+
+#[test]
+fn projection_data_bar_extension_scaling() {
+    let rule = r#"<conditionalFormatting sqref="A1"><cfRule type="dataBar"><extLst><ext><x14:id xmlns:x14="http://schemas.microsoft.com/office/spreadsheetml/2009/9/main">GUID</x14:id></ext></extLst></cfRule></conditionalFormatting>"#;
+    let measure = |count| {
+        let bytes = workbook("visible", &rule.repeat(count));
+        let p = extract("xlsx", &bytes).unwrap();
+        assert_eq!(p.drops["extension-data"], count);
+        p.validation_operations
+    };
+    let small = measure(4_000);
+    let large = measure(16_000);
+    assert_eq!(small, 8_000);
+    assert_eq!(large, small * 4);
+}
+
+#[test]
+fn projection_slide_extension_chart_refuses_and_break_only_chart_paragraph_drops() {
+    let chart = r#"<c:chartSpace xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><c:chart><c:title><c:tx><c:rich><a:p><a:br/></a:p></c:rich></c:tx></c:title></c:chart></c:chartSpace>"#;
+    let reference = r#"<c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="chart"/>"#;
+    let rels = r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="chart" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart" Target="../charts/chart.xml"/></Relationships>"#;
+    let extra = [
+        ("ppt/slides/_rels/slide1.xml.rels", rels),
+        ("ppt/charts/chart.xml", chart),
+    ];
+    let visible = "<p:sp><p:txBody><a:p><a:r><a:t>VISIBLE</a:t></a:r></a:p></p:txBody></p:sp>";
+    let bytes = deck(
+        &format!("{visible}<p:extLst><p:ext>{reference}</p:ext></p:extLst>"),
+        &extra,
+    );
+    let error = extract("pptx", &bytes).err().unwrap();
+    assert!(
+        error
+            .to_string()
+            .contains("1 chart references only in slide/drawing extLst"),
+        "{error:#}"
+    );
+    let p = extract("pptx", &deck(&format!("{visible}{reference}"), &extra)).unwrap();
+    assert_eq!(p.nodes.len(), 1);
+    assert_eq!(text(&p), "VISIBLE");
 }

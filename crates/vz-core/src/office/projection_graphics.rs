@@ -153,6 +153,12 @@ fn chart(n: &Node, at: &str, hidden: bool, out: &mut Projection, cache: bool) ->
     }
     if n.ns == A && n.local == "p" {
         paragraph_nodes(out, paragraph_start, at, "chart paragraph");
+        if out.nodes[paragraph_start..]
+            .iter()
+            .all(|node| node.text.trim().is_empty())
+        {
+            out.nodes.truncate(paragraph_start);
+        }
     }
     Ok(())
 }

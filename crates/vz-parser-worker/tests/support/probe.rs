@@ -47,7 +47,9 @@ fn main() {
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
         }
-        "crash" => std::process::abort(),
+        // Any unsuccessful exit without a response is classified as crashed.
+        // A dedicated code exercises that path without OS crash reports/dialogs.
+        "crash" => std::process::exit(86),
         "timeout" => std::thread::sleep(std::time::Duration::from_secs(30)),
         _ => {
             vz_core::worker::write_frame(
