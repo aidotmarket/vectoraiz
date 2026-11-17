@@ -61,21 +61,40 @@ def main():
     assert "FPDF_RenderPageBitmap" in traps
     source = args.scratch / "trap.c"
     export = "__declspec(dllexport) " if windows else '__attribute__((visibility("default"))) '
-    source.write_text("#include <stdlib.h>\n" + "\n".join(export + "void " + name + "(void) { _Exit(86); }" for name in traps))
+    code = "#include <stdlib.h>\n" + "\n".join(export + "void " + name + "(void) { _Exit(86); }" for name in traps)
+    if windows:
+        # Put forwarders directly in the object file's linker directives. The
+        # shim defines only traps; other exports belong to the renamed DLL.
+        # PRIVATE keeps these runtime-only exports out of the import library.
+        code += "\n" + "\n".join(
+            f'#pragma comment(linker, "/export:{name}=pdfium_real.{name},PRIVATE")'
+            for name in exports if name not in traps
+        )
+    source.write_text(code + "\n")
     shim = args.scratch / ("pdfium.dll" if windows else "libpdfium-trap.dylib")
     if windows:
-        definition = args.scratch / "trap.def"
-        definition.write_text("EXPORTS\n" + "\n".join(name if name in traps else name + "=pdfium_real." + name for name in exports))
-        run(["cl", "/nologo", "/LD", source, "/link", "/DEF:" + str(definition), "/OUT:" + str(shim)], cwd=args.scratch)
+        run(["cl", "/nologo", "/LD", source, "/link", "/OUT:" + str(shim)], cwd=args.scratch)
     else:
         run(["clang", "-dynamiclib", "-Wl,-headerpad_max_install_names", source, "-o", shim, "-Wl,-reexport_library," + str(library)])
         run(["install_name_tool", "-change", "./libpdfium.dylib", library, shim])
         run(["codesign", "--force", "--sign", "-", shim])
-    child = "import ctypes,sys; ctypes.CDLL(sys.argv[1]).FPDF_RenderPageBitmap()"
+    # Python 3.8+ does not use PATH to resolve dependencies of ctypes DLLs.
+    # Keep the directory handle alive while loading/calling Windows forwarders.
+    child = """import ctypes, os, sys
+from pathlib import Path
+directory = os.add_dll_directory(str(Path(sys.argv[1]).parent)) if sys.platform == "win32" else None
+pdfium = ctypes.CDLL(sys.argv[1])
+pdfium.FPDF_InitLibrary()
+pdfium.FPDF_DestroyLibrary()
+print("render trap: non-render forwarding control passed", flush=True)
+getattr(pdfium, sys.argv[2])()
+"""
     proxy = ["rtk", "run"] if shutil.which("rtk") else []
     env = dict(os.environ, VZ_TEST_PDFIUM=str(shim.resolve()), PATH=str(args.scratch.resolve()) + os.pathsep + os.environ["PATH"])
-    positive = subprocess.run(proxy + [sys.executable, "-c", child, str(shim.resolve())], env=env)
-    assert positive.returncode == 86, f"render trap positive control failed: {positive.returncode}"
+    for name in traps:
+        positive = subprocess.run(proxy + [sys.executable, "-c", child, str(shim.resolve()), name], env=env)
+        assert positive.returncode == 86, f"render trap positive control failed for {name}: {positive.returncode}"
+        print(f"render trap: {name} positive control exited 86", flush=True)
     run(["cargo", "test", "-p", "vz-core", "--lib", "office::projection::v2_tests::projection_pdf_", "--", "--nocapture"], env=env)
     print(f"render trap: {len(traps)} APIs trapped; positive control and PDF projection regressions passed")
 
