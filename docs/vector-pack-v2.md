@@ -55,8 +55,8 @@ spellings. No object-active flag is used as a default-state oracle. Such PDFs
 cannot be included through the hidden-content toggle. Unlayered PDFs proceed;
 mode-3 and off-page text are flagged ordinary content and can be edited/excluded.
 Unmapped glyphs become U+FFFD with a mandatory-drop count at the character location.
-ActualText anywhere in decoded content/resources conservatively flags all text in
-that document as potentially not-visible replacement text; PDFium still supplies
+ActualText in parsed BDC/DP property operands (including escaped names and
+named resource properties) conservatively flags text on the affected pages as potentially not-visible replacement text; PDFium still supplies
 the text, and the seller may edit/exclude it. Annotation counts count array items
 rather than dictionary keys. Blank/image-only pages are counted omissions, while an entirely textless document
 refuses. There is no render/OCR fallback in this module.
@@ -99,3 +99,24 @@ Image-codec independence tests invoke invalid image payloads with six filters,
 require surviving text and exact omitted-page counts, and classify OCR layers.
 These tests and corpus counts are evidence of tested coverage, not capacity or
 installed-journey qualification.
+
+
+Fold 2 decoding rules: only streams reached as image XObjects and their image
+masks avoid decoded accounting; a content, Form, font or CMap stream cannot opt
+out with an Image label or a resource name. Each page/Form decompression requires
+a bounded-decode receipt; absolute per-stream and document caps and the aggregate
+100:1 expansion bound apply before content parsing or PDFium loading. Form syntax
+validation is memoized by Form and effective resources, retaining depth checks.
+Inline images remain outside this profile and refuse with
+`PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED` before PDFium loading.
+
+PDF text maps non-whitespace C0 controls, including NUL, to counted U+FFFD
+unmapped-glyph replacements. U+0002 is PDFium's line-end hyphen marker and is
+removed to join the word. Page visibility uses the intersection of normalized
+MediaBox and CropBox bounds. Undefined, unreferenced Quartz xref entries at offset
+zero are treated as free; referenced entries still refuse.
+
+HTML meta declarations resolving to UTF-16LE/BE select UTF-8; a UTF-16 BOM remains
+authoritative. Progress and meter fallback text shares the UA-hidden handling:
+omitted by default, counted, and seller-includable. Details, summary, center,
+dialog and option establish block boundaries.

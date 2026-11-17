@@ -54,6 +54,11 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                         | "aside"
                         | "blockquote"
                         | "body"
+                        | "details"
+                        | "summary"
+                        | "center"
+                        | "dialog"
+                        | "option"
                         | "div"
                         | "dl"
                         | "dt"
@@ -152,6 +157,8 @@ pub(super) fn extract(input: &[u8], out: &mut Projection) -> Result<()> {
                                 | "noembed"
                                 | "noframes"
                                 | "rp"
+                                | "progress"
+                                | "meter"
                         )
                         || (name == "dialog" && element.attr("open").is_none())
                         || style.is_some_and(inline_hidden);
@@ -263,6 +270,12 @@ fn decode_html(input: &[u8]) -> Result<String> {
             Some(label) => Encoding::for_label(label.as_bytes())
                 .context("PROJECTION_HTML_ENCODING_UNSUPPORTED: declared charset")?,
             None => UTF_8,
+        };
+        // HTML meta UTF-16 labels mean UTF-8; only a BOM selects UTF-16.
+        let enc = if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+            UTF_8
+        } else {
+            enc
         };
         (enc, 0)
     };

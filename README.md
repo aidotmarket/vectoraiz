@@ -29,7 +29,9 @@ Decoded text-path streams support raw, ASCII85 and Flate (including single-filte
 arrays and supported PNG predictors); other filters/parameters refuse with
 `PROJECTION_PDF_STREAM_UNSUPPORTED`. Inherited page boxes are resolved; undefined
 references are null. Unmapped glyphs are counted and replaced with U+FFFD.
-ActualText documents carry a conservative not-visible replacement-text flag.
+Pages using ActualText carry a conservative not-visible replacement-text flag.
+Non-whitespace C0 controls become counted replacements; PDFium’s U+0002 line-end
+hyphen marker is removed to join words. Inline images refuse by name.
 Encrypted, malformed and unclassifiable PDFs refuse without a search fallback.
 
 HTML parses inert local bytes through pinned scraper/html5ever. UTF-8, declared
@@ -42,7 +44,8 @@ select and output values are mandatory drops. SVG/MathML subtrees are counted
 drops, including inside hidden content. Hidden attributes, inline `display:none`,
 inline `visibility:hidden`, template contents and browser fallback/inactive
 content are inherited visibility signals. Datalist, closed dialog, canvas,
-video/audio fallback, noembed, noframes and rp are hidden and seller-includable.
+video/audio/progress/meter fallback, noembed, noframes and rp are hidden and
+seller-includable. Meta UTF-16 labels select UTF-8; BOMs remain authoritative.
 Stylesheets, classes and CSS layout are not evaluated; style carriers produce a
 per-document warning. No resource is fetched.
 

@@ -944,3 +944,259 @@ fn projection_pdf_malformed_decoded_flate_and_unsupported_predictor_refuse() {
         );
     }
 }
+
+#[test]
+fn projection_html_meta_utf16_and_bom_authority() {
+    for label in ["utf-16", "utf-16le", "utf-16be"] {
+        let source = format!("<meta charset='{label}'><body><p>ASCII body text declared as utf16.</p><script>SECRET</script><!--SECRET--><div hidden>HIDDEN</div>");
+        let p = extract("html", source.as_bytes()).unwrap();
+        assert_eq!(
+            p.nodes
+                .iter()
+                .filter(|n| !n.hidden)
+                .map(|n| n.text.as_str())
+                .collect::<String>(),
+            "ASCII body text declared as utf16."
+        );
+        assert!(!values(&p).contains("SECRET"));
+    }
+    for big_endian in [false, true] {
+        let mut bytes = if big_endian {
+            vec![0xfe, 0xff]
+        } else {
+            vec![0xff, 0xfe]
+        };
+        for c in "<meta charset='utf-8'><p>BOM body</p>".encode_utf16() {
+            bytes.extend_from_slice(&if big_endian {
+                c.to_be_bytes()
+            } else {
+                c.to_le_bytes()
+            });
+        }
+        assert_eq!(values(&extract("html", &bytes).unwrap()), "BOM body");
+    }
+}
+
+#[test]
+fn projection_html_fallbacks_and_extra_blocks() {
+    let p = extract("html", b"<p>Visible</p><progress>PROGRESS</progress><meter>METER</meter><details><summary>Sum</summary>Body</details><center>Cen</center><dialog open>Dialog</dialog><option>Opt</option>").unwrap();
+    for text in ["PROGRESS", "METER"] {
+        assert!(p.nodes.iter().any(|n| n.hidden && n.text == text));
+    }
+    let visible: Vec<_> = p
+        .nodes
+        .iter()
+        .filter(|n| !n.hidden)
+        .map(|n| n.text.as_str())
+        .collect();
+    assert_eq!(visible, ["Visible", "Sum", "Body", "Cen", "Dialog", "Opt"]);
+}
+
+// CC's craft2 probes, regenerated synthetically in memory. The encoder writes
+// fixed blocks so even the 300 MiB test never allocates its expanded payload.
+fn compressed_newlines(mib: usize) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+    for _ in 0..mib * 16 {
+        encoder.write_all(&[b'\n'; 65536]).unwrap();
+    }
+    encoder.finish().unwrap()
+}
+
+#[test]
+fn projection_pdf_decode_caps_ignore_labels_and_resource_names() {
+    for (role, name, label, mib) in [
+        ("content", "", false, 60),
+        ("content", "", true, 60),
+        ("content", "", true, 300),
+        ("form", "X1", false, 60),
+        ("form", "A", false, 60),
+        ("cmap", "A", true, 60),
+    ] {
+        let mut doc =
+            Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (BODY) Tj ET"], false)).unwrap();
+        let page = *doc.get_pages().values().next().unwrap();
+        let mut dict = dictionary! {"Filter"=>"FlateDecode"};
+        if label {
+            dict.set("Subtype", "Image");
+        }
+        let mut resources = super::pdf::test_resources(&doc, page);
+        if role == "form" {
+            dict.set("Subtype", "Form");
+            dict.set("Resources", resources.clone());
+        }
+        let bomb = doc.add_object(Stream::new(dict, compressed_newlines(mib)));
+        match role {
+            "content" => {
+                // The same stream also has an image role: accounting must win.
+                resources.set("XObject", dictionary! {"ImageAlias"=>bomb});
+                doc.get_object_mut(page)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("Contents", bomb);
+            }
+            "form" => {
+                resources.set("XObject", dictionary! {name=>bomb});
+                let content = doc.add_object(Stream::new(
+                    dictionary! {},
+                    format!("/{name} Do").into_bytes(),
+                ));
+                doc.get_object_mut(page)
+                    .unwrap()
+                    .as_dict_mut()
+                    .unwrap()
+                    .set("Contents", content);
+            }
+            _ => {
+                resources.set("Font", dictionary! {name=>dictionary! {"Type"=>"Font", "Subtype"=>"Type1", "BaseFont"=>"Helvetica", "ToUnicode"=>bomb}});
+            }
+        }
+        doc.get_object_mut(page)
+            .unwrap()
+            .as_dict_mut()
+            .unwrap()
+            .set("Resources", resources);
+        let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
+        let expected = if mib == 300 {
+            "PROJECTION_PART_BYTES_EXCEEDED"
+        } else {
+            "PROJECTION_EXPANSION_RATIO_EXCEEDED"
+        };
+        assert!(
+            format!("{error:#}").contains(expected),
+            "{role}/{name}/{label}: {error:#}"
+        );
+    }
+}
+
+#[test]
+fn projection_pdf_actualtext_is_parsed_and_page_scoped() {
+    for label in [false, true] {
+        let mut doc = Document::load_mem(&pdf(&[
+            "/Span << /Actual#54ext (REPLACEMENT) >> BDC BT /F1 12 Tf 30 700 Td (SHOWN) Tj ET EMC",
+            "BT /F1 12 Tf 30 700 Td (ORDINARY) Tj ET",
+        ], false)).unwrap();
+        if label {
+            let first = *doc.get_pages().values().next().unwrap();
+            let content = doc.get_page_contents(first)[0];
+            doc.get_object_mut(content)
+                .unwrap()
+                .as_stream_mut()
+                .unwrap()
+                .dict
+                .set("Subtype", "Image");
+        }
+        let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+        assert!(p
+            .nodes
+            .iter()
+            .any(|n| n.text.contains("REPLACEMENT") && n.kind.contains("ActualText")));
+        assert!(p
+            .nodes
+            .iter()
+            .any(|n| n.text.contains("ORDINARY") && !n.kind.contains("ActualText")));
+    }
+}
+
+#[test]
+fn projection_pdf_quartz_unused_zero_offset_entry() {
+    for referenced in [false, true] {
+        let mut doc =
+            Document::load_mem(&pdf(&["BT /F1 12 Tf 30 700 Td (BODY) Tj ET"], false)).unwrap();
+        let missing = doc.max_id + 1;
+        if referenced {
+            doc.catalog_mut().unwrap().set("Unused", (missing, 0));
+        }
+        let mut bytes = save_pdf(doc);
+        let previous = Document::load_mem(&bytes).unwrap().xref_start;
+        // Add an incremental xref entry without defining the object.
+        let xref = bytes.len();
+        bytes.extend_from_slice(format!("xref\n{missing} 1\n0000000000 00000 n \ntrailer\n<< /Size {} /Root 1 0 R /Prev {previous} >>\nstartxref\n{xref}\n%%EOF\n", missing + 1).as_bytes());
+        let result = super::pdf::metadata(&bytes, &mut Projection::new());
+        if referenced {
+            assert!(format!("{:#}", result.unwrap_err()).contains("XREF_OBJECT_MISMATCH"));
+        } else {
+            result.unwrap();
+        }
+    }
+}
+
+#[test]
+fn projection_pdf_reversed_media_and_larger_crop() {
+    let mut doc = Document::load_mem(&pdf(
+        &["BT /F1 12 Tf 30 700 Td (IN) Tj ET BT /F1 12 Tf 400 700 Td (OUTSIDE) Tj ET"],
+        false,
+    ))
+    .unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let dict = doc.get_object_mut(page).unwrap().as_dict_mut().unwrap();
+    dict.set("MediaBox", vec![300.into(), 792.into(), 0.into(), 0.into()]);
+    dict.set("CropBox", vec![0.into(), 0.into(), 612.into(), 792.into()]);
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("OUTSIDE") && n.kind.contains("off-page")));
+}
+
+#[test]
+fn projection_pdf_inline_images_have_named_refusal() {
+    let bytes = pdf(
+        &["BT /F1 12 Tf 30 700 Td (BODY) Tj ET BI /W 1 /H 1 /CS /G /BPC 8 ID x EI"],
+        false,
+    );
+    let error = super::pdf::metadata(&bytes, &mut Projection::new()).unwrap_err();
+    assert!(format!("{error:#}").contains("PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"));
+}
+
+#[test]
+fn projection_pdf_stream_aliases_cannot_bypass_accounting() {
+    let mut doc = Document::load_mem(&pdf(&[""], false)).unwrap();
+    let bomb = doc.add_object(Stream::new(
+        dictionary! {"Subtype"=>"Image", "Filter"=>"FlateDecode"},
+        compressed_newlines(1),
+    ));
+    let alias = doc.add_object(Object::Reference(bomb));
+    let page = *doc.get_pages().values().next().unwrap();
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Contents", alias);
+    let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
+    assert!(format!("{error:#}").contains("PROJECTION_EXPANSION_RATIO_EXCEEDED"));
+}
+
+#[test]
+fn projection_pdf_actualtext_in_named_form_and_property_operands() {
+    let mut doc = Document::load_mem(&pdf(
+        &["/A Do", "BT /F1 12 Tf 30 700 Td (ORDINARY) Tj ET"],
+        false,
+    ))
+    .unwrap();
+    let page = *doc.get_pages().values().next().unwrap();
+    let mut resources = super::pdf::test_resources(&doc, page);
+    resources.set(
+        "Properties",
+        dictionary! {"Replacement"=>dictionary! {"ActualText"=>Object::string_literal("PROPERTY")}},
+    );
+    let form = doc.add_object(Stream::new(dictionary! {
+        "Subtype"=>"Form", "BBox"=>vec![0.into(),0.into(),600.into(),800.into()], "Resources"=>resources.clone()
+    }, b"/Span /Replacement DP /Span << /Actual#54ext (FORM_REPLACEMENT) >> BDC BT /F1 12 Tf 30 700 Td (SHOWN) Tj ET EMC".to_vec()));
+    resources.set("XObject", dictionary! {"A"=>form});
+    doc.get_object_mut(page)
+        .unwrap()
+        .as_dict_mut()
+        .unwrap()
+        .set("Resources", resources);
+    let p = extract_with_pdfium("pdf", &save_pdf(doc), Some(&library())).unwrap();
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("FORM_REPLACEMENT") && n.kind.contains("ActualText")));
+    assert!(p
+        .nodes
+        .iter()
+        .any(|n| n.text.contains("ORDINARY") && !n.kind.contains("ActualText")));
+}

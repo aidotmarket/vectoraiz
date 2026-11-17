@@ -12,10 +12,9 @@ pub(super) fn extract(
     library: Option<&std::path::Path>,
     out: &mut Projection,
 ) -> Result<()> {
-    let (doc, expected_pages) = metadata_document(input, out)?;
+    let (doc, expected_pages, actual_pages) = metadata_document(input, out)?;
     let boxes = inherited_boxes(&doc)?;
     drop(doc);
-    let actual_text = out.warnings.iter().any(|s| s.starts_with("PDF ActualText"));
     // PDFium's process-global initialization/destruction cannot overlap when
     // this API is exercised directly by concurrent tests. Workers do one job.
     let _guard = PDFIUM_LOCK
@@ -33,6 +32,7 @@ pub(super) fn extract(
     ensure!(usize::from(count) == expected_pages, "PROJECTION_PDF_PAGE_TREE_UNPROVEN: PDFium page count {count} differs from validated {expected_pages}");
     ensure!(count > 0, "PROJECTION_PDF_MALFORMED: no pages");
     for i in 0..count {
+        let actual_text = actual_pages.contains(&usize::from(i));
         let at = format!("pdf/page[{}]", i + 1);
         let page = document
             .pages()
@@ -51,7 +51,9 @@ pub(super) fn extract(
         let mut segments: Vec<(bool, bool, String)> = Vec::new();
         for j in 0..chars.len() {
             let character = chars.get(j)?;
-            let value = character.unicode_char().unwrap_or('\u{fffd}');
+            let Some(value) = projected_character(character.unicode_char()) else {
+                continue;
+            };
             if value == '\u{fffd}' {
                 out.drop_at("unmapped-glyphs", &format!("{at}/char[{j}]"))?;
             }
@@ -135,7 +137,10 @@ pub(super) fn metadata(input: &[u8], out: &mut Projection) -> Result<usize> {
     Ok(metadata_document(input, out)?.1)
 }
 
-fn metadata_document(input: &[u8], out: &mut Projection) -> Result<(Document, usize)> {
+fn metadata_document(
+    input: &[u8],
+    out: &mut Projection,
+) -> Result<(Document, usize, BTreeSet<usize>)> {
     ensure!(
         input.len() as u64 <= PART_BYTES,
         "PROJECTION_PART_BYTES_EXCEEDED at pdf: {} / {PART_BYTES}",
@@ -217,9 +222,25 @@ fn metadata_document(input: &[u8], out: &mut Projection) -> Result<(Document, us
         doc.objects.len()
     );
     // lopdf skips malformed objects; require every live xref object instead.
+    let mut referenced = BTreeSet::new();
+    for object in doc
+        .objects
+        .values()
+        .chain(std::iter::once(&Object::Dictionary(doc.trailer.clone())))
+    {
+        referenced_objects(object, &mut referenced);
+    }
     for (id, entry) in &doc.reference_table.entries {
         match entry {
             lopdf::xref::XrefEntry::Normal { generation, offset } => {
+                // Quartz sometimes advertises an unused, undefined object at
+                // offset zero. A reference to it must still refuse.
+                if *offset == 0
+                    && !doc.objects.keys().any(|key| key.0 == *id)
+                    && !referenced.contains(id)
+                {
+                    continue;
+                }
                 let mut pos = *offset as usize;
                 let number = pdf_token(input, &mut pos)
                     .and_then(|(a, b)| std::str::from_utf8(&input[a..b]).ok()?.parse::<u32>().ok());
@@ -273,14 +294,18 @@ fn metadata_document(input: &[u8], out: &mut Projection) -> Result<(Document, us
     let decoded_ids = decoded_stream_ids(&doc)?;
     let mut expanded = STRUCTURAL_GUARD.with(|state| state.borrow().0);
     let mut encoded = STRUCTURAL_GUARD.with(|state| state.borrow().3);
+    let mut receipts = BTreeMap::new();
     for (id, object) in &doc.objects {
         let at = format!("pdf/object[{}:{}]", id.0, id.1);
         walk(object, &at, 0, &doc, out)?;
         if let Object::Stream(stream) = object {
-            let decoded = if decoded_ids.contains(id) && !stream.dict.has_type(b"ObjStm") {
+            let decoded = if decoded_ids.contains(id) {
                 let size = decoded_size(stream, &at)?;
-                expanded += size;
-                encoded += stream.content.len() as u64;
+                receipts.insert(*id, size);
+                if !stream.dict.has_type(b"ObjStm") {
+                    expanded += size;
+                    encoded += stream.content.len() as u64;
+                }
                 size
             } else {
                 stream.content.len() as u64
@@ -304,39 +329,63 @@ fn metadata_document(input: &[u8], out: &mut Projection) -> Result<(Document, us
         .as_reference()?;
     let mut seen = BTreeSet::new();
     let count = page_tree(&doc, pages, 0, &mut seen)?;
-    // All referenced streams have already passed bounded decode accounting.
-    // Check content syntax independently: PDFium can recover malformed content
-    // as an empty text page, which must not become a permitted omission.
-    for id in seen {
-        if doc.get_object(id)?.as_dict()?.get(b"Type")?.as_name()? == b"Page" {
-            let content = doc.get_page_content(id).map_err(|_| {
-                anyhow::anyhow!(
-                    "PROJECTION_PDF_MALFORMED at pdf/object[{}:{}]: unreadable page content",
-                    id.0,
-                    id.1
-                )
-            })?;
-            let resources = inherited(&doc, id, b"Resources")?
-                .unwrap_or(Object::Dictionary(lopdf::Dictionary::new()));
-            validate_forms(&doc, &content, id, &resources, 0, &mut BTreeSet::new())?;
+    // Every call into lopdf's unbounded decompressor must have a receipt.
+    let mut actual_pages = BTreeSet::new();
+    let mut validation = FormValidation {
+        receipts: &receipts,
+        expanded_bytes: out.expanded_bytes,
+        consumed: BTreeSet::new(),
+        active: BTreeSet::new(),
+        memo: BTreeMap::new(),
+    };
+    for (index, id) in doc.get_pages().values().enumerate() {
+        let mut content = Vec::new();
+        for stream_id in doc.get_page_contents(*id) {
+            content.extend(guarded_content(&doc, stream_id, &mut validation)?);
+        }
+        let resources = inherited(&doc, *id, b"Resources")?
+            .unwrap_or(Object::Dictionary(lopdf::Dictionary::new()));
+        if validate_forms(&doc, &content, *id, &resources, 0, &mut validation)? {
+            actual_pages.insert(index);
         }
     }
-    if decoded_ids.iter().any(|id| {
-        doc.get_object(*id)
-            .ok()
-            .and_then(|o| o.as_stream().ok())
-            .is_some_and(|s| {
-                s.get_plain_content()
-                    .is_ok_and(|c| c.windows(10).any(|w| w == b"ActualText"))
-            })
-    }) || doc
-        .objects
-        .values()
-        .any(|o| o.as_dict().is_ok_and(|d| d.has(b"ActualText")))
-    {
-        out.warnings.push("PDF ActualText: all document text conservatively flagged as potentially not-visible replacement text.".into());
+    out.expanded_bytes = validation.expanded_bytes;
+    Ok((doc, count, actual_pages))
+}
+
+// PDFium uses U+0002 for a removed line-end hyphen: join the word.
+// Other non-whitespace C0 controls have the same counted replacement as
+// unmappable glyphs, rather than carrying raw controls into sale text.
+fn projected_character(value: Option<char>) -> Option<char> {
+    match value {
+        Some('\u{0002}') => None,
+        Some(c) if c < ' ' && !matches!(c, '\t' | '\r' | '\n') => Some('\u{fffd}'),
+        value => Some(value.unwrap_or('\u{fffd}')),
     }
-    Ok((doc, count))
+}
+
+fn referenced_objects(object: &Object, referenced: &mut BTreeSet<u32>) {
+    match object {
+        Object::Reference(id) => {
+            referenced.insert(id.0);
+        }
+        Object::Array(values) => {
+            for value in values {
+                referenced_objects(value, referenced);
+            }
+        }
+        Object::Dictionary(dict) => {
+            for (_, value) in dict.iter() {
+                referenced_objects(value, referenced);
+            }
+        }
+        Object::Stream(stream) => {
+            for (_, value) in stream.dict.iter() {
+                referenced_objects(value, referenced);
+            }
+        }
+        _ => (),
+    }
 }
 
 fn decoded_size(stream: &lopdf::Stream, at: &str) -> Result<u64> {
@@ -429,6 +478,15 @@ fn decoded_size(stream: &lopdf::Stream, at: &str) -> Result<u64> {
 }
 
 fn validate_content(content: &[u8], id: lopdf::ObjectId) -> Result<()> {
+    // Inline image decoding is outside the supported text-only profile.
+    // Tokenize to avoid mistaking BI inside strings/comments for an operator.
+    let mut pos = 0;
+    while let Some((a, b)) = pdf_token(content, &mut pos) {
+        ensure!(
+            &content[a..b] != b"BI",
+            "PROJECTION_PDF_INLINE_IMAGE_UNSUPPORTED"
+        );
+    }
     // The decoder accepts parsed prefixes. A private trailing sentinel proves
     // that malformed original bytes were not silently ignored.
     // Avoid inserting a second blank line after a trailing comment: lopdf's
@@ -546,10 +604,6 @@ fn walk(
     };
     if let Some(dict) = dict {
         for (key, value) in dict.iter() {
-            if key == b"ActualText" && !out.warnings.iter().any(|s| s.starts_with("PDF ActualText"))
-            {
-                out.warnings.push("PDF ActualText: document text conservatively flagged as potentially not-visible replacement text.".into());
-            }
             ensure!(
                 !matches!(key.as_slice(), b"OCProperties" | b"OCG" | b"OCMD" | b"OC"),
                 "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN: layered PDF; exclude document"
@@ -629,24 +683,45 @@ fn inherited_boxes(doc: &Document) -> Result<Vec<[f32; 4]>> {
     doc.get_pages()
         .values()
         .map(|id| {
-            let value = inherited(doc, *id, b"CropBox")?
-                .or(inherited(doc, *id, b"MediaBox")?)
+            let read_box = |key: &[u8]| -> Result<Option<[f32; 4]>> {
+                let Some(value) = inherited(doc, *id, key)? else {
+                    return Ok(None);
+                };
+                let values = value.as_array()?;
+                ensure!(
+                    values.len() == 4,
+                    "PROJECTION_PDF_CLASSIFICATION_UNKNOWN: page box length"
+                );
+                let mut bounds = [0f32; 4];
+                for (i, value) in values.iter().enumerate() {
+                    bounds[i] = resolve(doc, value)?.as_float()?;
+                }
+                ensure!(
+                    bounds.iter().all(|n| n.is_finite()),
+                    "PROJECTION_PDF_CLASSIFICATION_UNKNOWN: invalid page box"
+                );
+                let bounds = [
+                    bounds[0].min(bounds[2]),
+                    bounds[1].min(bounds[3]),
+                    bounds[0].max(bounds[2]),
+                    bounds[1].max(bounds[3]),
+                ];
+                ensure!(
+                    bounds[0] < bounds[2] && bounds[1] < bounds[3],
+                    "PROJECTION_PDF_CLASSIFICATION_UNKNOWN: invalid page box"
+                );
+                Ok(Some(bounds))
+            };
+            let mut bounds = read_box(b"MediaBox")?
                 .context("PROJECTION_PDF_CLASSIFICATION_UNKNOWN: inherited page geometry")?;
-            let values = value.as_array()?;
-            ensure!(
-                values.len() == 4,
-                "PROJECTION_PDF_CLASSIFICATION_UNKNOWN: page box length"
-            );
-            let mut bounds = [0f32; 4];
-            for (i, value) in values.iter().enumerate() {
-                bounds[i] = resolve(doc, value)?.as_float()?;
+            if let Some(crop) = read_box(b"CropBox")? {
+                bounds = [
+                    bounds[0].max(crop[0]),
+                    bounds[1].max(crop[1]),
+                    bounds[2].min(crop[2]),
+                    bounds[3].min(crop[3]),
+                ];
             }
-            ensure!(
-                bounds.iter().all(|n| n.is_finite())
-                    && bounds[0] < bounds[2]
-                    && bounds[1] < bounds[3],
-                "PROJECTION_PDF_CLASSIFICATION_UNKNOWN: invalid page box"
-            );
             Ok(bounds)
         })
         .collect()
@@ -664,14 +739,8 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
         match object {
             Object::Reference(id) => {
                 if seen.insert(*id) {
-                    let value = resolve(doc, object)?;
-                    if let Object::Stream(s) = value {
-                        if s.dict
-                            .get(b"Subtype")
-                            .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Image"))
-                        {
-                            return Ok(());
-                        }
+                    let value = doc.objects.get(id).unwrap_or(&Object::Null);
+                    if matches!(value, Object::Stream(_)) {
                         decoded.insert(*id);
                     }
                     collect(doc, value, depth + 1, seen, decoded)?;
@@ -684,10 +753,9 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
             }
             Object::Dictionary(dict) => {
                 for (key, value) in dict.iter() {
-                    if !matches!(
-                        key.as_slice(),
-                        b"Parent" | b"P" | b"Metadata" | b"Annots" | b"A" | b"AA" | b"SMask"
-                    ) {
+                    if key == b"Resources" {
+                        collect_resources(doc, value, depth + 1, seen, decoded)?;
+                    } else {
                         collect(doc, value, depth + 1, seen, decoded)?;
                     }
                 }
@@ -703,6 +771,34 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
         }
         Ok(())
     }
+    fn collect_resources(
+        doc: &Document,
+        object: &Object,
+        depth: usize,
+        seen: &mut BTreeSet<lopdf::ObjectId>,
+        decoded: &mut BTreeSet<lopdf::ObjectId>,
+    ) -> Result<()> {
+        ensure!(depth <= 32, "PROJECTION_PDF_DEPTH_EXCEEDED: resources");
+        for (category, map) in resolve(doc, object)?.as_dict()?.iter() {
+            if category == b"XObject" {
+                for (_, entry) in resolve(doc, map)?.as_dict()?.iter() {
+                    let image = resolve(doc, entry)?.as_stream().is_ok_and(|s| {
+                        s.dict
+                            .get(b"Subtype")
+                            .is_ok_and(|v| v.as_name().is_ok_and(|n| n == b"Image"))
+                    });
+                    // Only this role exempts images (and their masks). Do not
+                    // mark them seen: another role may require decoding them.
+                    if !image {
+                        collect(doc, entry, depth + 1, seen, decoded)?;
+                    }
+                }
+            } else {
+                collect(doc, map, depth + 1, seen, decoded)?;
+            }
+        }
+        Ok(())
+    }
     let mut decoded = BTreeSet::new();
     let mut seen = BTreeSet::new();
     for id in doc.get_pages().values() {
@@ -710,10 +806,53 @@ fn decoded_stream_ids(doc: &Document) -> Result<BTreeSet<lopdf::ObjectId>> {
             collect(doc, contents, 0, &mut seen, &mut decoded)?;
         }
         if let Some(resources) = inherited(doc, *id, b"Resources")? {
-            collect(doc, &resources, 0, &mut seen, &mut decoded)?;
+            collect_resources(doc, &resources, 0, &mut seen, &mut decoded)?;
         }
     }
     Ok(decoded)
+}
+
+// Every unbounded lopdf decompression is behind the actual stream's size
+// receipt. Charge repeated decoding too, including duplicate page Contents:
+// bounded individual streams must not create an unbounded concatenation.
+fn guarded_content(
+    doc: &Document,
+    mut id: lopdf::ObjectId,
+    validation: &mut FormValidation<'_>,
+) -> Result<Vec<u8>> {
+    for _ in 0..=8 {
+        match doc.objects.get(&id) {
+            Some(Object::Reference(next)) => id = *next,
+            Some(Object::Stream(stream)) => {
+                let size = *validation
+                    .receipts
+                    .get(&id)
+                    .context("PROJECTION_PDF_STREAM_UNACCOUNTED")?;
+                ensure!(size <= PART_BYTES, "PROJECTION_PART_BYTES_EXCEEDED");
+                if !validation.consumed.insert(id) {
+                    validation.expanded_bytes = validation.expanded_bytes.saturating_add(size);
+                }
+                ensure!(
+                    validation.expanded_bytes <= DOCUMENT_BYTES,
+                    "PROJECTION_DOCUMENT_BYTES_EXCEEDED: repeated content decoding"
+                );
+                return stream
+                    .get_plain_content()
+                    .context("PROJECTION_PDF_MALFORMED: unreadable content");
+            }
+            None | Some(Object::Null) => return Ok(Vec::new()),
+            _ => anyhow::bail!("PROJECTION_PDF_MALFORMED: content is not a stream"),
+        }
+    }
+    anyhow::bail!("PROJECTION_PDF_DEPTH_EXCEEDED: content reference cycle")
+}
+
+struct FormValidation<'a> {
+    receipts: &'a BTreeMap<lopdf::ObjectId, u64>,
+    expanded_bytes: u64,
+    consumed: BTreeSet<lopdf::ObjectId>,
+    active: BTreeSet<lopdf::ObjectId>,
+    memo: BTreeMap<(lopdf::ObjectId, String), (bool, usize)>,
 }
 
 fn validate_forms(
@@ -722,30 +861,57 @@ fn validate_forms(
     id: lopdf::ObjectId,
     resources: &Object,
     depth: usize,
-    active: &mut BTreeSet<lopdf::ObjectId>,
-) -> Result<()> {
+    validation: &mut FormValidation<'_>,
+) -> Result<bool> {
+    let key = (id, format!("{resources:?}"));
+    if let Some((result, validated_depth)) = validation.memo.get(&key) {
+        if depth <= *validated_depth {
+            return Ok(*result);
+        }
+    }
     ensure!(
-        depth <= 8 && active.insert(id),
+        depth <= 8 && validation.active.insert(id),
         "PROJECTION_PDF_FORM_UNPROVEN: Form depth/cycle"
     );
     validate_content(content, id)?;
     let operations = lopdf::content::Content::decode(content)?.operations;
-    for op in operations.iter().filter(|op| op.operator == "Do") {
+    let mut actual_text = false;
+    for op in &operations {
+        if matches!(op.operator.as_str(), "BDC" | "DP") {
+            if let Some(properties) = op.operands.get(1) {
+                let properties = if let Object::Name(name) = properties {
+                    resolve(doc, resources)?
+                        .as_dict()?
+                        .get(b"Properties")
+                        .ok()
+                        .and_then(|p| resolve(doc, p).ok())
+                        .and_then(|p| p.as_dict().ok())
+                        .and_then(|p| p.get(name).ok())
+                        .unwrap_or(&Object::Null)
+                } else {
+                    properties
+                };
+                actual_text |= resolve(doc, properties)?
+                    .as_dict()
+                    .is_ok_and(|p| p.has(b"ActualText"));
+            }
+        }
+        if op.operator != "Do" {
+            continue;
+        }
         let name = op
             .operands
             .first()
             .context("PROJECTION_PDF_FORM_UNPROVEN: missing Do operand")?
             .as_name()?;
         let dict = resolve(doc, resources)?.as_dict()?;
-        let xobjects = resolve(
-            doc,
-            dict.get(b"XObject")
-                .context("PROJECTION_PDF_FORM_UNPROVEN: missing XObject resources")?,
-        )?
-        .as_dict()?;
-        let object = xobjects
-            .get(name)
-            .context("PROJECTION_PDF_FORM_UNPROVEN: unknown invoked XObject")?;
+        let Ok(xobjects) = dict.get(b"XObject") else {
+            continue;
+        };
+        let xobjects = resolve(doc, xobjects)?.as_dict()?;
+        let Ok(object) = xobjects.get(name) else {
+            continue;
+        };
         let value = resolve(doc, object)?;
         if matches!(value, Object::Null) {
             continue;
@@ -760,21 +926,28 @@ fn validate_forms(
                 .as_reference()
                 .context("PROJECTION_PDF_FORM_UNPROVEN: direct Form stream")?;
             let own = stream.dict.get(b"Resources").unwrap_or(resources);
-            validate_forms(
+            if let Some((result, validated_depth)) =
+                validation.memo.get(&(form_id, format!("{own:?}")))
+            {
+                if depth < *validated_depth {
+                    actual_text |= *result;
+                    continue;
+                }
+            }
+            actual_text |= validate_forms(
                 doc,
-                &stream
-                    .get_plain_content()
-                    .context("PROJECTION_PDF_FORM_UNPROVEN: unreadable Form")?,
+                &guarded_content(doc, form_id, validation)?,
                 form_id,
                 own,
                 depth + 1,
-                active,
+                validation,
             )
             .context("PROJECTION_PDF_FORM_UNPROVEN: invoked Form content")?;
         }
     }
-    active.remove(&id);
-    Ok(())
+    validation.active.remove(&id);
+    validation.memo.insert(key, (actual_text, depth));
+    Ok(actual_text)
 }
 
 // This tokenizer skips strings, hex strings and comments so the word `stream`
@@ -1014,4 +1187,57 @@ pub(super) fn test_resources(doc: &Document, page: lopdf::ObjectId) -> lopdf::Di
         .as_dict()
         .unwrap()
         .clone()
+}
+
+#[cfg(test)]
+mod character_tests {
+    #[test]
+    fn repeat_decode_budget_is_checked_before_allocating() {
+        let mut doc = lopdf::Document::new();
+        let stream = lopdf::Stream::new(lopdf::dictionary! {}, b"q Q".to_vec());
+        let size = super::decoded_size(&stream, "test").unwrap();
+        let id = doc.add_object(stream);
+        let alias = doc.add_object(lopdf::Object::Reference(id));
+        let receipts = [(id, size)].into_iter().collect();
+        let mut validation = super::FormValidation {
+            receipts: &receipts,
+            expanded_bytes: super::DOCUMENT_BYTES,
+            consumed: Default::default(),
+            active: Default::default(),
+            memo: Default::default(),
+        };
+        assert_eq!(
+            super::guarded_content(&doc, alias, &mut validation).unwrap(),
+            b"q Q"
+        );
+        let error = super::guarded_content(&doc, id, &mut validation).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("PROJECTION_DOCUMENT_BYTES_EXCEEDED"));
+        let mut unaccounted = super::FormValidation {
+            receipts: &Default::default(),
+            expanded_bytes: 0,
+            consumed: Default::default(),
+            active: Default::default(),
+            memo: Default::default(),
+        };
+        assert!(super::guarded_content(&doc, alias, &mut unaccounted)
+            .unwrap_err()
+            .to_string()
+            .contains("PROJECTION_PDF_STREAM_UNACCOUNTED"));
+    }
+
+    #[test]
+    fn controls_are_counted_replacements_and_hyphen_marker_joins() {
+        for code in 0..32 {
+            let c = char::from(code);
+            let expected = match c {
+                '\u{0002}' => None,
+                '\t' | '\r' | '\n' => Some(c),
+                _ => Some('\u{fffd}'),
+            };
+            assert_eq!(super::projected_character(Some(c)), expected);
+        }
+        assert_eq!(super::projected_character(None), Some('\u{fffd}'));
+    }
 }
