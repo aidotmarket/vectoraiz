@@ -160,7 +160,9 @@ resource exhaustion, not a leak. L6's padded Do and BDC/DP operands retain the
 ActualText flag.
 
 The resource bound retains candidate dictionaries across invoking streams,
-fonts and pages, then removes edges proven impossible by pinned PDFium rules:
+fonts and pages, including saved font scopes from earlier selections when a
+Type3 font has no Resources dictionary. It removes edges proven impossible by
+pinned PDFium rules:
 a local XObject category shadows fallback categories, Do reads its final
 operand, and an explicit, successfully loaded Type1 font cannot execute Type3
 glyphs. Unresolved names and unproven/inherited fonts retain the conservative

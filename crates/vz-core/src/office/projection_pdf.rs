@@ -1278,6 +1278,37 @@ fn all_type3_glyphs<'a>(object: &'a Object, glyphs: &mut Vec<(&'a Object, Option
     }
 }
 
+// Type3::SetPageResources saves the dictionary used when Tf selects the font.
+// A later gs Font selection does not refresh it. For fonts without Resources,
+// glyph fallback can therefore retain a dictionary from a different stream or
+// page, rather than one in the current invocation chain.
+fn all_resource_scopes<'a>(object: &'a Object, scope: &mut Vec<&'a Object>) {
+    match object {
+        Object::Dictionary(dict) => {
+            if let Ok(resources) = dict.get(b"Resources") {
+                scope.push(resources);
+            }
+            for (_, value) in dict.iter() {
+                all_resource_scopes(value, scope);
+            }
+        }
+        Object::Stream(stream) => {
+            if let Ok(resources) = stream.dict.get(b"Resources") {
+                scope.push(resources);
+            }
+            for (_, value) in stream.dict.iter() {
+                all_resource_scopes(value, scope);
+            }
+        }
+        Object::Array(values) => {
+            for value in values {
+                all_resource_scopes(value, scope);
+            }
+        }
+        _ => (),
+    }
+}
+
 fn structural_stream_bound<'a>(
     doc: &'a Document,
     id: lopdf::ObjectId,
@@ -1389,8 +1420,14 @@ fn structural_cost<'a>(
     }
     for (procs, resources) in glyphs {
         let mut glyph_scope = scope.to_vec();
-        if let Some(resources) = resources {
+        if let Some(resources @ Object::Dictionary(_)) =
+            resources.map(|v| resolve(doc, v)).transpose()?
+        {
             glyph_scope.push(resources);
+        } else {
+            for object in doc.objects.values() {
+                all_resource_scopes(object, &mut glyph_scope);
+            }
         }
         canonical_scope(doc, &mut glyph_scope)?;
         for (_, glyph) in resolve(doc, procs)?.as_dict()?.iter() {
@@ -2210,6 +2247,63 @@ mod character_tests {
                 "{error:#}"
             ),
         }
+    }
+
+    #[test]
+    fn type3_fallback_includes_previous_font_selection_resources() {
+        use lopdf::{dictionary, Document, Object, Stream};
+        let mut doc = Document::new();
+        let mut form = doc.add_object(Stream::new(
+            dictionary! {"Subtype"=>"Form"},
+            b"q Q".to_vec(),
+        ));
+        for _ in 0..5 {
+            form = doc.add_object(Stream::new(dictionary! {"Subtype"=>"Form", "Resources"=>dictionary! {"XObject"=>dictionary! {"Child"=>form}}}, "/Child Do ".repeat(12).into_bytes()));
+        }
+        // Tf can save this scope on an earlier page without loading a glyph.
+        // A later gs selects the same font while retaining that saved scope.
+        doc.add_object(
+            dictionary! {"Resources"=>dictionary! {"XObject"=>dictionary! {"Hidden"=>form}}},
+        );
+        let glyph = doc.add_object(Stream::new(
+            dictionary! {},
+            "/Hidden Do ".repeat(12).into_bytes(),
+        ));
+        let font =
+            doc.add_object(dictionary! {"Subtype"=>"Type3", "CharProcs"=>dictionary! {"a"=>glyph}});
+        let page = Object::Dictionary(
+            dictionary! {"ExtGState"=>dictionary! {"State"=>dictionary! {"Font"=>vec![font.into(), 12.into()]}}},
+        );
+        let receipts = doc
+            .objects
+            .iter()
+            .filter_map(|(id, value)| {
+                value
+                    .as_stream()
+                    .ok()
+                    .map(|stream| (*id, stream.content.len() as u64))
+            })
+            .collect();
+        let mut validation = super::FormValidation {
+            receipts: &receipts,
+            expanded_bytes: 0,
+            consumed: Default::default(),
+            active: Default::default(),
+            memo: Default::default(),
+            invoked: Default::default(),
+            stream_counts: Default::default(),
+            structural_memo: Default::default(),
+            has_type3: None,
+        };
+        let bound = super::structural_form_bound(
+            &doc,
+            b"/State gs BT (a) Tj ET",
+            &page,
+            &page,
+            &mut validation,
+        )
+        .unwrap();
+        assert!(bound > super::MAX_FORM_INVOCATIONS);
     }
 
     #[test]
