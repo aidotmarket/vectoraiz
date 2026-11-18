@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import App, { readableFolder, indexProgress } from "./App";
+import App, { readableFolder, formatIndexProgress } from "./App";
 import { version } from "../package.json";
 import { licenceName } from "./licence";
 
@@ -2510,7 +2510,7 @@ it("Ask Re-index confirms replacement before indexing a different Library folder
 });
 
 it("keeps failed file names and OCR reasons after later successful files and counts remaining failures", () => {
-  const result = indexProgress({completed: 6, failed: 4, infrastructure_failed: 0, infrastructure_examples: [], skipped: 0, total: 10, path: "/source/z-good.txt", failure_examples: ["/source/scanned-image-only.pdf: needs text recognition (OCR)", "bad.docx: corrupt ZIP", "empty.txt: document has no text"]});
+  const result = formatIndexProgress({completed: 6, failed: 4, infrastructure_failed: 0, infrastructure_examples: [], skipped: 0, total: 10, path: "/source/z-good.txt", failure_examples: ["/source/scanned-image-only.pdf: needs text recognition (OCR)", "bad.docx: corrupt ZIP", "empty.txt: document has no text"]});
   expect(result).toContain("scanned-image-only.pdf: needs text recognition (OCR)");
   expect(result).toContain("and 1 more");
 });

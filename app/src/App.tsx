@@ -8,7 +8,7 @@ import { repositoryLicenceName } from "./licence";
 import { ListingReview } from "./components/ListingReview";
 
 interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
-export function indexProgress(p: Progress) {
+export function formatIndexProgress(p: Progress) {
   const failures = p.failure_examples ?? [];
   const remaining = Math.max(0, p.failed - failures.length);
   return `${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${readableFolder(p.path).path}${p.reason ? ` · ${p.reason}` : ""}${failures.length ? ` · Failed files: ${failures.join("; ")}${remaining ? `; and ${remaining} more` : ""}` : ""}`;
@@ -312,10 +312,10 @@ export default function App() {
     setIndexedCount(undefined);
     let counts = { completed: 0, skipped: 0, failed: 0, total: 0 };
     const channel = new Channel<Progress>();
-    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(indexProgress(p)); } };
+    channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(formatIndexProgress(p)); } };
     try {
       const result = await invoke<Progress>("pipeline_index", { folder, progress: channel });
-      if (result) setIndexProgress(indexProgress(result));
+      if (result) setIndexProgress(formatIndexProgress(result));
       const next = await refreshModels();
       setIndexedCount(result?.failed === 0 && Number.isInteger(result.completed) && Number.isInteger(result.skipped) && result.completed + result.skipped === result.total && next?.last_indexed_folder ? {folder: next.last_indexed_folder, count: result.completed + result.skipped} : undefined);
     }

@@ -94,7 +94,7 @@ fn candidate(
     Ok(Candidate {
         projection_summary,
         source: Path::new(&doc.path)
-            .strip_prefix(&source)?
+            .strip_prefix(source)?
             .to_str()
             .context("source path must be UTF-8")?
             .replace('\\', "/"),
@@ -780,6 +780,7 @@ mod tests {
         let (payload, _) = guard.reviewed_payload(&current).unwrap();
         let manifest = crate::verify(&payload).unwrap();
         assert_eq!(manifest["originals"], false);
+        assert_eq!(manifest["counts"]["documents"], 1);
         assert!(!payload.join("scanned-image-only.pdf").exists());
         assert!(guard
             .inspect(&current)
@@ -2036,6 +2037,9 @@ mod tests {
             .warnings
             .iter()
             .any(|s| s.contains("no-text-pages: 1")));
+        assert!(review.warnings.iter().any(|s| s
+            .contains("Invisible text: 1 included segments; off-page text: 1 included segments.")));
+
         guard.accept(&first).unwrap();
         changes.origin = Some(first.clone());
         changes.include_hidden = true;
