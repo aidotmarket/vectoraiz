@@ -91,6 +91,12 @@ The preparation step limits memory, processing time and repeated content work.
 If a document exceeds those limits, the seller sees a named memory or processing
 time refusal and can exclude the document from the pack.
 
+On Windows, two rare PDFium out-of-memory paths (an aligned-allocation failure
+and a failed C++ allocation inside PDFium) end as a generic "worker crashed"
+refusal instead of the named memory refusal. The document is still refused and
+nothing is exposed; only the seller-facing wording is generic. Reviewed
+statically, not measured.
+
 Text supplied through PDF accessibility replacements is flagged for review,
 including replacements inside nested forms. Sellers should check these flags
 before approving the sale copy. Image-only PDFs still need OCR; this projection
