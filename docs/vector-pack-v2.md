@@ -184,14 +184,24 @@ memory limit, without aborts or crash dialogs. On Windows the watchdog runs
 64 MiB below the job-object commit cap so it can refuse before allocations are
 denied. The shipping parser contains no resource-probe hook.
 
+On Windows, two rare PDFium out-of-memory paths (an aligned-allocation failure
+and a failed C++ allocation inside PDFium) end as a generic "worker crashed"
+refusal instead of the named memory refusal. The document is still refused and
+nothing is exposed; only the seller-facing wording is generic. Reviewed
+statically, not measured.
+
 The corpus gate is the manifest with SHA-256
 `551b34a5eedb541be1a0b1507f66f452b1f50109e11acbc1c5ec31af4b516d04`,
 kept with its file copies in Koskadeux private evidence. It pins 740 files:
 127 real PDFs, 100 synthetic PDFs and 513 HTML files. One of the previously
-available 128 real PDFs was lost before pinning. Compare base vs head on every
-manifest file for each change; a missing file or a hash that differs from the
+available 128 real PDFs was lost before pinning; its manifest row marked
+`MISSING` is excluded from the gate. Compare base vs head on every other
+manifest row for each change; a missing file or a hash that differs from the
 manifest fails the gate. Each change must preserve the base's per-file results,
 including node, character, drop and warning details and projection output.
+
+For the procedure, see [vectoraiz-vector-pack-corpus-gate.md](https://github.com/aidotmarket/runbooks/blob/main/vectoraiz-vector-pack-corpus-gate.md)
+in aidotmarket/runbooks.
 
 The current reference counts are CC's 18 November 2026 comparison: 102 of 127
 real PDFs pass, 60 of 100 synthetic PDFs pass, and 505 of 513 HTML files pass.
