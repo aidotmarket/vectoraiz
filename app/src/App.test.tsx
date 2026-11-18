@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
-import App, { readableFolder } from "./App";
+import App, { readableFolder, indexProgress } from "./App";
 import { version } from "../package.json";
 import { licenceName } from "./licence";
 
@@ -118,7 +118,7 @@ it("shows PDF and HTML extraction counts, hidden locations and named PDF refusal
   const original = invoke.getMockImplementation()!;
   invoke.mockImplementation(async (command, args) => command === "listing_sources" ? {
     pack_id: listingCurrent.pack_id, protected_columns: [], sources: [
-      {source: "text.pdf", artifact: "projection/document-0001", format: "pdf", supported: true, projection_summary: {mandatory_drops: {properties: 2, annotations: 1, "hidden-form-data": 0, "no-text-pages": 1}, hidden_locations: []}},
+      {source: "text.pdf", artifact: "projection/document-0001", format: "pdf", supported: true, projection_summary: {mandatory_drops: {properties: 2, annotations: 1, "hidden-form-data": 0, "no-text-pages": 1}, hidden_locations: [], included_pdf_segments: {invisible: 1, off_page: 1}, warning: "Invisible text: 1 included segments; off-page text: 1 included segments. These remain included content."}},
       {source: "page.html", artifact: "projection/document-0002", format: "html", supported: true, projection_summary: {mandatory_drops: {comments: 1, "active-markup": 2, "hidden-form-data": 1}, hidden_locations: ["html/node[7]"]}},
       {source: "layers.pdf", artifact: "projection/document-0003", format: "pdf", supported: false, refusal: "PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN"},
     ],
@@ -128,6 +128,7 @@ it("shows PDF and HTML extraction counts, hidden locations and named PDF refusal
   expect(region.getByText("Source format: HTML")).toBeInTheDocument();
   expect(region.getByRole("checkbox", {name: /layers.pdf.*PROJECTION_PDF_OPTIONAL_CONTENT_STATE_UNPROVEN/})).toBeChecked();
   expect(region.getByText(/properties: 2; annotations: 1; hidden-form-data: 0; no-text-pages: 1/)).toBeInTheDocument();
+  expect(region.getByText(/Included PDF segments: invisible 1; off-page 1/)).toBeInTheDocument();
   expect(region.getByText("html/node[7]: hidden, omitted by default")).toBeInTheDocument();
   expect(region.getByRole("checkbox", {name: /Include supported hidden content/})).not.toBeChecked();
   expect(region.getByRole("button", {name: "Rebuild purchaser preview"})).toBeDisabled();
@@ -2506,4 +2507,10 @@ it("Ask Re-index confirms replacement before indexing a different Library folder
   expect(invoke.mock.calls.some(([command]) => command === "pipeline_index")).toBe(false);
   await userEvent.click(dialog.getByRole("button", {name:"Replace folder"}));
   await waitFor(() => expect(invoke).toHaveBeenCalledWith("pipeline_index", expect.objectContaining({folder:"C:/New library"})));
+});
+
+it("keeps failed file names and OCR reasons after later successful files and counts remaining failures", () => {
+  const result = indexProgress({completed: 6, failed: 4, infrastructure_failed: 0, infrastructure_examples: [], skipped: 0, total: 10, path: "/source/z-good.txt", failure_examples: ["/source/scanned-image-only.pdf: needs text recognition (OCR)", "bad.docx: corrupt ZIP", "empty.txt: document has no text"]});
+  expect(result).toContain("scanned-image-only.pdf: needs text recognition (OCR)");
+  expect(result).toContain("and 1 more");
 });

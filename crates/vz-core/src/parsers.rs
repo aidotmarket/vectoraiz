@@ -302,7 +302,10 @@ fn pdf(request: &Request) -> Result<Vec<Page>> {
             image.write_to(&mut png, image::ImageFormat::Png)?;
             let text = crate::Ocr::recognize(&AppleVision, png.get_ref())
                 .map_err(|e| crate::failures::infrastructure(anyhow::Error::msg(e)))?;
-            pages.push(page(i as u32 + 1, text));
+            let needs_ocr = text.trim().is_empty();
+            let mut extracted = page(i as u32 + 1, text);
+            extracted.needs_ocr = needs_ocr;
+            pages.push(extracted);
         }
         #[cfg(not(target_os = "macos"))]
         pages.push(Page {

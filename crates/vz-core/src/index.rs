@@ -231,7 +231,7 @@ pub async fn index(
             let mut chunks = chunk(&doc_id, &pages);
             if chunks.is_empty() {
                 let reason = if pages.iter().any(|p| p.needs_ocr) {
-                    "needs OCR"
+                    "needs text recognition (OCR)"
                 } else {
                     "document has no text"
                 };
@@ -449,6 +449,57 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("../tests/support/image_only_pdf.rs");
+
+    #[tokio::test]
+    async fn image_only_pdf_is_a_named_content_failure_alongside_good_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("scanned-image-only.pdf"),
+            image_only_pdf(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("z-good.txt"),
+            "A good searchable document.",
+        )
+        .unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let mut state = State::open(index.path()).unwrap();
+        let engines = Engines::load_embedding(
+            &root.join(".assets"),
+            &root.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let result = super::index(
+            &mut state,
+            source.path(),
+            &engines,
+            &root.join(".assets"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        eprintln!(
+            "image-only PDF indexing result: {}",
+            serde_json::to_string(&result).unwrap()
+        );
+        assert_eq!(
+            (
+                result.completed,
+                result.failed,
+                result.infrastructure_failed
+            ),
+            (1, 1, 0)
+        );
+        assert!(result.failure_examples[0]
+            .contains("scanned-image-only.pdf: needs text recognition (OCR)"));
+        result.ensure_publishable().unwrap();
+        assert_eq!(state.documents().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn listing_refused_office_original_still_indexes_and_is_searchable() {
         use std::io::{Cursor, Read, Write};

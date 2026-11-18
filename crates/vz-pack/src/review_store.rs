@@ -98,11 +98,11 @@ impl NativeIndexFence {
     pub(crate) fn candidate_documents(
         library: &Path,
         source: &Path,
-    ) -> Result<Vec<vz_core::pipeline::Document>> {
+    ) -> Result<Vec<(vz_core::pipeline::Document, bool)>> {
         let fence = Self::acquire(library)?;
         let index = &fence.selection.index;
-        let _binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        vz_core::storage::State::review_documents(index)
+        let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
+        review_candidates(&binding, vz_core::storage::State::review_documents(index)?)
     }
 
     fn acquire(library: &Path) -> Result<Self> {
@@ -124,6 +124,55 @@ impl NativeIndexFence {
             writer,
         })
     }
+}
+
+/// Enumerate the captured source tree without adding failed documents to search.
+/// The same binding and writer fence govern both candidate display and rebuild.
+pub(crate) fn review_candidates(
+    binding: &ReviewBinding,
+    indexed: Vec<vz_core::pipeline::Document>,
+) -> Result<Vec<(vz_core::pipeline::Document, bool)>> {
+    let mut result: Vec<_> = indexed.into_iter().map(|doc| (doc, true)).collect();
+    let indexed_paths: std::collections::BTreeSet<_> =
+        result.iter().map(|(doc, _)| doc.path.clone()).collect();
+    for (relative, file) in &binding.source_files {
+        let kind = Path::new(relative)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if ![
+            "pdf", "docx", "xlsx", "pptx", "txt", "md", "markdown", "html", "htm",
+        ]
+        .contains(&kind.as_str())
+        {
+            continue;
+        }
+        let path = binding
+            .source
+            .join(relative)
+            .to_str()
+            .context("UTF-8 source")?
+            .to_owned();
+        if indexed_paths.contains(&path) {
+            continue;
+        }
+        result.push((
+            vz_core::pipeline::Document {
+                doc_id: vz_core::pipeline::sha256(path.as_bytes()),
+                path,
+                sha256: file.sha256.clone().into(),
+                bytes: file.size,
+                pages: 0,
+                kind,
+                needs_ocr_pages: vec![],
+                chunks: vec![],
+            },
+            false,
+        ));
+    }
+    anyhow::ensure!(result.len() <= MAX_FILES, "review document limit");
+    Ok(result)
 }
 
 impl Drop for NativeIndexFence {
