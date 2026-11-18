@@ -95,10 +95,3 @@ Text supplied through PDF accessibility replacements is flagged for review,
 including replacements inside nested forms. Sellers should check these flags
 before approving the sale copy. Image-only PDFs still need OCR; this projection
 profile does not provide it.
-
-The corpus gate compares each change against its base using the files still
-available. The latest reviewer comparison passed 103 of 128 real PDFs, 60 of
-100 synthetic PDFs and 505 of 513 HTML files, with identical results and text
-counts on both versions. Thirteen original PDFs and thirteen HTML files are
-unavailable. See [the projection profile](docs/vector-pack-v2.md) for the gate
-and technical limits.
