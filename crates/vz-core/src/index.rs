@@ -230,8 +230,15 @@ pub async fn index(
             let doc_id = sha256(path_text.as_bytes());
             let mut chunks = chunk(&doc_id, &pages);
             if chunks.is_empty() {
-                let reason = if pages.iter().any(|p| p.needs_ocr) {
-                    "needs OCR"
+                // A PDF can yield no usable text even after platform OCR ran.
+                // Keep Page::needs_ocr's platform contract (OCR not attempted)
+                // independent from the seller-facing explanation of this failure.
+                let reason = if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+                    || pages.iter().any(|p| p.needs_ocr)
+                {
+                    "needs text recognition (OCR)"
                 } else {
                     "document has no text"
                 };
@@ -290,9 +297,8 @@ pub async fn index(
                 }
                 let reason = format!("{error:#}");
                 if stats.failure_examples.len() < 3 {
-                    stats
-                        .failure_examples
-                        .push(format!("{path_text}: {reason}"));
+                    let name = path.strip_prefix(&folder).unwrap_or(&path).display();
+                    stats.failure_examples.push(format!("{name}: {reason}"));
                 }
                 stats.reason = Some(reason.clone());
                 // Never serve an older revision when replacement failed.
@@ -449,6 +455,57 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    include!("../tests/support/image_only_pdf.rs");
+
+    #[tokio::test]
+    async fn image_only_pdf_is_a_named_content_failure_alongside_good_files() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(
+            source.path().join("scanned-image-only.pdf"),
+            image_only_pdf(),
+        )
+        .unwrap();
+        std::fs::write(
+            source.path().join("z-good.txt"),
+            "A good searchable document.",
+        )
+        .unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let mut state = State::open(index.path()).unwrap();
+        let engines = Engines::load_embedding(
+            &root.join(".assets"),
+            &root.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let result = super::index(
+            &mut state,
+            source.path(),
+            &engines,
+            &root.join(".assets"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        eprintln!(
+            "image-only PDF indexing result: {}",
+            serde_json::to_string(&result).unwrap()
+        );
+        assert_eq!(
+            (
+                result.completed,
+                result.failed,
+                result.infrastructure_failed
+            ),
+            (1, 1, 0)
+        );
+        assert!(result.failure_examples[0]
+            .contains("scanned-image-only.pdf: needs text recognition (OCR)"));
+        result.ensure_publishable().unwrap();
+        assert_eq!(state.documents().unwrap().len(), 1);
+    }
+
     #[tokio::test]
     async fn listing_refused_office_original_still_indexes_and_is_searchable() {
         use std::io::{Cursor, Read, Write};

@@ -58,34 +58,100 @@ pub fn candidates_with_pdfium(
     let candidates = crate::review_store::NativeIndexFence::candidate_documents(library, &source)?
         .into_iter()
         .enumerate()
-        .map(|(position, doc)| {
-            let artifact = candidate_location(position, &doc.kind);
+        .map(|(position, entry)| {
+            let artifact = candidate_location(position, &entry.doc.kind);
             lease.check(policy)?;
             let mut budget = Budget::default();
             budget.enable_office();
             budget.started = Some(started);
             budget.cancel = Some(lease.cancellation_token());
-            let refusal = preparation_refusal_with_pdfium(&doc, &artifact, &mut budget, pdfium);
-            #[cfg(not(feature = "listing-originals"))]
-            let projection_summary = budget.projection.as_ref().map(|projection| json!({"mandatory_drops":projection.drops,"hidden_locations":projection.nodes.iter().filter(|n|n.hidden).map(|n|&n.location).collect::<Vec<_>>()}));
-            #[cfg(feature = "listing-originals")]
-            let projection_summary = None;
-            Ok(Candidate {
-                projection_summary,
-                source: Path::new(&doc.path)
-                    .strip_prefix(&source)?
-                    .to_str()
-                    .context("source path must be UTF-8")?
-                    .replace('\\', "/"),
+            candidate(
+                &entry.doc,
+                entry.indexed,
+                entry.indexing_reason.as_deref(),
                 artifact,
-                supported: refusal.is_none(),
-                refusal,
-                format: doc.kind,
-            })
+                &source,
+                &mut budget,
+                pdfium,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     lease.check(policy)?;
     Ok(candidates)
+}
+
+fn candidate(
+    doc: &vz_core::pipeline::Document,
+    indexed: bool,
+    indexing_reason: Option<&str>,
+    artifact: String,
+    source: &Path,
+    budget: &mut Budget,
+    pdfium: Option<&Path>,
+) -> Result<Candidate> {
+    let preparation = preparation_refusal_with_pdfium(doc, &artifact, budget, pdfium);
+    let refusal = if indexed {
+        preparation
+    } else {
+        let recorded = indexing_reason.map(str::to_owned);
+        // Keep the PDF projection's named OCR refusal; otherwise prefer the
+        // indexer's explanation (e.g. empty text) to a generic projection error.
+        let reason = if doc.kind == "pdf" {
+            preparation.or(recorded)
+        } else {
+            recorded.or(preparation)
+        };
+        Some(reason.unwrap_or_else(|| {
+            "Document is not indexed; re-index or exclude it before rebuilding".into()
+        }))
+    };
+    #[cfg(not(feature = "listing-originals"))]
+    let projection_summary = budget
+        .projection
+        .as_ref()
+        .map(|projection| projection_summary(&doc.kind, projection));
+    #[cfg(feature = "listing-originals")]
+    let projection_summary = None;
+    Ok(Candidate {
+        projection_summary,
+        source: Path::new(&doc.path)
+            .strip_prefix(source)?
+            .to_str()
+            .context("source path must be UTF-8")?
+            .replace('\\', "/"),
+        artifact,
+        supported: refusal.is_none(),
+        refusal,
+        format: doc.kind.clone(),
+    })
+}
+
+#[cfg(not(feature = "listing-originals"))]
+fn projection_summary(
+    kind: &str,
+    projection: &vz_core::office::projection::Projection,
+) -> serde_json::Value {
+    let mut summary = json!({"mandatory_drops":projection.drops,"hidden_locations":projection.nodes.iter().filter(|n|n.hidden).map(|n|&n.location).collect::<Vec<_>>()});
+    if kind == "pdf" {
+        let invisible = projection
+            .nodes
+            .iter()
+            .filter(|n| n.kind.contains("(invisible render mode 3)"))
+            .count();
+        let off_page = projection
+            .nodes
+            .iter()
+            .filter(|n| n.kind.contains("(off-page)"))
+            .count();
+        summary["included_pdf_segments"] = json!({"invisible": invisible, "off_page": off_page});
+        summary["warning"] = json!(pdf_segment_warning(invisible, off_page));
+    }
+    summary
+}
+
+#[cfg(not(feature = "listing-originals"))]
+fn pdf_segment_warning(invisible: usize, off_page: usize) -> String {
+    format!("Invisible text: {invisible} included segments; off-page text: {off_page} included segments. These remain included content.")
 }
 
 fn candidate_location(position: usize, kind: &str) -> String {
@@ -686,6 +752,237 @@ mod tests {
     use super::*;
     use crate::listing_policy::{ListingPolicy, ManagedPolicy, PolicySource};
     use std::sync::{Arc, Mutex};
+    #[cfg(not(feature = "listing-originals"))]
+    include!("../../vz-core/tests/support/image_only_pdf.rs");
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn unindexed_image_pdf_is_refused_and_exclusion_rebuilds_without_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let index = root.join("index");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("scanned-image-only.pdf"), image_only_pdf()).unwrap();
+        std::fs::write(source.join("empty.txt"), "").unwrap();
+        std::fs::write(
+            source.join("z-good.txt"),
+            "A good searchable and saleable document.",
+        )
+        .unwrap();
+        std::fs::create_dir(source.join("subfolder")).unwrap();
+        std::fs::write(
+            source.join("subfolder/nested-good.txt"),
+            "A nested searchable document.",
+        )
+        .unwrap();
+        // canonicalize() above gives verbatim \\?\ paths on Windows CI.
+        #[cfg(windows)]
+        assert!(source.to_str().unwrap().starts_with(r"\\?\"));
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let engines = Engines::load_embedding(
+            &repo.join(".assets"),
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut state = State::open(&index).unwrap();
+        let progress = runtime
+            .block_on(vz_core::index::index(
+                &mut state,
+                &source,
+                &engines,
+                &repo.join(".assets"),
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(
+            (
+                progress.completed,
+                progress.failed,
+                progress.infrastructure_failed
+            ),
+            (2, 2, 0)
+        );
+        assert!(progress
+            .failure_examples
+            .iter()
+            .any(|s| s.contains("scanned-image-only.pdf: needs text recognition (OCR)")));
+        assert!(progress
+            .failure_examples
+            .iter()
+            .all(|failure| !failure.contains(source.to_str().unwrap())));
+        assert!(progress
+            .failure_examples
+            .iter()
+            .any(|failure| failure == "empty.txt: document has no text"));
+        progress.ensure_publishable().unwrap();
+        drop(state);
+        let docs =
+            crate::review_store::NativeIndexFence::candidate_documents(&index, &source).unwrap();
+        assert_eq!(
+            docs.len(),
+            4,
+            "indexed nested file must not also be an unindexed candidate"
+        );
+        assert_eq!(docs.iter().filter(|entry| entry.indexed).count(), 2);
+        let nested = docs
+            .iter()
+            .filter(|entry| Path::new(&entry.doc.path).ends_with("subfolder/nested-good.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(nested.len(), 1);
+        assert!(nested[0].indexed);
+        let entry = docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("scanned-image-only.pdf"))
+            .unwrap();
+        assert!(!entry.indexed);
+        let refused = candidate(
+            &entry.doc,
+            entry.indexed,
+            entry.indexing_reason.as_deref(),
+            "projection/document-0003".into(),
+            &source,
+            &mut Budget::default(),
+            Some(&engines.pdfium_library()),
+        )
+        .unwrap();
+        assert!(!refused.supported);
+        assert_eq!(refused.source, "scanned-image-only.pdf");
+        assert!(refused
+            .refusal
+            .unwrap()
+            .contains("PROJECTION_PDF_NEEDS_OCR: needs OCR; no sale projection available"));
+        let empty = docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("empty.txt"))
+            .unwrap();
+        let refused = candidate(
+            &empty.doc,
+            empty.indexed,
+            empty.indexing_reason.as_deref(),
+            "projection/document-0004".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap();
+        assert!(!refused.supported);
+        assert_eq!(refused.refusal.as_deref(), Some("document has no text"));
+        // A newly added supported file has no job record and keeps the generic refusal.
+        std::fs::write(source.join("added-later.txt"), "Added after indexing.").unwrap();
+        let later_docs =
+            crate::review_store::NativeIndexFence::candidate_documents(&index, &source).unwrap();
+        assert_eq!(later_docs.len(), 5);
+        let later = later_docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("added-later.txt"))
+            .unwrap();
+        let refused = candidate(
+            &later.doc,
+            later.indexed,
+            later.indexing_reason.as_deref(),
+            "projection/document-0005".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap();
+        assert!(!refused.supported);
+        assert_eq!(
+            refused.refusal.as_deref(),
+            Some("Document is not indexed; re-index or exclude it before rebuilding")
+        );
+        let id = Uuid::new_v4();
+        let policy = ListingPolicy::new(Arc::new(Source(Mutex::new(ManagedPolicy::Allowed))));
+        let store = ReviewStore::open(&root.join("reviews")).unwrap();
+        let guard = store.lock_native(&policy, id, &index).unwrap();
+        let mut changes = Changes::default();
+        assert!(build(&guard, &source, id, &engines, "query", &changes)
+            .unwrap_err()
+            .to_string()
+            .contains("unindexed source must be excluded"));
+        changes.exclusions.extend([
+            "scanned-image-only.pdf".into(),
+            "empty.txt".into(),
+            "added-later.txt".into(),
+        ]);
+        let current = build(&guard, &source, id, &engines, "query", &changes).unwrap();
+        guard.accept(&current).unwrap();
+        let (payload, _) = guard.reviewed_payload(&current).unwrap();
+        let manifest = crate::verify(&payload).unwrap();
+        assert_eq!(manifest["originals"], false);
+        assert_eq!(manifest["counts"]["documents"], 2);
+        assert!(!payload.join("scanned-image-only.pdf").exists());
+        assert!(guard
+            .inspect(&current)
+            .unwrap()
+            .metadata_inventory
+            .iter()
+            .all(|e| !e
+                .value
+                .as_deref()
+                .unwrap_or("")
+                .contains("scanned-image-only")));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn pdf_private_summary_counts_included_segments_in_real_fixtures() {
+        let f = Fixture::new();
+        for (bytes, expected) in [
+            (
+                include_bytes!("../../vz-core/tests/fixtures/projection-v2.pdf").as_slice(),
+                (2, 1),
+            ),
+            (
+                include_bytes!("../../../spike/fixtures/documents/boats.pdf").as_slice(),
+                (0, 0),
+            ),
+        ] {
+            let projection = vz_core::office::projection::extract_with_pdfium(
+                "pdf",
+                bytes,
+                f.engine.pdfium().as_deref(),
+            )
+            .unwrap();
+            let invisible = projection
+                .nodes
+                .iter()
+                .filter(|n| n.kind.contains("(invisible render mode 3)"))
+                .count();
+            let off_page = projection
+                .nodes
+                .iter()
+                .filter(|n| n.kind.contains("(off-page)"))
+                .count();
+            eprintln!(
+                "PDF segment inventory: {:?}",
+                projection
+                    .nodes
+                    .iter()
+                    .map(|n| (&n.kind, &n.text))
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!((invisible, off_page), expected);
+            let summary = projection_summary("pdf", &projection);
+            assert_eq!(
+                summary["included_pdf_segments"],
+                json!({"invisible": invisible, "off_page": off_page})
+            );
+            assert!(summary["warning"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("Invisible text: {invisible}")));
+            assert!(projection.nodes.iter().all(|n| !n.hidden));
+        }
+        let html = vz_core::office::projection::extract("html", b"<p>Hello</p>").unwrap();
+        assert!(projection_summary("html", &html)
+            .get("included_pdf_segments")
+            .is_none());
+    }
+
     #[test]
     #[cfg(feature = "listing-originals")]
     fn preparation_reports_every_refusal_with_production_worker_reasons() {
@@ -1881,6 +2178,9 @@ mod tests {
             .warnings
             .iter()
             .any(|s| s.contains("no-text-pages: 1")));
+        assert!(review.warnings.iter().any(|s| s
+            .contains("Invisible text: 2 included segments; off-page text: 1 included segments.")));
+
         guard.accept(&first).unwrap();
         changes.origin = Some(first.clone());
         changes.include_hidden = true;

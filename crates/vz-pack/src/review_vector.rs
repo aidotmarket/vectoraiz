@@ -159,7 +159,10 @@ pub(super) fn build(
         recipe == *engines.recipe(),
         "embedding recipe mismatch; re-index required"
     );
-    let indexed = State::review_documents(pack.index_path())?;
+    let indexed = crate::review_store::review_candidates(
+        &binding,
+        State::review_documents(pack.index_path())?,
+    )?;
     let identity_key = pack.identity_key()?;
     let work = pack.work()?;
     let result = (|| {
@@ -178,7 +181,7 @@ pub(super) fn build(
         let source = source.canonicalize()?;
         let mut applied = std::collections::BTreeSet::new();
         let mut excluded_targets = std::collections::BTreeSet::new();
-        for mut doc in indexed {
+        for (mut doc, indexed) in indexed {
             pack.check_policy()?;
             let relative = Path::new(&doc.path)
                 .strip_prefix(&source)
@@ -190,6 +193,10 @@ pub(super) fn build(
                 excluded_targets.insert(relative);
                 continue;
             }
+            ensure!(
+                indexed,
+                "unindexed source must be excluded or re-indexed: {relative}"
+            );
             let mut identity = Hmac::<Sha256>::new_from_slice(&identity_key)?;
             identity.update(doc.doc_id.as_bytes());
             let public_id = format!("{:x}", identity.finalize().into_bytes());
@@ -327,12 +334,32 @@ pub(super) fn build(
                 "{location}: hidden nodes: {}",
                 projection.nodes.iter().filter(|n| n.hidden).count()
             ));
-            projection_warnings.extend(
-                projection
-                    .warnings
-                    .iter()
-                    .map(|w| format!("{location}/{w}")),
-            );
+            let pdf_warning = (doc.kind == "pdf").then(|| {
+                let count = |flag: &str| {
+                    nodes
+                        .values()
+                        .filter(|node| {
+                            node["included"] == true
+                                && node["kind"]
+                                    .as_str()
+                                    .is_some_and(|kind| kind.contains(flag))
+                        })
+                        .count()
+                };
+                super::pdf_segment_warning(count("(invisible render mode 3)"), count("(off-page)"))
+            });
+            projection_warnings.extend(projection.warnings.iter().map(|w| {
+                let warning = pdf_warning.as_deref().map_or_else(
+                    || w.clone(),
+                    |counts| {
+                        w.replace(
+                            "Invisible and off-page text remain included content.",
+                            counts,
+                        )
+                    },
+                );
+                format!("{location}/{warning}")
+            }));
             projections.insert(
                 public_id.clone(),
                 json!({"nodes":nodes,"omissions":projection.omissions,"drops":projection.drops}),

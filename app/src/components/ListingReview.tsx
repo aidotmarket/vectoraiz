@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 interface Current { pack_id: string; generation: string; review_hash: string }
 interface Entry { location: string; kind: string; value: string | null; warning: boolean }
 interface Review { metadata_inventory: Entry[]; projection_inventory?: Entry[]; warnings: string[]; exclusions: string[]; accepted_review_hash: string | null }
-interface Source { source: string; artifact: string; format: string; supported: boolean; refusal?: string | null; projection_summary?: {mandatory_drops: Record<string, number>; hidden_locations: string[]} }
+interface Source { source: string; artifact: string; format: string; supported: boolean; refusal?: string | null; projection_summary?: {mandatory_drops: Record<string, number>; hidden_locations: string[]; included_pdf_segments?: {invisible: number; off_page: number}; warning?: string} }
 interface Sources { pack_id: string; sources: Source[]; protected_columns: string[] }
 interface Built { current: Current; review: Review; source_mapping?: Record<string, string> }
 const PAGE = 50;
@@ -26,6 +26,7 @@ function ProjectionSummary({summary}: {summary: NonNullable<Source["projection_s
   const locations = summary.hidden_locations.filter(location => location.toLocaleLowerCase().includes(search.toLocaleLowerCase()));
   return <details><summary>Private extraction counts and hidden locations ({summary.hidden_locations.length} hidden nodes)</summary>
     <p>{Object.entries(summary.mandatory_drops).map(([category, count]) => `${category}: ${count}`).join("; ")}</p>
+    {summary.included_pdf_segments && <p>Included PDF segments: invisible {summary.included_pdf_segments.invisible}; off-page {summary.included_pdf_segments.off_page}. {summary.warning}</p>}
     <label>Find hidden locations<input type="search" value={search} onChange={event => {setSearch(event.target.value); setPage(0);}} /></label>
     <ul>{locations.slice(page * PAGE, (page + 1) * PAGE).map(location => <li key={location}>{location}: hidden, omitted by default</li>)}</ul>
     <button disabled={page === 0} onClick={() => setPage(value => value - 1)}>Previous hidden locations</button>

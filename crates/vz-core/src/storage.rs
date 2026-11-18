@@ -30,10 +30,9 @@ impl Drop for FileLock {
     }
 }
 impl State {
-    /// Review builders already hold the selected index writer fence. Read the
-    /// committed visibility set without recovery, lock upgrade or SQLite writes.
-    pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
-        use std::io::Read;
+    // Review callers already hold the selected index writer fence. Never
+    // recover, upgrade locks, or create SQLite sidecar files on this path.
+    fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
             "readonly_shm=1"
@@ -46,10 +45,33 @@ impl State {
             .replace('%', "%25")
             .replace('?', "%3F")
             .replace('#', "%23");
-        let db = Connection::open_with_flags(
+        Ok(Connection::open_with_flags(
             format!("file:{uri}?{mode}"),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?)
+    }
+
+    /// Latest recorded failure per path, under the caller's native writer fence.
+    /// A later successful or skipped job supersedes an older failure.
+    pub fn review_failure_reasons(
+        root: &Path,
+    ) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+        let db = Self::review_connection(root)?;
+        let mut statement = db.prepare(
+            "SELECT path,reason FROM jobs WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY path)
+             AND status='failed' AND reason IS NOT NULL AND reason != ''",
         )?;
+        let rows = statement.query_map([], |row| {
+            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Read committed visibility without recovery, lock upgrade or SQLite writes.
+    /// The caller must hold the selected index writer fence.
+    pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
+        use std::io::Read;
+        let db = Self::review_connection(root)?;
         let mut statement = db.prepare("SELECT generation FROM documents ORDER BY doc_id")?;
         let generations = statement
             .query_map([], |r| r.get::<_, String>(0))?
@@ -456,6 +478,46 @@ impl crate::Store for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_failure_reasons_use_only_latest_failed_jobs_without_writes() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        for (path, status, reason) in [
+            ("empty.txt", "failed", Some("old reason")),
+            ("empty.txt", "failed", Some("document has no text")),
+            ("recovered.txt", "failed", Some("old failure")),
+            ("recovered.txt", "done", None),
+            ("skipped.txt", "failed", Some("old failure")),
+            ("skipped.txt", "skipped", None),
+            ("unknown.txt", "failed", None),
+            ("blank.txt", "failed", Some("")),
+        ] {
+            state
+                .db
+                .execute(
+                    "INSERT INTO jobs(path,status,reason) VALUES(?1,?2,?3)",
+                    params![path, status, reason],
+                )
+                .unwrap();
+        }
+        drop(state);
+        let before = std::fs::read(root.path().join("state.sqlite")).unwrap();
+        let reasons = State::review_failure_reasons(root.path()).unwrap();
+        assert_eq!(
+            reasons,
+            std::collections::BTreeMap::from([(
+                PathBuf::from("empty.txt"),
+                "document has no text".to_owned(),
+            )])
+        );
+        assert_eq!(
+            std::fs::read(root.path().join("state.sqlite")).unwrap(),
+            before
+        );
+        assert!(!root.path().join("state.sqlite-wal").exists());
+        assert!(!root.path().join("state.sqlite-shm").exists());
+    }
 
     #[test]
     fn full_recipe_gate_refuses_same_dimension_model_changes() {
