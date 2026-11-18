@@ -297,9 +297,8 @@ pub async fn index(
                 }
                 let reason = format!("{error:#}");
                 if stats.failure_examples.len() < 3 {
-                    stats
-                        .failure_examples
-                        .push(format!("{path_text}: {reason}"));
+                    let name = path.strip_prefix(&folder).unwrap_or(&path).display();
+                    stats.failure_examples.push(format!("{name}: {reason}"));
                 }
                 stats.reason = Some(reason.clone());
                 // Never serve an older revision when replacement failed.

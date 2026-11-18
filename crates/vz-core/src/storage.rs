@@ -32,8 +32,7 @@ impl Drop for FileLock {
 impl State {
     /// Review builders already hold the selected index writer fence. Read the
     /// committed visibility set without recovery, lock upgrade or SQLite writes.
-    pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
-        use std::io::Read;
+    fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
             "readonly_shm=1"
@@ -46,10 +45,31 @@ impl State {
             .replace('%', "%25")
             .replace('?', "%3F")
             .replace('#', "%23");
-        let db = Connection::open_with_flags(
+        Ok(Connection::open_with_flags(
             format!("file:{uri}?{mode}"),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?)
+    }
+
+    /// Latest recorded failure per path, under the caller's native writer fence.
+    /// A later successful or skipped job supersedes an older failure.
+    pub fn review_failure_reasons(
+        root: &Path,
+    ) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+        let db = Self::review_connection(root)?;
+        let mut statement = db.prepare(
+            "SELECT path,reason FROM jobs WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY path)
+             AND status='failed' AND reason IS NOT NULL AND reason != ''",
         )?;
+        let rows = statement.query_map([], |row| {
+            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn review_documents(root: &Path) -> Result<Vec<Document>> {
+        use std::io::Read;
+        let db = Self::review_connection(root)?;
         let mut statement = db.prepare("SELECT generation FROM documents ORDER BY doc_id")?;
         let generations = statement
             .query_map([], |r| r.get::<_, String>(0))?

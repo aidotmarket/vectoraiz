@@ -58,14 +58,22 @@ pub fn candidates_with_pdfium(
     let candidates = crate::review_store::NativeIndexFence::candidate_documents(library, &source)?
         .into_iter()
         .enumerate()
-        .map(|(position, (doc, indexed))| {
-            let artifact = candidate_location(position, &doc.kind);
+        .map(|(position, entry)| {
+            let artifact = candidate_location(position, &entry.doc.kind);
             lease.check(policy)?;
             let mut budget = Budget::default();
             budget.enable_office();
             budget.started = Some(started);
             budget.cancel = Some(lease.cancellation_token());
-            candidate(&doc, indexed, artifact, &source, &mut budget, pdfium)
+            candidate(
+                &entry.doc,
+                entry.indexed,
+                entry.indexing_reason.as_deref(),
+                artifact,
+                &source,
+                &mut budget,
+                pdfium,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     lease.check(policy)?;
@@ -75,14 +83,18 @@ pub fn candidates_with_pdfium(
 fn candidate(
     doc: &vz_core::pipeline::Document,
     indexed: bool,
+    indexing_reason: Option<&str>,
     artifact: String,
     source: &Path,
     budget: &mut Budget,
     pdfium: Option<&Path>,
 ) -> Result<Candidate> {
     let refusal = preparation_refusal_with_pdfium(doc, &artifact, budget, pdfium).or_else(|| {
-        (!indexed)
-            .then(|| "Document is not indexed; re-index or exclude it before rebuilding".into())
+        (!indexed).then(|| {
+            indexing_reason
+                .unwrap_or("Document is not indexed; re-index or exclude it before rebuilding")
+                .to_owned()
+        })
     });
     #[cfg(not(feature = "listing-originals"))]
     let projection_summary = budget
@@ -749,6 +761,15 @@ mod tests {
             "A good searchable and saleable document.",
         )
         .unwrap();
+        std::fs::create_dir(source.join("subfolder")).unwrap();
+        std::fs::write(
+            source.join("subfolder/nested-good.txt"),
+            "A nested searchable document.",
+        )
+        .unwrap();
+        // canonicalize() above gives verbatim \\?\ paths on Windows CI.
+        #[cfg(windows)]
+        assert!(source.to_str().unwrap().starts_with(r"\\?\"));
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let engines = Engines::load_embedding(
             &repo.join(".assets"),
@@ -773,37 +794,97 @@ mod tests {
                 progress.failed,
                 progress.infrastructure_failed
             ),
-            (1, 2, 0)
+            (2, 2, 0)
         );
         assert!(progress
             .failure_examples
             .iter()
             .any(|s| s.contains("scanned-image-only.pdf: needs text recognition (OCR)")));
+        assert!(progress
+            .failure_examples
+            .iter()
+            .all(|failure| !failure.contains(source.to_str().unwrap())));
+        assert!(progress
+            .failure_examples
+            .iter()
+            .any(|failure| failure == "empty.txt: document has no text"));
         progress.ensure_publishable().unwrap();
         drop(state);
         let docs =
             crate::review_store::NativeIndexFence::candidate_documents(&index, &source).unwrap();
-        assert_eq!(docs.len(), 3);
-        let (doc, indexed) = docs
+        assert_eq!(
+            docs.len(),
+            4,
+            "indexed nested file must not also be an unindexed candidate"
+        );
+        assert_eq!(docs.iter().filter(|entry| entry.indexed).count(), 2);
+        let nested = docs
             .iter()
-            .find(|(d, _)| d.path.ends_with("scanned-image-only.pdf"))
+            .filter(|entry| Path::new(&entry.doc.path).ends_with("subfolder/nested-good.txt"))
+            .collect::<Vec<_>>();
+        assert_eq!(nested.len(), 1);
+        assert!(nested[0].indexed);
+        let entry = docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("scanned-image-only.pdf"))
             .unwrap();
-        assert!(!indexed);
-        let candidate = candidate(
-            doc,
-            *indexed,
+        assert!(!entry.indexed);
+        let refused = candidate(
+            &entry.doc,
+            entry.indexed,
+            entry.indexing_reason.as_deref(),
             "projection/document-0003".into(),
             &source,
             &mut Budget::default(),
             Some(&engines.pdfium_library()),
         )
         .unwrap();
-        assert!(!candidate.supported);
-        assert_eq!(candidate.source, "scanned-image-only.pdf");
-        assert!(candidate
+        assert!(!refused.supported);
+        assert_eq!(refused.source, "scanned-image-only.pdf");
+        assert!(refused
             .refusal
             .unwrap()
             .contains("PROJECTION_PDF_NEEDS_OCR: needs OCR; no sale projection available"));
+        let empty = docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("empty.txt"))
+            .unwrap();
+        let refused = candidate(
+            &empty.doc,
+            empty.indexed,
+            empty.indexing_reason.as_deref(),
+            "projection/document-0004".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap();
+        assert!(!refused.supported);
+        assert_eq!(refused.refusal.as_deref(), Some("document has no text"));
+        // A newly added supported file has no job record and keeps the generic refusal.
+        std::fs::write(source.join("added-later.txt"), "Added after indexing.").unwrap();
+        let later_docs =
+            crate::review_store::NativeIndexFence::candidate_documents(&index, &source).unwrap();
+        assert_eq!(later_docs.len(), 5);
+        let later = later_docs
+            .iter()
+            .find(|entry| entry.doc.path.ends_with("added-later.txt"))
+            .unwrap();
+        let refused = candidate(
+            &later.doc,
+            later.indexed,
+            later.indexing_reason.as_deref(),
+            "projection/document-0005".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap();
+        assert!(!refused.supported);
+        assert_eq!(
+            refused.refusal.as_deref(),
+            Some("Document is not indexed; re-index or exclude it before rebuilding")
+        );
         let id = Uuid::new_v4();
         let policy = ListingPolicy::new(Arc::new(Source(Mutex::new(ManagedPolicy::Allowed))));
         let store = ReviewStore::open(&root.join("reviews")).unwrap();
@@ -813,15 +894,17 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("unindexed source must be excluded"));
-        changes
-            .exclusions
-            .extend(["scanned-image-only.pdf".into(), "empty.txt".into()]);
+        changes.exclusions.extend([
+            "scanned-image-only.pdf".into(),
+            "empty.txt".into(),
+            "added-later.txt".into(),
+        ]);
         let current = build(&guard, &source, id, &engines, "query", &changes).unwrap();
         guard.accept(&current).unwrap();
         let (payload, _) = guard.reviewed_payload(&current).unwrap();
         let manifest = crate::verify(&payload).unwrap();
         assert_eq!(manifest["originals"], false);
-        assert_eq!(manifest["counts"]["documents"], 1);
+        assert_eq!(manifest["counts"]["documents"], 2);
         assert!(!payload.join("scanned-image-only.pdf").exists());
         assert!(guard
             .inspect(&current)

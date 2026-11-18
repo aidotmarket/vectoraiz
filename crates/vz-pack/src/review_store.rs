@@ -94,15 +94,34 @@ pub struct NativeIndexFence {
     writer: File,
 }
 
+pub(crate) struct CandidateDocument {
+    pub doc: vz_core::pipeline::Document,
+    pub indexed: bool,
+    pub indexing_reason: Option<String>,
+}
+
 impl NativeIndexFence {
     pub(crate) fn candidate_documents(
         library: &Path,
         source: &Path,
-    ) -> Result<Vec<(vz_core::pipeline::Document, bool)>> {
+    ) -> Result<Vec<CandidateDocument>> {
         let fence = Self::acquire(library)?;
         let index = &fence.selection.index;
         let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        review_candidates(&binding, vz_core::storage::State::review_documents(index)?)
+        let reasons = vz_core::storage::State::review_failure_reasons(index)?;
+        Ok(
+            review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?
+                .into_iter()
+                .map(|(doc, indexed)| {
+                    let indexing_reason = reasons.get(Path::new(&doc.path)).cloned();
+                    CandidateDocument {
+                        doc,
+                        indexed,
+                        indexing_reason,
+                    }
+                })
+                .collect(),
+        )
     }
 
     fn acquire(library: &Path) -> Result<Self> {
@@ -133,8 +152,10 @@ pub(crate) fn review_candidates(
     indexed: Vec<vz_core::pipeline::Document>,
 ) -> Result<Vec<(vz_core::pipeline::Document, bool)>> {
     let mut result: Vec<_> = indexed.into_iter().map(|doc| (doc, true)).collect();
-    let indexed_paths: std::collections::BTreeSet<_> =
-        result.iter().map(|(doc, _)| doc.path.clone()).collect();
+    let indexed_paths: std::collections::BTreeSet<_> = result
+        .iter()
+        .map(|(doc, _)| PathBuf::from(&doc.path))
+        .collect();
     for (relative, file) in &binding.source_files {
         let kind = Path::new(relative)
             .extension()
@@ -148,15 +169,12 @@ pub(crate) fn review_candidates(
         {
             continue;
         }
-        let path = binding
-            .source
-            .join(relative)
-            .to_str()
-            .context("UTF-8 source")?
-            .to_owned();
+        // Path equality normalizes native separators (including verbatim Windows roots).
+        let path = binding.source.join(relative);
         if indexed_paths.contains(&path) {
             continue;
         }
+        let path = path.to_str().context("UTF-8 source")?.to_owned();
         result.push((
             vz_core::pipeline::Document {
                 doc_id: vz_core::pipeline::sha256(path.as_bytes()),
