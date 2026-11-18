@@ -93,17 +93,22 @@ fn candidate(
     let refusal = if indexed {
         preparation
     } else {
-        let recorded = indexing_reason.map(str::to_owned);
-        // Keep the PDF projection's named OCR refusal; otherwise prefer the
-        // indexer's explanation (e.g. empty text) to a generic projection error.
-        let reason = if doc.kind == "pdf" {
-            preparation.or(recorded)
+        // Preserve the known content failure's useful explanation. Otherwise a
+        // current named projection refusal wins over historical raw worker errors.
+        // Recorded reasons describe the last attempt, never a final verdict.
+        let recorded = indexing_reason.map(|reason| format!("Last indexing attempt: {reason}"));
+        let reason = if doc.kind != "pdf" && indexing_reason == Some("document has no text") {
+            recorded
         } else {
-            recorded.or(preparation)
+            match preparation {
+                Some(reason) if reason.contains("PROJECTION_") || doc.kind == "pdf" => Some(reason),
+                other => recorded.or(other),
+            }
         };
-        Some(reason.unwrap_or_else(|| {
-            "Document is not indexed; re-index or exclude it before rebuilding".into()
-        }))
+        Some(match reason {
+            Some(reason) => format!("{reason}; re-index or exclude it before rebuilding"),
+            None => "Document is not indexed; re-index or exclude it before rebuilding".into(),
+        })
     };
     #[cfg(not(feature = "listing-originals"))]
     let projection_summary = budget
@@ -757,6 +762,183 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "listing-originals"))]
+    fn selected_root_includes_top_level_failed_pdf() {
+        selected_folder_failures("scan.pdf", false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn selected_root_includes_sibling_failed_pdf() {
+        selected_folder_failures("scans/scan.pdf", false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn all_failed_selected_folder_opens_review() {
+        selected_folder_failures("scans/scan.pdf", true);
+    }
+
+    #[cfg(not(feature = "listing-originals"))]
+    fn selected_folder_failures(pdf_name: &str, all_failed: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let library = root.join("library");
+        std::fs::create_dir_all(source.join("reports")).unwrap();
+        std::fs::create_dir_all(source.join("scans")).unwrap();
+        std::fs::write(source.join(pdf_name), image_only_pdf()).unwrap();
+        std::fs::write(source.join("empty.txt"), "").unwrap();
+        if !all_failed {
+            std::fs::write(source.join("reports/good.txt"), "Searchable document.").unwrap();
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let engines = Engines::load_embedding(
+            &repo.join(".assets"),
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let progress = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(vz_core::active_index::reindex(
+                &library,
+                &source,
+                &engines,
+                &repo.join(".assets"),
+                |_| {},
+                || false,
+            ))
+            .unwrap();
+        assert_eq!(progress.failed, 2);
+        assert_eq!(progress.completed, usize::from(!all_failed));
+        let index = vz_core::active_index::resolve_state(&library);
+        let selected = vz_core::active_index::last_indexed_folder(&index).unwrap();
+        assert_eq!(Path::new(&selected), source);
+        let docs = crate::review_store::NativeIndexFence::candidate_documents(
+            &library,
+            Path::new(&selected),
+        )
+        .unwrap();
+        assert_eq!(docs.len(), if all_failed { 2 } else { 3 });
+        assert_eq!(
+            docs.iter().filter(|doc| doc.indexed).count(),
+            usize::from(!all_failed)
+        );
+        for entry in docs.iter().filter(|entry| !entry.indexed) {
+            let refused = candidate(
+                &entry.doc,
+                false,
+                entry.indexing_reason.as_deref(),
+                "projection/document-0001".into(),
+                Path::new(&selected),
+                &mut Budget::default(),
+                Some(&engines.pdfium_library()),
+            )
+            .unwrap();
+            assert!(!refused.supported);
+            let reason = refused.refusal.unwrap();
+            assert!(reason.contains("re-index or exclude"), "{reason}");
+            if entry.doc.kind == "pdf" {
+                assert_eq!(refused.source, pdf_name);
+                assert!(reason.contains("PROJECTION_PDF_NEEDS_OCR"), "{reason}");
+            } else {
+                assert!(reason.contains("document has no text"), "{reason}");
+            }
+        }
+        let policy = ListingPolicy::new(Arc::new(Source(Mutex::new(ManagedPolicy::Allowed))));
+        let store = ReviewStore::open(&root.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let guard = store.lock_native(&policy, id, &library).unwrap();
+        let mut changes = Changes::default();
+        assert!(build(&guard, &source, id, &engines, "query", &changes)
+            .unwrap_err()
+            .to_string()
+            .contains("unindexed source must be excluded"));
+        if !all_failed {
+            changes
+                .exclusions
+                .extend([pdf_name.into(), "empty.txt".into()]);
+            let current = build(&guard, &source, id, &engines, "query", &changes).unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            assert_eq!(crate::verify(&payload).unwrap()["counts"]["documents"], 1);
+        }
+    }
+
+    #[test]
+    fn transient_index_failure_is_historical_and_keeps_action_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().canonicalize().unwrap();
+        let path = source.join("fixed.txt");
+        std::fs::write(&path, "Fixed document with text.").unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "id".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: vz_core::pipeline::file_sha256(&path).unwrap(),
+            bytes: std::fs::metadata(&path).unwrap().len(),
+            pages: 0,
+            kind: "txt".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        for reason in [
+            "interrupted before completion",
+            "source changed during parsing; retry indexing",
+            "worker timeout",
+        ] {
+            let refusal = candidate(
+                &doc,
+                false,
+                Some(reason),
+                "projection/document-0001".into(),
+                &source,
+                &mut Budget::default(),
+                None,
+            )
+            .unwrap()
+            .refusal
+            .unwrap();
+            assert!(refusal.starts_with("Last indexing attempt:"), "{refusal}");
+            assert!(refusal.contains("re-index or exclude"), "{refusal}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn non_pdf_projection_refusal_wins_over_raw_indexing_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().canonicalize().unwrap();
+        let path = source.join("broken.html");
+        std::fs::write(&path, "<html><script>unsafe()</script></html>").unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "id".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: vz_core::pipeline::file_sha256(&path).unwrap(),
+            bytes: std::fs::metadata(&path).unwrap().len(),
+            pages: 0,
+            kind: "html".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let refusal = candidate(
+            &doc,
+            false,
+            Some("raw infrastructure chain /private/source"),
+            "projection/document-0001".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap()
+        .refusal
+        .unwrap();
+        assert!(refusal.contains("PROJECTION_"), "{refusal}");
+        assert!(!refusal.contains("raw infrastructure"), "{refusal}");
+        assert!(refusal.contains("re-index or exclude"));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
     fn unindexed_image_pdf_is_refused_and_exclusion_rebuilds_without_it() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -869,7 +1051,7 @@ mod tests {
         )
         .unwrap();
         assert!(!refused.supported);
-        assert_eq!(refused.refusal.as_deref(), Some("document has no text"));
+        assert_eq!(refused.refusal.as_deref(), Some("Last indexing attempt: document has no text; re-index or exclude it before rebuilding"));
         // A newly added supported file has no job record and keeps the generic refusal.
         std::fs::write(source.join("added-later.txt"), "Added after indexing.").unwrap();
         let later_docs =

@@ -11,7 +11,7 @@ use lancedb::{
     index::{scalar::FtsIndexBuilder, Index},
     query::{ExecutableQuery, QueryBase},
 };
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -51,6 +51,37 @@ impl State {
         )?)
     }
 
+    /// Private seller selection; absent on indexes created before this metadata.
+    /// Call under the native writer fence, without migrating legacy storage.
+    pub fn review_selected_folder(root: &Path) -> Result<Option<PathBuf>> {
+        let db = Self::review_connection(root)?;
+        Self::selected_folder(&db)
+    }
+
+    pub(crate) fn selected_folder(db: &Connection) -> Result<Option<PathBuf>> {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_metadata')",
+            [], |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let selected: Option<String> = db
+            .query_row(
+                "SELECT value FROM index_metadata WHERE key='selected_folder'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        selected
+            .map(|selected| {
+                let path = PathBuf::from(selected);
+                anyhow::ensure!(path.is_absolute(), "invalid selected source folder");
+                Ok(path)
+            })
+            .transpose()
+    }
+
     /// Latest recorded failure per path, under the caller's native writer fence.
     /// A later successful or skipped job supersedes an older failure.
     pub fn review_failure_reasons(
@@ -59,12 +90,14 @@ impl State {
         let db = Self::review_connection(root)?;
         let mut statement = db.prepare(
             "SELECT path,reason FROM jobs WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY path)
-             AND status='failed' AND reason IS NOT NULL AND reason != ''",
+             AND status='failed' AND reason IS NOT NULL AND reason != '' LIMIT 50001",
         )?;
         let rows = statement.query_map([], |row| {
             Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let reasons = rows.collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
+        anyhow::ensure!(reasons.len() <= 50_000, "review job path limit");
+        Ok(reasons)
     }
 
     /// Read committed visibility without recovery, lock upgrade or SQLite writes.
@@ -161,6 +194,8 @@ impl State {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,path TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
+            CREATE INDEX IF NOT EXISTS jobs_path ON jobs(path);
+            CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
             UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running';")?;
         let state = Self {
             db,
@@ -517,6 +552,19 @@ mod tests {
         );
         assert!(!root.path().join("state.sqlite-wal").exists());
         assert!(!root.path().join("state.sqlite-shm").exists());
+    }
+
+    #[test]
+    fn review_failure_history_has_a_hard_path_limit() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        state.db.execute_batch(
+            "WITH RECURSIVE paths(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM paths WHERE n<50001)
+             INSERT INTO jobs(path,status,reason) SELECT 'file-' || n,'failed','no text' FROM paths;"
+        ).unwrap();
+        drop(state);
+        let error = State::review_failure_reasons(root.path()).unwrap_err();
+        assert!(error.to_string().contains("review job path limit"));
     }
 
     #[test]

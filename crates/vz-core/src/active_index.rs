@@ -197,7 +197,8 @@ fn activate_with(
     result
 }
 
-/// Read the old document paths without acquiring a writer or running recovery.
+/// Read the persisted seller selection, falling back to legacy document paths.
+/// Never acquire a writer or run recovery.
 pub fn last_indexed_folder(root: &Path) -> Option<String> {
     let db_path = root.join("state.sqlite").canonicalize().ok()?;
     let mode = if root.join("state.sqlite-wal").exists() {
@@ -215,6 +216,9 @@ pub fn last_indexed_folder(root: &Path) -> Option<String> {
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     )
     .ok()?;
+    if let Some(selected) = crate::storage::State::selected_folder(&db).ok()? {
+        return selected.to_str().map(str::to_owned);
+    }
     let mut query = db
         .prepare("SELECT path FROM documents ORDER BY path")
         .ok()?;
@@ -285,10 +289,10 @@ pub async fn reindex(
             return e;
         }
         if !started {
-            return anyhow::anyhow!("Re-index did not finish: {e:#}");
+            return anyhow::anyhow!("Re-index did not finish; source or index unavailable; Re-index to resume");
         }
         anyhow::anyhow!(
-            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {e:#}",
+            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; indexing interrupted; Re-index to resume",
             latest.completed,
             latest.skipped,
             latest.failed,
@@ -324,6 +328,59 @@ async fn finish_reindex(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_source_fallback_then_persisted_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let selected = temp.path().join("source");
+        let deep = selected.join("reports");
+        fs::create_dir_all(&deep).unwrap();
+        let selected = selected.canonicalize().unwrap();
+        let deep = deep.canonicalize().unwrap();
+        let root = temp.path().join("index");
+        fs::create_dir(&root).unwrap();
+        let state = crate::storage::State::open(&root).unwrap();
+        state
+            .db
+            .execute_batch("DROP TABLE index_metadata; DROP INDEX jobs_path;")
+            .unwrap();
+        state
+            .db
+            .execute(
+                "INSERT INTO documents VALUES('legacy',?1,0,'mtime','hash','generation')",
+                [deep.join("good.txt").to_str().unwrap()],
+            )
+            .unwrap();
+        drop(state);
+        assert_eq!(
+            last_indexed_folder(&root),
+            Some(deep.to_str().unwrap().into())
+        );
+        // Opening an old index adds metadata/index without losing legacy inference.
+        let state = crate::storage::State::open(&root).unwrap();
+        let has_index: bool = state.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='jobs_path')", [], |r| r.get(0)
+        ).unwrap();
+        assert!(has_index);
+        drop(state);
+        assert_eq!(
+            last_indexed_folder(&root),
+            Some(deep.to_str().unwrap().into())
+        );
+        let state = crate::storage::State::open(&root).unwrap();
+        state
+            .db
+            .execute(
+                "INSERT INTO index_metadata VALUES('selected_folder',?1)",
+                [selected.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(state);
+        assert_eq!(
+            last_indexed_folder(&root),
+            Some(selected.to_str().unwrap().into())
+        );
+    }
 
     #[test]
     fn selection_fence_serializes_publication_against_native_review_readers() {
@@ -571,20 +628,14 @@ mod tests {
         let mut new = old.clone();
         new.model.push_str("-new");
         let candidate = seed(data.path(), &new);
-        for stats in [
-            Progress {
-                total: 2,
-                failed: 2,
-                ..Default::default()
-            },
-            Progress {
+        {
+            let stats = Progress {
                 total: 3,
                 completed: 1,
                 failed: 2,
                 infrastructure_failed: 1,
                 ..Default::default()
-            },
-        ] {
+            };
             let error = finish_reindex(
                 data.path(),
                 &new,

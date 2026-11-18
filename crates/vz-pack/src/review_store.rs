@@ -106,6 +106,7 @@ impl NativeIndexFence {
         source: &Path,
     ) -> Result<Vec<CandidateDocument>> {
         let fence = Self::acquire(library)?;
+        fence.check_source(source)?;
         let index = &fence.selection.index;
         let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
         let reasons = vz_core::storage::State::review_failure_reasons(index)?;
@@ -122,6 +123,19 @@ impl NativeIndexFence {
                 })
                 .collect(),
         )
+    }
+
+    fn check_source(&self, source: &Path) -> Result<()> {
+        let index = &self.selection.index;
+        if index.join("state.sqlite").is_file() {
+            if let Some(selected) = vz_core::storage::State::review_selected_folder(index)? {
+                ensure!(
+                    source.canonicalize()? == selected,
+                    ListingError::StaleGeneration
+                );
+            }
+        }
+        Ok(())
     }
 
     fn acquire(library: &Path) -> Result<Self> {
@@ -169,7 +183,7 @@ pub(crate) fn review_candidates(
         {
             continue;
         }
-        // Path equality normalizes native separators (including verbatim Windows roots).
+        // Joining onto the native root supplies native separators, including verbatim Windows roots.
         let path = binding.source.join(relative);
         if indexed_paths.contains(&path) {
             continue;
@@ -389,6 +403,13 @@ impl NativePackReview<'_> {
             generation.binding.selection.as_ref() == Some(&self.index.selection),
             ListingError::StaleGeneration
         );
+        if let Some(source) = vz_core::storage::State::review_selected_folder(self.index_path())? {
+            if source != generation.binding.source {
+                self.pack
+                    .invalidate(current, "selected source folder changed")?;
+                return Err(ListingError::StaleGeneration.into());
+            }
+        }
         let private: serde_json::Value =
             read_json(&self.pack.generation_path(current).join("private.json"))?;
         if generation
@@ -583,6 +604,7 @@ impl NativePackReview<'_> {
     /// Only a sanitizer rebuild may call freeze with this captured binding.
     pub fn capture(&self, source: &Path) -> Result<ReviewBinding> {
         self.pack.lease.check(self.pack.policy)?;
+        self.index.check_source(source)?;
         let index = &self.index.selection.index;
         let mut binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
         binding.selection = Some(self.index.selection.clone());
@@ -1600,6 +1622,45 @@ mod tests {
             .db
             .execute("INSERT INTO jobs VALUES (1, 'neutral', 'ready', NULL)", [])
             .unwrap();
+        drop(writer);
+        stale(store.lock_native_current(&policy, &current, &index));
+    }
+
+    #[test]
+    fn gaining_shallower_selected_root_durably_invalidates_legacy_names() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        let deep = source.join("reports");
+        fs::create_dir(&deep).unwrap();
+        fs::rename(source.join("original.txt"), deep.join("original.txt")).unwrap();
+        let index = fixture.0.join("index");
+        drop(vz_core::storage::State::open(&index).unwrap());
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let current;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            current = fixture.freeze_bound(&native.pack, native.capture(&deep).unwrap());
+            native.accept(&current).unwrap();
+        }
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer
+            .db
+            .execute(
+                "INSERT INTO index_metadata VALUES('selected_folder',?1)",
+                [source.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            stale(native.edit_origin(&current));
+        }
+        stale(store.lock_native_current(&policy, &current, &index));
+        // Restoring old metadata cannot restore the invalidated acceptance.
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer.db.execute("DELETE FROM index_metadata", []).unwrap();
         drop(writer);
         stale(store.lock_native_current(&policy, &current, &index));
     }

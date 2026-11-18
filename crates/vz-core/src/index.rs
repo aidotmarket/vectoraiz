@@ -25,8 +25,10 @@ pub struct Progress {
 }
 impl Progress {
     pub fn ensure_publishable(&self) -> Result<()> {
+        // A completed content-only scan is reviewable even with no searchable
+        // documents. Refused candidates still require explicit exclusion to build.
         anyhow::ensure!(
-            self.infrastructure_failed == 0 && (self.completed + self.skipped > 0 || self.total == 0),
+            self.infrastructure_failed == 0,
             "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {}; Re-index to resume",
             self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, if self.infrastructure_failed > 0 { &self.infrastructure_examples } else { &self.failure_examples }.join("; ")
         );
@@ -155,6 +157,13 @@ pub async fn index(
         }
     }
     files.sort();
+    // Persist the seller's selection, including when every supported file fails.
+    // SQLite and the native writer fence make this part of the review commitment.
+    state.db.execute(
+        "INSERT INTO index_metadata(key,value) VALUES('selected_folder',?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [folder.to_str().context("source path must be UTF-8")?],
+    )?;
     let mut stats = Progress {
         total: files.len(),
         ..Default::default()
@@ -290,9 +299,12 @@ pub async fn index(
                 if !crate::failures::is_content(&error) {
                     stats.infrastructure_failed += 1;
                     if stats.infrastructure_examples.len() < 3 {
-                        stats
-                            .infrastructure_examples
-                            .push(format!("{path_text}: {error:#}"));
+                        stats.infrastructure_examples.push(format!(
+                            "{}: indexing infrastructure unavailable; re-index to retry",
+                            path.strip_prefix(&folder)
+                                .context("source outside selected folder")?
+                                .display()
+                        ));
                     }
                 }
                 let reason = format!("{error:#}");
@@ -504,6 +516,46 @@ mod tests {
             .contains("scanned-image-only.pdf: needs text recognition (OCR)"));
         result.ensure_publishable().unwrap();
         assert_eq!(state.documents().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn infrastructure_examples_and_reindex_errors_keep_paths_private() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("scan.pdf"), image_only_pdf()).unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let mut state = State::open(index.path()).unwrap();
+        let engines = Engines::load_embedding(
+            &root.join(".assets"),
+            &root.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let assets = source.path().join("missing-private-assets");
+        let stats = super::index(&mut state, source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(stats.infrastructure_failed, 1);
+        assert_eq!(
+            stats.infrastructure_examples,
+            ["scan.pdf: indexing infrastructure unavailable; re-index to retry"]
+        );
+        let error = stats.ensure_publishable().unwrap_err().to_string();
+        assert!(error.contains("scan.pdf"));
+        assert!(!error.contains(source.path().to_str().unwrap()));
+        assert!(!error.contains(assets.to_str().unwrap()));
+        let library = tempfile::tempdir().unwrap();
+        let error = crate::active_index::reindex(
+            library.path(),
+            &source.path().join("missing-private-folder"),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains(source.path().to_str().unwrap()));
     }
 
     #[tokio::test]
