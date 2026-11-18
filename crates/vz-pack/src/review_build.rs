@@ -89,13 +89,22 @@ fn candidate(
     budget: &mut Budget,
     pdfium: Option<&Path>,
 ) -> Result<Candidate> {
-    let refusal = preparation_refusal_with_pdfium(doc, &artifact, budget, pdfium).or_else(|| {
-        (!indexed).then(|| {
-            indexing_reason
-                .unwrap_or("Document is not indexed; re-index or exclude it before rebuilding")
-                .to_owned()
-        })
-    });
+    let preparation = preparation_refusal_with_pdfium(doc, &artifact, budget, pdfium);
+    let refusal = if indexed {
+        preparation
+    } else {
+        let recorded = indexing_reason.map(str::to_owned);
+        // Keep the PDF projection's named OCR refusal; otherwise prefer the
+        // indexer's explanation (e.g. empty text) to a generic projection error.
+        let reason = if doc.kind == "pdf" {
+            preparation.or(recorded)
+        } else {
+            recorded.or(preparation)
+        };
+        Some(reason.unwrap_or_else(|| {
+            "Document is not indexed; re-index or exclude it before rebuilding".into()
+        }))
+    };
     #[cfg(not(feature = "listing-originals"))]
     let projection_summary = budget
         .projection
