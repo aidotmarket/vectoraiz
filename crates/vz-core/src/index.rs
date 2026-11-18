@@ -230,7 +230,14 @@ pub async fn index(
             let doc_id = sha256(path_text.as_bytes());
             let mut chunks = chunk(&doc_id, &pages);
             if chunks.is_empty() {
-                let reason = if pages.iter().any(|p| p.needs_ocr) {
+                // A PDF can yield no usable text even after platform OCR ran.
+                // Keep Page::needs_ocr's platform contract (OCR not attempted)
+                // independent from the seller-facing explanation of this failure.
+                let reason = if path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("pdf"))
+                    || pages.iter().any(|p| p.needs_ocr)
+                {
                     "needs text recognition (OCR)"
                 } else {
                     "document has no text"
