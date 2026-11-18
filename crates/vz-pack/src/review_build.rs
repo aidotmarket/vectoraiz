@@ -737,16 +737,53 @@ mod tests {
     #[test]
     #[cfg(not(feature = "listing-originals"))]
     fn unindexed_image_pdf_is_refused_and_exclusion_rebuilds_without_it() {
-        let f = Fixture::new();
-        let source = f.root.join("source");
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let index = root.join("index");
+        std::fs::create_dir(&source).unwrap();
         std::fs::write(source.join("scanned-image-only.pdf"), image_only_pdf()).unwrap();
         std::fs::write(source.join("empty.txt"), "").unwrap();
-        let docs = crate::review_store::NativeIndexFence::candidate_documents(
-            &f.root.join("index"),
-            &source,
+        std::fs::write(
+            source.join("z-good.txt"),
+            "A good searchable and saleable document.",
         )
         .unwrap();
-        assert_eq!(docs.len(), 4);
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let engines = Engines::load_embedding(
+            &repo.join(".assets"),
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let mut state = State::open(&index).unwrap();
+        let progress = runtime
+            .block_on(vz_core::index::index(
+                &mut state,
+                &source,
+                &engines,
+                &repo.join(".assets"),
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(
+            (
+                progress.completed,
+                progress.failed,
+                progress.infrastructure_failed
+            ),
+            (1, 2, 0)
+        );
+        assert!(progress
+            .failure_examples
+            .iter()
+            .any(|s| s.contains("scanned-image-only.pdf: needs text recognition (OCR)")));
+        progress.ensure_publishable().unwrap();
+        drop(state);
+        let docs =
+            crate::review_store::NativeIndexFence::candidate_documents(&index, &source).unwrap();
+        assert_eq!(docs.len(), 3);
         let (doc, indexed) = docs
             .iter()
             .find(|(d, _)| d.path.ends_with("scanned-image-only.pdf"))
@@ -758,7 +795,7 @@ mod tests {
             "projection/document-0003".into(),
             &source,
             &mut Budget::default(),
-            f.engine.pdfium().as_deref(),
+            Some(&engines.pdfium_library()),
         )
         .unwrap();
         assert!(!candidate.supported);
@@ -768,19 +805,18 @@ mod tests {
             .unwrap()
             .contains("PROJECTION_PDF_NEEDS_OCR: needs OCR; no sale projection available"));
         let id = Uuid::new_v4();
-        let store = ReviewStore::open(&f.root.join("reviews")).unwrap();
-        let guard = store
-            .lock_native(&f.policy, id, &f.root.join("index"))
-            .unwrap();
-        let mut changes = Fixture::changes();
-        assert!(build(&guard, &source, id, &f.engine, "query", &changes)
+        let policy = ListingPolicy::new(Arc::new(Source(Mutex::new(ManagedPolicy::Allowed))));
+        let store = ReviewStore::open(&root.join("reviews")).unwrap();
+        let guard = store.lock_native(&policy, id, &index).unwrap();
+        let mut changes = Changes::default();
+        assert!(build(&guard, &source, id, &engines, "query", &changes)
             .unwrap_err()
             .to_string()
             .contains("unindexed source must be excluded"));
         changes
             .exclusions
             .extend(["scanned-image-only.pdf".into(), "empty.txt".into()]);
-        let current = build(&guard, &source, id, &f.engine, "query", &changes).unwrap();
+        let current = build(&guard, &source, id, &engines, "query", &changes).unwrap();
         guard.accept(&current).unwrap();
         let (payload, _) = guard.reviewed_payload(&current).unwrap();
         let manifest = crate::verify(&payload).unwrap();
