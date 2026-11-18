@@ -315,7 +315,7 @@ export default function App() {
     channel.onmessage = p => { if (active) { receivedProgress = true; counts = p; setIndexProgress(formatIndexProgress(p)); } };
     try {
       const result = await invoke<Progress>("pipeline_index", { folder, progress: channel });
-      if (result) setIndexProgress(formatIndexProgress(result));
+      if (result?.path) setIndexProgress(formatIndexProgress(result));
       const next = await refreshModels();
       setIndexedCount(result?.failed === 0 && Number.isInteger(result.completed) && Number.isInteger(result.skipped) && result.completed + result.skipped === result.total && next?.last_indexed_folder ? {folder: next.last_indexed_folder, count: result.completed + result.skipped} : undefined);
     }

@@ -334,9 +334,22 @@ pub(super) fn build(
                 "{location}: hidden nodes: {}",
                 projection.nodes.iter().filter(|n| n.hidden).count()
             ));
-            let summary = super::projection_summary(&doc.kind, &projection);
+            let pdf_warning = (doc.kind == "pdf").then(|| {
+                let count = |flag: &str| {
+                    nodes
+                        .values()
+                        .filter(|node| {
+                            node["included"] == true
+                                && node["kind"]
+                                    .as_str()
+                                    .is_some_and(|kind| kind.contains(flag))
+                        })
+                        .count()
+                };
+                super::pdf_segment_warning(count("(invisible render mode 3)"), count("(off-page)"))
+            });
             projection_warnings.extend(projection.warnings.iter().map(|w| {
-                let warning = summary["warning"].as_str().map_or_else(
+                let warning = pdf_warning.as_deref().map_or_else(
                     || w.clone(),
                     |counts| {
                         w.replace(

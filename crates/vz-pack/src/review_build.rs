@@ -123,9 +123,14 @@ fn projection_summary(
             .filter(|n| n.kind.contains("(off-page)"))
             .count();
         summary["included_pdf_segments"] = json!({"invisible": invisible, "off_page": off_page});
-        summary["warning"] = json!(format!("Invisible text: {invisible} included segments; off-page text: {off_page} included segments. These remain included content."));
+        summary["warning"] = json!(pdf_segment_warning(invisible, off_page));
     }
     summary
+}
+
+#[cfg(not(feature = "listing-originals"))]
+fn pdf_segment_warning(invisible: usize, off_page: usize) -> String {
+    format!("Invisible text: {invisible} included segments; off-page text: {off_page} included segments. These remain included content.")
 }
 
 fn candidate_location(position: usize, kind: &str) -> String {
