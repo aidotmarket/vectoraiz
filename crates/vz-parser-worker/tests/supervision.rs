@@ -538,7 +538,8 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         (
             b"VZ_RESOURCE_PROBE_RSS\n".as_slice(),
             "PROJECTION_MEMORY_LIMIT_EXCEEDED",
-            Duration::from_secs(10),
+            // Touching 1.5 GiB in an unoptimized probe takes longer on CI.
+            Duration::from_secs(30),
             None,
         ),
         (
@@ -584,7 +585,7 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
             "test-only bypass must run before supervision refuses"
         );
         assert!(!dir.path().join("projection.json").exists());
-        assert!(start.elapsed() < Duration::from_secs(12));
+        assert!(start.elapsed() < timeout + Duration::from_secs(2));
     }
     assert!(run(
         worker,
