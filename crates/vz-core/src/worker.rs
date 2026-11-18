@@ -11,6 +11,10 @@ use std::{
 pub const MAX_FRAME: usize = 32 * 1024 * 1024;
 pub const MEMORY_BYTES: u64 = 1536 * 1024 * 1024;
 pub const OFFICE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
+// Leave committed-memory headroom for the 10 ms supervisor poll on Windows.
+// The watchdog must refuse before the job object denies a parser allocation.
+#[cfg(windows)]
+const WINDOWS_WATCHDOG_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
 #[derive(Serialize, Deserialize)]
 pub struct OfficeJob {
     pub name: String,
@@ -176,7 +180,7 @@ fn run_command_checked(
 }
 
 /// Test-only seam: exercise the real supervisor below the OS allocation cap.
-/// The shipping entry points always use the request's full memory limit.
+/// The shipping entry points use the production watchdog threshold.
 #[cfg(feature = "test-support")]
 pub fn run_with_watchdog_limit(
     worker: &Path,
@@ -202,6 +206,12 @@ fn run_command_with_watchdog(
     check: impl Fn() -> Result<()>,
     memory_limit: u64,
 ) -> Result<Vec<Page>> {
+    #[cfg(windows)]
+    let memory_limit = memory_limit.min(
+        request
+            .memory_bytes()
+            .saturating_sub(WINDOWS_WATCHDOG_MARGIN_BYTES),
+    );
     #[cfg(all(unix, test))]
     {
         use std::os::unix::process::CommandExt;

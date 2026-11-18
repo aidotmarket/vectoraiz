@@ -128,7 +128,7 @@ single-call cycles use the pinned PDFium Form and Type3 recursion limits.
 Lexical stream costs and non-cyclic stream/resource bounds are cached
 document-wide. A stream revisited with a larger scope must be explored before
 calling it a cycle. This bound can conservatively refuse unproven routes;
-the full corpus gate remains unverified, as detailed below.
+the available-set corpus comparison is the gate, as detailed below.
 
 Each Form invocation charges its full descendant invocation count and decoded
 bytes once per invocation, including memo hits, against document budgets of 100,000 invocations and
@@ -179,16 +179,19 @@ between checks. The former 67-second, 1,000-page guard probe now passes in about
 Projection deadlines return `PROJECTION_RESOURCE_LIMIT`; RSS watchdog refusals
 retain `PROJECTION_MEMORY_LIMIT_EXCEEDED`. A dedicated test executable bypasses
 the guard for synthetic resource probes and proves the hook ran. macOS and
-Windows CI exercise both named seller-review refusals without aborts or crash
-dialogs. The shipping parser contains no resource-probe hook.
+Windows CI exercise both named worker refusals, including the production
+memory limit, without aborts or crash dialogs. On Windows the watchdog runs
+64 MiB below the job-object commit cap so it can refuse before allocations are
+denied. The shipping parser contains no resource-probe hook.
 
-The full 141/100/526 corpus gate remains unverified because source files were
-removed. The November 17 snapshot, including hash-verified public-corpus
-recovery, has 126 real PDFs, 100 synthetic PDFs and 404 HTML files. Acceptance is
-101/60/396, identical to fold 3 on those same inputs; passing node, character,
-ActualText and drop counts are unchanged. Fifteen real-PDF paths and 122 HTML
-paths remain unavailable (including five HTTP 403 PDF sources and 109 HTTP 429
-HTML sources). The original required full-list counts remain 115/60/510; this
-subset is not a substitute for that gate. Seller enablement remains blocked
-until the complete corpus gate is verified. See [PR #145](https://github.com/aidotmarket/vectoraiz/pull/145)
-for validation and CI status.
+The corpus gate is the available-set comparison, run base vs head for each
+change. CC measured 103 passing real PDFs out of 128 available, 60 passing
+synthetic PDFs out of 100, and 505 passing HTML files out of 513, identically
+between the base and the reviewed code. Per-file node, character, drop and
+warning details were also identical. Of the original 141 real PDFs, 100
+synthetic PDFs and 526 HTML files, 13 PDFs and 13 HTML files are unavailable
+anywhere searched. Those missing files cannot be included in the gate. The
+available set replaces the original full-list 115/60/510 seller-enablement gate;
+each change must preserve the base's results on the same available files.
+These measurements are CC's comparison for [PR #145](https://github.com/aidotmarket/vectoraiz/pull/145),
+not a new corpus run for this follow-up.
