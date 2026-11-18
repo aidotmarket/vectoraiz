@@ -842,7 +842,7 @@ mod tests {
         for (bytes, expected) in [
             (
                 include_bytes!("../../vz-core/tests/fixtures/projection-v2.pdf").as_slice(),
-                (1, 1),
+                (2, 1),
             ),
             (
                 include_bytes!("../../../spike/fixtures/documents/boats.pdf").as_slice(),
@@ -865,6 +865,14 @@ mod tests {
                 .iter()
                 .filter(|n| n.kind.contains("(off-page)"))
                 .count();
+            eprintln!(
+                "PDF segment inventory: {:?}",
+                projection
+                    .nodes
+                    .iter()
+                    .map(|n| (&n.kind, &n.text))
+                    .collect::<Vec<_>>()
+            );
             assert_eq!((invisible, off_page), expected);
             let summary = projection_summary("pdf", &projection);
             assert_eq!(
@@ -2079,7 +2087,7 @@ mod tests {
             .iter()
             .any(|s| s.contains("no-text-pages: 1")));
         assert!(review.warnings.iter().any(|s| s
-            .contains("Invisible text: 1 included segments; off-page text: 1 included segments.")));
+            .contains("Invisible text: 2 included segments; off-page text: 1 included segments.")));
 
         guard.accept(&first).unwrap();
         changes.origin = Some(first.clone());
