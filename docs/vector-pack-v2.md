@@ -128,7 +128,7 @@ single-call cycles use the pinned PDFium Form and Type3 recursion limits.
 Lexical stream costs and non-cyclic stream/resource bounds are cached
 document-wide. A stream revisited with a larger scope must be explored before
 calling it a cycle. This bound can conservatively refuse unproven routes;
-the available-set corpus comparison is the gate, as detailed below.
+the pinned-manifest corpus comparison is the gate, as detailed below.
 
 Each Form invocation charges its full descendant invocation count and decoded
 bytes once per invocation, including memo hits, against document budgets of 100,000 invocations and
@@ -184,14 +184,17 @@ memory limit, without aborts or crash dialogs. On Windows the watchdog runs
 64 MiB below the job-object commit cap so it can refuse before allocations are
 denied. The shipping parser contains no resource-probe hook.
 
-The corpus gate is the available-set comparison, run base vs head for each
-change. CC measured 103 passing real PDFs out of 128 available, 60 passing
-synthetic PDFs out of 100, and 505 passing HTML files out of 513, identically
-between the base and the reviewed code. Per-file node, character, drop and
-warning details were also identical. Of the original 141 real PDFs, 100
-synthetic PDFs and 526 HTML files, 13 PDFs and 13 HTML files are unavailable
-anywhere searched. Those missing files cannot be included in the gate. The
-available set replaces the original full-list 115/60/510 seller-enablement gate;
-each change must preserve the base's results on the same available files.
-These measurements are CC's comparison for [PR #145](https://github.com/aidotmarket/vectoraiz/pull/145),
-not a new corpus run for this follow-up.
+The corpus gate is the manifest with SHA-256
+`551b34a5eedb541be1a0b1507f66f452b1f50109e11acbc1c5ec31af4b516d04`,
+kept with its file copies in Koskadeux private evidence. It pins 740 files:
+127 real PDFs, 100 synthetic PDFs and 513 HTML files. One of the previously
+available 128 real PDFs was lost before pinning. Compare base vs head on every
+manifest file for each change; a missing file or a hash that differs from the
+manifest fails the gate. Each change must preserve the base's per-file results,
+including node, character, drop and warning details and projection output.
+
+The current reference counts are CC's 18 November 2026 comparison: 102 of 127
+real PDFs pass, 60 of 100 synthetic PDFs pass, and 505 of 513 HTML files pass.
+These are reference measurements, not a new corpus run for this follow-up.
+The pinned-manifest comparison replaces the original full-list 115/60/510
+seller-enablement gate.

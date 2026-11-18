@@ -538,8 +538,8 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
         (
             b"VZ_RESOURCE_PROBE_RSS\n".as_slice(),
             "PROJECTION_MEMORY_LIMIT_EXCEEDED",
-            // Touching 1.5 GiB in an unoptimized probe takes longer on CI.
-            Duration::from_secs(30),
+            // Allow for touching and compressing 1.5 GiB on loaded macOS runners.
+            Duration::from_secs(90),
             None,
         ),
         (

@@ -15,6 +15,18 @@ pub const OFFICE_MEMORY_BYTES: u64 = 1024 * 1024 * 1024;
 // The watchdog must refuse before the job object denies a parser allocation.
 #[cfg(windows)]
 const WINDOWS_WATCHDOG_MARGIN_BYTES: u64 = 64 * 1024 * 1024;
+// Pinned PDFium chromium/8111 core/fxcrt/fx_memory.cpp:
+// FX_OutOfMemoryTerminate raises 0xe0000008 on Windows.
+// https://pdfium.googlesource.com/pdfium/+/refs/heads/chromium/8111/core/fxcrt/fx_memory.cpp
+#[cfg(any(windows, test))]
+fn windows_memory_refusal(code: Option<i32>, projection: bool) -> bool {
+    code.is_some_and(|code| match code as u32 {
+        0xc0000017 | 0xc000009a => true,
+        0xe0000008 => projection,
+        _ => false,
+    })
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct OfficeJob {
     pub name: String,
@@ -307,16 +319,13 @@ fn run_command_with_watchdog(
                             .windows(b"bytes failed".len())
                             .any(|w| w == b"bytes failed")
                     {
-                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {memory_limit} bytes; last observed {last_usage} bytes; allocation denied")));
+                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {} bytes; last observed {last_usage} bytes; allocation denied", request.memory_bytes())));
                     }
                 }
                 #[cfg(windows)]
                 if let Some(label) = request.office_label() {
-                    if status
-                        .code()
-                        .is_some_and(|c| matches!(c as u32, 0xc0000017 | 0xc000009a))
-                    {
-                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {memory_limit} bytes; last observed {last_usage} bytes; allocation denied")));
+                    if windows_memory_refusal(status.code(), request.projection.is_some()) {
+                        return Err(crate::failures::content(format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {label}: hard cap {} bytes; last observed {last_usage} bytes; allocation denied", request.memory_bytes())));
                     }
                 }
                 if sandboxed
@@ -616,5 +625,26 @@ mod tests {
         }
         let error = failed_command("cat >/dev/null; exit 71", false);
         assert!(crate::failures::is_content(&error), "{error:#}");
+    }
+}
+
+#[cfg(test)]
+mod windows_memory_tests {
+    use super::windows_memory_refusal;
+
+    #[test]
+    fn projection_pdfium_oom_status_is_a_memory_refusal() {
+        for projection in [false, true] {
+            for code in [0xc0000017_u32, 0xc000009a] {
+                assert!(windows_memory_refusal(Some(code as i32), projection));
+            }
+            assert_eq!(
+                windows_memory_refusal(Some(0xe0000008_u32 as i32), projection),
+                projection
+            );
+            for code in [None, Some(0), Some(1), Some(0xc0000005_u32 as i32)] {
+                assert!(!windows_memory_refusal(code, projection));
+            }
+        }
     }
 }

@@ -1849,3 +1849,49 @@ fn projection_pdf_stream_resource_scope_refuses_as_non_dictionary() {
         "{error:#}"
     );
 }
+
+#[test]
+fn projection_pdf_type3_bound_rejects_unvisited_stream_resource_scope() {
+    let mut doc = Document::load_mem(&routed_invocation_pdf("glyph", 1, 1, false)).unwrap();
+    // Without font Resources the bound considers every document Resources.
+    // The resolver only visits the valid page scope and this glyph's /Top Do.
+    for object in doc.objects.values_mut() {
+        // A text-free leaf prevents structural_counts from independently
+        // rejecting the stream while checking font candidates.
+        if let Object::Stream(stream) = object {
+            if stream
+                .dict
+                .get(b"Subtype")
+                .ok()
+                .and_then(|v| v.as_name().ok())
+                == Some(b"Form")
+            {
+                stream.set_plain_content(b"n".to_vec());
+            }
+        }
+        if let Object::Dictionary(dict) = object {
+            if dict.get(b"Subtype").ok().and_then(|v| v.as_name().ok()) == Some(b"Type3") {
+                dict.remove(b"Resources");
+            }
+        }
+    }
+    let resources = doc.add_object(Stream::new(
+        dictionary! {"XObject" => dictionary! {}},
+        vec![],
+    ));
+    // This uninvoked Form is never consulted by the resolver, but its resource
+    // stream is a candidate in the Type3 structural bound.
+    doc.add_object(Stream::new(
+        dictionary! {"Subtype" => "Form", "Resources" => resources},
+        vec![],
+    ));
+    let error = super::pdf::metadata(&save_pdf(doc), &mut Projection::new()).unwrap_err();
+    assert!(
+        matches!(
+            error.downcast_ref::<lopdf::Error>(),
+            Some(lopdf::Error::ObjectType { expected, found })
+                if *expected == "Dictionary" && *found == "Stream"
+        ),
+        "{error:#}"
+    );
+}
