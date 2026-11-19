@@ -18,7 +18,7 @@ records local evidence separately from hosted CI and hardware claims.
 | Pack integrity | All six payload hashes match; Parquet references resolve; text first lines have no comma or tab; originals use neutral names |
 | Example query | Clean Python dependency environment loads Parquet; recomputes the query embedding through the exact recorded recipe and linked CLI engine; expected top three match |
 | Upload | Explicit CLI upload to pinned MinIO; all seven files including the manifest download byte-for-byte; server stopped unconditionally |
-| Source revocation | An unavailable source fails explicitly and removes its searchable cached content |
+| Source revocation | An unavailable current source (explicit index or library root, including a library with no persisted folder) fails explicitly and removes its searchable cached content. A failed switch to a different folder keeps the previous selection; overlapping files still follow per-file replacement/revocation rules. A completed current-source scan removes deleted paths even when another file has an infrastructure failure |
 | UI | Four Vitest tests; actual debug WebView logs `indexed`, `searched`, `answered` and `VECTORAIZ_PIPELINE_SMOKE_TEST_OK` |
 | Build and notices | Rust 1.90 formatting, clippy with warnings denied, workspace tests and debug app build; TypeScript/Vite build; Rust/UI and native PDFium/llama.cpp notices generated |
 

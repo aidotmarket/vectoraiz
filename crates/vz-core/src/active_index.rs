@@ -244,6 +244,18 @@ pub fn last_indexed_folder(root: &Path) -> Option<String> {
     folder.map(|p| p.to_string_lossy().into_owned())
 }
 
+// Resolve surviving ancestors too: a removed selected directory still has the
+// same identity, including when its caller used a symlinked temporary root.
+fn source_identity(folder: &Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(folder).ok()?;
+    for ancestor in absolute.ancestors() {
+        if let Ok(parent) = ancestor.canonicalize() {
+            return Some(parent.join(absolute.strip_prefix(ancestor).ok()?));
+        }
+    }
+    None
+}
+
 /// Rebuild separately, resume via the existing indexer, then publish on success.
 /// Poll cancellation at async boundaries and once more before publishing. Work
 /// already committed per document remains resumable after dropping this future.
@@ -257,6 +269,7 @@ pub async fn reindex(
 ) -> Result<crate::index::Progress> {
     let mut latest = crate::index::Progress::default();
     let mut started = false;
+    let mut failed_switch = false;
     let mut progress = progress;
     let result = async {
         ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
@@ -269,51 +282,111 @@ pub async fn reindex(
             root.canonicalize()?.starts_with(data.canonicalize()?),
             "index outside data root"
         );
-        let restore_on_failure = root.canonicalize().ok() == resolve(data).canonicalize().ok()
-            && last_indexed_folder(&root).is_some_and(|previous|
-                folder.canonicalize().ok().as_ref() != Some(&PathBuf::from(previous)));
+        let previous = last_indexed_folder(&resolve(data));
+        let different_folder = previous.is_some_and(|previous| {
+            source_identity(folder).as_ref() != Some(&PathBuf::from(previous))
+        });
+        let restore_on_failure =
+            different_folder && root.canonicalize().ok() == resolve(data).canonicalize().ok();
+        let replacing_documents =
+            crate::storage::State::has_persisted_documents(&resolve(data)).unwrap_or(true);
         let mut state = crate::storage::State::open(&root)?;
-        // Keep the previous folder's visibility on a failed same-recipe switch.
-        // Generation files are retained until publication or rollback finishes.
-        state.db.execute_batch("CREATE TEMP TABLE previous_documents AS SELECT * FROM documents")?;
-        let mut seen = std::collections::HashSet::new();
+        state
+            .db
+            .execute_batch("CREATE TEMP TABLE previous_documents AS SELECT * FROM documents")?;
+        let revoke_unavailable =
+            !different_folder || crate::storage::State::selected_folder(&state.db)?.is_none();
+        let mut prepared = false;
+        let mut source_revoked = false;
         let result = finish_reindex(
             data,
             &engines.recipe,
             &selected,
             async {
-                let (stats, paths) = crate::index::scan(&mut state, folder, engines, assets, |p| {
+                let scan = crate::index::scan(&mut state, folder, engines, assets, |p| {
                     started = true;
                     latest = p.clone();
                     progress(p);
-                }).await?;
-                seen = paths;
+                })
+                .await;
+                let (stats, paths) = match scan {
+                    Err(error)
+                        if revoke_unavailable && crate::index::source_unavailable(&error) =>
+                    {
+                        state.db.execute("DELETE FROM documents", [])?;
+                        source_revoked = true;
+                        state.recover()?;
+                        return Err(error);
+                    }
+                    result => result?,
+                };
+                // Current-source revocation is independent of publishability.
+                if !different_folder {
+                    crate::index::publish_source(&state, folder, &paths)?;
+                }
+                validate_publication(&stats, replacing_documents)?;
+                state.db.execute_batch(
+                    "CREATE TEMP TABLE publication_documents AS SELECT * FROM documents;
+                     CREATE TEMP TABLE publication_metadata AS SELECT * FROM index_metadata;",
+                )?;
+                crate::index::prepare_source(&state, folder, &paths)?;
+                prepared = true;
                 Ok(stats)
             },
             &cancelled,
-        ).await;
-        if result.is_ok() {
-            crate::index::publish_source(&state, folder, &seen)?;
-        } else if restore_on_failure {
-            state.db.execute_batch("BEGIN; DELETE FROM documents; INSERT INTO documents SELECT * FROM previous_documents; COMMIT;")?;
-            state.recover()?;
+        )
+        .await;
+        if result.is_err() {
+            failed_switch = different_folder && !source_revoked;
+            // Restore publication-only changes, preserving per-file revocations
+            // and successful revisions made during the scan.
+            if prepared {
+                state.db.execute_batch(
+                    "BEGIN; DELETE FROM documents;
+                     INSERT INTO documents SELECT * FROM publication_documents;
+                     DELETE FROM index_metadata;
+                     INSERT INTO index_metadata SELECT * FROM publication_metadata; COMMIT;",
+                )?;
+            }
+            if restore_on_failure {
+                state.db.execute_batch(
+                    "DELETE FROM documents WHERE path NOT IN (SELECT path FROM previous_documents)",
+                )?;
+            }
         }
+        state.recover()?;
         result
     }
     .await;
     result.map_err(|e| {
-        if e.to_string().starts_with("Re-index did not finish") {
-            return e;
-        }
-        let cause = if cancelled() || e.to_string().contains("cancelled") {
+        let message = e.to_string();
+        let cause = if cancelled() || message.contains("cancelled") {
             "cancelled"
-        } else if e.to_string().contains("source missing") {
+        } else if message.contains("source missing") {
             "source missing"
-        } else if e.chain().any(|e| e.to_string().contains("in use") || e.to_string().contains("lock")) {
+        } else if e.chain().any(|e| {
+            let message = e.to_string();
+            message.contains("in use") || message.contains("lock")
+                || message.contains("index already open by another process")
+        }) {
             "index in use"
         } else {
             "indexing interrupted"
         };
+        if failed_switch {
+            let summary = if message.starts_with("Re-index did not finish") {
+                message.strip_suffix("; Re-index to resume").unwrap_or(&message).to_owned()
+            } else {
+                format!(
+                    "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {cause}",
+                    latest.completed, latest.skipped, latest.failed, latest.infrastructure_failed, latest.total
+                )
+            };
+            return anyhow::anyhow!("{summary}; the previous folder is still active. Re-index the new folder to try again.");
+        }
+        if message.starts_with("Re-index did not finish") {
+            return e;
+        }
         if !started {
             return anyhow::anyhow!("Re-index did not finish; {cause}; Re-index to resume");
         }
@@ -334,7 +407,8 @@ async fn finish_reindex(
     run: impl std::future::Future<Output = Result<crate::index::Progress>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
-    let replacing_documents = crate::storage::State::has_persisted_documents(&resolve(data))?;
+    let replacing_documents =
+        crate::storage::State::has_persisted_documents(&resolve(data)).unwrap_or(true);
     let mut run = Box::pin(run);
     let result = futures::future::poll_fn(|cx| {
         if cancelled() {
@@ -347,16 +421,21 @@ async fn finish_reindex(
     })
     .await?;
     ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
-    result.ensure_publishable()?;
-    if result.total > 0 && result.completed + result.skipped == 0 {
-        ensure!(
-            !replacing_documents,
-            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; active index retained; Re-index to resume",
-            result.completed, result.skipped, result.failed, result.total
-        );
-    }
+    validate_publication(&result, replacing_documents)?;
     activate_with(data, recipe, selected, || Ok(()))?;
     Ok(result)
+}
+
+fn validate_publication(stats: &crate::index::Progress, replacing_documents: bool) -> Result<()> {
+    stats.ensure_publishable()?;
+    if stats.total > 0 && stats.completed + stats.skipped == 0 {
+        ensure!(
+            !replacing_documents,
+            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; no successful documents; publication refused; Re-index to resume",
+            stats.completed, stats.skipped, stats.failed, stats.total
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -786,6 +865,10 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("Re-index did not finish"));
+        assert!(error.to_string().contains("1 indexed"));
+        assert!(error.to_string().contains("1 failed"));
+        assert!(error.to_string().contains("1 infrastructure"));
+        assert!(!error.to_string().contains("resume"));
         for cancel_after_file in [false, true] {
             if cancel_after_file {
                 let cancelled = AtomicBool::new(false);
@@ -816,6 +899,328 @@ mod tests {
             assert_eq!(docs.len(), 1);
             assert!(Path::new(&docs[0].path).starts_with(a.path().canonicalize().unwrap()));
         }
+    }
+
+    fn embedding_fixture() -> (crate::engine::Engines, PathBuf) {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = crate::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        (engines, assets)
+    }
+
+    #[tokio::test]
+    async fn publication_failure_after_scan_keeps_old_recipe_documents_and_source() {
+        let (mut engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let a = sources.path().join("a");
+        let b = sources.path().join("b");
+        fs::create_dir(&a).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(a.join("good.txt"), "A searchable source document.").unwrap();
+        fs::write(b.join("good.txt"), "B replacement source document.").unwrap();
+        reindex(data.path(), &a, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let old = resolve(data.path());
+        let documents = crate::storage::State::review_documents(&old).unwrap();
+        engines.recipe.model.push_str("-new-recipe");
+        let error = reindex(
+            data.path(),
+            &b,
+            &engines,
+            &assets,
+            |p| {
+                if p.completed + p.skipped + p.failed == p.total {
+                    fs::rename(&b, sources.path().join("renamed-b")).unwrap();
+                }
+            },
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("previous folder is still active"));
+        assert!(!error.to_string().contains("resume"));
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).unwrap(),
+            pointer
+        );
+        assert_eq!(resolve(data.path()), old);
+        let candidate =
+            crate::storage::State::open(&recipe_dir(data.path(), &engines.recipe).unwrap())
+                .unwrap();
+        assert_eq!(
+            candidate.documents().unwrap().len(),
+            1,
+            "separate recipe candidates remain resumable"
+        );
+        drop(candidate);
+        let reopened = crate::storage::State::open(&resolve(data.path())).unwrap();
+        assert_eq!(reopened.documents().unwrap()[0].sha256, documents[0].sha256);
+        assert_eq!(
+            last_indexed_folder(&old).as_deref(),
+            a.canonicalize().unwrap().to_str()
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_persisted_library_source_revokes_documents() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("good.txt"), "Cached source text.").unwrap();
+        reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+        let folder = source.path().to_owned();
+        source.close().unwrap();
+        let error = reindex(data.path(), &folder, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("source missing"), "{error}");
+        let state = crate::storage::State::open(&resolve(data.path())).unwrap();
+        assert!(state.documents().unwrap().is_empty());
+        assert_eq!(
+            fs::read_dir(state.root.join("generations"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(state
+            .search("Cached", &vec![0.; engines.recipe.dimensions], 3)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn unavailable_source_without_persisted_library_folder_revokes_documents() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("good.txt"), "Legacy cached source.").unwrap();
+        reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+        let root = resolve(data.path());
+        let state = crate::storage::State::open(&root).unwrap();
+        state.db.execute("DELETE FROM index_metadata", []).unwrap();
+        drop(state);
+        let error = reindex(
+            data.path(),
+            &source.path().join("missing"),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("source missing"), "{error}");
+        assert!(!error
+            .to_string()
+            .contains("previous folder is still active"));
+        let state = crate::storage::State::open(&root).unwrap();
+        assert!(state.documents().unwrap().is_empty());
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn completed_current_scan_revokes_deleted_paths_despite_missing_pdfium_both_entry_points()
+    {
+        let (engines, assets) = embedding_fixture();
+        for library in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let text = source.path().join("good.txt");
+            fs::write(&text, "Deleted searchable source text.").unwrap();
+            let root = if library {
+                reindex(
+                    data.path(),
+                    source.path(),
+                    &engines,
+                    &assets,
+                    |_| {},
+                    || false,
+                )
+                .await
+                .unwrap();
+                resolve(data.path())
+            } else {
+                let mut state = crate::storage::State::open(data.path()).unwrap();
+                crate::index::index(&mut state, source.path(), &engines, &assets, |_| {})
+                    .await
+                    .unwrap();
+                data.path().to_owned()
+            };
+            let state = crate::storage::State::open(&root).unwrap();
+            let generation = state.generations().unwrap().pop().unwrap();
+            drop(state);
+            fs::remove_file(text).unwrap();
+            fs::write(source.path().join("broken.pdf"), "not a PDF").unwrap();
+            let missing = source.path().join("missing-assets");
+            if library {
+                assert!(reindex(
+                    data.path(),
+                    source.path(),
+                    &engines,
+                    &missing,
+                    |_| {},
+                    || false
+                )
+                .await
+                .is_err());
+            } else {
+                let mut state = crate::storage::State::open(&root).unwrap();
+                let stats =
+                    crate::index::index(&mut state, source.path(), &engines, &missing, |_| {})
+                        .await
+                        .unwrap();
+                assert_eq!(stats.infrastructure_failed, 1);
+            }
+            let state = crate::storage::State::open(&root).unwrap();
+            assert!(state.documents().unwrap().is_empty());
+            assert!(!root.join("generations").join(generation).exists());
+            assert!(state
+                .search("Deleted", &vec![0.; engines.recipe.dimensions], 3)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_parent_switch_preserves_per_file_revocation_and_updated_revision() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let a = parent.path().join("a");
+        fs::create_dir(&a).unwrap();
+        fs::write(a.join("empty.txt"), "Old content must disappear.").unwrap();
+        fs::write(a.join("updated.txt"), "Original revision.").unwrap();
+        reindex(data.path(), &a, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        fs::write(a.join("empty.txt"), "").unwrap();
+        fs::write(a.join("updated.txt"), "Replacement revision survives.").unwrap();
+        fs::write(parent.path().join("new.txt"), "New parent document.").unwrap();
+        fs::write(parent.path().join("broken.pdf"), "not a PDF").unwrap();
+        let error = reindex(
+            data.path(),
+            parent.path(),
+            &engines,
+            &parent.path().join("missing-assets"),
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("previous folder is still active"));
+        let root = resolve(data.path());
+        assert_eq!(
+            last_indexed_folder(&root).as_deref(),
+            a.canonicalize().unwrap().to_str()
+        );
+        let state = crate::storage::State::open(&root).unwrap();
+        let docs = state.documents().unwrap();
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].path.ends_with("updated.txt"));
+        assert!(docs[0].chunks[0]
+            .text
+            .contains("Replacement revision survives"));
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 1);
+    }
+
+    #[tokio::test]
+    async fn damaged_active_storage_allows_successful_recipe_migration() {
+        let data = tempfile::tempdir().unwrap();
+        let old = recipe();
+        let old_root = seed(data.path(), &old);
+        activate(data.path(), &old).unwrap();
+        fs::write(old_root.join("state.sqlite"), "damaged database").unwrap();
+        let mut new = old.clone();
+        new.model.push_str("-recovery");
+        let candidate = seed(data.path(), &new);
+        let selected = publication_dir(data.path(), &new).unwrap();
+        let error = finish_reindex(
+            data.path(),
+            &new,
+            &selected,
+            async {
+                Ok(crate::index::Progress {
+                    total: 1,
+                    failed: 1,
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("publication refused"));
+        assert!(!error.to_string().contains("active index retained"));
+        finish_reindex(
+            data.path(),
+            &new,
+            &selected,
+            async {
+                Ok(crate::index::Progress {
+                    total: 1,
+                    completed: 1,
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resolve(data.path()), candidate.canonicalize().unwrap());
+    }
+
+    #[tokio::test]
+    async fn busy_index_reports_neutral_cause() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let root = recipe_dir(data.path(), &engines.recipe).unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let _writer = crate::storage::State::open(&root).unwrap();
+        let error = reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("index in use"), "{error}");
+        assert!(!error.to_string().contains(root.to_str().unwrap()));
     }
 
     #[tokio::test]

@@ -104,6 +104,13 @@ fn unchanged_document(
     Ok(None)
 }
 
+pub(crate) fn source_unavailable(error: &anyhow::Error) -> bool {
+    matches!(
+        error.to_string().as_str(),
+        "source missing" | "source unavailable during scan"
+    )
+}
+
 pub async fn index(
     state: &mut State,
     folder: &Path,
@@ -112,26 +119,28 @@ pub async fn index(
     progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
     let (stats, seen) = match scan(state, folder, engines, assets, progress).await {
-        Err(error)
-            if error.to_string() == "source missing"
-                || error.to_string() == "source unavailable during scan" =>
-        {
-            // Explicit-index callers retain their source-revocation contract.
-            // Library re-indexing uses scan() and preserves the previous folder
-            // when a replacement source cannot be scanned.
+        Err(error) if source_unavailable(&error) => {
+            // An unavailable current source revokes its cached content.
             state.db.execute("DELETE FROM documents", [])?;
             state.recover()?;
             return Err(error).context("source unavailable");
         }
         result => result?,
     };
-    if stats.infrastructure_failed == 0 {
-        publish_source(state, folder, &seen)?;
-    }
+    // A completed walk revokes absent paths even if a present file failed.
+    publish_source(state, folder, &seen)?;
     Ok(stats)
 }
 
 pub(crate) fn publish_source(state: &State, folder: &Path, seen: &HashSet<String>) -> Result<()> {
+    prepare_source(state, folder, seen)?;
+    state.recover()?;
+    Ok(())
+}
+
+// Commit source metadata and pruning before pointer publication. Recovery waits
+// until activation so a failed promotion can restore pruned rows safely.
+pub(crate) fn prepare_source(state: &State, folder: &Path, seen: &HashSet<String>) -> Result<()> {
     let folder = folder.canonicalize()?;
     let indexed: Vec<String> = state
         .db
@@ -150,7 +159,6 @@ pub(crate) fn publish_source(state: &State, folder: &Path, seen: &HashSet<String
         [folder.to_str().context("source path must be UTF-8")?],
     )?;
     tx.commit()?;
-    state.recover()?;
     Ok(())
 }
 
