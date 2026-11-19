@@ -879,6 +879,251 @@ mod tests {
     }
 
     #[test]
+    fn t15_publication_process_child() {
+        let Some(library) = std::env::var_os("VZ_REVIEW_PUBLICATION_LIBRARY") else {
+            return;
+        };
+        let source =
+            std::path::PathBuf::from(std::env::var_os("VZ_REVIEW_PUBLICATION_SOURCE").unwrap());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let mut engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        if std::env::var_os("VZ_PUBLICATION_RECIPE_CHANGE").is_some() {
+            engines.recipe.model.push_str("-migration");
+        }
+        let scanning =
+            std::env::var("VZ_PUBLICATION_CRASH_STEP").ok().as_deref() == Some("scanning");
+        let result =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(vz_core::active_index::reindex(
+                    Path::new(&library),
+                    &source,
+                    &engines,
+                    &assets,
+                    |_| {
+                        if scanning {
+                            std::fs::write(
+                                std::env::var_os("VZ_PUBLICATION_READY").unwrap(),
+                                "scanning",
+                            )
+                            .unwrap();
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                        }
+                    },
+                    || false,
+                ));
+        // A released child intentionally fails before publication.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn t15_accept_export_first_after_process_death_or_failed_install() {
+        use std::process::{Command, Stdio};
+        for step in [
+            "scanning",
+            "generation install",
+            "before sqlite commit",
+            "after sqlite commit",
+            "before pointer rename",
+            "failed install",
+        ] {
+            let f = Fixture::new();
+            let library = f.root.join("flat-library");
+            let a = f.root.join("a");
+            let b = f.root.join("b");
+            std::fs::create_dir(&a).unwrap();
+            std::fs::create_dir(&b).unwrap();
+            std::fs::write(
+                a.join("a.txt"),
+                "Reviewed original content with stable source bytes.",
+            )
+            .unwrap();
+            std::fs::write(
+                b.join("b.txt"),
+                "Private replacement for publication crash tests.",
+            )
+            .unwrap();
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let assets = repo.join(".assets");
+            let engines =
+                Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                    .unwrap();
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(vz_core::active_index::index_explicit(
+                    &library,
+                    &a,
+                    &engines,
+                    &assets,
+                    |_| {},
+                ))
+                .unwrap();
+            let store = ReviewStore::open(&f.root.join("real-reviews")).unwrap();
+            let id = Uuid::new_v4();
+            let guard = store.lock_native(&f.policy, id, &library).unwrap();
+            let current = build(&guard, &a, id, &engines, "reviewed", &Changes::default()).unwrap();
+            guard.accept(&current).unwrap();
+            drop(guard);
+            let ready = f.root.join("child-ready");
+            let release = f.root.join("child-release");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "review_build::tests::t15_publication_process_child",
+                    "--nocapture",
+                ])
+                .env("VZ_REVIEW_PUBLICATION_LIBRARY", &library)
+                .env("VZ_REVIEW_PUBLICATION_SOURCE", &b)
+                .env("VZ_PUBLICATION_READY", &ready)
+                .env("VZ_PUBLICATION_RELEASE", &release)
+                .env(
+                    "VZ_PUBLICATION_CRASH_STEP",
+                    if step == "failed install" {
+                        "generation install"
+                    } else {
+                        step
+                    },
+                )
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if step == "before pointer rename" {
+                command.env("VZ_PUBLICATION_RECIPE_CHANGE", "1");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !ready.exists() {
+                if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child did not reach {step}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let busy = store
+                .lock_native_current(&f.policy, &current, &library)
+                .err()
+                .unwrap();
+            assert!(format!("{busy:#}").contains("in use"), "{busy:#}");
+            if step == "failed install" {
+                std::fs::write(&release, "fail before commit").unwrap();
+                assert!(child.wait().unwrap().success());
+            } else {
+                child.kill().unwrap();
+                child.wait().unwrap();
+            }
+            // First native command after death: no search, recovery or re-index.
+            let result = store.lock_native_current(&f.policy, &current, &library);
+            if step == "after sqlite commit" {
+                assert!(result.is_err());
+                continue;
+            }
+            let guard = result.unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join("export-after-death"),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn t15_review_accept_and_export_survive_private_scans_and_busy_does_not_invalidate() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let f = Fixture::new();
+        let library = f.root.join("real-library");
+        let a = f.root.join("a");
+        let b = f.root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(
+            a.join("good.txt"),
+            "A usable reviewed document about orbital archive retention.",
+        )
+        .unwrap();
+        std::fs::write(b.join("a-good.txt"), "Private staged replacement document.").unwrap();
+        std::fs::write(b.join("z-bad.pdf"), "broken").unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("real-reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        let current = build(&guard, &a, id, &engines, "orbital", &Changes::default()).unwrap();
+        guard.accept(&current).unwrap();
+        drop(guard);
+        for cancel in [true, false] {
+            let stopped = AtomicBool::new(false);
+            let missing = f.root.join("no-assets");
+            let result = rt.block_on(vz_core::active_index::reindex(
+                &library,
+                &b,
+                &engines,
+                if cancel { &assets } else { &missing },
+                |_| {
+                    let busy = store
+                        .lock_native_current(&f.policy, &current, &library)
+                        .err()
+                        .unwrap();
+                    assert!(format!("{busy:#}").contains("in use"), "{busy:#}");
+                    if cancel {
+                        stopped.store(true, Ordering::SeqCst);
+                    }
+                },
+                || stopped.load(Ordering::SeqCst),
+            ));
+            assert!(result.is_err());
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join(format!("export-{cancel}")),
+            )
+            .unwrap();
+        }
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        store
+            .lock_native_current(&f.policy, &current, &library)
+            .unwrap()
+            .check_accepted(&current)
+            .unwrap();
+    }
+
+    #[test]
     fn failed_and_cancelled_folder_switch_leave_review_openable() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let temp = tempfile::tempdir().unwrap();

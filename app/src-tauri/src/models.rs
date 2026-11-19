@@ -50,6 +50,7 @@ pub struct OperationState<E> {
     lock: Arc<Mutex<EngineCache<E>>>,
     generation: AtomicU64,
     cancel: std::sync::Mutex<watch::Sender<bool>>,
+    scan: std::sync::Mutex<Option<vz_core::active_index::ScanControl>>,
     transfer: Arc<Mutex<()>>,
     transfer_cancel: std::sync::Mutex<watch::Sender<bool>>,
     pub target: RwLock<Option<Value>>,
@@ -64,6 +65,7 @@ impl<E> Default for OperationState<E> {
             })),
             generation: AtomicU64::new(0),
             cancel: std::sync::Mutex::new(watch::channel(false).0),
+            scan: std::sync::Mutex::new(None),
             transfer: Arc::new(Mutex::new(())),
             transfer_cancel: std::sync::Mutex::new(watch::channel(false).0),
             target: RwLock::new(None),
@@ -99,9 +101,16 @@ impl<E: CachedEngine> OperationState<E> {
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     // A fresh channel identifies this operation; successors cannot reset old receivers.
     pub fn start(&self) -> watch::Receiver<bool> {
+        *self.scan.lock().unwrap() = None;
         let (sender, receiver) = watch::channel(false);
         *self.cancel.lock().unwrap() = sender;
         receiver
+    }
+    pub fn start_index(&self) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
+        let receiver = self.start();
+        let control = vz_core::active_index::ScanControl::default();
+        *self.scan.lock().unwrap() = Some(control.clone());
+        (receiver, control)
     }
     pub fn promotion_lock(&self) -> Arc<Mutex<EngineCache<E>>> {
         self.lock.clone()
@@ -171,6 +180,18 @@ impl<E: CachedEngine> OperationState<E> {
         result
     }
     pub fn cancel(&self) {
+        let _ = self.request_cancel();
+    }
+    pub fn request_cancel(&self) -> bool {
+        if self
+            .scan
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|scan| !scan.cancel())
+        {
+            return false;
+        }
         self.checks.lock().unwrap().clear();
         self.cancel.lock().unwrap().send_replace(true);
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -179,6 +200,7 @@ impl<E: CachedEngine> OperationState<E> {
         if let Ok(mut cache) = self.lock.try_lock() {
             cache.invalidate();
         }
+        true
     }
 }
 

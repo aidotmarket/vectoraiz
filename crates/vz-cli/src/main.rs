@@ -322,11 +322,8 @@ fn run() -> Result<()> {
                     vz_core::active_index::reindex(&args.state, &folder, &engines, &args.assets,
                         |p| eprintln!("{}", serde_json::to_string(p).unwrap()), || false).await?
                 } else {
-                    let mut state = State::open(&args.state)?;
-                    vz_core::index::index(&mut state, &folder, &engines, &args.assets, |p| {
-                        eprintln!("{}", serde_json::to_string(p).unwrap())
-                    })
-                    .await?
+                    vz_core::active_index::index_explicit(&args.state, &folder, &engines, &args.assets,
+                        |p| eprintln!("{}", serde_json::to_string(p).unwrap())).await?
                 };
                 println!("{}", serde_json::to_string(&result)?);
             }

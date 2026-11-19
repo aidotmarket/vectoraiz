@@ -489,6 +489,15 @@ pub(crate) fn run() {
     allow_single_instance_foreground(&context.config().identifier);
     configure(tauri::Builder::default().setup(|app| {
         vz_pack::listing_policy::system().refresh();
+        if let Ok(data) = data_root(app.handle()) {
+            if data.is_dir() {
+                if let Ok(_fence) = vz_core::active_index::selection_fence(&data, true) {
+                    if let Err(error) = vz_core::active_index::cleanup_start(&data) {
+                        eprintln!("Index cleanup deferred: {error:#}");
+                    }
+                }
+            }
+        }
         #[cfg(feature = "smoke-test")]
         if std::env::args().any(|arg| arg == "--update-test") {
             use tauri_plugin_updater::UpdaterExt;
@@ -800,7 +809,7 @@ async fn pipeline_index<R: tauri::Runtime>(
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_index_total");
     models::validate_folder(&folder)?;
     let guard = operations.acquire()?;
-    let cancel = operations.start();
+    let (_cancel, scan_control) = operations.start_index();
     #[cfg(feature = "smoke-test")]
     let hold =
         smoke_test_requested() && HOLD_NEXT_INDEX.swap(false, std::sync::atomic::Ordering::SeqCst);
@@ -819,7 +828,7 @@ async fn pipeline_index<R: tauri::Runtime>(
         #[cfg(feature = "smoke-test")]
         if hold {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-            while !RELEASE_INDEX.load(std::sync::atomic::Ordering::SeqCst) && !*cancel.borrow() {
+            while !RELEASE_INDEX.load(std::sync::atomic::Ordering::SeqCst) && !*_cancel.borrow() {
                 if std::time::Instant::now() >= deadline {
                     return Err("Smoke index release timed out".into());
                 }
@@ -833,8 +842,8 @@ async fn pipeline_index<R: tauri::Runtime>(
             })?;
             #[cfg(feature = "smoke-test")]
             record_loaded_models(&assets, &pins, engines.chat_loaded())?;
-            let result =
-                tokio::runtime::Runtime::new()?.block_on(vz_core::active_index::reindex(
+            let result = tokio::runtime::Runtime::new()?.block_on(
+                vz_core::active_index::reindex_controlled(
                     &data,
                     std::path::Path::new(&folder),
                     engines,
@@ -842,8 +851,9 @@ async fn pipeline_index<R: tauri::Runtime>(
                     |value| {
                         let _ = progress.send(desktop_pipeline::display_progress(value));
                     },
-                    || *cancel.borrow(),
-                ))?;
+                    &scan_control,
+                ),
+            )?;
             Ok(serde_json::to_value(result)?)
         };
         run().map_err(desktop_pipeline::reindex_error)
@@ -1444,7 +1454,11 @@ fn models_cancel<R: tauri::Runtime>(
 ) -> Result<(), String> {
     match kind.as_str() {
         "transfer" => operations.cancel_transfer(),
-        "pipeline" => operations.cancel(),
+        "pipeline" => {
+            if !operations.request_cancel() {
+                return Err("Index publication already started; wait for its result".into());
+            }
+        }
         "cloud" | "cloud_setup" => return cloud::cancel(&model_dir(&app)?, &kind),
         _ => return Err("Unknown operation kind".into()),
     }

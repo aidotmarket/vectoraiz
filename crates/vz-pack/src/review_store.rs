@@ -56,6 +56,10 @@ pub struct ReviewBinding {
     recipe_sha256: Sha256,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selection: Option<NativeSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_binding: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_content: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,7 +112,13 @@ impl NativeIndexFence {
         let fence = Self::acquire(library)?;
         fence.check_source(source)?;
         let index = &fence.selection.index;
-        let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
+        let binding = ReviewBinding::capture_version(
+            source,
+            index,
+            &index.join("recipe.json"),
+            Some(fence.selection.clone()),
+            Some(2),
+        )?;
         let candidates =
             review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?;
         let paths: Vec<_> = candidates
@@ -144,8 +154,19 @@ impl NativeIndexFence {
     }
 
     fn acquire(library: &Path) -> Result<Self> {
+        Self::acquire_mode(library, false)
+    }
+    fn acquire_existing(library: &Path) -> Result<Self> {
+        Self::acquire_mode(library, true)
+    }
+    fn acquire_mode(library: &Path, existing: bool) -> Result<Self> {
         plain_directory(library)?;
-        let selection = vz_core::active_index::selection_fence(library, false)?;
+        let selection = if existing {
+            check_regular(&library.join("index-selection.lock"))?;
+            vz_core::active_index::existing_selection_fence(library)?
+        } else {
+            vz_core::active_index::selection_fence(library, false)?
+        };
         let snapshot = NativeSelection::capture(library)?;
         let lock_path = snapshot.index.join("writer.lock");
         check_regular(&lock_path)?;
@@ -220,35 +241,65 @@ impl Drop for NativeIndexFence {
 
 impl ReviewBinding {
     pub fn capture(source: &Path, index: &Path, recipe: &Path) -> Result<Self> {
+        Self::capture_version(source, index, recipe, None, Some(2))
+    }
+    fn capture_version(
+        source: &Path,
+        index: &Path,
+        recipe: &Path,
+        selection: Option<NativeSelection>,
+        version: Option<u8>,
+    ) -> Result<Self> {
+        ensure!(
+            version.is_none() || version == Some(2),
+            "unknown index binding"
+        );
+        let (index_files, index_content) = if version == Some(2) {
+            index_tree(
+                index,
+                selection.as_ref().is_some_and(|s| s.library == s.index),
+            )?
+        } else {
+            (tree(index)?, None)
+        };
         Ok(Self {
             source: plain_directory(source)?,
             index: plain_directory(index)?,
             source_files: tree(source)?,
-            index_files: tree(index)?,
+            index_files,
+            index_binding: version,
+            index_content,
             recipe: fs::canonicalize(recipe)?,
             recipe_file: hash_file(recipe)?,
             recipe_sha256: digest(&read_input_json::<serde_json::Value>(recipe)?)?,
-            selection: None,
+            selection,
         })
     }
-
     fn revisions(&self) -> Result<(String, String)> {
         Ok((
             digest(&self.source_files)?.into(),
-            digest(&self.index_files)?.into(),
+            if self.index_binding == Some(2) {
+                digest(&(&self.index_files, &self.index_content))?.into()
+            } else {
+                digest(&self.index_files)?.into()
+            },
         ))
     }
-
     fn check(&self) -> Result<()> {
-        let mut captured = Self::capture(&self.source, &self.index, &self.recipe)?;
         if let Some(selection) = &self.selection {
-            let current = NativeSelection::capture(&selection.library)?;
             ensure!(
-                current == *selection && current.index == self.index,
+                NativeSelection::capture(&selection.library)? == *selection
+                    && selection.index == self.index,
                 ListingError::StaleGeneration
             );
-            captured.selection = Some(current);
         }
+        let captured = Self::capture_version(
+            &self.source,
+            &self.index,
+            &self.recipe,
+            self.selection.clone(),
+            self.index_binding,
+        )?;
         ensure!(captured == *self, ListingError::StaleGeneration);
         Ok(())
     }
@@ -370,13 +421,29 @@ impl ReviewStore {
         library: &Path,
     ) -> Result<NativePackReview<'a>> {
         let pack = self.lock(policy, current.pack_id)?;
-        let generation = pack.validate(current, false)?;
+        let generation: Generation =
+            read_json(&pack.generation_path(current).join("generation.json"))
+                .map_err(|_| ListingError::StaleGeneration)?;
         let selection = NativeSelection::capture(library);
         if selection.as_ref().ok() != generation.binding.selection.as_ref() {
             pack.invalidate(current, "native index selection changed or binding absent")?;
             return Err(ListingError::StaleGeneration.into());
         }
-        let index = NativeIndexFence::acquire(library)?;
+        let index = match NativeIndexFence::acquire_existing(library) {
+            Ok(index) => index,
+            Err(error) => {
+                if !error.chain().any(|e| {
+                    e.downcast_ref::<std::io::Error>().is_some_and(|e| {
+                        e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+                    })
+                }) {
+                    pack.invalidate(current, "native index lock missing or invalid")?;
+                    return Err(ListingError::StaleGeneration.into());
+                }
+                return Err(error);
+            }
+        };
         let native = NativePackReview { pack, index };
         native.inspect(current)?;
         Ok(native)
@@ -611,8 +678,13 @@ impl NativePackReview<'_> {
         self.pack.lease.check(self.pack.policy)?;
         self.index.check_source(source)?;
         let index = &self.index.selection.index;
-        let mut binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        binding.selection = Some(self.index.selection.clone());
+        let binding = ReviewBinding::capture_version(
+            source,
+            index,
+            &index.join("recipe.json"),
+            Some(self.index.selection.clone()),
+            Some(2),
+        )?;
         binding.check()?;
         self.pack.lease.check(self.pack.policy)?;
         Ok(binding)
@@ -1148,6 +1220,84 @@ fn plain_directory(path: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(path)?)
 }
 
+/// Only the index root has reserved names. Source and payload walkers retain
+/// the original strict tree rule, including directories named `.vz-scan`.
+fn index_tree(root: &Path, flat: bool) -> Result<(BTreeMap<String, FileHash>, Option<Sha256>)> {
+    plain_directory(root)?;
+    let mut bytes = 0_u64;
+    for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let metadata = check_regular(&path)?;
+                if name == "state.sqlite" {
+                    bytes = metadata.len();
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    ensure!(bytes <= MAX_BYTES, "review tree byte limit");
+    let (content, referenced) = if root.join("state.sqlite").exists() {
+        let (digest, generations) = vz_core::storage::State::review_content(root)?;
+        (
+            Some(digest.try_into().map_err(anyhow::Error::msg)?),
+            generations,
+        )
+    } else {
+        (None, Default::default())
+    };
+    let mut files = BTreeMap::new();
+    let entries = walkdir::WalkDir::new(root)
+        .max_depth(64)
+        .into_iter()
+        .filter_entry(|entry| {
+            let Ok(relative) = entry.path().strip_prefix(root) else {
+                return true;
+            };
+            if ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"]
+                .iter()
+                .any(|name| relative == Path::new(name))
+            {
+                return false;
+            }
+            if relative == Path::new(".vz-scan")
+                || (flat
+                    && (relative == Path::new("indexes")
+                        || relative == Path::new("active-index.json")))
+            {
+                return false;
+            }
+            if relative.parent() == Some(Path::new("generations")) {
+                return referenced.contains(&entry.file_name().to_string_lossy().into_owned());
+            }
+            true
+        });
+    for (count, entry) in entries.enumerate() {
+        ensure!(count <= MAX_FILES, "review tree entry count limit");
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(root)?;
+        if entry.file_type().is_dir() {
+            plain_directory(entry.path())?;
+        } else {
+            let file = hash_file(entry.path())?;
+            bytes = bytes
+                .checked_add(file.size)
+                .context("review byte overflow")?;
+            files.insert(
+                relative
+                    .to_str()
+                    .context("UTF-8 index path")?
+                    .replace('\\', "/"),
+                file,
+            );
+        }
+        ensure!(bytes <= MAX_BYTES, "review tree byte limit");
+    }
+    Ok((files, content))
+}
+
 fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
     let mut files = BTreeMap::new();
@@ -1408,6 +1558,199 @@ mod tests {
             result.err().unwrap().downcast_ref::<ListingError>(),
             Some(ListingError::StaleGeneration)
         ));
+    }
+
+    #[test]
+    fn t15_v2_committed_database_orphans_and_root_scoped_prunes() {
+        let f = Fixture::new();
+        let root = f.0.join("index");
+        drop(vz_core::storage::State::open(&root).unwrap());
+        let binding = f.binding();
+        assert_eq!(binding.index_binding, Some(2));
+        fs::create_dir_all(root.join(".vz-scan/many/entries")).unwrap();
+        fs::write(root.join(".vz-scan/many/entries/staged"), "private").unwrap();
+        fs::create_dir_all(root.join("generations/orphan")).unwrap();
+        fs::write(root.join("generations/orphan/uncommitted"), "private").unwrap();
+        binding.check().unwrap();
+        let writer = vz_core::storage::State::open(&root).unwrap();
+        let tx = writer.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO index_metadata VALUES('test','uncommitted')",
+            [],
+        )
+        .unwrap();
+        binding.check().unwrap();
+        tx.rollback().unwrap();
+        binding.check().unwrap();
+        writer
+            .db
+            .execute("INSERT INTO index_metadata VALUES('test','committed')", [])
+            .unwrap();
+        stale(binding.check());
+        drop(writer);
+        let current = f.binding();
+        assert_ne!(
+            binding.revisions().unwrap().1,
+            current.revisions().unwrap().1
+        );
+        fs::create_dir_all(f.0.join("source/.vz-scan")).unwrap();
+        fs::write(f.0.join("source/.vz-scan/terms.txt"), "bound source").unwrap();
+        stale(current.check());
+    }
+
+    #[test]
+    fn t15_transient_sidecars_are_node_checked_but_never_charged_or_hashed() {
+        let f = Fixture::new();
+        let root = f.0.join("index");
+        drop(vz_core::storage::State::open(&root).unwrap());
+        let binding = f.binding();
+        let writer = vz_core::storage::State::open(&root).unwrap();
+        let tx = writer.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO index_metadata VALUES('pending','not committed')",
+            [],
+        )
+        .unwrap();
+        let wal = root.join("state.sqlite-wal");
+        let file = OpenOptions::new().write(true).open(&wal).unwrap();
+        let original = file.metadata().unwrap().len();
+        // Sparse extension costs no large allocation and exceeds the entire
+        // review allowance. Only the main DB's size is part of that allowance.
+        file.set_len(MAX_BYTES + 4096).unwrap();
+        binding.check().unwrap();
+        file.set_len(original).unwrap();
+        drop(file);
+        tx.rollback().unwrap();
+        drop(writer);
+        binding.check().unwrap();
+        #[cfg(unix)]
+        {
+            fs::hard_link(root.join("state.sqlite"), f.0.join("linked-database")).unwrap();
+            assert!(binding.check().is_err());
+        }
+    }
+
+    #[test]
+    fn t15_version_one_survives_real_nochange_scan_and_expires_after_cancelled_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let f = Fixture::new();
+        let index = f.0.join("real-index");
+        let source = f.0.join("source");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::index_explicit(
+            &index,
+            &source,
+            &engines,
+            &assets,
+            |_| {},
+        ))
+        .unwrap();
+        let old =
+            ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
+                .unwrap();
+        let new = ReviewBinding::capture(&source, &index, &index.join("recipe.json")).unwrap();
+        old.check().unwrap();
+        let report = rt
+            .block_on(vz_core::active_index::index_explicit(
+                &index,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(report.skipped, 1);
+        assert!(!index.join(".vz-scan/scan.sqlite").exists());
+        old.check().unwrap();
+        new.check().unwrap();
+        let b = f.0.join("other-source");
+        fs::create_dir(&b).unwrap();
+        fs::write(b.join("good.txt"), "Reusable cancelled success.").unwrap();
+        let stopped = AtomicBool::new(false);
+        assert!(rt
+            .block_on(vz_core::active_index::reindex(
+                &index,
+                &b,
+                &engines,
+                &assets,
+                |_| stopped.store(true, Ordering::SeqCst),
+                || stopped.load(Ordering::SeqCst)
+            ))
+            .is_err());
+        stale(old.check());
+        new.check().unwrap();
+    }
+
+    #[test]
+    fn t15_version_one_remains_strict_and_every_new_capture_is_v2() {
+        let f = Fixture::new();
+        let old = ReviewBinding::capture_version(
+            &f.0.join("source"),
+            &f.0.join("index"),
+            &f.0.join("index/recipe.json"),
+            None,
+            None,
+        )
+        .unwrap();
+        old.check().unwrap();
+        assert!(serde_json::to_value(&old)
+            .unwrap()
+            .get("index_binding")
+            .is_none());
+        let new = f.binding();
+        assert_eq!(new.index_binding, Some(2));
+        fs::create_dir_all(f.0.join("index/.vz-scan")).unwrap();
+        fs::write(
+            f.0.join("index/.vz-scan/scan.sqlite"),
+            "cancelled scan success",
+        )
+        .unwrap();
+        stale(old.check());
+        new.check().unwrap();
+    }
+
+    #[test]
+    fn t15_missing_bound_selection_lock_invalidates_before_recreation_and_contention_is_busy() {
+        for export_first in [false, true] {
+            let f = Fixture::new();
+            let index = f.0.join("index");
+            fs::write(index.join("writer.lock"), b"").unwrap();
+            let (_, policy) = policy();
+            let store = ReviewStore::open(&f.0.join("reviews")).unwrap();
+            let guard = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
+            let current = f.freeze_bound(&guard.pack, guard.capture(&f.0.join("source")).unwrap());
+            drop(guard);
+            {
+                let _busy = vz_core::active_index::selection_fence(&index, true).unwrap();
+                let error = store
+                    .lock_native_current(&policy, &current, &index)
+                    .err()
+                    .unwrap();
+                assert!(format!("{error:#}").contains("in use"));
+            }
+            store
+                .lock_native_current(&policy, &current, &index)
+                .unwrap()
+                .inspect(&current)
+                .unwrap();
+            fs::remove_file(index.join("index-selection.lock")).unwrap();
+            stale(store.lock_native_current(&policy, &current, &index));
+            assert!(!index.join("index-selection.lock").exists());
+            fs::write(index.join("index-selection.lock"), b"").unwrap();
+            let result = store.lock_native_current(&policy, &current, &index);
+            assert!(
+                result.is_err(),
+                "restoring deleted lock revived review; export-first={export_first}"
+            );
+        }
     }
 
     #[test]

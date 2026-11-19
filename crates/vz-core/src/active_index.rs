@@ -48,6 +48,17 @@ pub fn selection_fence(data: &Path, exclusive: bool) -> Result<SelectionFence> {
     Ok(SelectionFence(file))
 }
 
+/// Review validation must never recreate a lock removed since capture.
+pub fn existing_selection_fence(data: &Path) -> Result<SelectionFence> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(data.join("index-selection.lock"))?;
+    fs2::FileExt::try_lock_shared(&file)
+        .context("native index is in use; retry after indexing/search")?;
+    Ok(SelectionFence(file))
+}
+
 /// Canonical JSON: recursively sorted object keys, compact UTF-8 serialization.
 /// Sort explicitly so dependency feature unification cannot change the ID.
 pub fn recipe_id(recipe: &Recipe) -> Result<String> {
@@ -147,12 +158,11 @@ fn valid_directory(relative: &str, id: &str) -> bool {
 /// this, indexing that State would create a nested pointer inside the snapshot.
 pub(crate) fn state_location(path: &Path) -> PathBuf {
     if path.file_name().is_some_and(|name| name == "phase0-index") {
-        if let Some(data) = path.parent() {
-            return if data.as_os_str().is_empty() {
-                PathBuf::from(".")
-            } else {
-                data.to_owned()
-            };
+        if let Some(data) = path
+            .parent()
+            .filter(|p| p.join("active-index.json").is_file())
+        {
+            return data.to_owned();
         }
     }
     if let Some(indexes) = path
@@ -214,9 +224,36 @@ impl std::error::Error for PublishedFailure {}
 #[cfg(test)]
 thread_local! {
     static FAULTS: std::cell::RefCell<Vec<(PathBuf, &'static str)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static CANCEL_HOOK: std::cell::RefCell<Option<(PathBuf, &'static str, ScanControl)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn publication_step(_data: &Path, _step: &'static str) -> Result<()> {
+    #[cfg(any(test, all(debug_assertions, feature = "test-support")))]
+    if std::env::var("VZ_PUBLICATION_CRASH_STEP").ok().as_deref() == Some(_step) {
+        if let Some(ready) = std::env::var_os("VZ_PUBLICATION_READY") {
+            fs::write(ready, _step)?;
+            loop {
+                if std::env::var_os("VZ_PUBLICATION_RELEASE")
+                    .is_some_and(|path| Path::new(&path).exists())
+                {
+                    anyhow::bail!("injected pre-commit publication failure");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+    }
+    #[cfg(test)]
+    CANCEL_HOOK.with(|hook| {
+        if let Some((data, step, control)) = &*hook.borrow() {
+            if data == _data && *step == _step {
+                ensure!(
+                    !control.cancel(),
+                    "cancel accepted after entering publication"
+                );
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })?;
     #[cfg(test)]
     FAULTS.with(|faults| {
         if faults
@@ -261,7 +298,10 @@ fn activate_with(
         dir: relative.to_owned(),
         recipe_id: id,
     };
-    let temp = data.join(format!(".active-index-{}.tmp", uuid::Uuid::new_v4()));
+    fs::create_dir_all(data.join(".vz-scan"))?;
+    let temp = data
+        .join(".vz-scan")
+        .join(format!("pointer-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -271,7 +311,9 @@ fn activate_with(
         file.sync_all()?;
         drop(file);
         before_rename()?;
+        publication_step(data, "before pointer rename")?;
         fs::rename(&temp, data.join("active-index.json"))?;
+        publication_step(data, "after pointer rename").context(PublishedFailure("cleanup"))?;
         (|| -> Result<()> {
             publication_step(data, "directory sync")?;
             #[cfg(unix)]
@@ -342,7 +384,12 @@ pub(crate) fn source_identity(folder: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(folder).ok()?;
     for ancestor in absolute.ancestors() {
         if let Ok(parent) = ancestor.canonicalize() {
-            return Some(parent.join(absolute.strip_prefix(ancestor).ok()?));
+            let tail = absolute.strip_prefix(ancestor).ok()?;
+            return Some(if tail.as_os_str().is_empty() {
+                parent
+            } else {
+                parent.join(tail)
+            });
         }
     }
     None
@@ -351,6 +398,7 @@ pub(crate) fn source_identity(folder: &Path) -> Option<PathBuf> {
 // Existing paths canonicalize to the volume's spelling. For a removed tail,
 // compare against the persisted spelling only after proving its surviving
 // ancestor accepts alternate case. Case-sensitive volumes keep exact identity.
+#[cfg(test)]
 pub(crate) fn same_source(folder: &Path, previous: &Path) -> bool {
     let Some(current) = source_identity(folder) else {
         return false;
@@ -413,7 +461,11 @@ fn decide_scan(
         return ScanDecision::RevokeSource;
     }
     if current && outcome.completed_walk {
-        return ScanDecision::Publish;
+        return if outcome.stats.infrastructure_failed == 0 {
+            ScanDecision::Publish
+        } else {
+            ScanDecision::RevokeSource
+        };
     }
     if !outcome.unavailable
         && outcome.completed_walk
@@ -431,11 +483,7 @@ fn decide_scan(
 
 fn candidate_dir(data: &Path, recipe: &Recipe) -> Result<(String, PathBuf)> {
     let id = recipe_id(recipe)?;
-    let relative = if !data.join(format!("indexes/{id}")).try_exists()? {
-        format!("indexes/{id}")
-    } else {
-        format!("indexes/{id}-{}", uuid::Uuid::new_v4())
-    };
+    let relative = format!("indexes/{id}-{}", uuid::Uuid::new_v4());
     let root = data.join(&relative);
     fs::create_dir_all(data.join("indexes"))?;
     ensure!(
@@ -452,108 +500,215 @@ fn candidate_dir(data: &Path, recipe: &Recipe) -> Result<(String, PathBuf)> {
     Ok((relative, root))
 }
 
-// VACUUM includes committed WAL rows without checkpointing or copying a live DB
-// file. Generation files are immutable; copy them so recovery stays isolated.
-fn copy_index(source: &Path, db: &rusqlite::Connection, destination: &Path) -> Result<()> {
-    db.execute(
-        "VACUUM INTO ?1",
-        [destination
-            .join("state.sqlite")
-            .to_str()
-            .context("UTF-8 index path")?],
-    )?;
-    let generations = db
-        .prepare("SELECT generation FROM documents ORDER BY generation")?
-        .query_map([], |r| r.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for generation in generations {
-        ensure!(
-            !generation.is_empty()
-                && generation
-                    .bytes()
-                    .all(|c| c.is_ascii_alphanumeric() || c == b'-'),
-            "unsafe index generation"
-        );
-        copy_tree(
-            &source.join("generations").join(&generation),
-            &destination.join("generations").join(generation),
-        )?;
+#[derive(Clone, Default)]
+pub struct ScanControl(std::sync::Arc<std::sync::Mutex<ScanPhase>>);
+#[derive(Default)]
+struct ScanPhase {
+    phase: Phase,
+    cancelled: bool,
+}
+#[derive(Default, PartialEq)]
+enum Phase {
+    #[default]
+    Scanning,
+    Committing,
+    Done,
+}
+impl ScanControl {
+    /// True means cancellation was accepted and publication cannot start.
+    pub fn cancel(&self) -> bool {
+        let mut state = self.0.lock().unwrap();
+        if state.phase != Phase::Scanning {
+            return false;
+        }
+        state.cancelled = true;
+        true
     }
-    if source.join("recipe.json").is_file() {
-        fs::copy(source.join("recipe.json"), destination.join("recipe.json"))?;
+    pub fn is_cancelled(&self) -> bool {
+        self.0.lock().unwrap().cancelled
     }
-    Ok(())
+    fn commit(&self) -> Result<()> {
+        let mut state = self.0.lock().unwrap();
+        ensure!(!state.cancelled, "Indexing cancelled");
+        state.phase = Phase::Committing;
+        Ok(())
+    }
+    fn complete(&self) -> Result<()> {
+        let mut state = self.0.lock().unwrap();
+        ensure!(!state.cancelled, "Indexing cancelled");
+        state.phase = Phase::Done;
+        Ok(())
+    }
+    fn finish(&self) {
+        self.0.lock().unwrap().phase = Phase::Done;
+    }
+}
+struct ScanCompletion(ScanControl);
+impl Drop for ScanCompletion {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
 }
 
-fn copy_active(
-    source: &Path,
-    explicit: Option<&crate::storage::State>,
-    destination: &Path,
-) -> Result<()> {
-    if let Some(state) = explicit {
-        return copy_index(&state.root, &state.db, destination);
-    }
-    // Fence a stable snapshot without opening a writer, running recovery, or
-    // migrating the active SQLite schema.
+fn writer_fence(root: &Path, create: bool) -> Result<SelectionFence> {
     let file = fs::OpenOptions::new()
         .write(true)
-        .create(true)
+        .create(create)
         .truncate(false)
-        .open(source.join("writer.lock"))?;
-    fs2::FileExt::try_lock_exclusive(&file).context("index already open by another process")?;
-    let _lock = SelectionFence(file);
-    let db = crate::storage::State::review_connection(source)?;
-    copy_index(source, &db, destination)
+        .open(root.join("writer.lock"))?;
+    fs2::FileExt::try_lock_exclusive(&file).context("index in use; retry after indexing/search")?;
+    Ok(SelectionFence(file))
 }
 
-fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
-    ensure!(
-        !source.symlink_metadata()?.file_type().is_symlink(),
-        "symlink in index snapshot"
-    );
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source)? {
-        let entry = entry?;
-        ensure!(
-            !entry.file_type()?.is_symlink(),
-            "symlink in index snapshot"
-        );
-        if entry.file_type()?.is_dir() {
-            copy_tree(&entry.path(), &destination.join(entry.file_name()))?;
-        } else {
-            let path = destination.join(entry.file_name());
-            fs::copy(entry.path(), &path)?;
-            fs::File::open(path)?.sync_all()?;
+fn remove_unreferenced(root: &Path, db: &rusqlite::Connection) -> Result<()> {
+    let referenced: std::collections::HashSet<String> = db
+        .prepare("SELECT generation FROM documents")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if let Ok(entries) = fs::read_dir(root.join("generations")) {
+        for entry in entries {
+            let entry = entry?;
+            if !referenced.contains(&entry.file_name().to_string_lossy().into_owned()) {
+                fs::remove_dir_all(entry.path())?;
+            }
         }
     }
-    #[cfg(unix)]
-    fs::File::open(destination)?.sync_all()?;
     Ok(())
 }
 
-fn publish_candidate(
-    data: &Path,
-    recipe: &Recipe,
-    relative: &str,
-    state: &crate::storage::State,
-) -> Result<()> {
-    // Remove revoked candidate generations before publication. Any failure here
-    // leaves the current selection intact.
-    state.recover()?;
-    #[cfg(unix)]
-    {
-        fs::File::open(state.root.join("generations"))?.sync_all()?;
-        fs::File::open(&state.root)?.sync_all()?;
-        fs::File::open(data.join("indexes"))?.sync_all()?;
+/// Run under the selection fence at application/scan start and after publication.
+/// Reader-pinned indexes are retried on the next invocation.
+pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
+    let active = resolve_state(data);
+    let active = active.canonicalize().unwrap_or(active);
+    if let Ok(entries) = fs::read_dir(data.join(".vz-scan")) {
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("pointer-") && name.ends_with(".tmp") {
+                fs::remove_file(entry.path())?;
+            }
+        }
     }
-    activate_with(data, recipe, relative, || Ok(()))?;
-    publication_step(data, "generation cleanup")
-        .and_then(|()| state.recover())
-        .context(PublishedFailure("generation cleanup"))
+    let mut roots = Vec::new();
+    if let Ok(entries) = fs::read_dir(data.join("indexes")) {
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                roots.push(entry.path());
+            }
+        }
+    }
+    roots.push(data.join("phase0-index"));
+    if data.join("state.sqlite").exists() {
+        roots.push(data.to_owned());
+    }
+    for root in roots {
+        if !root.is_dir() {
+            continue;
+        }
+        let canonical = root.canonicalize()?;
+        if canonical == active || keep.is_some_and(|p| p == root || p == canonical) {
+            continue;
+        }
+        let Ok(lock) = writer_fence(&root, true) else {
+            continue;
+        };
+        if root == data {
+            for name in [
+                "state.sqlite",
+                "state.sqlite-wal",
+                "state.sqlite-shm",
+                "recipe.json",
+            ] {
+                let path = root.join(name);
+                if path.exists() {
+                    fs::remove_file(path)?;
+                }
+            }
+            for name in ["generations", ".vz-scan"] {
+                let path = root.join(name);
+                if path.exists() {
+                    fs::remove_dir_all(path)?;
+                }
+            }
+        } else {
+            // Windows requires the lock handle closed before deleting its directory.
+            drop(lock);
+            fs::remove_dir_all(root)?;
+        }
+    }
+    Ok(())
 }
 
-/// Shared transaction for library and explicit-index entry points. The explicit
-/// caller may already own the active writer; only its snapshot is read here.
+/// Preserve one recoverable candidate at startup. The next requested scan
+/// narrows eligibility to its single resolved source identity and recipe.
+pub fn cleanup_start(data: &Path) -> Result<()> {
+    let keep = fs::read_dir(data.join("indexes"))
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.join("scan.sqlite").is_file())
+        .max_by_key(|p| {
+            fs::metadata(p.join("scan.sqlite"))
+                .and_then(|m| m.modified())
+                .ok()
+        });
+    cleanup_library(data, keep.as_deref())
+}
+
+fn retry_candidate(
+    data: &Path,
+    source: &str,
+    recipe: &str,
+    active: &Path,
+) -> Option<(String, PathBuf)> {
+    for entry in fs::read_dir(data.join("indexes")).ok()?.flatten() {
+        let root = entry.path();
+        if root.canonicalize().ok() == active.canonicalize().ok() {
+            continue;
+        }
+        let matches = (|| -> Result<bool> {
+            let db = rusqlite::Connection::open_with_flags(
+                root.join("scan.sqlite"),
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
+            Ok(db.query_row(
+                "SELECT source_identity,recipe_id FROM scan_state",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )? == (source.into(), recipe.into()))
+        })()
+        .unwrap_or(false);
+        if matches {
+            // Crash-left committed candidates get a fresh name before retry,
+            // preserving successes without ever republishing a former target.
+            if root.join("state.sqlite").exists() {
+                let probe = writer_fence(&root, false).ok()?;
+                let stored: Recipe =
+                    serde_json::from_slice(&fs::read(root.join("recipe.json")).ok()?).ok()?;
+                let (relative, fresh) = candidate_dir(data, &stored).ok()?;
+                fs::remove_dir(&fresh).ok()?;
+                drop(probe);
+                fs::rename(&root, &fresh).ok()?;
+                return Some((relative, fresh));
+            }
+            return Some((format!("indexes/{}", entry.file_name().to_str()?), root));
+        }
+    }
+    None
+}
+
+#[derive(Default)]
+pub(crate) struct ScanOptions<'a> {
+    pub explicit: Option<&'a crate::storage::State>,
+    pub flat: bool,
+    pub control: Option<&'a ScanControl>,
+}
+
+/// Scan reads only committed published content and writes only private retry work.
 pub(crate) async fn scan_candidate(
     data: &Path,
     folder: &Path,
@@ -561,11 +716,23 @@ pub(crate) async fn scan_candidate(
     assets: &Path,
     progress: impl FnMut(&crate::index::Progress),
     cancelled: impl Fn() -> bool,
-    explicit: Option<&crate::storage::State>,
+    options: ScanOptions<'_>,
 ) -> Result<crate::index::Progress> {
-    ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
+    let ScanOptions {
+        explicit,
+        flat,
+        control,
+    } = options;
+    use crate::{
+        index::{ScanRow, ScanWorkspace},
+        storage::State,
+    };
+    let local = ScanControl::default();
+    let control = control.unwrap_or(&local);
+    let _completion = ScanCompletion(control.clone());
+    ensure!(!cancelled(), "Indexing cancelled");
     fs::create_dir_all(data)?;
-    let _selection = if explicit.is_some() {
+    let _selection = if flat {
         Some(selection_fence(data, true)?)
     } else {
         None
@@ -577,173 +744,299 @@ pub(crate) async fn scan_candidate(
             "index selection changed; reopen before indexing"
         );
     }
+    let identity = source_identity(folder).context("source identity unavailable")?;
+    let source = identity.to_str().context("UTF-8 source")?;
+    let stored = fs::read(active.join("recipe.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Recipe>(&b).ok());
+    let same_recipe = (stored.as_ref() == Some(&engines.recipe) || (flat && stored.is_none()))
+        && !needs_pointer_repair(data);
+    ensure!(
+        same_recipe || !flat || is_library_root(data),
+        "embedding recipe mismatch; re-index required"
+    );
+    let id = recipe_id(&engines.recipe)?;
+    let candidate = if same_recipe {
+        None
+    } else {
+        Some(match retry_candidate(data, source, &id, &active) {
+            Some(c) => c,
+            None => candidate_dir(data, &engines.recipe)?,
+        })
+    };
+    let root = candidate.as_ref().map(|c| c.1.as_path()).unwrap_or(&active);
+    let _writer = if explicit.is_none() {
+        Some(writer_fence(root, true)?)
+    } else {
+        None
+    };
+    if is_library_root(data) {
+        cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path()))?;
+    }
     let previous = last_indexed_folder(&active);
-    let current = previous
-        .as_deref()
-        .is_some_and(|p| same_source(folder, Path::new(p)));
-    let populated = crate::storage::State::has_persisted_documents(&active).unwrap_or(true);
-    let (relative, root) = candidate_dir(data, &engines.recipe)?;
-    let mut scan_published = false;
-    let result = async {
-        let same_recipe = fs::read(active.join("recipe.json"))
-            .ok()
-            .and_then(|b| serde_json::from_slice::<Recipe>(&b).ok())
-            .is_some_and(|r| r == engines.recipe);
-        if same_recipe {
-            copy_active(&active, explicit, &root)?;
-        }
-        let mut state = crate::storage::State::open(&root)?;
-        let mut outcome = {
-            let run = crate::index::scan(&mut state, folder, engines, assets, progress);
-            let mut run = Box::pin(run);
-            futures::future::poll_fn(|cx| {
-                if cancelled() {
-                    std::task::Poll::Ready(Err(anyhow::anyhow!(
-                        "Indexing cancelled; Re-index to resume"
-                    )))
-                } else {
-                    run.as_mut().poll(cx)
-                }
-            })
-            .await?
-        };
-        ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
-        if outcome
-            .source
-            .as_ref()
-            .is_some_and(|source| !source.is_dir())
+    let current = previous.as_deref() == Some(source);
+    let populated = State::has_persisted_documents(&active).unwrap_or(true);
+    let published = if same_recipe && active.join("state.sqlite").exists() {
         {
-            outcome.unavailable = true;
-            if outcome.error.is_none() {
-                outcome.error = Some(anyhow::anyhow!("source missing"));
-            }
+            let db = State::review_connection(&active)?;
+            remove_unreferenced(&active, &db)?;
+            ScanRow::read(&db, "documents")?
         }
-        let decision = decide_scan(&outcome, current, populated);
-        match decision {
-            ScanDecision::Publish => {
-                let source = outcome.source.as_deref().context("source missing")?;
-                // Detect disappearance after the last file callback, before publication.
-                ensure!(source.is_dir(), "source missing");
-                let previous_count: usize = if same_recipe {
-                    state
-                        .db
-                        .query_row("SELECT count(*) FROM documents", [], |r| r.get(0))?
-                } else {
-                    0
-                };
-                let unchanged = current
-                    && verified_target(data).as_deref() == Some(active.as_path())
-                    && same_recipe
-                    && outcome.stats.completed == 0
-                    && outcome.stats.failed == 0
-                    && outcome.stats.skipped == previous_count
-                    && crate::storage::State::review_selected_folder(&active)
-                        .ok()
-                        .flatten()
-                        .as_deref()
-                        == Some(source);
-                if unchanged {
-                    return Ok(outcome.stats);
-                }
-                crate::index::prepare_source(&state, source, &outcome.succeeded)?;
-                let publication = publish_candidate(data, &engines.recipe, &relative, &state);
-                scan_published = publication.is_ok()
-                    || publication
-                        .as_ref()
-                        .err()
-                        .is_some_and(|e| e.is::<PublishedFailure>());
-                publication?;
+    } else {
+        vec![]
+    };
+    let workspace_root = if same_recipe {
+        root.join(".vz-scan")
+    } else {
+        root.to_owned()
+    };
+    let mut workspace =
+        ScanWorkspace::new(&workspace_root, &active, published.clone(), source, &id)?;
+    if !same_recipe {
+        crate::index::initialize_recipe(root, &engines.recipe, || Ok(()))?;
+    }
+    let outcome = {
+        let run = crate::index::scan(&mut workspace, &identity, engines, assets, progress);
+        let mut run = Box::pin(run);
+        futures::future::poll_fn(|cx| {
+            if cancelled() {
+                std::task::Poll::Ready(Err(anyhow::anyhow!("Indexing cancelled")))
+            } else {
+                run.as_mut().poll(cx)
             }
-            ScanDecision::RevokeSource | ScanDecision::RevokeFailedPaths => {
-                // A refusal can publish only revocations of A, never B's writes.
-                let active_recipe: Option<Recipe> = fs::read(active.join("recipe.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok());
-                if let Some(recipe) = active_recipe {
-                    let (rev_relative, rev_root) = candidate_dir(data, &recipe)?;
-                    let mut rev_published = false;
-                    let revocation = (|| -> Result<()> {
-                        copy_active(&active, explicit, &rev_root)?;
-                        let revoked = crate::storage::State::open(&rev_root)?;
-                        let mut changed = 0;
-                        if decision == ScanDecision::RevokeSource {
-                            changed += revoked.db.execute("DELETE FROM documents", [])?;
+        })
+        .await
+    };
+    let mut outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            return Err(if !workspace.staged()?.is_empty() {
+                error.context("Indexing cancelled or interrupted; Re-index to resume")
+            } else {
+                error
+            })
+        }
+    };
+    ensure!(
+        !cancelled(),
+        if workspace.staged()?.is_empty() {
+            "Indexing cancelled"
+        } else {
+            "Indexing cancelled; Re-index to resume"
+        }
+    );
+    if outcome.source.as_deref().is_some_and(|path| !path.is_dir()) {
+        outcome.unavailable = true;
+    }
+    let decision = decide_scan(&outcome, current, populated);
+    // Enter the phase boundary only for an actual publication write set.
+    match decision {
+        ScanDecision::Publish => {
+            let staged = workspace.staged()?;
+            let changed = !staged.is_empty()
+                || !outcome.jobs.is_empty()
+                || published
+                    .iter()
+                    .any(|r| !outcome.succeeded.contains(&r.path))
+                || outcome.unchanged.iter().any(|r| !published.contains(r))
+                || previous.as_deref() != Some(source)
+                || candidate.is_some();
+            if changed {
+                if same_recipe {
+                    if cancelled() {
+                        control.cancel();
+                    }
+                    control.commit()?;
+                    publication_step(data, "commit entered")?;
+                }
+                crate::index::initialize_recipe(root, &engines.recipe, || Ok(()))?;
+                fs::create_dir_all(root.join("generations"))?;
+                for row in &staged {
+                    let from = workspace_root.join("generations").join(&row.generation);
+                    let to = root.join("generations").join(&row.generation);
+                    if from != to {
+                        fs::rename(from, to)?;
+                    }
+                }
+                #[cfg(unix)]
+                fs::File::open(root.join("generations"))?.sync_all()?;
+                publication_step(data, "generation install")?;
+                let db = State::publication_connection(root)?;
+                let tx = db.unchecked_transaction()?;
+                State::initialize_schema(&tx)?;
+                tx.execute("UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running'",[])?;
+                for row in ScanRow::read(&tx, "documents")? {
+                    if !outcome.succeeded.contains(&row.path) {
+                        tx.execute("DELETE FROM documents WHERE path=?1", [&row.path])?;
+                    }
+                }
+                for row in staged.iter().chain(&outcome.unchanged) {
+                    row.put(&tx)?;
+                }
+                for (path, status, reason) in &outcome.jobs {
+                    tx.execute(
+                        "INSERT INTO jobs(path,status,reason) VALUES(?1,?2,?3)",
+                        rusqlite::params![path, status, reason],
+                    )?;
+                }
+                tx.execute("INSERT INTO index_metadata VALUES('selected_folder',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[source])?;
+                publication_step(data, "before sqlite commit")?;
+                tx.commit()?;
+                publication_step(data, "after sqlite commit").map_err(|error| {
+                    if same_recipe {
+                        error.context(PublishedFailure("cleanup"))
+                    } else {
+                        error
+                    }
+                })?;
+                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .map_err(|e| {
+                        let error = anyhow::Error::from(e);
+                        if same_recipe {
+                            error.context(PublishedFailure("checkpoint"))
                         } else {
-                            for path in outcome
-                                .failed_content
-                                .iter()
-                                .chain(&outcome.failed_infrastructure)
-                            {
-                                changed += revoked
-                                    .db
-                                    .execute("DELETE FROM documents WHERE path=?1", [path])?;
-                            }
+                            error
                         }
-                        if changed > 0 {
-                            let publication =
-                                publish_candidate(data, &recipe, &rev_relative, &revoked);
-                            rev_published = publication.is_ok()
-                                || publication
-                                    .as_ref()
-                                    .err()
-                                    .is_some_and(|e| e.is::<PublishedFailure>());
-                            publication?;
+                    })?;
+                if let Some((relative, _)) = &candidate {
+                    activate_with(data, &engines.recipe, relative, || {
+                        if cancelled() {
+                            control.cancel();
                         }
-                        Ok(())
-                    })();
-                    if !rev_published {
-                        if let Err(cleanup) = fs::remove_dir_all(&rev_root) {
-                            return match revocation {
-                                Err(error) => Err(error.context(format!(
-                                    "Generation cleanup also failed: {cleanup:#}"
-                                ))),
-                                Ok(()) => Err(cleanup.into()),
-                            };
+                        control.commit()?;
+                        publication_step(data, "commit entered")
+                    })?;
+                }
+                publication_step(data, "generation cleanup")
+                    .context(PublishedFailure("generation cleanup"))?;
+                remove_unreferenced(root, &db).context(PublishedFailure("generation cleanup"))?;
+                drop(db);
+                drop(workspace.state.take());
+                if same_recipe {
+                    if workspace_root.exists() {
+                        fs::remove_dir_all(&workspace_root)
+                            .context(PublishedFailure("workspace cleanup"))?;
+                    }
+                } else {
+                    for name in ["scan.sqlite", "scan.sqlite-journal", "scan-writer.lock"] {
+                        let p = root.join(name);
+                        if p.exists() {
+                            fs::remove_file(p).context(PublishedFailure("workspace cleanup"))?;
                         }
                     }
-                    revocation?;
+                }
+                if is_library_root(data) {
+                    cleanup_library(data, None).context(PublishedFailure("generation cleanup"))?;
                 }
             }
-            ScanDecision::Discard => {}
         }
-        if outcome.unavailable {
-            return Err(outcome
-                .error
-                .take()
-                .unwrap_or_else(|| anyhow::anyhow!("source unavailable during scan")))
-            .context("source unavailable");
-        }
-        if explicit.is_none() {
-            if decision != ScanDecision::Publish {
-                validate_publication(&outcome.stats, populated)?;
-                anyhow::bail!("Re-index did not finish; publication refused");
-            }
-            outcome
-                .stats
-                .ensure_publishable()
-                .map_err(|e| e.context(PublishedFailure("incomplete scan")))?;
-        }
-        Ok(outcome.stats)
-    }
-    .await;
-    // Publication is irreversible, including errors after pointer rename.
-    if !scan_published {
-        let cleanup = publication_step(data, "generation cleanup")
-            .and_then(|()| fs::remove_dir_all(&root).map_err(Into::into));
-        if let Err(cleanup) = cleanup {
-            return match result {
-                Err(error) => {
-                    Err(error.context(format!("Generation cleanup also failed: {cleanup:#}")))
+        ScanDecision::RevokeSource | ScanDecision::RevokeFailedPaths => {
+            if active.join("state.sqlite").exists() {
+                let _old_lock = if same_recipe || explicit.is_some() {
+                    None
+                } else {
+                    Some(
+                        writer_fence(&active, false)
+                            .context("revocation pending; re-index to apply")?,
+                    )
+                };
+                let db = State::review_connection(&active)?;
+                let rows = ScanRow::read(&db, "documents")?;
+                drop(db);
+                let revoked: std::collections::HashSet<_> = rows
+                    .iter()
+                    .filter(|r| {
+                        if decision == ScanDecision::RevokeFailedPaths {
+                            outcome.failed_content.contains(&r.path)
+                                || outcome.failed_infrastructure.contains(&r.path)
+                        } else {
+                            outcome.unavailable
+                                || !outcome.seen.contains(&r.path)
+                                || outcome.failed_content.contains(&r.path)
+                                || ((outcome.changed.contains(&r.path)
+                                    || crate::pipeline::file_sha256(Path::new(&r.path))
+                                        .is_ok_and(|hash| hash != r.hash))
+                                    && outcome.failed_infrastructure.contains(&r.path))
+                        }
+                    })
+                    .map(|r| r.path.clone())
+                    .collect();
+                if !revoked.is_empty() {
+                    if cancelled() {
+                        control.cancel();
+                    }
+                    control.commit()?;
+                    publication_step(data, "commit entered")?;
+                    let db = State::publication_connection(&active)?;
+                    let tx = db.unchecked_transaction()?;
+                    State::initialize_schema(&tx)?;
+                    for path in &revoked {
+                        tx.execute("DELETE FROM documents WHERE path=?1", [path])?;
+                    }
+                    for (path, status, reason) in &outcome.jobs {
+                        if revoked.contains(path) {
+                            tx.execute(
+                                "INSERT INTO jobs(path,status,reason) VALUES(?1,?2,?3)",
+                                rusqlite::params![path, status, reason],
+                            )?;
+                        }
+                    }
+                    publication_step(data, "before revoke commit")?;
+                    tx.commit()?;
+                    publication_step(data, "after revoke commit")
+                        .context(PublishedFailure("cleanup"))?;
+                    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                    remove_unreferenced(&active, &db)
+                        .context(PublishedFailure("generation cleanup"))?;
                 }
-                Ok(_) => Err(cleanup),
-            };
+            }
         }
+        ScanDecision::Discard => {}
     }
-    result
+    control.complete()?;
+    if outcome.unavailable {
+        workspace.retain(&Default::default())?;
+        let reason = outcome
+            .error
+            .take()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "source missing".into());
+        anyhow::bail!(
+            "source unavailable: {reason}{}",
+            if previous.is_some() && !current {
+                "; the previous folder is still active"
+            } else {
+                ""
+            }
+        );
+    }
+    // Preserve the embedding API's per-file report; CLI/desktop callers use
+    // the refusing entry points and receive the publication outcome as an error.
+    if explicit.is_some() {
+        return Ok(outcome.stats);
+    }
+    if decision != ScanDecision::Publish {
+        let resume = !workspace.staged()?.is_empty();
+        let error = outcome
+            .stats
+            .ensure_publishable()
+            .err()
+            .unwrap_or_else(|| anyhow::anyhow!("publication refused"));
+        let message = error.to_string().replace("; Re-index to resume", "");
+        anyhow::bail!(
+            "{message}{}{}",
+            if previous.is_some() && !current {
+                "; the previous folder is still active"
+            } else {
+                ""
+            },
+            if resume { "; Re-index to resume" } else { "" }
+        );
+    }
+    Ok(outcome.stats)
 }
 
-/// Scan an isolated snapshot and publish the selected outcome by pointer rename.
-/// Poll cancellation at async boundaries and once more before publication.
+/// Library entry point; selection remains fenced through cleanup.
 pub async fn reindex(
     data: &Path,
     folder: &Path,
@@ -752,86 +1045,87 @@ pub async fn reindex(
     progress: impl FnMut(&crate::index::Progress),
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
-    let mut latest = crate::index::Progress::default();
-    let mut started = false;
-    let mut failed_switch = false;
-    let mut cleanup_failed = false;
-    let mut progress = progress;
-    let result = async {
-        ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
-        fs::create_dir_all(data)?;
-        let _selection = selection_fence(data, true)?;
-        let previous = last_indexed_folder(&resolve_state(data));
-        failed_switch = previous
-            .as_ref()
-            .is_some_and(|p| !same_source(folder, Path::new(p)));
-        let result = scan_candidate(
-            data,
-            folder,
-            engines,
-            assets,
-            |p| {
-                started = true;
-                latest = p.clone();
-                progress(p);
-            },
-            &cancelled,
-            None,
-        )
-        .await;
-        cleanup_failed = result
-            .as_ref()
-            .err()
-            .is_some_and(|e| e.to_string().contains("cleanup also failed"));
-        result
-    }
-    .await;
-    result.map_err(|e| {
-        if e.is::<PublishedFailure>() { return e; }
-        let message = e.to_string();
-        let cause = if cancelled() || message.contains("cancelled") {
-            "cancelled"
-        } else if e.chain().any(|error| error.to_string().contains("source missing")) {
-            "source missing"
-        } else if e.chain().any(|e| {
-            let message = e.to_string();
-            message.contains("in use") || message.contains("lock")
-                || message.contains("index already open by another process")
-        }) {
-            "index in use"
+    fs::create_dir_all(data)?;
+    let _selection = selection_fence(data, true)?;
+    scan_candidate(
+        data,
+        folder,
+        engines,
+        assets,
+        progress,
+        cancelled,
+        ScanOptions::default(),
+    )
+    .await
+    .map_err(|e| {
+        if e.is::<PublishedFailure>() || e.to_string().starts_with("Re-index did not finish") {
+            e
         } else {
-            "indexing interrupted"
-        };
-        if !failed_switch && message.starts_with("Re-index did not finish") {
-            return e;
+            anyhow::anyhow!("Re-index did not finish: {e}")
         }
-        // Ordinary diagnostics stay path-free and do not reintroduce a discarded
-        // switch's resume hint through the CLI's full-chain error rendering.
-        // Preserve the original chain when cleanup also failed.
-        let diagnostic = |message: String| {
-            if cleanup_failed { e.context(message) } else { anyhow::anyhow!(message) }
-        };
-        if failed_switch {
-            let summary = if message.starts_with("Re-index did not finish") {
-                message.strip_suffix("; Re-index to resume").unwrap_or(&message).to_owned()
-            } else {
-                format!(
-                    "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {cause}",
-                    latest.completed, latest.skipped, latest.failed, latest.infrastructure_failed, latest.total
-                )
-            };
-            return diagnostic(format!("{summary}; the previous folder is still active. Re-index the new folder to try again."));
+    })
+}
+
+/// Desktop cancellation and publication serialize on the same mutex.
+pub async fn reindex_controlled(
+    data: &Path,
+    folder: &Path,
+    engines: &crate::engine::Engines,
+    assets: &Path,
+    progress: impl FnMut(&crate::index::Progress),
+    control: &ScanControl,
+) -> Result<crate::index::Progress> {
+    fs::create_dir_all(data)?;
+    let _selection = selection_fence(data, true)?;
+    scan_candidate(
+        data,
+        folder,
+        engines,
+        assets,
+        progress,
+        || control.is_cancelled(),
+        ScanOptions {
+            control: Some(control),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| {
+        if e.is::<PublishedFailure>() || e.to_string().starts_with("Re-index did not finish") {
+            e
+        } else {
+            anyhow::anyhow!("Re-index did not finish: {e}")
         }
-        if !started {
-            return diagnostic(format!("Re-index did not finish; {cause}; Re-index to resume"));
+    })
+}
+
+/// Explicit CLI state directories stay flat, even when named phase0-index.
+pub async fn index_explicit(
+    data: &Path,
+    folder: &Path,
+    engines: &crate::engine::Engines,
+    assets: &Path,
+    progress: impl FnMut(&crate::index::Progress),
+) -> Result<crate::index::Progress> {
+    scan_candidate(
+        data,
+        folder,
+        engines,
+        assets,
+        progress,
+        || false,
+        ScanOptions {
+            flat: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| {
+        if e.is::<PublishedFailure>() || e.to_string().starts_with("Re-index did not finish") {
+            e
+        } else {
+            anyhow::anyhow!("Re-index did not finish: {e}")
         }
-        diagnostic(format!(
-            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {cause}; Re-index to resume",
-            latest.completed,
-            latest.skipped,
-            latest.failed,
-            latest.total
-        ))
     })
 }
 
@@ -878,6 +1172,191 @@ fn validate_publication(stats: &crate::index::Progress, replacing_documents: boo
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn t7_cancel_is_rejected_after_commit_entry_for_publish_revoke_and_pointer() {
+        let (mut engines, assets) = embedding_fixture();
+        for step in [
+            "generation install",
+            "before revoke commit",
+            "before pointer rename",
+        ] {
+            let data = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            let file = source.path().join("good.txt");
+            fs::write(&file, "Previously published content.").unwrap();
+            reindex(
+                data.path(),
+                source.path(),
+                &engines,
+                &assets,
+                |_| {},
+                || false,
+            )
+            .await
+            .unwrap();
+            if step == "before revoke commit" {
+                fs::remove_file(&file).unwrap();
+                fs::write(source.path().join("bad.pdf"), "bad").unwrap();
+            } else {
+                fs::write(&file, "Published replacement content.").unwrap();
+            }
+            if step == "before pointer rename" {
+                engines.recipe.model.push_str("-next");
+            }
+            let control = ScanControl::default();
+            CANCEL_HOOK.with(|hook| {
+                *hook.borrow_mut() = Some((data.path().to_owned(), step, control.clone()))
+            });
+            let result = reindex_controlled(
+                data.path(),
+                source.path(),
+                &engines,
+                &source.path().join("no-assets"),
+                |_| {},
+                &control,
+            )
+            .await;
+            CANCEL_HOOK.with(|hook| *hook.borrow_mut() = None);
+            assert!(!control.is_cancelled());
+            assert!(!control.cancel());
+            let docs = crate::storage::State::review_documents(&resolve(data.path())).unwrap();
+            if step == "before revoke commit" {
+                assert!(result.is_err());
+                assert!(docs.is_empty());
+            } else {
+                result.unwrap();
+                assert_eq!(docs[0].chunks[0].text, "Published replacement content.");
+            }
+        }
+    }
+
+    #[test]
+    fn publication_crash_child() {
+        let Some(data) = std::env::var_os("VZ_PUBLICATION_DATA") else {
+            return;
+        };
+        let source = PathBuf::from(std::env::var_os("VZ_PUBLICATION_SOURCE").unwrap());
+        let (mut engines, assets) = embedding_fixture();
+        if std::env::var_os("VZ_PUBLICATION_RECIPE_CHANGE").is_some() {
+            engines.recipe.model.push_str("-crash");
+        }
+        let scanning =
+            std::env::var("VZ_PUBLICATION_CRASH_STEP").ok().as_deref() == Some("scanning");
+        tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(reindex(
+                Path::new(&data),
+                &source,
+                &engines,
+                &assets,
+                |_| {
+                    if scanning {
+                        fs::write(
+                            std::env::var_os("VZ_PUBLICATION_READY").unwrap(),
+                            "scanning",
+                        )
+                        .unwrap();
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                },
+                || false,
+            ))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn t5_t6_t7_process_death_at_production_publication_boundaries() {
+        use std::process::{Command, Stdio};
+        let (engines, assets) = embedding_fixture();
+        for step in [
+            "scanning",
+            "generation install",
+            "before sqlite commit",
+            "after sqlite commit",
+            "before pointer rename",
+            "after pointer rename",
+        ] {
+            let data = tempfile::tempdir().unwrap();
+            let a = tempfile::tempdir().unwrap();
+            let b = tempfile::tempdir().unwrap();
+            fs::write(
+                a.path().join("a.txt"),
+                "Original crash-safe published content.",
+            )
+            .unwrap();
+            fs::write(b.path().join("b.txt"), "Replacement durable generation.").unwrap();
+            reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+                .await
+                .unwrap();
+            let old = resolve(data.path());
+            let ready = data.path().join("child-ready");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "active_index::tests::publication_crash_child",
+                    "--nocapture",
+                ])
+                .env("VZ_PUBLICATION_DATA", data.path())
+                .env("VZ_PUBLICATION_SOURCE", b.path())
+                .env("VZ_PUBLICATION_READY", &ready)
+                .env("VZ_PUBLICATION_CRASH_STEP", step)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if step.contains("pointer") {
+                command.env("VZ_PUBLICATION_RECIPE_CHANGE", "1");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !ready.exists() {
+                if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child did not reach {step}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            child.kill().unwrap();
+            child.wait().unwrap();
+            let root = resolve(data.path());
+            // Read first, before any recovery or search: committed WAL content is visible.
+            let docs = crate::storage::State::review_documents(&root).unwrap();
+            let committed = step == "after sqlite commit" || step == "after pointer rename";
+            assert_eq!(
+                docs[0].chunks[0].text,
+                if committed {
+                    "Replacement durable generation."
+                } else {
+                    "Original crash-safe published content."
+                },
+                "{step}"
+            );
+            if step == "after pointer rename" {
+                assert_ne!(root, old);
+            }
+            let state = crate::storage::State::open(&root).unwrap();
+            for generation in state.generations().unwrap() {
+                state.document(&generation).unwrap();
+            }
+            drop(state);
+            {
+                let _fence = selection_fence(data.path(), true).unwrap();
+                cleanup_start(data.path()).unwrap();
+            }
+            if committed && step.contains("pointer") {
+                assert!(!old.exists());
+            }
+            if step == "scanning" {
+                let result = reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+                    .await
+                    .unwrap();
+                assert_eq!(result.skipped, 1);
+            }
+        }
+    }
+
     #[test]
     fn candidate_decision_table() {
         use crate::index::{Progress, ScanOutcome};
@@ -895,7 +1374,10 @@ mod tests {
         assert_eq!(decide_scan(&outcome, false, false), ScanDecision::Publish);
         outcome.stats.infrastructure_failed = 1;
         outcome.failed_infrastructure.insert("failed.txt".into());
-        assert_eq!(decide_scan(&outcome, true, true), ScanDecision::Publish);
+        assert_eq!(
+            decide_scan(&outcome, true, true),
+            ScanDecision::RevokeSource
+        );
         assert_eq!(
             decide_scan(&outcome, false, false),
             ScanDecision::RevokeFailedPaths
@@ -1038,7 +1520,11 @@ mod tests {
             fs::read(data.path().join("active-index.json")).unwrap(),
             before
         );
-        assert_eq!(fs::read_dir(data.path()).unwrap().count(), 2);
+        assert_eq!(fs::read_dir(data.path()).unwrap().count(), 3);
+        assert_eq!(
+            fs::read_dir(data.path().join(".vz-scan")).unwrap().count(),
+            0
+        );
         fs::remove_file(data.path().join("active-index.json")).unwrap();
         assert!(activate_with(
             data.path(),
@@ -1341,7 +1827,7 @@ mod tests {
         assert!(error.to_string().contains("1 indexed"));
         assert!(error.to_string().contains("1 failed"));
         assert!(error.to_string().contains("1 infrastructure"));
-        assert!(!format!("{error:#}").contains("resume"));
+        assert!(format!("{error:#}").contains("resume"));
         for cancel_after_file in [false, true] {
             if cancel_after_file {
                 let cancelled = AtomicBool::new(false);
@@ -1429,8 +1915,8 @@ mod tests {
         assert_eq!(resolve(data.path()), old);
         assert_eq!(
             fs::read_dir(data.path().join("indexes")).unwrap().count(),
-            1,
-            "a refused different-source candidate is discarded entirely"
+            2,
+            "one private candidate is retained beside the active index"
         );
         let reopened = crate::storage::State::open(&resolve(data.path())).unwrap();
         assert_eq!(reopened.documents().unwrap()[0].sha256, documents[0].sha256);
@@ -1599,7 +2085,7 @@ mod tests {
             .unwrap();
         let generations = state.generations().unwrap();
         fs::write(b.path().join("bad.pdf"), "not a PDF").unwrap();
-        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).ok();
         // Keep the zero-success regression and extend it with a successful B row.
         for successful_b_file in [false, true] {
             if successful_b_file {
@@ -1621,7 +2107,7 @@ mod tests {
             assert_eq!(stats.infrastructure_failed, 1);
             assert_eq!(stats.completed, usize::from(successful_b_file));
             assert_eq!(
-                fs::read(data.path().join("active-index.json")).unwrap(),
+                fs::read(data.path().join("active-index.json")).ok(),
                 pointer
             );
             drop(state);
@@ -1675,7 +2161,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            let before = fs::read(data.path().join("active-index.json")).unwrap();
+            let before = fs::read(data.path().join("active-index.json")).ok();
             let generations = crate::storage::State::open(data.path())
                 .unwrap()
                 .generations()
@@ -1695,19 +2181,15 @@ mod tests {
                 .unwrap();
             } else {
                 let mut state = crate::storage::State::open(data.path()).unwrap();
-                let stats =
+                let error =
                     crate::index::index(&mut state, source.path(), &engines, &assets, |_| {})
                         .await
-                        .unwrap();
-                assert_eq!(
-                    (stats.completed, stats.failed, stats.infrastructure_failed),
-                    (0, 1, 0)
-                );
+                        .unwrap_err();
+                assert!(error.to_string().contains("re-index required"));
+                assert_eq!(state.documents().unwrap().len(), 1);
+                continue;
             }
-            assert_ne!(
-                fs::read(data.path().join("active-index.json")).unwrap(),
-                before
-            );
+            assert_ne!(fs::read(data.path().join("active-index.json")).ok(), before);
             let (state, _) =
                 crate::storage::State::open_index(data.path(), &engines.recipe).unwrap();
             assert!(state.documents().unwrap().is_empty());
@@ -1753,7 +2235,7 @@ mod tests {
                     .unwrap();
             }
             let selected = last_indexed_folder(data.path()).unwrap();
-            let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+            let pointer = fs::read(data.path().join("active-index.json")).ok();
             let generations = crate::storage::State::open(data.path())
                 .unwrap()
                 .generations()
@@ -1789,7 +2271,7 @@ mod tests {
                 assert_eq!(stats.infrastructure_failed, 1);
             }
             assert_eq!(
-                fs::read(data.path().join("active-index.json")).unwrap(),
+                fs::read(data.path().join("active-index.json")).ok(),
                 pointer
             );
             assert_eq!(
@@ -1854,6 +2336,18 @@ mod tests {
                         fs::read(data.path().join("active-index.json")).unwrap(),
                         pointer
                     );
+                    if !changed_recipe {
+                        assert!(crate::storage::State::open(&resolve(data.path())).is_err());
+                        assert_eq!(
+                            crate::storage::State::review_documents(&resolve(data.path())).unwrap()
+                                [0]
+                            .chunks[0]
+                                .text,
+                            "Published original text."
+                        );
+                        checked += 1;
+                        return;
+                    }
                     let reader = crate::storage::State::open(&resolve(data.path())).unwrap();
                     assert_eq!(reader.generations().unwrap(), generations);
                     assert_eq!(reader.documents().unwrap().len(), 1);
@@ -1884,6 +2378,19 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(checked, 2);
+            if !changed_recipe {
+                assert_eq!(
+                    fs::read(data.path().join("active-index.json")).unwrap(),
+                    pointer
+                );
+                assert_eq!(
+                    crate::storage::State::review_documents(&resolve(data.path()))
+                        .unwrap()
+                        .len(),
+                    2
+                );
+                continue;
+            }
             let mut original = concurrent.unwrap();
             assert_eq!(
                 original.documents().unwrap()[0].chunks[0].text,
@@ -1934,13 +2441,13 @@ mod tests {
             .await
             .unwrap();
         let generations = state.generations().unwrap();
-        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).ok();
         fs::write(source.path().join("a.txt"), "Unpublished replacement.").unwrap();
         fs::write(source.path().join("z.txt"), "Unpublished extra document.").unwrap();
         let mut checks = 0;
         crate::index::index(&mut state, source.path(), &engines, &assets, |_| {
             assert_eq!(
-                fs::read(data.path().join("active-index.json")).unwrap(),
+                fs::read(data.path().join("active-index.json")).ok(),
                 pointer
             );
             let selected = resolve_state(data.path());
@@ -1959,8 +2466,8 @@ mod tests {
         .unwrap();
         assert_eq!(checks, 2);
         assert_ne!(state.generations().unwrap(), generations);
-        assert_ne!(
-            fs::read(data.path().join("active-index.json")).unwrap(),
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).ok(),
             pointer
         );
         drop(state);
@@ -1994,7 +2501,7 @@ mod tests {
         crate::index::index(&mut state, source.path(), &engines, &assets, |_| {})
             .await
             .unwrap();
-        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).ok();
         let generations = state.generations().unwrap();
         let error = crate::index::index(
             &mut state,
@@ -2007,7 +2514,7 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("source unavailable"));
         assert_eq!(
-            fs::read(data.path().join("active-index.json")).unwrap(),
+            fs::read(data.path().join("active-index.json")).ok(),
             pointer
         );
         assert_eq!(state.generations().unwrap(), generations);
@@ -2055,6 +2562,7 @@ mod tests {
                 .recipe
                 .model
                 .truncate(engines.recipe.model.len() - "-interim".len());
+            engines.recipe.model.push_str("-published");
             FAULTS.with(|faults| faults.borrow_mut().push((data.path().to_owned(), step)));
             let error = reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
                 .await
@@ -2068,7 +2576,7 @@ mod tests {
             let published = resolve(data.path());
             assert_ne!(
                 published, candidate,
-                "same-recipe scans publish a fresh snapshot"
+                "recipe changes publish a fresh candidate"
             );
             assert_eq!(
                 last_indexed_folder(&published).as_deref(),
@@ -2091,7 +2599,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_scan_keeps_original_error_when_cleanup_also_fails() {
+    async fn discard_does_not_run_publication_cleanup() {
         let (engines, assets) = embedding_fixture();
         let data = tempfile::tempdir().unwrap();
         FAULTS.with(|faults| {
@@ -2113,7 +2621,7 @@ mod tests {
         let chain = format!("{error:#}");
         assert!(chain.contains("source missing"), "{chain}");
         assert!(
-            chain.contains("injected generation cleanup failure"),
+            !chain.contains("injected generation cleanup failure"),
             "{chain}"
         );
         assert!(!chain.contains("Index published"));

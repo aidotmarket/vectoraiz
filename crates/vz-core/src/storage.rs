@@ -23,6 +23,7 @@ pub struct State {
     pub root: PathBuf,
     pub(crate) location: PathBuf,
     _lock: FileLock,
+    workspace: bool,
 }
 struct FileLock(std::fs::File);
 impl Drop for FileLock {
@@ -33,7 +34,7 @@ impl Drop for FileLock {
 impl State {
     // Review callers already hold the selected index writer fence. Never
     // recover, upgrade locks, or create SQLite sidecar files on this path.
-    pub(crate) fn review_connection(root: &Path) -> Result<Connection> {
+    pub fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
             "readonly_shm=1"
@@ -50,6 +51,45 @@ impl State {
             format!("file:{uri}?{mode}"),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )?)
+    }
+
+    /// Canonical committed DB commitment and referenced generations from one read
+    /// transaction. Values have explicit type tags and big-endian length prefixes;
+    /// table/row boundaries and NULL are distinct. Jobs expose the latest per path.
+    pub fn review_content(root: &Path) -> Result<(String, HashSet<String>)> {
+        use sha2::{Digest, Sha256};
+        let db = Self::review_connection(root)?;
+        let tx = db.unchecked_transaction()?;
+        let mut hash = Sha256::new();
+        let mut generations = HashSet::new();
+        for (table, query) in [
+            ("documents", "SELECT doc_id,path,size,mtime,sha256,generation FROM documents ORDER BY doc_id"),
+            ("index_metadata", "SELECT key,value FROM index_metadata ORDER BY key"),
+            ("jobs", "SELECT path,status,reason FROM jobs WHERE id IN (SELECT max(id) FROM jobs GROUP BY path) ORDER BY path"),
+        ] {
+            hash.update((table.len() as u64).to_be_bytes()); hash.update(table.as_bytes());
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[table],|r| r.get(0))?;
+            if !exists { hash.update([0]); continue; }
+            let mut statement = tx.prepare(query)?;
+            let columns = statement.column_count();
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                hash.update([1]);
+                for col in 0..columns {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(col)? {
+                        ValueRef::Null => hash.update([0]),
+                        ValueRef::Integer(n) => { hash.update([1]); hash.update(8_u64.to_be_bytes()); hash.update(n.to_be_bytes()); },
+                        ValueRef::Text(bytes) => { hash.update([2]); hash.update((bytes.len() as u64).to_be_bytes()); hash.update(bytes); },
+                        _ => anyhow::bail!("invalid index value"),
+                    }
+                }
+                if table == "documents" { generations.insert(row.get(5)?); }
+            }
+            hash.update([0]);
+        }
+        tx.commit()?;
+        Ok((format!("{:x}", hash.finalize()), generations))
     }
 
     /// Private seller selection; absent on indexes created before this metadata.
@@ -202,22 +242,76 @@ impl State {
             .write(true)
             .open(root.join("writer.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock).context("index already open by another process")?;
-        let db = Connection::open(root.join("state.sqlite"))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,path TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
-            CREATE INDEX IF NOT EXISTS jobs_path ON jobs(path);
-            CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-            UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running';")?;
+        let db = Self::publication_connection(root)?;
+        let tx = db.unchecked_transaction()?;
+        Self::initialize_schema(&tx)?;
+        tx.execute("UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running'",[])?;
+        tx.commit()?;
         let state = Self {
             db,
             root: root.to_owned(),
             location,
             _lock: FileLock(lock),
+            workspace: false,
         };
         state.recover()?;
         Ok(state)
     }
+    pub(crate) fn publication_connection(root: &Path) -> Result<Connection> {
+        std::fs::create_dir_all(root.join("generations"))?;
+        let db = Connection::open(root.join("state.sqlite"))?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        Ok(db)
+    }
+
+    pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,path TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
+            CREATE INDEX IF NOT EXISTS jobs_path ON jobs(path);
+            CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        Ok(())
+    }
+
+    pub(crate) fn open_workspace(root: &Path, source: &str, recipe: &str) -> Result<Self> {
+        std::fs::create_dir_all(root.join("generations"))?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("scan-writer.lock"))?;
+        fs2::FileExt::try_lock_exclusive(&lock)?;
+        let db = Connection::open(root.join("scan.sqlite"))?;
+        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+            CREATE TABLE IF NOT EXISTS scan_state(source_identity TEXT NOT NULL, recipe_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS scan_documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);")?;
+        if db.query_row("SELECT count(*) FROM scan_state", [], |r| {
+            r.get::<_, usize>(0)
+        })? == 0
+        {
+            db.execute(
+                "INSERT INTO scan_state VALUES(?1,?2)",
+                params![source, recipe],
+            )?;
+        }
+        let state = Self {
+            db,
+            root: root.to_owned(),
+            location: root.to_owned(),
+            _lock: FileLock(lock),
+            workspace: true,
+        };
+        state.recover()?;
+        Ok(state)
+    }
+
+    pub(crate) fn table(&self) -> &'static str {
+        if self.workspace {
+            "scan_documents"
+        } else {
+            "documents"
+        }
+    }
+
     /// All query/export entry points open through this recipe gate before inference.
     pub fn open_index(
         root: &Path,
@@ -257,7 +351,7 @@ impl State {
     pub fn recover(&self) -> Result<()> {
         let active: HashSet<String> = self
             .db
-            .prepare("SELECT generation FROM documents")?
+            .prepare(&format!("SELECT generation FROM {}", self.table()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for entry in std::fs::read_dir(self.root.join("generations"))? {
@@ -271,7 +365,10 @@ impl State {
     pub fn generations(&self) -> Result<Vec<String>> {
         Ok(self
             .db
-            .prepare("SELECT generation FROM documents ORDER BY doc_id")?
+            .prepare(&format!(
+                "SELECT generation FROM {} ORDER BY doc_id",
+                self.table()
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -318,8 +415,9 @@ impl State {
         Ok(id)
     }
     pub fn commit(&mut self, doc: &Document, mtime: &str, generation: &str) -> Result<()> {
+        let table = self.table();
         let tx = self.db.transaction()?;
-        tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path,size=excluded.size,mtime=excluded.mtime,sha256=excluded.sha256,generation=excluded.generation", params![doc.doc_id, doc.path, doc.bytes, mtime, doc.sha256, generation])?;
+        tx.execute(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path,size=excluded.size,mtime=excluded.mtime,sha256=excluded.sha256,generation=excluded.generation"), params![doc.doc_id, doc.path, doc.bytes, mtime, doc.sha256, generation])?;
         tx.commit()?;
         Ok(())
     }

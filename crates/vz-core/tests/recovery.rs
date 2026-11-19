@@ -123,3 +123,64 @@ fn ocr_status_commits_with_generation_and_old_metadata_reopens() {
     let state = State::open(temp.path()).unwrap();
     assert!(state.documents().unwrap()[0].needs_ocr_pages.is_empty());
 }
+
+#[tokio::test]
+async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_misses() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    std::fs::write(a.path().join("a.txt"), "Published recovery document.").unwrap();
+    std::fs::write(b.path().join("b.txt"), "Staged recovery document.").unwrap();
+    active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    let root = active_index::resolve(data.path());
+    let stopped = AtomicBool::new(false);
+    assert!(active_index::reindex(
+        data.path(),
+        b.path(),
+        &engines,
+        &assets,
+        |_| stopped.store(true, Ordering::SeqCst),
+        || stopped.load(Ordering::SeqCst)
+    )
+    .await
+    .is_err());
+    let staged = {
+        let db = rusqlite::Connection::open(root.join(".vz-scan/scan.sqlite")).unwrap();
+        db.query_row("SELECT generation FROM scan_documents", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+    };
+    std::fs::write(
+        root.join(".vz-scan/generations")
+            .join(&staged)
+            .join("document.json"),
+        "damaged",
+    )
+    .unwrap();
+    let result = active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!((result.completed, result.skipped), (1, 0));
+    assert!(!root.join(".vz-scan/generations").join(staged).exists());
+    let generation = State::review_connection(&root)
+        .unwrap()
+        .query_row("SELECT generation FROM documents", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    std::fs::remove_dir_all(root.join("generations").join(&generation)).unwrap();
+    let result = active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!((result.completed, result.skipped), (1, 0));
+    assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+}

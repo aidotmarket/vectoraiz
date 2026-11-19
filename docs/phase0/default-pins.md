@@ -51,7 +51,8 @@ resolver. With no valid pointer, they fall back to `<data_root>/phase0-index`,
 whose recipe is read from its own `recipe.json`. Missing directories and paths
 outside the data root (including symlink escapes) are ignored safely. The pointer
 ID must equal the canonical hash of the target recipe, and its directory must
-be `indexes/<recipe-id>` or the legacy `phase0-index` with its own matching ID.
+be `indexes/<recipe-id>-<uuid>`, the older `indexes/<recipe-id>`, or the legacy
+`phase0-index` with its own matching ID. New candidates always use fresh UUID names.
 An invalid pointer marks the library as needing re-index; no unverified target
 is searched. CLI
 Search/Ask/pack accept a library data root through `--state` as well as the
@@ -66,11 +67,13 @@ It runs the existing resumable indexer in the new recipe directory. Only a
 finished run activates that directory, using a temporary pointer file, fsync,
 and atomic rename (and directory fsync on Unix). Initial recipe creation also
 uses temp + fsync + rename, so interruption cannot leave partial recipe JSON.
-Publication requires no infrastructure failures. A scan with no successful
-documents may activate only when the active index has no indexed documents
-(including a first index), or the folder has no supported documents. An all-failed
-scan never replaces an active index containing documents; its candidate is retained
-for retry. The selected review folder is persisted only after activation.
+Publication requires no infrastructure failures. Content failures alone permit a
+completed walk of the current source to publish, including an all-content-failed
+walk that revokes every old document. A different folder with no successes cannot
+replace a populated index. Infrastructure failure leaves successes private for
+retry; for the current folder it revokes absent paths, content failures, and paths
+whose bytes changed before failing. Unchanged infrastructure failures retain their
+published rows. Selection changes only on successful publication.
 Unsupported extensions are
 excluded at scan time, before hashing or worker launch; the parser also rejects
 unsupported formats as document failures for callers bypassing the scanner.
@@ -86,8 +89,8 @@ unsupported formats as document failures for callers bypassing the scanner.
 | PDFium page load/text/render error after the document loaded (damaged page) | Document | Allowed |
 | PDFium wrapped I/O (any stage); internal file/page/unknown errors while loading; other unrecognized load failures | Infrastructure (fail closed) | Blocked |
 
-All-failed nonempty runs remain blocked even when every failure is a document
-failure. Infrastructure errors keep the pointer unchanged and the candidate
+All-failed nonempty runs of a different source remain blocked when replacing a
+populated index. Infrastructure errors keep the pointer unchanged and successes
 resumable. The UI reports “Re-index did not finish” once, with real progress
 counts when available and the first three failed file paths and reasons.
 Cancel or kill before completion leaves the pointer unchanged; the next Re-index
@@ -97,9 +100,12 @@ published; a matching legacy directory appearing during the run cannot replace i
 
 If the legacy recipe already equals current pins, Index adopts `phase0-index`
 in place and resumes its existing documents instead of rebuilding.
-The legacy index is never moved or deleted. Old recipe directories and old
-model files are never deleted automatically. Both indexes are kept, so rebuilding
-requires disk space for the new index in addition to the old index and models.
+Publication deletes unreferenced generations, superseded recipe directories and
+superseded flat/legacy index data. Reader-pinned directories are reclaimed at the
+next scan or app start after the reader releases them. One private retry workspace
+is retained; a no-change scan creates no workspace and writes nothing. Model files
+are not deleted by index cleanup. Testers upgrading from a version-1 listing review
+must re-review once after a scan changes the bound tree. Downgrade is unsupported.
 
 ## Verification limits
 
