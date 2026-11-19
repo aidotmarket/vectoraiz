@@ -1181,11 +1181,19 @@ fn check_regular(path: &Path) -> Result<fs::Metadata> {
 fn hash_file(path: &Path) -> Result<FileHash> {
     let metadata = check_regular(path)?;
     ensure!(metadata.len() <= MAX_BYTES, "review file byte limit");
-    let mut reader = File::open(path)?.take(MAX_BYTES + 1);
+    // An empty writer.lock still participates in the tree commitment. Do not
+    // issue even an EOF read: Windows rejects ReadFile under its byte-range
+    // lock. Taking zero bytes preserves the empty-file hash without that read.
+    let limit = if metadata.len() == 0 {
+        0
+    } else {
+        MAX_BYTES + 1
+    };
+    let mut reader = File::open(path)?.take(limit);
     let mut hasher = Hasher::new();
     let size = std::io::copy(&mut reader, &mut hasher)?;
     ensure!(
-        size == metadata.len() && size <= MAX_BYTES,
+        size == metadata.len() && size <= MAX_BYTES && check_regular(path)?.len() == size,
         "review input changed while hashing"
     );
     Ok(FileHash {

@@ -26,6 +26,17 @@ pub struct State {
     workspace: bool,
 }
 struct FileLock(std::fs::File);
+
+/// A committed review snapshot could not be obtained within the retry budget.
+#[derive(Debug)]
+pub struct ReviewDatabaseBusy;
+impl std::fmt::Display for ReviewDatabaseBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("review database busy; retry after indexing")
+    }
+}
+impl std::error::Error for ReviewDatabaseBusy {}
+
 impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.0);
@@ -57,8 +68,33 @@ impl State {
     /// transaction. Values have explicit type tags and big-endian length prefixes;
     /// table/row boundaries and NULL are distinct. Jobs expose the latest per path.
     pub fn review_content(root: &Path) -> Result<(String, HashSet<String>)> {
+        // Retry the whole read transaction, never a partial digest. Keep SQLite
+        // lock contention bounded and distinguish it from changed content.
+        let mut retries = 2;
+        loop {
+            match Self::review_content_once(root) {
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::SqliteFailure(code, _))
+                            if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    if retries == 0 {
+                        return Err(error.context(ReviewDatabaseBusy));
+                    }
+                    retries -= 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn review_content_once(root: &Path) -> Result<(String, HashSet<String>)> {
         use sha2::{Digest, Sha256};
         let db = Self::review_connection(root)?;
+        db.busy_timeout(std::time::Duration::from_millis(100))?;
         let tx = db.unchecked_transaction()?;
         let mut hash = Sha256::new();
         let mut generations = HashSet::new();
@@ -626,6 +662,45 @@ impl crate::Store for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_content_observes_only_committed_rows_during_a_writer_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        let before = State::review_content(root.path()).unwrap();
+        let tx = state.db.unchecked_transaction().unwrap();
+        tx.execute("INSERT INTO index_metadata VALUES('test','pending')", [])
+            .unwrap();
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+        tx.rollback().unwrap();
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+        state
+            .db
+            .execute("INSERT INTO index_metadata VALUES('test','published')", [])
+            .unwrap();
+        assert_ne!(State::review_content(root.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn review_content_lock_contention_is_bounded_and_named() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        let before = State::review_content(root.path()).unwrap();
+        state
+            .db
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let start = std::time::Instant::now();
+        let error = State::review_content(root.path()).unwrap_err();
+        assert!(
+            error.downcast_ref::<ReviewDatabaseBusy>().is_some(),
+            "{error:#}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        state.db.execute_batch("ROLLBACK").unwrap();
+        drop(state);
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+    }
 
     #[test]
     fn review_failure_reasons_use_only_latest_failed_jobs_without_writes() {
