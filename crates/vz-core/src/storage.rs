@@ -21,6 +21,7 @@ use std::{
 pub struct State {
     pub db: Connection,
     pub root: PathBuf,
+    pub(crate) location: PathBuf,
     _lock: FileLock,
 }
 struct FileLock(std::fs::File);
@@ -32,7 +33,7 @@ impl Drop for FileLock {
 impl State {
     // Review callers already hold the selected index writer fence. Never
     // recover, upgrade locks, or create SQLite sidecar files on this path.
-    fn review_connection(root: &Path) -> Result<Connection> {
+    pub(crate) fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
             "readonly_shm=1"
@@ -191,6 +192,9 @@ impl State {
         )
     }
     pub fn open(root: &Path) -> Result<Self> {
+        let location = crate::active_index::state_location(root);
+        let resolved = crate::active_index::resolve_state(root);
+        let root = resolved.as_path();
         std::fs::create_dir_all(root.join("generations"))?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
@@ -208,6 +212,7 @@ impl State {
         let state = Self {
             db,
             root: root.to_owned(),
+            location,
             _lock: FileLock(lock),
         };
         state.recover()?;
@@ -218,6 +223,7 @@ impl State {
         root: &Path,
         selected: &crate::engine::Recipe,
     ) -> Result<(Self, crate::engine::Recipe)> {
+        let location = crate::active_index::state_location(root);
         anyhow::ensure!(
             !crate::active_index::needs_pointer_repair(root),
             "active index pointer invalid; re-index required"
@@ -228,7 +234,8 @@ impl State {
             root.join("recipe.json").is_file(),
             "index recipe missing; re-index required"
         );
-        let state = Self::open(&root)?;
+        let mut state = Self::open(&root)?;
+        state.location = location;
         let recipe = state.validate_recipe(selected)?;
         Ok((state, recipe))
     }

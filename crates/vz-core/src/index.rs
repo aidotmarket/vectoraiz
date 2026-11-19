@@ -1,4 +1,4 @@
-//! Folder scan and resumable per-file jobs.
+//! Candidate folder scans with explicit per-file outcomes.
 use crate::{
     engine::Engines,
     pipeline::{chunk, sha256, Document},
@@ -104,13 +104,6 @@ fn unchanged_document(
     Ok(None)
 }
 
-pub(crate) fn source_unavailable(error: &anyhow::Error) -> bool {
-    matches!(
-        error.to_string().as_str(),
-        "source missing" | "source unavailable during scan"
-    )
-}
-
 pub async fn index(
     state: &mut State,
     folder: &Path,
@@ -118,41 +111,43 @@ pub async fn index(
     assets: &Path,
     progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let previous = crate::active_index::last_indexed_folder(&state.root);
-    let current_source = previous
-        .as_ref()
-        .is_none_or(|previous| crate::active_index::same_source(folder, Path::new(previous)));
-    let (stats, seen) = match scan(state, folder, engines, assets, progress).await {
-        Err(error) if source_unavailable(&error) => {
-            // An unavailable current source revokes its cached content.
-            state.db.execute("DELETE FROM documents", [])?;
-            state.recover()?;
-            return Err(error).context("source unavailable");
-        }
-        result => result?,
-    };
-    // Current-source revocation is unconditional after a completed walk.
-    // A different source must earn publication before replacing the selection.
-    if current_source
-        || (stats.ensure_publishable().is_ok()
-            && (stats.total == 0 || stats.completed + stats.skipped > 0))
-    {
-        prepare_source(state, folder, &seen)?;
+    let location = state.location.clone();
+    let result = crate::active_index::scan_candidate(
+        &location,
+        folder,
+        engines,
+        assets,
+        progress,
+        || false,
+        Some(state),
+    )
+    .await;
+    let selected = crate::active_index::resolve_state(&location);
+    if selected.canonicalize().ok() != state.root.canonicalize().ok() {
+        *state = State::open(&location).map_err(|error| {
+            error.context(crate::active_index::PublishedFailure("state reopen"))
+        })?;
     }
-    state.recover()?;
-    Ok(stats)
+    result
 }
 
-pub(crate) fn publish_source(state: &State, folder: &Path, seen: &HashSet<String>) -> Result<()> {
-    prepare_source(state, folder, seen)?;
-    state.recover()?;
-    Ok(())
+/// Everything the publication decision needs; scan writes exist only in a candidate.
+#[derive(Default)]
+pub(crate) struct ScanOutcome {
+    pub completed_walk: bool,
+    pub source: Option<std::path::PathBuf>,
+    pub seen: HashSet<String>,
+    pub succeeded: HashSet<String>,
+    pub failed_content: HashSet<String>,
+    pub failed_infrastructure: HashSet<String>,
+    pub stats: Progress,
+    pub unavailable: bool,
+    pub error: Option<anyhow::Error>,
 }
 
-// Commit source metadata and pruning before pointer publication. Recovery waits
-// until activation so a failed promotion can restore pruned rows safely.
+// Commit source metadata and pruning only in the private candidate. The caller
+// supplies successful paths, so absent paths and failed replacements are revoked.
 pub(crate) fn prepare_source(state: &State, folder: &Path, seen: &HashSet<String>) -> Result<()> {
-    let folder = folder.canonicalize()?;
     let indexed: Vec<String> = state
         .db
         .prepare("SELECT path FROM documents")?
@@ -179,11 +174,16 @@ pub(crate) async fn scan(
     engines: &Engines,
     assets: &Path,
     mut progress: impl FnMut(&Progress),
-) -> Result<(Progress, HashSet<String>)> {
+) -> Result<ScanOutcome> {
     let folder = match folder.canonicalize() {
         Ok(folder) if folder.is_dir() => folder,
         _ => {
-            bail!("source missing");
+            return Ok(ScanOutcome {
+                source: crate::active_index::source_identity(folder),
+                unavailable: true,
+                error: Some(anyhow::anyhow!("source missing")),
+                ..Default::default()
+            });
         }
     };
     initialize_recipe(&state.root, &engines.recipe, || Ok(()))?;
@@ -192,7 +192,14 @@ pub(crate) async fn scan(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                return Err(error).context("source unavailable during scan");
+                return Ok(ScanOutcome {
+                    source: Some(folder),
+                    unavailable: true,
+                    error: Some(
+                        anyhow::Error::new(error).context("source unavailable during scan"),
+                    ),
+                    ..Default::default()
+                });
             }
         };
         if entry.file_type().is_file()
@@ -223,13 +230,17 @@ pub(crate) async fn scan(
         total: files.len(),
         ..Default::default()
     };
-    let mut seen = HashSet::new();
+    let mut outcome = ScanOutcome {
+        completed_walk: true,
+        source: Some(folder.clone()),
+        ..Default::default()
+    };
     for path in files {
         let path_text = path
             .to_str()
             .context("source path must be UTF-8")?
             .to_owned();
-        seen.insert(path_text.clone());
+        outcome.seen.insert(path_text.clone());
         stats.path = path_text.clone();
         stats.reason = None;
         stats.needs_ocr_pages.clear();
@@ -333,6 +344,7 @@ pub(crate) async fn scan(
         .await;
         match result {
             Ok(changed) => {
+                outcome.succeeded.insert(path_text.clone());
                 if changed {
                     stats.completed += 1;
                 } else {
@@ -351,7 +363,10 @@ pub(crate) async fn scan(
             }
             Err(error) => {
                 stats.failed += 1;
-                if !crate::failures::is_content(&error) {
+                if crate::failures::is_content(&error) {
+                    outcome.failed_content.insert(path_text.clone());
+                } else {
+                    outcome.failed_infrastructure.insert(path_text.clone());
                     stats.infrastructure_failed += 1;
                     if stats.infrastructure_examples.len() < 3 {
                         stats.infrastructure_examples.push(format!(
@@ -380,7 +395,8 @@ pub(crate) async fn scan(
         }
         progress(&stats);
     }
-    Ok((stats, seen))
+    outcome.stats = stats;
+    Ok(outcome)
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Citation {

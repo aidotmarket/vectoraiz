@@ -18,7 +18,7 @@ records local evidence separately from hosted CI and hardware claims.
 | Pack integrity | All six payload hashes match; Parquet references resolve; text first lines have no comma or tab; originals use neutral names |
 | Example query | Clean Python dependency environment loads Parquet; recomputes the query embedding through the exact recorded recipe and linked CLI engine; expected top three match |
 | Upload | Explicit CLI upload to pinned MinIO; all seven files including the manifest download byte-for-byte; server stopped unconditionally |
-| Source revocation | An unavailable current source (explicit index or library root, using persisted or inferred legacy selection) fails explicitly and removes its searchable cached content. Library revocations affect the active index even when rebuilding with a changed recipe. A different missing folder preserves the inferred legacy selection. A failed switch to a different folder keeps the previous selection; overlapping files still follow per-file replacement/revocation rules. A completed current-source scan removes deleted paths from the active index even with a changed recipe and another file failing infrastructure checks. An explicit-index scan of a different folder with no successful documents retains the previous selection, generations and search results |
+| Source revocation | Both entry points scan private candidates; only pointer publication changes the selected snapshot. Completed current-source scans revoke absent and failed paths under every recipe. Unavailable current sources publish a separate revocation. Refused different-source switches discard candidate writes; overlapping failed paths can publish a separate revocation of the previous selection. |
 | UI | Four Vitest tests; actual debug WebView logs `indexed`, `searched`, `answered` and `VECTORAIZ_PIPELINE_SMOKE_TEST_OK` |
 | Build and notices | Rust 1.90 formatting, clippy with warnings denied, workspace tests and debug app build; TypeScript/Vite build; Rust/UI and native PDFium/llama.cpp notices generated |
 
@@ -84,3 +84,21 @@ tail without case only after the surviving ancestor demonstrates insensitive
 case lookup. The macOS/Windows regression follows the actual test volume's
 case semantics. Known limit: non-ASCII case folding of removed path components
 is not implemented; use the persisted spelling for those paths.
+
+Fold 5 candidate scans: every library rebuild and explicit-index scan writes a
+private snapshot, copying the active index for matching recipes. Publication by
+pointer rename is the only visibility change; failed promotion discards scan
+writes. Post-rename durability/cleanup failures retain the published selection.
+Stored canonical source paths are historical identities and are never resolved
+again; only the requested path uses canonicalization and the missing-tail rule.
+
+| Scan outcome | Publication decision |
+|---|---|
+| Current source, completed walk, any recipe | Publish candidate; revoke absent paths and failed replacements, including their generations |
+| Current source unavailable or missing | Publish a separate snapshot revoking that source's documents |
+| Different source, completed walk | Publish only without infrastructure failures and with successes (or an empty folder); all-content-failed folders publish only over an empty index |
+| Different source refused | Discard candidate entirely; preserve previous documents, generations and selection, except failed overlapping paths revoked by a separate publication |
+
+Published snapshots are retained so readers already holding an old State remain
+consistent; revoked generations are absent from the newly selected snapshot.
+Automatic garbage collection of superseded snapshots is not implemented.
