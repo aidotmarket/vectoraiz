@@ -11,7 +11,7 @@ pub(crate) fn model_load_error(_: anyhow::Error) -> anyhow::Error {
 
 pub(crate) fn reindex_error(error: anyhow::Error) -> String {
     let detail = error.to_string();
-    if detail.starts_with("Re-index did not finish") {
+    if detail.starts_with("Re-index did not finish") || detail.starts_with("Index published;") {
         detail
     } else {
         "Re-index did not finish: indexing unavailable; retry indexing".into()
@@ -215,6 +215,16 @@ mod tests {
             "preflight changed database contents"
         );
         assert_eq!(snapshot(root), files, "preflight changed files");
+    }
+
+    #[test]
+    fn published_index_warning_preserves_outcome_without_private_cause() {
+        for step in ["durability", "generation cleanup"] {
+            let outcome = format!("Index published; {step} step must be retried");
+            let error = anyhow::anyhow!("private filesystem cause /private/source")
+                .context(outcome.clone());
+            assert_eq!(reindex_error(error), outcome);
+        }
     }
 
     #[test]

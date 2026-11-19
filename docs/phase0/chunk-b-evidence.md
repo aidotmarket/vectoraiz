@@ -18,7 +18,7 @@ records local evidence separately from hosted CI and hardware claims.
 | Pack integrity | All six payload hashes match; Parquet references resolve; text first lines have no comma or tab; originals use neutral names |
 | Example query | Clean Python dependency environment loads Parquet; recomputes the query embedding through the exact recorded recipe and linked CLI engine; expected top three match |
 | Upload | Explicit CLI upload to pinned MinIO; all seven files including the manifest download byte-for-byte; server stopped unconditionally |
-| Source revocation | An unavailable current source (explicit index or library root, including a library with no persisted folder) fails explicitly and removes its searchable cached content. A failed switch to a different folder keeps the previous selection; overlapping files still follow per-file replacement/revocation rules. A completed current-source scan removes deleted paths even when another file has an infrastructure failure |
+| Source revocation | An unavailable current source (explicit index or library root, using persisted or inferred legacy selection) fails explicitly and removes its searchable cached content. Library revocations affect the active index even when rebuilding with a changed recipe. A different missing folder preserves the inferred legacy selection. A failed switch to a different folder keeps the previous selection; overlapping files still follow per-file replacement/revocation rules. A completed current-source scan removes deleted paths from the active index even with a changed recipe and another file failing infrastructure checks. An explicit-index scan of a different folder with no successful documents retains the previous selection, generations and search results |
 | UI | Four Vitest tests; actual debug WebView logs `indexed`, `searched`, `answered` and `VECTORAIZ_PIPELINE_SMOKE_TEST_OK` |
 | Build and notices | Rust 1.90 formatting, clippy with warnings denied, workspace tests and debug app build; TypeScript/Vite build; Rust/UI and native PDFium/llama.cpp notices generated |
 
@@ -71,3 +71,16 @@ selection, releases and public integrations belong to their separately scoped
 chunks/phases. The minimal pack refuses originals over 2 GB rather than
 implementing later multipart export. See [pipeline.md](pipeline.md) for the
 per-generation BM25 tradeoff and other spike limits.
+
+Fold 4 publication boundary: the active-pointer rename makes the candidate
+visible. A subsequent directory-sync or generation-cleanup error reports
+“Index published” with the durability/cleanup step to retry; it preserves the
+published rows and selected review source. Fault-injection regressions reopen
+the library and check the pointer, documents, search and review source together.
+Failure-path cleanup retains the original scan/publication error in its chain.
+
+Source identity resolves surviving ancestors and compares an ASCII missing
+tail without case only after the surviving ancestor demonstrates insensitive
+case lookup. The macOS/Windows regression follows the actual test volume's
+case semantics. Known limit: non-ASCII case folding of removed path components
+is not implemented; use the persisted spelling for those paths.

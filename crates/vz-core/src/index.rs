@@ -118,6 +118,10 @@ pub async fn index(
     assets: &Path,
     progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
+    let previous = crate::active_index::last_indexed_folder(&state.root);
+    let current_source = previous
+        .as_ref()
+        .is_none_or(|previous| crate::active_index::same_source(folder, Path::new(previous)));
     let (stats, seen) = match scan(state, folder, engines, assets, progress).await {
         Err(error) if source_unavailable(&error) => {
             // An unavailable current source revokes its cached content.
@@ -127,8 +131,15 @@ pub async fn index(
         }
         result => result?,
     };
-    // A completed walk revokes absent paths even if a present file failed.
-    publish_source(state, folder, &seen)?;
+    // Current-source revocation is unconditional after a completed walk.
+    // A different source must earn publication before replacing the selection.
+    if current_source
+        || (stats.ensure_publishable().is_ok()
+            && (stats.total == 0 || stats.completed + stats.skipped > 0))
+    {
+        prepare_source(state, folder, &seen)?;
+    }
+    state.recover()?;
     Ok(stats)
 }
 

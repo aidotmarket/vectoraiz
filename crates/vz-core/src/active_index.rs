@@ -143,6 +143,37 @@ fn publication_dir(data: &Path, recipe: &Recipe) -> Result<String> {
     }
 }
 
+// This marker survives anyhow context so callers can distinguish a visible
+// publication from a failure that is still safe to roll back.
+#[derive(Debug)]
+struct PublishedFailure(&'static str);
+impl std::fmt::Display for PublishedFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Index published; {} step must be retried", self.0)
+    }
+}
+impl std::error::Error for PublishedFailure {}
+
+#[cfg(test)]
+thread_local! {
+    static FAULTS: std::cell::RefCell<Vec<(PathBuf, &'static str)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn publication_step(_data: &Path, _step: &'static str) -> Result<()> {
+    #[cfg(test)]
+    FAULTS.with(|faults| {
+        if faults
+            .borrow()
+            .iter()
+            .any(|(path, step)| path == _data && *step == _step)
+        {
+            anyhow::bail!("injected {_step} failure");
+        }
+        Ok(())
+    })?;
+    Ok(())
+}
+
 /// Call only after the indexer returned successfully and cancellation was checked.
 #[cfg(test)]
 fn activate(data: &Path, recipe: &Recipe) -> Result<()> {
@@ -187,8 +218,13 @@ fn activate_with(
         drop(file);
         before_rename()?;
         fs::rename(&temp, data.join("active-index.json"))?;
-        #[cfg(unix)]
-        fs::File::open(data)?.sync_all()?;
+        (|| -> Result<()> {
+            publication_step(data, "directory sync")?;
+            #[cfg(unix)]
+            fs::File::open(data)?.sync_all()?;
+            Ok(())
+        })()
+        .context(PublishedFailure("durability"))?;
         Ok(())
     })();
     if result.is_err() {
@@ -256,6 +292,54 @@ fn source_identity(folder: &Path) -> Option<PathBuf> {
     None
 }
 
+// Existing paths canonicalize to the volume's spelling. For a removed tail,
+// compare against the persisted spelling only after proving its surviving
+// ancestor accepts alternate case. Case-sensitive volumes keep exact identity.
+pub(crate) fn same_source(folder: &Path, previous: &Path) -> bool {
+    let Some(current) = source_identity(folder) else {
+        return false;
+    };
+    let Some(previous) = source_identity(previous) else {
+        return false;
+    };
+    if current == previous {
+        return true;
+    }
+    for ancestor in current.ancestors() {
+        let Some(name) = ancestor.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let swapped: String = name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() {
+                    c.to_ascii_uppercase()
+                } else {
+                    c.to_ascii_lowercase()
+                }
+            })
+            .collect();
+        if swapped == name {
+            continue;
+        }
+        if let (Ok(actual), Ok(alternate)) = (
+            ancestor.canonicalize(),
+            ancestor.with_file_name(swapped).canonicalize(),
+        ) {
+            if actual == alternate {
+                return current
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&previous.to_string_lossy());
+            }
+            return false;
+        }
+        if ancestor.exists() {
+            return false;
+        }
+    }
+    false
+}
+
 /// Rebuild separately, resume via the existing indexer, then publish on success.
 /// Poll cancellation at async boundaries and once more before publishing. Work
 /// already committed per document remains resumable after dropping this future.
@@ -270,6 +354,7 @@ pub async fn reindex(
     let mut latest = crate::index::Progress::default();
     let mut started = false;
     let mut failed_switch = false;
+    let mut cleanup_failed = false;
     let mut progress = progress;
     let result = async {
         ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
@@ -282,10 +367,14 @@ pub async fn reindex(
             root.canonicalize()?.starts_with(data.canonicalize()?),
             "index outside data root"
         );
-        let previous = last_indexed_folder(&resolve(data));
-        let different_folder = previous.is_some_and(|previous| {
-            source_identity(folder).as_ref() != Some(&PathBuf::from(previous))
-        });
+        let active = resolve(data);
+        let previous = last_indexed_folder(&active);
+        let different_folder = previous
+            .as_ref()
+            .is_some_and(|previous| !same_source(folder, Path::new(previous)));
+        let revoke_active = !different_folder
+            && previous.is_some()
+            && root.canonicalize().ok() != active.canonicalize().ok();
         let restore_on_failure =
             different_folder && root.canonicalize().ok() == resolve(data).canonicalize().ok();
         let replacing_documents =
@@ -294,8 +383,7 @@ pub async fn reindex(
         state
             .db
             .execute_batch("CREATE TEMP TABLE previous_documents AS SELECT * FROM documents")?;
-        let revoke_unavailable =
-            !different_folder || crate::storage::State::selected_folder(&state.db)?.is_none();
+        let revoke_unavailable = !different_folder;
         let mut prepared = false;
         let mut source_revoked = false;
         let result = finish_reindex(
@@ -315,13 +403,21 @@ pub async fn reindex(
                     {
                         state.db.execute("DELETE FROM documents", [])?;
                         source_revoked = true;
-                        state.recover()?;
+                        if revoke_active {
+                            let active = crate::storage::State::open(&active)?;
+                            active.db.execute("DELETE FROM documents", [])?;
+                            active.recover()?;
+                        }
                         return Err(error);
                     }
                     result => result?,
                 };
                 // Current-source revocation is independent of publishability.
                 if !different_folder {
+                    if revoke_active {
+                        let active = crate::storage::State::open(&active)?;
+                        crate::index::publish_source(&active, folder, &paths)?;
+                    }
                     crate::index::publish_source(&state, folder, &paths)?;
                 }
                 validate_publication(&stats, replacing_documents)?;
@@ -336,7 +432,12 @@ pub async fn reindex(
             &cancelled,
         )
         .await;
-        if result.is_err() {
+        let published = result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.is::<PublishedFailure>())
+            || result.is_ok();
+        if !published {
             failed_switch = different_folder && !source_revoked;
             // Restore publication-only changes, preserving per-file revocations
             // and successful revisions made during the scan.
@@ -354,11 +455,25 @@ pub async fn reindex(
                 )?;
             }
         }
-        state.recover()?;
-        result
+        let cleanup = publication_step(data, "generation cleanup").and_then(|()| state.recover());
+        match (result, cleanup) {
+            (Ok(stats), Ok(())) => Ok(stats),
+            (Ok(_), Err(error)) => Err(error.context(PublishedFailure("generation cleanup"))),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(cleanup)) => {
+                cleanup_failed = true;
+                let error = error.context(format!("Generation cleanup also failed: {cleanup:#}"));
+                Err(if published {
+                    error.context(PublishedFailure("durability and generation cleanup"))
+                } else {
+                    error
+                })
+            }
+        }
     }
     .await;
     result.map_err(|e| {
+        if e.is::<PublishedFailure>() { return e; }
         let message = e.to_string();
         let cause = if cancelled() || message.contains("cancelled") {
             "cancelled"
@@ -373,6 +488,15 @@ pub async fn reindex(
         } else {
             "indexing interrupted"
         };
+        if !failed_switch && message.starts_with("Re-index did not finish") {
+            return e;
+        }
+        // Ordinary diagnostics stay path-free and do not reintroduce a discarded
+        // switch's resume hint through the CLI's full-chain error rendering.
+        // Preserve the original chain when cleanup also failed.
+        let diagnostic = |message: String| {
+            if cleanup_failed { e.context(message) } else { anyhow::anyhow!(message) }
+        };
         if failed_switch {
             let summary = if message.starts_with("Re-index did not finish") {
                 message.strip_suffix("; Re-index to resume").unwrap_or(&message).to_owned()
@@ -382,21 +506,18 @@ pub async fn reindex(
                     latest.completed, latest.skipped, latest.failed, latest.infrastructure_failed, latest.total
                 )
             };
-            return anyhow::anyhow!("{summary}; the previous folder is still active. Re-index the new folder to try again.");
-        }
-        if message.starts_with("Re-index did not finish") {
-            return e;
+            return diagnostic(format!("{summary}; the previous folder is still active. Re-index the new folder to try again."));
         }
         if !started {
-            return anyhow::anyhow!("Re-index did not finish; {cause}; Re-index to resume");
+            return diagnostic(format!("Re-index did not finish; {cause}; Re-index to resume"));
         }
-        anyhow::anyhow!(
+        diagnostic(format!(
             "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {cause}; Re-index to resume",
             latest.completed,
             latest.skipped,
             latest.failed,
             latest.total
-        )
+        ))
     })
 }
 
@@ -868,7 +989,7 @@ mod tests {
         assert!(error.to_string().contains("1 indexed"));
         assert!(error.to_string().contains("1 failed"));
         assert!(error.to_string().contains("1 infrastructure"));
-        assert!(!error.to_string().contains("resume"));
+        assert!(!format!("{error:#}").contains("resume"));
         for cancel_after_file in [false, true] {
             if cancel_after_file {
                 let cancelled = AtomicBool::new(false);
@@ -948,7 +1069,7 @@ mod tests {
         assert!(error
             .to_string()
             .contains("previous folder is still active"));
-        assert!(!error.to_string().contains("resume"));
+        assert!(!format!("{error:#}").contains("resume"));
         assert_eq!(
             fs::read(data.path().join("active-index.json")).unwrap(),
             pointer
@@ -972,8 +1093,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn missing_persisted_library_source_revokes_documents() {
-        let (engines, assets) = embedding_fixture();
+    async fn missing_persisted_library_source_revokes_documents_after_recipe_change() {
+        let (mut engines, assets) = embedding_fixture();
         let data = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
         fs::write(source.path().join("good.txt"), "Cached source text.").unwrap();
@@ -989,6 +1110,7 @@ mod tests {
         .unwrap();
         let folder = source.path().to_owned();
         source.close().unwrap();
+        engines.recipe.model.push_str("-changed");
         let error = reindex(data.path(), &folder, &engines, &assets, |_| {}, || false)
             .await
             .unwrap_err();
@@ -1009,7 +1131,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unavailable_source_without_persisted_library_folder_revokes_documents() {
+    async fn legacy_library_keeps_inferred_source_when_other_folder_is_missing() {
         let (engines, assets) = embedding_fixture();
         let data = tempfile::tempdir().unwrap();
         let source = tempfile::tempdir().unwrap();
@@ -1039,18 +1161,22 @@ mod tests {
         .await
         .unwrap_err();
         assert!(error.to_string().contains("source missing"), "{error}");
-        assert!(!error
+        assert!(error
             .to_string()
             .contains("previous folder is still active"));
         let state = crate::storage::State::open(&root).unwrap();
-        assert!(state.documents().unwrap().is_empty());
-        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 0);
+        assert_eq!(state.documents().unwrap().len(), 1);
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 1);
+        assert_eq!(
+            last_indexed_folder(&root).as_deref(),
+            source.path().canonicalize().unwrap().to_str()
+        );
     }
 
     #[tokio::test]
     async fn completed_current_scan_revokes_deleted_paths_despite_missing_pdfium_both_entry_points()
     {
-        let (engines, assets) = embedding_fixture();
+        let (mut engines, assets) = embedding_fixture();
         for library in [false, true] {
             let data = tempfile::tempdir().unwrap();
             let source = tempfile::tempdir().unwrap();
@@ -1082,6 +1208,7 @@ mod tests {
             fs::write(source.path().join("broken.pdf"), "not a PDF").unwrap();
             let missing = source.path().join("missing-assets");
             if library {
+                engines.recipe.model.push_str("-changed");
                 assert!(reindex(
                     data.path(),
                     source.path(),
@@ -1100,7 +1227,7 @@ mod tests {
                         .unwrap();
                 assert_eq!(stats.infrastructure_failed, 1);
             }
-            let state = crate::storage::State::open(&root).unwrap();
+            let state = crate::storage::State::open(&resolve_state(data.path())).unwrap();
             assert!(state.documents().unwrap().is_empty());
             assert!(!root.join("generations").join(generation).exists());
             assert!(state
@@ -1109,6 +1236,142 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn explicit_index_failed_different_source_keeps_selection_and_search() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        fs::write(a.path().join("good.txt"), "Original searchable selection.").unwrap();
+        let mut state = crate::storage::State::open(data.path()).unwrap();
+        crate::index::index(&mut state, a.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        let generations = state.generations().unwrap();
+        fs::write(b.path().join("bad.pdf"), "not a PDF").unwrap();
+        let stats = crate::index::index(
+            &mut state,
+            b.path(),
+            &engines,
+            &b.path().join("missing-assets"),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(stats.infrastructure_failed, 1);
+        drop(state);
+        assert_eq!(
+            last_indexed_folder(data.path()).as_deref(),
+            a.path().canonicalize().unwrap().to_str()
+        );
+        let state = crate::storage::State::open(data.path()).unwrap();
+        assert_eq!(state.generations().unwrap(), generations);
+        assert_eq!(state.documents().unwrap().len(), 1);
+        assert!(!state
+            .search("Original", &engines.vector("Original", true).unwrap(), 3)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn post_rename_failures_keep_published_documents_and_review_source() {
+        let (mut engines, assets) = embedding_fixture();
+        for step in ["directory sync", "generation cleanup"] {
+            let data = tempfile::tempdir().unwrap();
+            let a = tempfile::tempdir().unwrap();
+            let b = tempfile::tempdir().unwrap();
+            fs::write(a.path().join("good.txt"), "Previous selection.").unwrap();
+            fs::write(b.path().join("good.txt"), "Published replacement.").unwrap();
+            // Reuse a recipe candidate containing A, so rollback would visibly
+            // restore A's rows/metadata after B's pointer has been published.
+            reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+                .await
+                .unwrap();
+            let candidate = resolve(data.path());
+            engines.recipe.model.push_str("-interim");
+            reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+                .await
+                .unwrap();
+            engines
+                .recipe
+                .model
+                .truncate(engines.recipe.model.len() - "-interim".len());
+            FAULTS.with(|faults| faults.borrow_mut().push((data.path().to_owned(), step)));
+            let error = reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+                .await
+                .unwrap_err();
+            FAULTS.with(|faults| faults.borrow_mut().clear());
+            assert!(
+                error.to_string().starts_with("Index published;"),
+                "{error:#}"
+            );
+            assert!(!error.to_string().contains("previous folder"));
+            assert_eq!(resolve(data.path()), candidate);
+            assert_eq!(
+                last_indexed_folder(&candidate).as_deref(),
+                b.path().canonicalize().unwrap().to_str()
+            );
+            let docs = crate::storage::State::review_documents(&candidate).unwrap();
+            assert_eq!(docs.len(), 1);
+            assert!(Path::new(&docs[0].path).starts_with(b.path().canonicalize().unwrap()));
+            let state = crate::storage::State::open(&resolve_state(data.path())).unwrap();
+            assert_eq!(
+                state.documents().unwrap()[0].chunks[0].text,
+                "Published replacement."
+            );
+            assert!(!state
+                .search("Published", &engines.vector("Published", true).unwrap(), 3)
+                .await
+                .unwrap()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_scan_keeps_original_error_when_cleanup_also_fails() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        FAULTS.with(|faults| {
+            faults
+                .borrow_mut()
+                .push((data.path().to_owned(), "generation cleanup"))
+        });
+        let error = reindex(
+            data.path(),
+            &data.path().join("missing"),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        FAULTS.with(|faults| faults.borrow_mut().clear());
+        let chain = format!("{error:#}");
+        assert!(chain.contains("source missing"), "{chain}");
+        assert!(
+            chain.contains("injected generation cleanup failure"),
+            "{chain}"
+        );
+        assert!(!chain.contains("Index published"));
+    }
+
+    #[cfg(any(target_os = "macos", windows))]
+    #[test]
+    fn missing_source_tail_uses_volume_case_semantics() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("CaseParent");
+        fs::create_dir(&parent).unwrap();
+        let alternate = temp.path().join("cASEpARENT");
+        let insensitive = alternate.canonicalize().ok() == parent.canonicalize().ok();
+        assert_eq!(
+            same_source(&parent.join("DOCS"), &parent.join("docs")),
+            insensitive
+        );
+        assert!(!same_source(&parent.join("other"), &parent.join("docs")));
     }
 
     #[tokio::test]

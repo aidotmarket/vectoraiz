@@ -942,6 +942,21 @@ it.each([true, false])("reports unfinished Re-index with counts and allows retry
   expect(at("Library").getByRole("button", {name: "Re-index"})).toBeEnabled();
 });
 
+it.each(["durability", "generation cleanup"])("shows a published index warning and refreshes the selected library after %s failure", async step => {
+  modelsInvoke.mockResolvedValueOnce({...readyModels, needs_reindex: true, last_indexed_folder: "/previous"})
+    .mockResolvedValue({...readyModels, needs_reindex: false, last_indexed_folder: "/published"});
+  const message = `Index published; ${step} step must be retried`;
+  invoke.mockImplementation(async command => {
+    if (command === "pipeline_index") throw message;
+    return {available: false};
+  });
+  render(<App />);
+  await userEvent.click(await at("Library").findByRole("button", {name: "Re-index"}));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+  expect(screen.queryByText(/Re-index did not finish/)).not.toBeInTheDocument();
+  await waitFor(() => expect(at("Ask").getByRole("button", {name: "Search"})).toBeEnabled());
+});
+
 it("reports setup failure without invented zero counts", async () => {
   modelsInvoke.mockResolvedValue({...readyModels, needs_reindex: true, last_indexed_folder: "/documents"});
   invoke.mockImplementation(async command => {

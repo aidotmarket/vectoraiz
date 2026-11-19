@@ -321,9 +321,10 @@ export default function App() {
     }
     catch (cause) {
       const detail = String(cause);
-      setIndexError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
+      setIndexError(detail.startsWith("Re-index did not finish") || detail.startsWith("Index published;") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
         `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
       setIndexProgress("");
+      if (detail.startsWith("Index published;")) await refreshModels().catch(() => undefined);
     }
     finally { active = false; setIndexing(false); setRunning(false); }
   }
