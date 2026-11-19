@@ -221,8 +221,10 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     let refused = false;
     try { await window.__TAURI_INTERNALS__.invoke('pipeline_index', { folder: invalid, progress }); }
     catch (error) {
-      const expected = invalid.trim() ? 'Folder not found' : 'Choose a folder to index';
+      // This is a missing different source; the scanner must retain the selected folder.
+      const expected = invalid.trim() ? 'Re-index did not finish: source unavailable: source missing; the previous folder is still active' : 'Choose a folder to index';
       if (String(error) !== expected) throw error;
+      if (invalid.trim()) await report('missing different-source refusal: ' + String(error));
       refused = true;
     }
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));

@@ -410,12 +410,32 @@ async fn t3_t8_historical_selection_and_request_use_one_scan_identity() {
     fs::create_dir(&b).unwrap();
     symlink(&a, &request).unwrap();
     fs::write(a.join("good.txt"), "Historical canonical selected source.").unwrap();
-    active_index::reindex(data.path(), &request, &engines, &assets, |_| {}, || false)
-        .await
-        .unwrap();
+    fs::write(
+        a.join("second.txt"),
+        "Second document stays in the resolved source.",
+    )
+    .unwrap();
+    let mut retargeted = false;
+    active_index::reindex(
+        data.path(),
+        &request,
+        &engines,
+        &assets,
+        |_| {
+            if !retargeted {
+                fs::remove_file(&request).unwrap();
+                symlink(&b, &request).unwrap();
+                retargeted = true;
+            }
+        },
+        || false,
+    )
+    .await
+    .unwrap();
+    assert!(retargeted);
     let historical = active_index::last_indexed_folder(data.path()).unwrap();
-    fs::remove_file(&request).unwrap();
-    symlink(&b, &request).unwrap();
+    assert_eq!(Path::new(&historical), a.canonicalize().unwrap());
+    assert_eq!(documents(data.path()).len(), 2);
     fs::write(b.join("bad.pdf"), "bad").unwrap();
     assert!(active_index::reindex(
         data.path(),
@@ -676,14 +696,14 @@ async fn missing_current_source_case_follows_actual_volume_semantics() {
     let (engines, assets) = fixture();
     let data = tempfile::tempdir().unwrap();
     let parent = tempfile::tempdir().unwrap();
-    let source = parent.path().join("CaseSource");
+    let source = parent.path().join("ÉcoleSource");
     fs::create_dir(&source).unwrap();
     fs::write(source.join("a.txt"), "Volume-sensitive revocation content.").unwrap();
     active_index::reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
         .await
         .unwrap();
-    let alternate = parent.path().join("cASEsOURCE");
-    let insensitive = alternate.canonicalize().ok() == source.canonicalize().ok();
+    let alternate = parent.path().join("éCOLEsOURCE");
+    let insensitive = same_file::is_same_file(&alternate, &source).unwrap_or(false);
     println!("missing-source identity: case_insensitive={insensitive}");
     fs::remove_dir_all(&source).unwrap();
     assert!(
@@ -847,4 +867,61 @@ async fn refused_different_source_preserves_retry_workspace_until_first_write() 
         .await
         .unwrap();
     assert_eq!((resumed.completed, resumed.skipped), (0, 1));
+}
+
+#[tokio::test]
+async fn t6_nochange_a_reclaims_refused_b_and_missing_recipe_candidates_are_bounded() {
+    let (mut engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(a.path().join("a.txt"), "Unchanged published content.").unwrap();
+    active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    let root = active_index::resolve(data.path());
+    let before = fs::read(root.join("state.sqlite")).unwrap();
+    fs::write(b.path().join("good.txt"), "Private B reusable content.").unwrap();
+    fs::write(b.path().join("bad.pdf"), "not a PDF").unwrap();
+    assert!(active_index::reindex(
+        data.path(),
+        b.path(),
+        &engines,
+        &b.path().join("missing-assets"),
+        |_| {},
+        || false
+    )
+    .await
+    .is_err());
+    assert!(root.join(".vz-scan/scan.sqlite").exists());
+    let report = active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!((report.completed, report.skipped), (0, 1));
+    assert!(!root.join(".vz-scan").exists());
+    assert_eq!(fs::read(root.join("state.sqlite")).unwrap(), before);
+    engines.recipe.model.push_str("-changed");
+    for _ in 0..4 {
+        assert!(active_index::reindex(
+            data.path(),
+            &b.path().join("missing"),
+            &engines,
+            &assets,
+            |_| {},
+            || false
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            fs::read_dir(data.path().join("indexes")).unwrap().count(),
+            1
+        );
+    }
+    active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_dir(data.path().join("indexes")).unwrap().count(),
+        1
+    );
 }

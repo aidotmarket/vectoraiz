@@ -256,6 +256,7 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         "Readable generation structural recovery.",
     )
     .unwrap();
+    std::fs::write(source.path().join("b.txt"), "Undamaged control document.").unwrap();
     active_index::reindex(
         data.path(),
         source.path(),
@@ -270,7 +271,11 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
     for damage in ["manifest", "data"] {
         let generation: String = State::review_connection(&root)
             .unwrap()
-            .query_row("SELECT generation FROM documents", [], |r| r.get(0))
+            .query_row(
+                "SELECT generation FROM documents WHERE path LIKE '%a.txt'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let table = root
             .join("generations")
@@ -289,7 +294,13 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
                         .unwrap()
                 })
                 .unwrap();
-            std::fs::write(latest, b"damaged").unwrap();
+            let mut bytes = std::fs::read(&latest).unwrap();
+            // Retain the footer, offset and message length, but corrupt protobuf.
+            let offset =
+                u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().unwrap())
+                    as usize;
+            bytes[offset + 4] = 0xff;
+            std::fs::write(latest, bytes).unwrap();
         } else {
             std::fs::remove_dir_all(table.join("data")).unwrap();
         }
@@ -303,7 +314,17 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         )
         .await
         .unwrap();
-        assert_eq!((result.completed, result.skipped), (1, 0), "{damage}");
+        assert_eq!((result.completed, result.skipped), (1, 1), "{damage}");
         assert!(!root.join("generations").join(generation).exists());
+        let state = State::open(&root).unwrap();
+        assert!(!state
+            .search(
+                "structural recovery",
+                &engines.vector("structural recovery", true).unwrap(),
+                5
+            )
+            .await
+            .unwrap()
+            .is_empty());
     }
 }

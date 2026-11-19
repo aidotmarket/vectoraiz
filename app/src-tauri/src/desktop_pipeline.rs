@@ -31,8 +31,7 @@ pub(crate) fn begin_index(
 ) -> Result<IndexOperation, String> {
     // Syntax only: availability belongs to the scanner's revocation decision.
     crate::models::validate_index_request(folder)?;
-    let cache = operations.acquire()?;
-    let (cancel, control) = operations.start_index();
+    let (cache, cancel, control) = operations.acquire_index()?;
     Ok(IndexOperation {
         cache,
         cancel,

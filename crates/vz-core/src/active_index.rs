@@ -404,38 +404,29 @@ pub(crate) fn same_source(current: &Path, previous: &Path) -> bool {
     if current == previous {
         return true;
     }
-    // Probe the surviving parent volume, never resolve the requested leaf again.
+    // Ask this volume to compare the missing suffixes in an isolated probe.
+    // Unicode folding and normalization belong to the filesystem, not Rust.
     for ancestor in current.ancestors().skip(1) {
-        let Some(name) = ancestor.file_name().and_then(|s| s.to_str()) else {
+        if !ancestor.is_dir() {
+            continue;
+        }
+        let Ok(current_tail) = current.strip_prefix(ancestor) else {
             continue;
         };
-        let swapped: String = name
-            .chars()
-            .map(|c| {
-                if c.is_ascii_lowercase() {
-                    c.to_ascii_uppercase()
-                } else {
-                    c.to_ascii_lowercase()
-                }
-            })
-            .collect();
-        if swapped == name {
+        let Ok(previous_tail) = previous.strip_prefix(ancestor) else {
             continue;
-        }
-        if let (Ok(actual), Ok(alternate)) = (
-            ancestor.canonicalize(),
-            ancestor.with_file_name(swapped).canonicalize(),
-        ) {
-            if actual == alternate {
-                return current
-                    .to_string_lossy()
-                    .eq_ignore_ascii_case(&previous.to_string_lossy());
-            }
+        };
+        let probe = ancestor.join(format!(".vz-case-probe-{}", uuid::Uuid::new_v4()));
+        if fs::create_dir(&probe).is_err() {
             return false;
         }
-        if ancestor.exists() {
-            return false;
-        }
+        let equal = (|| -> std::io::Result<bool> {
+            fs::create_dir_all(probe.join(current_tail))?;
+            same_file::is_same_file(probe.join(current_tail), probe.join(previous_tail))
+        })()
+        .unwrap_or(false);
+        let _ = fs::remove_dir_all(probe);
+        return equal;
     }
     false
 }
@@ -653,6 +644,49 @@ fn owned_recipe_directory(data: &Path, root: &Path) -> bool {
             || owned_database(root, "scan.sqlite", "scan_documents"))
 }
 
+// A recovery record is tied to the canonical root and its retained recipe.
+// The database digest records ownership evidence before destructive cleanup.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlatCleanup {
+    root: PathBuf,
+    recipe: Recipe,
+    database_sha256: String,
+}
+fn valid_flat_cleanup(root: &Path) -> bool {
+    (|| -> Result<bool> {
+        let marker = root.join(".vz-flat-cleanup");
+        let metadata = marker.symlink_metadata()?;
+        ensure!(
+            metadata.is_file() && !metadata.file_type().is_symlink(),
+            "cleanup marker collision"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            ensure!(metadata.nlink() == 1, "cleanup marker link collision");
+        }
+        let record: FlatCleanup = serde_json::from_slice(&fs::read(marker)?)?;
+        ensure!(
+            root.join("recipe.json").symlink_metadata()?.is_file(),
+            "cleanup recipe missing"
+        );
+        let recipe: Recipe = serde_json::from_slice(&fs::read(root.join("recipe.json"))?)?;
+        Ok(record.root == root.canonicalize()?
+            && record.recipe == recipe
+            && record.database_sha256.len() == 64
+            && record
+                .database_sha256
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+            && (!root.join("state.sqlite").try_exists()?
+                || (owned_database(root, "state.sqlite", "documents")
+                    && crate::pipeline::file_sha256(&root.join("state.sqlite"))?
+                        == record.database_sha256)))
+    })()
+    .unwrap_or(false)
+}
+
 /// Run under the selection fence at application/scan start and after publication.
 /// Reader-pinned indexes are retried on the next invocation.
 pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
@@ -684,12 +718,7 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
     if owned_legacy_directory(&data.join("phase0-index")) {
         roots.push(data.join("phase0-index"));
     }
-    if owned_legacy_directory(data)
-        || data
-            .join(".vz-flat-cleanup")
-            .symlink_metadata()
-            .is_ok_and(|m| m.is_file())
-    {
+    if owned_legacy_directory(data) || valid_flat_cleanup(data) {
         roots.push(data.to_owned());
     }
     for root in roots {
@@ -705,23 +734,36 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
         };
         if root == data {
             // Durable discovery survives removal of state.sqlite and any later
-            // cleanup error or process death. Remove this marker last.
+            // cleanup error or process death. Keep the recipe until the record is retired.
             let marker = root.join(".vz-flat-cleanup");
-            let file = fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&marker)?;
-            file.sync_all()?;
-            drop(file);
+            match marker.symlink_metadata() {
+                Ok(_) => ensure!(
+                    valid_flat_cleanup(&root),
+                    "flat cleanup marker collision; cleanup refused"
+                ),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    ensure!(
+                        owned_legacy_directory(&root),
+                        "flat cleanup ownership unavailable"
+                    );
+                    let record = FlatCleanup {
+                        root: root.canonicalize()?,
+                        recipe: serde_json::from_slice(&fs::read(root.join("recipe.json"))?)?,
+                        database_sha256: crate::pipeline::file_sha256(&root.join("state.sqlite"))?,
+                    };
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&marker)?;
+                    use std::io::Write;
+                    file.write_all(&serde_json::to_vec(&record)?)?;
+                    file.sync_all()?;
+                }
+                Err(error) => return Err(error.into()),
+            }
             #[cfg(unix)]
             fs::File::open(&root)?.sync_all()?;
-            for name in [
-                "state.sqlite",
-                "state.sqlite-wal",
-                "state.sqlite-shm",
-                "recipe.json",
-            ] {
+            for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
                 let path = root.join(name);
                 if path.exists() {
                     fs::remove_file(path)?;
@@ -735,6 +777,7 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
                 }
             }
             fs::remove_file(marker)?;
+            fs::remove_file(root.join("recipe.json"))?;
         } else {
             // Windows requires the lock handle closed before deleting its directory.
             drop(lock);
@@ -908,6 +951,7 @@ pub(crate) async fn scan_candidate(
             }
         }
         crate::index::initialize_recipe(root, &engines.recipe, || Ok(()))?;
+        workspace.initialize()?;
     }
     let outcome = {
         let run = crate::index::scan(&mut workspace, &identity, engines, assets, progress);
@@ -1047,6 +1091,9 @@ pub(crate) async fn scan_candidate(
                 if is_library_root(data) {
                     cleanup_library(data, None).context(PublishedFailure("generation cleanup"))?;
                 }
+            } else if same_recipe && workspace_root.exists() {
+                drop(workspace.state.take());
+                fs::remove_dir_all(&workspace_root)?;
             }
         }
         ScanDecision::RevokeSource | ScanDecision::RevokeFailedPaths => {
@@ -1116,6 +1163,13 @@ pub(crate) async fn scan_candidate(
     control.complete()?;
     if outcome.unavailable {
         workspace.retain(&Default::default())?;
+        if candidate.is_some() {
+            // Nothing from an unavailable walk is reusable. Close both Windows
+            // lock handles before reclaiming this unpublished candidate.
+            drop(workspace.state.take());
+            drop(_writer);
+            fs::remove_dir_all(root)?;
+        }
         let reason = outcome
             .error
             .take()
@@ -2716,6 +2770,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn flat_cleanup_marker_collision_fails_closed() {
+        for link in [false, true] {
+            let data = tempfile::tempdir().unwrap();
+            let recipe = recipe();
+            fs::write(
+                data.path().join("recipe.json"),
+                serde_json::to_vec(&recipe).unwrap(),
+            )
+            .unwrap();
+            drop(crate::storage::State::open(data.path()).unwrap());
+            fs::write(data.path().join("generations/precious"), b"keep").unwrap();
+            let elsewhere = seed(data.path(), &recipe);
+            activate(data.path(), &recipe).unwrap();
+            assert_eq!(resolve(data.path()), elsewhere.canonicalize().unwrap());
+            let target = data.path().join("unrelated");
+            fs::write(&target, b"unrelated bytes").unwrap();
+            let marker = data.path().join(".vz-flat-cleanup");
+            if link {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&target, &marker).unwrap();
+                #[cfg(not(unix))]
+                fs::hard_link(&target, &marker).unwrap();
+            } else {
+                fs::write(&marker, b"untrusted marker").unwrap();
+            }
+            assert!(cleanup_library(data.path(), None).is_err());
+            assert_eq!(fs::read(&target).unwrap(), b"unrelated bytes");
+            assert_eq!(
+                fs::read(data.path().join("generations/precious")).unwrap(),
+                b"keep"
+            );
+            // A marker alone cannot authorize restart cleanup.
+            fs::remove_file(data.path().join("state.sqlite")).unwrap();
+            cleanup_library(data.path(), None).unwrap();
+            assert!(data.path().join("generations/precious").exists());
+        }
+    }
+
     #[tokio::test]
     async fn flat_cleanup_restarts_after_database_removal() {
         let (engines, assets) = embedding_fixture();
@@ -2815,7 +2908,7 @@ mod tests {
         fs::create_dir(&parent).unwrap();
         let alternate = temp.path().join("cASEpARENT");
         let parent = parent.canonicalize().unwrap();
-        let insensitive = alternate.canonicalize().ok() == parent.canonicalize().ok();
+        let insensitive = same_file::is_same_file(&alternate, &parent).unwrap_or(false);
         assert_eq!(
             same_source(&parent.join("DOCS"), &parent.join("docs")),
             insensitive

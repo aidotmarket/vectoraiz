@@ -166,6 +166,10 @@ impl ScanWorkspace {
             recipe: recipe.into(),
         })
     }
+    pub fn initialize(&mut self) -> Result<()> {
+        self.writable()?;
+        Ok(())
+    }
     pub fn matches_published(&self, row: &ScanRow) -> bool {
         self.published_by_path.get(&row.path) == Some(row)
     }
@@ -258,15 +262,33 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
             })
             .max_by_key(|(version, _)| *version)?
             .1;
-        if !readable_lance_node(&manifest) {
+        let bytes = std::fs::read(manifest).ok()?;
+        if bytes.len() < 20 || !bytes.ends_with(b"LANC") {
             return None;
         }
+        let offset = u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().ok()?);
+        let offset = usize::try_from(offset).ok()?;
+        let message = bytes.get(offset..bytes.len() - 16)?;
+        let length = u32::from_le_bytes(message.get(..4)?.try_into().ok()?) as usize;
+        let message = message.get(4..)?;
+        if length != message.len() {
+            return None;
+        }
+        use prost::Message;
+        let manifest = lance_table::format::pb::Manifest::decode(message).ok()?;
+        let manifest = lance_table::format::Manifest::try_from(manifest).ok()?;
         let mut found_data = false;
-        for entry in std::fs::read_dir(table.join("data")).ok()? {
-            let path = entry.ok()?.path();
-            if path.extension().is_some_and(|x| x == "lance") {
+        for fragment in manifest.fragments.iter() {
+            for file in &fragment.files {
+                let relative = Path::new(&file.path);
+                if relative
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+                {
+                    return None;
+                }
                 found_data = true;
-                if !readable_lance_node(&path) {
+                if !readable_lance_node(&table.join("data").join(relative)) {
                     return None;
                 }
             }

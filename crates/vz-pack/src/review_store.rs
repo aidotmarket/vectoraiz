@@ -1091,9 +1091,18 @@ impl PackReview<'_> {
                 )
             })
             .collect();
-        if generation.binding.check().is_err()
-            || tree(&path.join("payload")).ok().as_ref() != Some(&expected)
-        {
+        let binding_changed = match generation.binding.check() {
+            Ok(()) => false,
+            Err(error)
+                if error
+                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                    .is_some() =>
+            {
+                return Err(error)
+            }
+            Err(_) => true,
+        };
+        if binding_changed || tree(&path.join("payload")).ok().as_ref() != Some(&expected) {
             if edit_origin && !path.join("edit-origin-revoked.json").try_exists()? {
                 write_json(
                     &path.join("edit-origin-revoked.json"),

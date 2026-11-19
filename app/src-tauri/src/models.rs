@@ -73,6 +73,11 @@ impl<E> Default for OperationState<E> {
         }
     }
 }
+type IndexRegistration<E> = (
+    OwnedMutexGuard<EngineCache<E>>,
+    watch::Receiver<bool>,
+    vz_core::active_index::ScanControl,
+);
 impl<E: CachedEngine> OperationState<E> {
     pub fn acquire(&self) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
         let mut cache = self
@@ -108,9 +113,24 @@ impl<E: CachedEngine> OperationState<E> {
         *self.cancel.lock().unwrap() = sender;
         receiver
     }
+    pub fn acquire_index(&self) -> Result<IndexRegistration<E>, String> {
+        self.acquire_index_with(|| {})
+    }
+    fn acquire_index_with(&self, acquired: impl FnOnce()) -> Result<IndexRegistration<E>, String> {
+        let mut scan = self.scan.lock().unwrap();
+        let cache = self.acquire()?;
+        acquired();
+        let (sender, receiver) = watch::channel(false);
+        *self.cancel.lock().unwrap() = sender;
+        let control = vz_core::active_index::ScanControl::default();
+        *scan = Some(control.clone());
+        Ok((cache, receiver, control))
+    }
+    #[cfg(test)]
     pub fn start_index(&self) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
         self.register_index(|| {})
     }
+    #[cfg(test)]
     fn register_index(
         &self,
         registered: impl FnOnce(),
@@ -1014,10 +1034,12 @@ mod scan_registration_tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let registrar = operations.clone();
         let start = std::thread::spawn(move || {
-            registrar.register_index(|| {
-                entered_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-            })
+            registrar
+                .acquire_index_with(|| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap()
         });
         entered_rx.recv().unwrap();
         let canceller = operations.clone();
@@ -1032,9 +1054,31 @@ mod scan_registration_tests {
         attempt_rx.recv().unwrap();
         assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
         release_tx.send(()).unwrap();
-        let (receiver, control) = start.join().unwrap();
+        let (_cache, receiver, control) = start.join().unwrap();
         assert!(cancel.join().unwrap());
         assert!(*receiver.borrow());
         assert!(control.is_cancelled());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            vz_core::active_index::reindex_controlled(
+                data.path(),
+                source.path(),
+                &engines,
+                &assets,
+                |_| {},
+                &control,
+            ),
+        );
+        assert!(result.is_err());
+        assert!(!data.path().join("active-index.json").exists());
     }
 }

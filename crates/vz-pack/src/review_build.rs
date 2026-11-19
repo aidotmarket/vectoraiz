@@ -1072,6 +1072,37 @@ mod tests {
         let guard = store.lock_native(&f.policy, id, &library).unwrap();
         let current = build(&guard, &a, id, &engines, "orbital", &Changes::default()).unwrap();
         guard.accept(&current).unwrap();
+        for export_first in [false, true] {
+            let index = vz_core::active_index::resolve_state(&library);
+            let database = rusqlite::Connection::open(index.join("state.sqlite")).unwrap();
+            database
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;",
+                )
+                .unwrap();
+            let error = if export_first {
+                guard.reviewed_payload(&current).unwrap_err()
+            } else {
+                guard.accept(&current).unwrap_err()
+            };
+            assert!(
+                error
+                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                    .is_some(),
+                "{error:#}"
+            );
+            database.execute_batch("ROLLBACK").unwrap();
+            drop(database);
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join(format!("sqlite-busy-export-{export_first}")),
+            )
+            .unwrap();
+        }
         drop(guard);
         for cancel in [true, false] {
             let stopped = AtomicBool::new(false);
