@@ -268,7 +268,7 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
     .await
     .unwrap();
     let root = active_index::resolve(data.path());
-    for damage in ["manifest", "data"] {
+    for damage in ["manifest", "data", "truncated fragment"] {
         let generation: String = State::review_connection(&root)
             .unwrap()
             .query_row(
@@ -301,8 +301,21 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
                     as usize;
             bytes[offset + 4] = 0xff;
             std::fs::write(latest, bytes).unwrap();
-        } else {
+        } else if damage == "data" {
             std::fs::remove_dir_all(table.join("data")).unwrap();
+        } else {
+            let fragment = std::fs::read_dir(table.join("data"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let bytes = std::fs::read(&fragment).unwrap();
+            assert!(bytes.ends_with(b"LANC"));
+            // Preserve the complete footer but remove part of the data body.
+            let mut truncated = bytes[..8].to_vec();
+            truncated.extend_from_slice(&bytes[bytes.len() - 40..]);
+            std::fs::write(fragment, truncated).unwrap();
         }
         let result = active_index::reindex(
             data.path(),
@@ -317,14 +330,21 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         assert_eq!((result.completed, result.skipped), (1, 1), "{damage}");
         assert!(!root.join("generations").join(generation).exists());
         let state = State::open(&root).unwrap();
-        assert!(!state
-            .search(
-                "structural recovery",
-                &engines.vector("structural recovery", true).unwrap(),
-                5
-            )
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            state
+                .search(
+                    "structural recovery",
+                    &engines.vector("structural recovery", true).unwrap(),
+                    5
+                )
+                .await
+                .unwrap()
+                .iter()
+                .any(|hit| hit
+                    .chunk
+                    .text
+                    .contains("Readable generation structural recovery")),
+            "search must recover the damaged document: {damage}"
+        );
     }
 }

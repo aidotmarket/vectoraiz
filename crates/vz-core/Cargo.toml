@@ -11,6 +11,8 @@ serde_json.workspace = true
 anyhow = "1"
 fs2 = "0.4"
 same-file = "1"
+unicode-normalization = "0.1"
+tempfile = "3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 sha2 = "0.10"
 walkdir = "2"
@@ -59,4 +61,4 @@ tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-native-keyring-store = { version = "=1.1.0", default-features = false }
-windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus"] }
+windows-sys = { version = "0.61", features = ["Win32_System_JobObjects", "Win32_Security", "Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_Globalization"] }

@@ -288,7 +288,10 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
                     return None;
                 }
                 found_data = true;
-                if !readable_lance_node(&table.join("data").join(relative)) {
+                if !readable_lance_node(
+                    &table.join("data").join(relative),
+                    file.file_size_bytes.get().map(|size| size.get()),
+                ) {
                     return None;
                 }
             }
@@ -307,17 +310,20 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
     Some(doc)
 }
 
-// Local Lance nodes carry a LANC footer. Keep structural damage and missing
-// data a cache miss without constructing a database/query for every unchanged
-// published document. Staged rows still take the full table-read path below.
-fn readable_lance_node(path: &Path) -> bool {
+// Match the manifest's recorded fragment length as well as the LANC footer.
+// Unknown lengths conservatively rebuild rather than reuse unverified storage.
+// This avoids a database/query for every unchanged published document.
+fn readable_lance_node(path: &Path, expected_size: Option<u64>) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     (|| -> std::io::Result<bool> {
         if !std::fs::symlink_metadata(path)?.is_file() {
             return Ok(false);
         }
         let mut file = std::fs::File::open(path)?;
-        if file.metadata()?.len() < 16 {
+        let length = file.metadata()?.len();
+        // Current writers record the complete fragment length in the manifest.
+        // A footer alone cannot detect a truncated body with its footer retained.
+        if length < 16 || expected_size.is_none_or(|expected| expected != length) {
             return Ok(false);
         }
         file.seek(SeekFrom::End(-4))?;

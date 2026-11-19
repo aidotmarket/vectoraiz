@@ -706,12 +706,26 @@ async fn missing_current_source_case_follows_actual_volume_semantics() {
     let insensitive = same_file::is_same_file(&alternate, &source).unwrap_or(false);
     println!("missing-source identity: case_insensitive={insensitive}");
     fs::remove_dir_all(&source).unwrap();
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        let original = fs::metadata(parent.path()).unwrap().permissions();
+        fs::set_permissions(parent.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        original
+    };
     assert!(
         active_index::reindex(data.path(), &alternate, &engines, &assets, |_| {}, || false)
             .await
             .is_err()
     );
     assert_eq!(documents(data.path()).is_empty(), insensitive);
+    assert_eq!(
+        fs::read_dir(parent.path()).unwrap().count(),
+        0,
+        "source identity comparison must not write probes"
+    );
+    #[cfg(unix)]
+    fs::set_permissions(parent.path(), permissions).unwrap();
     if !insensitive {
         assert!(
             active_index::reindex(data.path(), &source, &engines, &assets, |_| {}, || false)

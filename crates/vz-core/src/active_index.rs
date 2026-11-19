@@ -298,10 +298,8 @@ fn activate_with(
         dir: relative.to_owned(),
         recipe_id: id,
     };
-    fs::create_dir_all(data.join(".vz-scan"))?;
-    let temp = data
-        .join(".vz-scan")
-        .join(format!("pointer-{}.tmp", uuid::Uuid::new_v4()));
+    let workspace = pointer_workspace(data, true)?;
+    let temp = workspace.join(format!("pointer-{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<()> {
         let mut file = fs::OpenOptions::new()
             .write(true)
@@ -404,31 +402,100 @@ pub(crate) fn same_source(current: &Path, previous: &Path) -> bool {
     if current == previous {
         return true;
     }
-    // Ask this volume to compare the missing suffixes in an isolated probe.
-    // Unicode folding and normalization belong to the filesystem, not Rust.
-    for ancestor in current.ancestors().skip(1) {
-        if !ancestor.is_dir() {
+    // Compare surviving ancestors by file identity (dev/inode on Unix,
+    // volume serial/file index on Windows), without writing to the source tree.
+    // Probe alternate spellings of that existing ancestor, never the removed
+    // selection itself. A case-sensitive volume keeps exact suffix matching.
+    for (ancestor, historical) in current
+        .ancestors()
+        .skip(1)
+        .zip(previous.ancestors().skip(1))
+    {
+        if !same_existing_identity(ancestor, historical) {
             continue;
         }
-        let Ok(current_tail) = current.strip_prefix(ancestor) else {
-            continue;
+        let current_tail = current.strip_prefix(ancestor).unwrap();
+        let previous_tail = previous.strip_prefix(historical).unwrap();
+        if current_tail == previous_tail {
+            return true;
+        }
+        let Some(name) = ancestor.file_name() else {
+            return false;
         };
-        let Ok(previous_tail) = previous.strip_prefix(ancestor) else {
+        let spelling = name.to_string_lossy();
+        let alternatives = [spelling.to_lowercase(), spelling.to_uppercase()];
+        if alternatives
+            .iter()
+            .all(|alternate| alternate == spelling.as_ref())
+        {
             continue;
-        };
-        let probe = ancestor.join(format!(".vz-case-probe-{}", uuid::Uuid::new_v4()));
-        if fs::create_dir(&probe).is_err() {
+        }
+        let insensitive = alternatives.iter().any(|alternate| {
+            alternate != spelling.as_ref()
+                && same_existing_identity(ancestor, &ancestor.with_file_name(alternate))
+        });
+        if !insensitive {
             return false;
         }
-        let equal = (|| -> std::io::Result<bool> {
-            fs::create_dir_all(probe.join(current_tail))?;
-            same_file::is_same_file(probe.join(current_tail), probe.join(previous_tail))
-        })()
-        .unwrap_or(false);
-        let _ = fs::remove_dir_all(probe);
-        return equal;
+        return equivalent_missing_tail(current_tail, previous_tail);
     }
     false
+}
+
+fn equivalent_missing_tail(current: &Path, previous: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Globalization::{CompareStringOrdinal, CSTR_EQUAL};
+        let current: PathBuf = current.components().collect();
+        let previous: PathBuf = previous.components().collect();
+        let current: Vec<u16> = current.as_os_str().encode_wide().collect();
+        let previous: Vec<u16> = previous.as_os_str().encode_wide().collect();
+        let (Ok(current_len), Ok(previous_len)) =
+            (i32::try_from(current.len()), i32::try_from(previous.len()))
+        else {
+            return false;
+        };
+        // NTFS ordinal case comparison does not normalize Unicode spellings.
+        unsafe {
+            CompareStringOrdinal(
+                current.as_ptr(),
+                current_len,
+                previous.as_ptr(),
+                previous_len,
+                1,
+            ) == CSTR_EQUAL
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let fold = |path: &Path| {
+            #[cfg(target_os = "macos")]
+            {
+                use unicode_normalization::UnicodeNormalization;
+                path.to_string_lossy()
+                    .nfd()
+                    .collect::<String>()
+                    .to_lowercase()
+            }
+            #[cfg(not(target_os = "macos"))]
+            path.to_string_lossy().to_lowercase()
+        };
+        fold(current) == fold(previous)
+    }
+}
+
+fn same_existing_identity(left: &Path, right: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        fs::metadata(left)
+            .ok()
+            .zip(fs::metadata(right).ok())
+            .is_some_and(|(left, right)| (left.dev(), left.ino()) == (right.dev(), right.ino()))
+    }
+    #[cfg(not(unix))]
+    same_file::is_same_file(left, right).unwrap_or(false)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -653,6 +720,26 @@ struct FlatCleanup {
     recipe: Recipe,
     database_sha256: String,
 }
+
+// Only traverse the real, direct workspace child. read_dir/create_dir_all by
+// themselves follow a symlink and could stage or unlink outside the library.
+fn pointer_workspace(data: &Path, create: bool) -> Result<PathBuf> {
+    let root = data.canonicalize()?;
+    let workspace = root.join(".vz-scan");
+    if create && !workspace.try_exists()? {
+        fs::create_dir(&workspace)?;
+    }
+    let metadata = fs::symlink_metadata(&workspace)?;
+    ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "invalid scan workspace"
+    );
+    ensure!(
+        workspace.canonicalize()? == workspace,
+        "scan workspace outside library"
+    );
+    Ok(workspace)
+}
 fn valid_flat_cleanup(root: &Path) -> bool {
     (|| -> Result<bool> {
         let marker = root.join(".vz-flat-cleanup");
@@ -697,11 +784,19 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
     }
     let active = resolve_state(data);
     let active = active.canonicalize().unwrap_or(active);
-    if let Ok(entries) = fs::read_dir(data.join(".vz-scan")) {
+    if let Some(entries) = pointer_workspace(data, false)
+        .ok()
+        .and_then(|p| fs::read_dir(p).ok())
+    {
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("pointer-") && name.ends_with(".tmp") {
+            if name
+                .strip_prefix("pointer-")
+                .and_then(|s| s.strip_suffix(".tmp"))
+                .is_some_and(|s| uuid::Uuid::parse_str(s).is_ok_and(|u| u.to_string() == s))
+                && entry.path().symlink_metadata()?.is_file()
+            {
                 fs::remove_file(entry.path())?;
             }
         }
@@ -736,6 +831,25 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
             // Durable discovery survives removal of state.sqlite and any later
             // cleanup error or process death. Keep the recipe until the record is retired.
             let marker = root.join(".vz-flat-cleanup");
+            // Repair only an empty, unlinked ordinary marker while the original
+            // database still independently proves ownership. Other collisions
+            // remain untouched, including after database removal.
+            if let Ok(metadata) = marker.symlink_metadata() {
+                #[cfg(unix)]
+                let single_link = {
+                    use std::os::unix::fs::MetadataExt;
+                    metadata.nlink() == 1
+                };
+                #[cfg(not(unix))]
+                let single_link = true;
+                if metadata.is_file()
+                    && metadata.len() == 0
+                    && single_link
+                    && owned_legacy_directory(&root)
+                {
+                    fs::remove_file(&marker)?;
+                }
+            }
             match marker.symlink_metadata() {
                 Ok(_) => ensure!(
                     valid_flat_cleanup(&root),
@@ -751,13 +865,13 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
                         recipe: serde_json::from_slice(&fs::read(root.join("recipe.json"))?)?,
                         database_sha256: crate::pipeline::file_sha256(&root.join("state.sqlite"))?,
                     };
-                    let mut file = fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&marker)?;
-                    use std::io::Write;
+                    let mut file =
+                        tempfile::NamedTempFile::new_in(pointer_workspace(&root, true)?)?;
                     file.write_all(&serde_json::to_vec(&record)?)?;
-                    file.sync_all()?;
+                    file.as_file().sync_all()?;
+                    publication_step(data, "flat marker install")?;
+                    // Atomic no-clobber installation preserves any collision.
+                    file.persist_noclobber(&marker)?;
                 }
                 Err(error) => return Err(error.into()),
             }
@@ -938,6 +1052,9 @@ pub(crate) async fn scan_candidate(
         vec![]
     };
     let workspace_root = if same_recipe {
+        if root.join(".vz-scan").symlink_metadata().is_ok() {
+            pointer_workspace(root, false)?;
+        }
         root.join(".vz-scan")
     } else {
         root.to_owned()
@@ -2087,11 +2204,15 @@ mod tests {
         assert_eq!(resolve(data.path()), old);
         assert_eq!(
             fs::read_dir(data.path().join("indexes")).unwrap().count(),
-            2,
-            "one private candidate is retained beside the active index"
+            1,
+            "an unavailable source has no reusable candidate; only the active index remains"
         );
         let reopened = crate::storage::State::open(&resolve(data.path())).unwrap();
         assert_eq!(reopened.documents().unwrap()[0].sha256, documents[0].sha256);
+        assert_eq!(
+            reopened.documents().unwrap()[0].chunks[0].text,
+            "A searchable source document."
+        );
         assert_eq!(
             last_indexed_folder(&old).as_deref(),
             a.canonicalize().unwrap().to_str()
@@ -2771,6 +2892,81 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn pointer_workspace_symlink_is_never_traversed() {
+        let data = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let name = format!("pointer-{}.tmp", uuid::Uuid::new_v4());
+        fs::write(external.path().join(&name), b"precious").unwrap();
+        std::os::unix::fs::symlink(external.path(), data.path().join(".vz-scan")).unwrap();
+        cleanup_start(data.path()).unwrap();
+        cleanup_library(data.path(), None).unwrap();
+        assert!(pointer_workspace(data.path(), true).is_err());
+        let recipe = recipe();
+        seed(data.path(), &recipe);
+        assert!(activate(data.path(), &recipe).is_err());
+        assert_eq!(fs::read(external.path().join(&name)).unwrap(), b"precious");
+        fs::remove_file(data.path().join(".vz-scan")).unwrap();
+        fs::create_dir(data.path().join(".vz-scan")).unwrap();
+        let workspace = data.path().join(".vz-scan");
+        fs::write(workspace.join(&name), b"crash leftover").unwrap();
+        fs::write(workspace.join("pointer-unrelated.tmp"), b"keep").unwrap();
+        std::os::unix::fs::symlink(
+            external.path().join(&name),
+            workspace.join(format!("pointer-{}.tmp", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+        cleanup_start(data.path()).unwrap();
+        assert!(!workspace.join(name).exists());
+        assert!(workspace.join("pointer-unrelated.tmp").exists());
+        assert_eq!(fs::read_dir(&workspace).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn flat_cleanup_repairs_empty_interrupted_marker() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        fs::write(
+            data.path().join("recipe.json"),
+            serde_json::to_vec(&recipe).unwrap(),
+        )
+        .unwrap();
+        drop(crate::storage::State::open(data.path()).unwrap());
+        seed(data.path(), &recipe);
+        activate(data.path(), &recipe).unwrap();
+        fs::write(data.path().join(".vz-flat-cleanup"), b"").unwrap();
+        cleanup_start(data.path()).unwrap();
+        assert!(!data.path().join("state.sqlite").exists());
+        assert!(!data.path().join(".vz-flat-cleanup").exists());
+        assert!(resolve(data.path()).join("recipe.json").exists());
+    }
+
+    #[test]
+    fn flat_cleanup_interrupted_before_marker_install_retries() {
+        let data = tempfile::tempdir().unwrap();
+        let recipe = recipe();
+        fs::write(
+            data.path().join("recipe.json"),
+            serde_json::to_vec(&recipe).unwrap(),
+        )
+        .unwrap();
+        drop(crate::storage::State::open(data.path()).unwrap());
+        seed(data.path(), &recipe);
+        activate(data.path(), &recipe).unwrap();
+        FAULTS.with(|faults| {
+            faults
+                .borrow_mut()
+                .push((data.path().to_owned(), "flat marker install"))
+        });
+        assert!(cleanup_start(data.path()).is_err());
+        assert!(!data.path().join(".vz-flat-cleanup").exists());
+        assert!(data.path().join("state.sqlite").exists());
+        FAULTS.with(|faults| faults.borrow_mut().clear());
+        cleanup_start(data.path()).unwrap();
+        assert!(!data.path().join("state.sqlite").exists());
+    }
+
+    #[test]
     fn flat_cleanup_marker_collision_fails_closed() {
         for link in [false, true] {
             let data = tempfile::tempdir().unwrap();
@@ -2812,63 +3008,71 @@ mod tests {
     #[tokio::test]
     async fn flat_cleanup_restarts_after_database_removal() {
         let (engines, assets) = embedding_fixture();
-        let data = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
-        fs::write(
-            source.path().join("a.txt"),
-            "Flat cleanup durable generation.",
-        )
-        .unwrap();
-        index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
-            .await
+        for step in ["flat marker install", "flat database removal"] {
+            let data = tempfile::tempdir().unwrap();
+            let source = tempfile::tempdir().unwrap();
+            fs::write(
+                source.path().join("a.txt"),
+                "Flat cleanup durable generation.",
+            )
             .unwrap();
-        let old = fs::read_dir(data.path().join("generations"))
-            .unwrap()
-            .next()
-            .unwrap()
-            .unwrap()
-            .path();
-        use std::process::{Command, Stdio};
-        let ready = data.path().join("cleanup-ready");
-        let mut child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "active_index::tests::publication_crash_child",
-                "--nocapture",
-            ])
-            .env("VZ_PUBLICATION_DATA", data.path())
-            .env("VZ_PUBLICATION_SOURCE", source.path())
-            .env("VZ_PUBLICATION_READY", &ready)
-            .env("VZ_PUBLICATION_CRASH_STEP", "flat database removal")
-            .env("VZ_PUBLICATION_RECIPE_CHANGE", "1")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
-        while !ready.exists() {
-            if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("child did not reach flat database removal");
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        child.kill().unwrap();
-        child.wait().unwrap();
-        assert!(!data.path().join("state.sqlite").exists());
-        assert!(data.path().join(".vz-flat-cleanup").exists());
-        assert!(old.exists());
-        let active = resolve(data.path());
-        cleanup_start(data.path()).unwrap();
-        assert!(!old.exists());
-        assert!(!data.path().join(".vz-flat-cleanup").exists());
-        assert_eq!(
-            crate::storage::State::review_documents(&active)
+            index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+                .await
+                .unwrap();
+            let old = fs::read_dir(data.path().join("generations"))
                 .unwrap()
-                .len(),
-            1
-        );
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            use std::process::{Command, Stdio};
+            let ready = data.path().join("cleanup-ready");
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "active_index::tests::publication_crash_child",
+                    "--nocapture",
+                ])
+                .env("VZ_PUBLICATION_DATA", data.path())
+                .env("VZ_PUBLICATION_SOURCE", source.path())
+                .env("VZ_PUBLICATION_READY", &ready)
+                .env("VZ_PUBLICATION_CRASH_STEP", step)
+                .env("VZ_PUBLICATION_RECIPE_CHANGE", "1")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !ready.exists() {
+                if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child did not reach {step}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            child.kill().unwrap();
+            child.wait().unwrap();
+            assert_eq!(
+                data.path().join("state.sqlite").exists(),
+                step == "flat marker install"
+            );
+            assert_eq!(
+                data.path().join(".vz-flat-cleanup").exists(),
+                step == "flat database removal"
+            );
+            assert!(old.exists());
+            let active = resolve(data.path());
+            cleanup_start(data.path()).unwrap();
+            assert!(!old.exists());
+            assert!(!data.path().join(".vz-flat-cleanup").exists());
+            assert_eq!(
+                crate::storage::State::review_documents(&active)
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
     }
 
     #[tokio::test]
