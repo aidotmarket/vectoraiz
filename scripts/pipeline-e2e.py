@@ -297,7 +297,12 @@ try:
         (cancel_source / 'a.txt').write_text('A durable reusable private success.')
         (cancel_source / 'z.txt').write_text('A slower remaining document. ' * 2000)
         child = subprocess.Popen([*RTK, str(CLI), '--cpu', '--state', str(state), 'index', str(cancel_source)],
-                                 cwd=ROOT, text=True, encoding='utf-8', stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                                 cwd=ROOT, text=True, encoding='utf-8', stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=os.name != 'nt')
+        def stop_interrupted_scan():
+            if os.name == 'nt':
+                subprocess.run([*RTK, 'taskkill', '/PID', str(child.pid), '/T', '/F'], check=True, capture_output=True)
+            else:
+                os.killpg(child.pid, signal.SIGKILL)
         try:
             for line in child.stderr:
                 try:
@@ -305,13 +310,13 @@ try:
                 except ValueError:
                     continue
                 if update.get('completed', 0) >= 1:
-                    child.kill()
+                    stop_interrupted_scan()
                     break
             child.wait(timeout=120)
             assert child.returncode != 0, 'scan must be interrupted before publication'
         finally:
             if child.poll() is None:
-                child.kill()
+                stop_interrupted_scan()
                 child.wait(timeout=120)
             child.stderr.close()
         retried = cli('index', str(cancel_source))

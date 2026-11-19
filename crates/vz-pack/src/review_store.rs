@@ -58,8 +58,6 @@ pub struct ReviewBinding {
     selection: Option<NativeSelection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     index_binding: Option<u8>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    index_content: Option<Sha256>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -254,13 +252,13 @@ impl ReviewBinding {
             version.is_none() || version == Some(2),
             "unknown index binding"
         );
-        let (index_files, index_content) = if version == Some(2) {
+        let index_files = if version == Some(2) {
             index_tree(
                 index,
                 selection.as_ref().is_some_and(|s| s.library == s.index),
             )?
         } else {
-            (tree(index)?, None)
+            tree(index)?
         };
         Ok(Self {
             source: plain_directory(source)?,
@@ -268,7 +266,6 @@ impl ReviewBinding {
             source_files: tree(source)?,
             index_files,
             index_binding: version,
-            index_content,
             recipe: fs::canonicalize(recipe)?,
             recipe_file: hash_file(recipe)?,
             recipe_sha256: digest(&read_input_json::<serde_json::Value>(recipe)?)?,
@@ -276,13 +273,11 @@ impl ReviewBinding {
         })
     }
     fn revisions(&self) -> Result<(String, String)> {
+        // In v2 the existing map's state.sqlite entry commits to logical DB
+        // content. Its size is zero; physical DB size is charged separately.
         Ok((
             digest(&self.source_files)?.into(),
-            if self.index_binding == Some(2) {
-                digest(&(&self.index_files, &self.index_content))?.into()
-            } else {
-                digest(&self.index_files)?.into()
-            },
+            digest(&self.index_files)?.into(),
         ))
     }
     fn check(&self) -> Result<()> {
@@ -1222,7 +1217,7 @@ fn plain_directory(path: &Path) -> Result<PathBuf> {
 
 /// Only the index root has reserved names. Source and payload walkers retain
 /// the original strict tree rule, including directories named `.vz-scan`.
-fn index_tree(root: &Path, flat: bool) -> Result<(BTreeMap<String, FileHash>, Option<Sha256>)> {
+fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
     let mut bytes = 0_u64;
     for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
@@ -1295,7 +1290,10 @@ fn index_tree(root: &Path, flat: bool) -> Result<(BTreeMap<String, FileHash>, Op
         }
         ensure!(bytes <= MAX_BYTES, "review tree byte limit");
     }
-    Ok((files, content))
+    if let Some(sha256) = content {
+        files.insert("state.sqlite".into(), FileHash { size: 0, sha256 });
+    }
+    Ok(files)
 }
 
 fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
@@ -1569,6 +1567,11 @@ mod tests {
         assert_eq!(binding.index_binding, Some(2));
         fs::create_dir_all(root.join(".vz-scan/many/entries")).unwrap();
         fs::write(root.join(".vz-scan/many/entries/staged"), "private").unwrap();
+        // Exceed the real entry budget inside the reserved workspace. Pruning
+        // must happen before traversal and accounting, including on Windows.
+        for n in 0..=MAX_FILES {
+            File::create(root.join(".vz-scan/many/entries").join(n.to_string())).unwrap();
+        }
         fs::create_dir_all(root.join("generations/orphan")).unwrap();
         fs::write(root.join("generations/orphan/uncommitted"), "private").unwrap();
         binding.check().unwrap();
@@ -1599,29 +1602,67 @@ mod tests {
     }
 
     #[test]
+    fn t15_sidecar_writer_child() {
+        let Some(root) = std::env::var_os("VZ_SIDECAR_CHILD") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let writer = vz_core::storage::State::open(root).unwrap();
+        writer
+            .db
+            .execute_batch("PRAGMA cache_size=1; PRAGMA cache_spill=ON")
+            .unwrap();
+        let tx = writer.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO index_metadata VALUES('pending',?1)",
+            ["uncommitted".repeat(100_000)],
+        )
+        .unwrap();
+        let wal = OpenOptions::new()
+            .write(true)
+            .open(root.join("state.sqlite-wal"))
+            .unwrap();
+        wal.set_len(MAX_BYTES + 4096).unwrap();
+        fs::write(std::env::var_os("VZ_SIDECAR_READY").unwrap(), "ready").unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
     fn t15_transient_sidecars_are_node_checked_but_never_charged_or_hashed() {
+        use std::process::{Command, Stdio};
         let f = Fixture::new();
         let root = f.0.join("index");
         drop(vz_core::storage::State::open(&root).unwrap());
         let binding = f.binding();
-        let writer = vz_core::storage::State::open(&root).unwrap();
-        let tx = writer.db.unchecked_transaction().unwrap();
-        tx.execute(
-            "INSERT INTO index_metadata VALUES('pending','not committed')",
-            [],
-        )
-        .unwrap();
-        let wal = root.join("state.sqlite-wal");
-        let file = OpenOptions::new().write(true).open(&wal).unwrap();
-        let original = file.metadata().unwrap().len();
-        // Sparse extension costs no large allocation and exceeds the entire
-        // review allowance. Only the main DB's size is part of that allowance.
-        file.set_len(MAX_BYTES + 4096).unwrap();
-        binding.check().unwrap();
-        file.set_len(original).unwrap();
-        drop(file);
-        tx.rollback().unwrap();
-        drop(writer);
+        let ready = f.0.join("sidecar-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "review_store::tests::t15_sidecar_writer_child",
+                "--nocapture",
+            ])
+            .env("VZ_SIDECAR_CHILD", &root)
+            .env("VZ_SIDECAR_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !ready.exists() {
+            if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("sidecar child did not reach uncommitted WAL write");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(fs::metadata(root.join("state.sqlite-wal")).unwrap().len() > MAX_BYTES);
+        // First capture after death, without recovery or another State open.
+        // Windows mandatory locks have gone with the killed writer.
         binding.check().unwrap();
         #[cfg(unix)]
         {
@@ -1687,6 +1728,28 @@ mod tests {
             .is_err());
         stale(old.check());
         new.check().unwrap();
+    }
+
+    #[test]
+    fn t15_payload_named_workspace_is_copied_and_remains_bound() {
+        let f = Fixture::new();
+        let (_, policy) = policy();
+        fs::write(
+            f.0.join("rebuilt/.vz-scan"),
+            "Payload content, not an index workspace.",
+        )
+        .unwrap();
+        let store = ReviewStore::open(&f.0.join("reviews")).unwrap();
+        let pack = store.lock(&policy, Uuid::new_v4()).unwrap();
+        let current = f.freeze(&pack);
+        let payload = pack.generation_path(&current).join("payload/.vz-scan");
+        assert_eq!(
+            fs::read(&payload).unwrap(),
+            b"Payload content, not an index workspace."
+        );
+        pack.validate(&current, false).unwrap();
+        fs::write(payload, "changed payload").unwrap();
+        stale(pack.validate(&current, false));
     }
 
     #[test]

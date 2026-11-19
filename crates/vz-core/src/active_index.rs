@@ -793,6 +793,11 @@ pub(crate) async fn scan_candidate(
     let mut workspace =
         ScanWorkspace::new(&workspace_root, &active, published.clone(), source, &id)?;
     if !same_recipe {
+        if let Ok(db) = State::review_connection(&active) {
+            if let Ok(rows) = ScanRow::read(&db, "documents") {
+                workspace.set_baseline(rows);
+            }
+        }
         crate::index::initialize_recipe(root, &engines.recipe, || Ok(()))?;
     }
     let outcome = {
@@ -951,11 +956,10 @@ pub(crate) async fn scan_candidate(
                                 || outcome.failed_infrastructure.contains(&r.path)
                         } else {
                             outcome.unavailable
+                                || outcome.damaged.contains(&r.path)
                                 || !outcome.seen.contains(&r.path)
                                 || outcome.failed_content.contains(&r.path)
-                                || ((outcome.changed.contains(&r.path)
-                                    || crate::pipeline::file_sha256(Path::new(&r.path))
-                                        .is_ok_and(|hash| hash != r.hash))
+                                || (outcome.changed.contains(&r.path)
                                     && outcome.failed_infrastructure.contains(&r.path))
                         }
                     })
@@ -1017,9 +1021,7 @@ pub(crate) async fn scan_candidate(
     }
     if decision != ScanDecision::Publish {
         let resume = !workspace.staged()?.is_empty();
-        let error = outcome
-            .stats
-            .ensure_publishable()
+        let error = validate_publication(&outcome.stats, populated)
             .err()
             .unwrap_or_else(|| anyhow::anyhow!("publication refused"));
         let message = error.to_string().replace("; Re-index to resume", "");

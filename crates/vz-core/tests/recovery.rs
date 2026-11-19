@@ -184,3 +184,60 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
     assert_eq!((result.completed, result.skipped), (1, 0));
     assert_eq!(State::review_documents(&root).unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn unreadable_published_generation_is_revoked_when_repair_has_infrastructure_failure() {
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::copy(
+        repo.join("spike/fixtures/documents/access.pdf"),
+        source.path().join("access.pdf"),
+    )
+    .unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let root = active_index::resolve(data.path());
+    let generation = State::review_connection(&root)
+        .unwrap()
+        .query_row("SELECT generation FROM documents", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    std::fs::remove_dir_all(root.join("generations").join(generation)).unwrap();
+    assert!(active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &source.path().join("no-assets"),
+        |_| {},
+        || false
+    )
+    .await
+    .is_err());
+    assert!(State::review_documents(&root).unwrap().is_empty());
+    let result = active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.completed, 1);
+    assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+}

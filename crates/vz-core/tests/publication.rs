@@ -360,12 +360,17 @@ async fn t12_recipe_infrastructure_failure_revokes_changed_and_absent_but_retain
     assert!(format!("{error:#}").contains("revocation pending"));
     assert_eq!(old, rows(data.path()));
     drop(held);
+    let original_pdf = fs::read(source.path().join("unchanged.pdf")).unwrap();
     assert!(active_index::reindex(
         data.path(),
         source.path(),
         &engines,
         &source.path().join("no-assets"),
-        |_| {},
+        |p| {
+            if p.path.ends_with("changed.pdf") && p.failed > 0 {
+                fs::write(source.path().join("changed.pdf"), &original_pdf).unwrap();
+            }
+        },
         || false
     )
     .await
@@ -524,4 +529,81 @@ async fn t2_overlapping_refusal_publishes_exact_failure_only_in_both_recipe_mode
         assert_eq!(rows(data.path()).len(), 2);
         assert!(!generation.exists());
     }
+}
+
+#[tokio::test]
+async fn t5_reverting_to_published_hash_removes_unconfirmed_staged_revision() {
+    let (engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let good = source.path().join("good.txt");
+    fs::write(&good, "Published original bytes.").unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let before = rows(data.path());
+    let active = active_index::resolve(data.path());
+    fs::write(&good, "Private replacement bytes.").unwrap();
+    fs::write(source.path().join("bad.pdf"), "bad").unwrap();
+    assert!(active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &source.path().join("no-assets"),
+        |_| {},
+        || false
+    )
+    .await
+    .is_err());
+    let scan = active.join(".vz-scan/scan.sqlite");
+    let staged = rusqlite::Connection::open(&scan)
+        .unwrap()
+        .query_row("SELECT generation FROM scan_documents", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap();
+    fs::write(&good, "Published original bytes.").unwrap();
+    assert!(active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &source.path().join("no-assets"),
+        |_| {},
+        || false
+    )
+    .await
+    .is_err());
+    assert_eq!(before, rows(data.path()));
+    let db = rusqlite::Connection::open(&scan).unwrap();
+    assert_eq!(
+        db.query_row("SELECT count(*) FROM scan_documents", [], |r| r
+            .get::<_, usize>(0))
+            .unwrap(),
+        0
+    );
+    assert!(!active.join(".vz-scan/generations").join(staged).exists());
+    drop(db);
+    fs::remove_file(source.path().join("bad.pdf")).unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(before, rows(data.path()));
+    assert_eq!(
+        documents(data.path())[0].chunks[0].text,
+        "Published original bytes."
+    );
 }

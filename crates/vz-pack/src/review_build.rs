@@ -1054,7 +1054,7 @@ mod tests {
         std::fs::write(b.join("z-bad.pdf"), "broken").unwrap();
         let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let assets = repo.join(".assets");
-        let engines =
+        let mut engines =
             Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
                 .unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -1121,6 +1121,51 @@ mod tests {
             .unwrap()
             .check_accepted(&current)
             .unwrap();
+        let flat = f.root.join("reviewed-flat");
+        rt.block_on(vz_core::active_index::index_explicit(
+            &flat,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+        ))
+        .unwrap();
+        let flat_id = Uuid::new_v4();
+        let guard = store.lock_native(&f.policy, flat_id, &flat).unwrap();
+        let flat_review = build(
+            &guard,
+            &a,
+            flat_id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap();
+        guard.accept(&flat_review).unwrap();
+        drop(guard);
+        engines.recipe.model.push_str("-migration");
+        assert!(rt
+            .block_on(vz_core::active_index::reindex(
+                &flat,
+                &b,
+                &engines,
+                &f.root.join("no-assets"),
+                |_| {},
+                || false
+            ))
+            .is_err());
+        let guard = store
+            .lock_native_current(&f.policy, &flat_review, &flat)
+            .unwrap();
+        guard.accept(&flat_review).unwrap();
+        let (payload, _) = guard.reviewed_payload(&flat_review).unwrap();
+        crate::review_transfer::package(
+            &guard,
+            &flat_review,
+            &payload,
+            &f.root.join("export-failed-flat-migration"),
+        )
+        .unwrap();
     }
 
     #[test]

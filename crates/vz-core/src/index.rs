@@ -112,6 +112,7 @@ pub(crate) struct ScanWorkspace {
     pub root: std::path::PathBuf,
     pub published_root: std::path::PathBuf,
     published_by_path: std::collections::HashMap<String, ScanRow>,
+    baseline_rows: std::collections::HashMap<String, ScanRow>,
     pub state: Option<State>,
     source: String,
     recipe: String,
@@ -149,6 +150,10 @@ impl ScanWorkspace {
         Ok(Self {
             root: root.into(),
             published_root: published_root.into(),
+            baseline_rows: published
+                .iter()
+                .map(|r| (r.path.clone(), r.clone()))
+                .collect(),
             published_by_path: published
                 .iter()
                 .map(|r| (r.path.clone(), r.clone()))
@@ -157,6 +162,9 @@ impl ScanWorkspace {
             source: source.into(),
             recipe: recipe.into(),
         })
+    }
+    pub fn set_baseline(&mut self, rows: Vec<ScanRow>) {
+        self.baseline_rows = rows.into_iter().map(|r| (r.path.clone(), r)).collect();
     }
     fn writable(&mut self) -> Result<&mut State> {
         if self.state.is_none() {
@@ -202,40 +210,40 @@ impl ScanWorkspace {
             ),
         ] {
             if let Some(row) = row.filter(|r| r.hash == hash) {
-                let generation = root.join("generations").join(&row.generation);
-                if generation.join("lance").is_dir() {
-                    if let Ok(bytes) = std::fs::read(generation.join("document.json")) {
-                        if let Ok(doc) = serde_json::from_slice::<Document>(&bytes) {
-                            use futures::TryStreamExt;
-                            use lancedb::query::{ExecutableQuery, QueryBase};
-                            let readable = async {
-                                let db = lancedb::connect(
-                                    generation
-                                        .join("lance")
-                                        .to_str()
-                                        .context("UTF-8 generation")?,
-                                )
-                                .execute()
-                                .await?;
-                                let table = db.open_table("chunks").execute().await?;
-                                let mut batches = table.query().limit(1).execute().await?;
-                                anyhow::ensure!(
-                                    batches.try_next().await?.is_some(),
-                                    "empty stored generation"
-                                );
-                                Ok::<_, anyhow::Error>(())
-                            }
-                            .await;
-                            if doc.path == row.path && doc.sha256 == row.hash && readable.is_ok() {
-                                return Ok(Some((doc, row, staged)));
-                            }
-                        }
-                    }
+                if let Some(doc) = readable_generation(root, &row).await {
+                    return Ok(Some((doc, row, staged)));
                 }
             }
         }
         Ok(None)
     }
+}
+
+async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
+    if row.generation.is_empty()
+        || !row
+            .generation
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    let generation = root.join("generations").join(&row.generation);
+    let doc: Document =
+        serde_json::from_slice(&std::fs::read(generation.join("document.json")).ok()?).ok()?;
+    if doc.path != row.path || doc.sha256 != row.hash || !generation.join("lance").is_dir() {
+        return None;
+    }
+    use futures::TryStreamExt;
+    use lancedb::query::{ExecutableQuery, QueryBase};
+    let db = lancedb::connect(generation.join("lance").to_str()?)
+        .execute()
+        .await
+        .ok()?;
+    let table = db.open_table("chunks").execute().await.ok()?;
+    let mut batches = table.query().limit(1).execute().await.ok()?;
+    batches.try_next().await.ok()??;
+    Some(doc)
 }
 
 pub async fn index(
@@ -276,6 +284,7 @@ pub(crate) struct ScanOutcome {
     pub source: Option<std::path::PathBuf>,
     pub seen: HashSet<String>,
     pub succeeded: HashSet<String>,
+    pub publishable: HashSet<String>,
     pub failed_content: HashSet<String>,
     pub failed_infrastructure: HashSet<String>,
     pub stats: Progress,
@@ -284,6 +293,7 @@ pub(crate) struct ScanOutcome {
     pub jobs: Vec<(String, String, Option<String>)>,
     pub unchanged: Vec<ScanRow>,
     pub changed: HashSet<String>,
+    pub damaged: HashSet<String>,
 }
 
 pub(crate) async fn scan(
@@ -367,9 +377,9 @@ pub(crate) async fn scan(
             let hash = crate::pipeline::file_sha256(&path)
                 .map_err(|e| crate::failures::source_io(e.into()))?;
             if state
-                .published_by_path
+                .baseline_rows
                 .get(&path_text)
-                .is_some_and(|r| r.hash != hash)
+                .is_some_and(|old| old.hash != hash)
             {
                 outcome.changed.insert(path_text.clone());
             }
@@ -378,6 +388,7 @@ pub(crate) async fn scan(
                 row.size = metadata.len();
                 row.mtime = mtime;
                 if staged {
+                    outcome.publishable.insert(path_text.clone());
                     let db = &state.state.as_ref().unwrap().db;
                     db.execute(
                         "UPDATE scan_documents SET size=?1,mtime=?2 WHERE path=?3",
@@ -474,6 +485,7 @@ pub(crate) async fn scan(
             Ok(changed) => {
                 outcome.succeeded.insert(path_text.clone());
                 if changed {
+                    outcome.publishable.insert(path_text.clone());
                     stats.completed += 1;
                 } else {
                     stats.skipped += 1;
@@ -491,6 +503,14 @@ pub(crate) async fn scan(
                 }
             }
             Err(error) => {
+                if let Some(row) = state.baseline_rows.get(&path_text) {
+                    if readable_generation(&state.published_root, row)
+                        .await
+                        .is_none()
+                    {
+                        outcome.damaged.insert(path_text.clone());
+                    }
+                }
                 stats.failed += 1;
                 if crate::failures::is_content(&error) {
                     outcome.failed_content.insert(path_text.clone());
@@ -519,7 +539,7 @@ pub(crate) async fn scan(
         }
         progress(&stats);
     }
-    state.retain(&outcome.succeeded)?;
+    state.retain(&outcome.publishable)?;
     outcome.stats = stats;
     Ok(outcome)
 }
