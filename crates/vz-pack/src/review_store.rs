@@ -1650,7 +1650,8 @@ mod tests {
         drop(writer);
         let (_, policy) = policy();
         let store_root = tempfile::tempdir().unwrap();
-        let store = ReviewStore::open(&store_root.path().join("reviews")).unwrap();
+        let store_root_path = fs::canonicalize(store_root.path()).unwrap();
+        let store = ReviewStore::open(&store_root_path.join("reviews")).unwrap();
         for wrong in [&deep, &fixture.0] {
             let native = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
             stale(native.capture(wrong));
