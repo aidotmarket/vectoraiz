@@ -66,8 +66,12 @@ It runs the existing resumable indexer in the new recipe directory. Only a
 finished run activates that directory, using a temporary pointer file, fsync,
 and atomic rename (and directory fsync on Unix). Initial recipe creation also
 uses temp + fsync + rename, so interruption cannot leave partial recipe JSON.
-Publication requires at least one completed or previously completed (skipped)
-document, or a folder with no supported documents. Unsupported extensions are
+Publication requires no infrastructure failures. A scan with no successful
+documents may activate only when the active index has no indexed documents
+(including a first index), or the folder has no supported documents. An all-failed
+scan never replaces an active index containing documents; its candidate is retained
+for retry. The selected review folder is persisted only after activation.
+Unsupported extensions are
 excluded at scan time, before hashing or worker launch; the parser also rejects
 unsupported formats as document failures for callers bypassing the scanner.
 

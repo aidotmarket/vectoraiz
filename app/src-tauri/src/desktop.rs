@@ -829,6 +829,7 @@ async fn pipeline_index<R: tauri::Runtime>(
         let mut run = || -> anyhow::Result<serde_json::Value> {
             let engines = cache.get_or_load(false, || {
                 vz_core::engine::Engines::load_embedding(&assets, &pins, pipeline_cpu_requested())
+                    .map_err(desktop_pipeline::model_load_error)
             })?;
             #[cfg(feature = "smoke-test")]
             record_loaded_models(&assets, &pins, engines.chat_loaded())?;
@@ -845,14 +846,7 @@ async fn pipeline_index<R: tauri::Runtime>(
                 ))?;
             Ok(serde_json::to_value(result)?)
         };
-        run().map_err(|e| {
-            let detail = format!("{e:#}");
-            if detail.starts_with("Re-index did not finish") {
-                detail
-            } else {
-                format!("Re-index did not finish: {detail}")
-            }
-        })
+        run().map_err(desktop_pipeline::reindex_error)
     })
     .await
     .map_err(|e| e.to_string())?

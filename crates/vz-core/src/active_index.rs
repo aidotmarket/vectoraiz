@@ -269,30 +269,56 @@ pub async fn reindex(
             root.canonicalize()?.starts_with(data.canonicalize()?),
             "index outside data root"
         );
+        let restore_on_failure = root.canonicalize().ok() == resolve(data).canonicalize().ok()
+            && last_indexed_folder(&root).is_some_and(|previous|
+                folder.canonicalize().ok().as_ref() != Some(&PathBuf::from(previous)));
         let mut state = crate::storage::State::open(&root)?;
-        finish_reindex(
+        // Keep the previous folder's visibility on a failed same-recipe switch.
+        // Generation files are retained until publication or rollback finishes.
+        state.db.execute_batch("CREATE TEMP TABLE previous_documents AS SELECT * FROM documents")?;
+        let mut seen = std::collections::HashSet::new();
+        let result = finish_reindex(
             data,
             &engines.recipe,
             &selected,
-            crate::index::index(&mut state, folder, engines, assets, |p| {
-                started = true;
-                latest = p.clone();
-                progress(p);
-            }),
-            cancelled,
-        )
-        .await
+            async {
+                let (stats, paths) = crate::index::scan(&mut state, folder, engines, assets, |p| {
+                    started = true;
+                    latest = p.clone();
+                    progress(p);
+                }).await?;
+                seen = paths;
+                Ok(stats)
+            },
+            &cancelled,
+        ).await;
+        if result.is_ok() {
+            crate::index::publish_source(&state, folder, &seen)?;
+        } else if restore_on_failure {
+            state.db.execute_batch("BEGIN; DELETE FROM documents; INSERT INTO documents SELECT * FROM previous_documents; COMMIT;")?;
+            state.recover()?;
+        }
+        result
     }
     .await;
     result.map_err(|e| {
         if e.to_string().starts_with("Re-index did not finish") {
             return e;
         }
+        let cause = if cancelled() || e.to_string().contains("cancelled") {
+            "cancelled"
+        } else if e.to_string().contains("source missing") {
+            "source missing"
+        } else if e.chain().any(|e| e.to_string().contains("in use") || e.to_string().contains("lock")) {
+            "index in use"
+        } else {
+            "indexing interrupted"
+        };
         if !started {
-            return anyhow::anyhow!("Re-index did not finish; source or index unavailable; Re-index to resume");
+            return anyhow::anyhow!("Re-index did not finish; {cause}; Re-index to resume");
         }
         anyhow::anyhow!(
-            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; indexing interrupted; Re-index to resume",
+            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; {cause}; Re-index to resume",
             latest.completed,
             latest.skipped,
             latest.failed,
@@ -308,6 +334,7 @@ async fn finish_reindex(
     run: impl std::future::Future<Output = Result<crate::index::Progress>>,
     cancelled: impl Fn() -> bool,
 ) -> Result<crate::index::Progress> {
+    let replacing_documents = crate::storage::State::has_persisted_documents(&resolve(data))?;
     let mut run = Box::pin(run);
     let result = futures::future::poll_fn(|cx| {
         if cancelled() {
@@ -321,6 +348,13 @@ async fn finish_reindex(
     .await?;
     ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
     result.ensure_publishable()?;
+    if result.total > 0 && result.completed + result.skipped == 0 {
+        ensure!(
+            !replacing_documents,
+            "Re-index did not finish: {} indexed, {} skipped, {} failed, {} total; active index retained; Re-index to resume",
+            result.completed, result.skipped, result.failed, result.total
+        );
+    }
     activate_with(data, recipe, selected, || Ok(()))?;
     Ok(result)
 }
@@ -618,12 +652,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn publication_requires_success_and_only_content_failures_then_resumes() {
+    async fn replacing_populated_index_requires_success_and_only_content_failures_then_resumes() {
         use crate::index::Progress;
         let data = tempfile::tempdir().unwrap();
         let old = recipe();
         seed(data.path(), &old);
         activate(data.path(), &old).unwrap();
+        let old_state = crate::storage::State::open(&resolve(data.path())).unwrap();
+        old_state
+            .db
+            .execute(
+                "INSERT INTO documents VALUES('old','old.txt',1,'mtime','hash','old')",
+                [],
+            )
+            .unwrap();
+        drop(old_state);
         let before = fs::read(data.path().join("active-index.json")).unwrap();
         let mut new = old.clone();
         new.model.push_str("-new");
@@ -653,6 +696,27 @@ mod tests {
             );
             assert!(candidate.join("recipe.json").is_file());
         }
+        let error = finish_reindex(
+            data.path(),
+            &new,
+            &publication_dir(data.path(), &new).unwrap(),
+            async {
+                Ok(Progress {
+                    total: 1,
+                    failed: 1,
+                    ..Default::default()
+                })
+            },
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Re-index did not finish"));
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).unwrap(),
+            before
+        );
+        assert!(candidate.join("recipe.json").is_file());
         // Resumed work may skip already committed documents and exclude corrupt ones.
         let stats = Progress {
             total: 3,
@@ -681,6 +745,77 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_or_cancelled_folder_switch_keeps_previous_review_source() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let engines = crate::engine::Engines::load_embedding(
+            &repo.join(".assets"),
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        fs::write(a.path().join("good.txt"), "A searchable source document.").unwrap();
+        reindex(
+            data.path(),
+            a.path(),
+            &engines,
+            &repo.join(".assets"),
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        // First successfully commit a B document, then hit an infrastructure failure.
+        fs::write(b.path().join("a-good.txt"), "Another searchable document.").unwrap();
+        fs::write(b.path().join("z-bad.pdf"), "not a PDF").unwrap();
+        let error = reindex(
+            data.path(),
+            b.path(),
+            &engines,
+            &b.path().join("missing-assets"),
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("Re-index did not finish"));
+        for cancel_after_file in [false, true] {
+            if cancel_after_file {
+                let cancelled = AtomicBool::new(false);
+                let error = reindex(
+                    data.path(),
+                    b.path(),
+                    &engines,
+                    &repo.join(".assets"),
+                    |_| {
+                        cancelled.store(true, Ordering::SeqCst);
+                    },
+                    || cancelled.load(Ordering::SeqCst),
+                )
+                .await
+                .unwrap_err();
+                assert!(error.to_string().contains("cancelled"));
+            }
+            let index = resolve(data.path());
+            assert_eq!(
+                last_indexed_folder(&index).as_deref(),
+                a.path().canonicalize().unwrap().to_str()
+            );
+            assert_eq!(
+                fs::read(data.path().join("active-index.json")).unwrap(),
+                pointer
+            );
+            let docs = crate::storage::State::review_documents(&index).unwrap();
+            assert_eq!(docs.len(), 1);
+            assert!(Path::new(&docs[0].path).starts_with(a.path().canonicalize().unwrap()));
+        }
     }
 
     #[tokio::test]

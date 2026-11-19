@@ -109,20 +109,25 @@ impl NativeIndexFence {
         fence.check_source(source)?;
         let index = &fence.selection.index;
         let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        let reasons = vz_core::storage::State::review_failure_reasons(index)?;
-        Ok(
-            review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?
-                .into_iter()
-                .map(|(doc, indexed)| {
-                    let indexing_reason = reasons.get(Path::new(&doc.path)).cloned();
-                    CandidateDocument {
-                        doc,
-                        indexed,
-                        indexing_reason,
-                    }
-                })
-                .collect(),
-        )
+        let candidates =
+            review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?;
+        let paths: Vec<_> = candidates
+            .iter()
+            .filter(|(_, indexed)| !indexed)
+            .map(|(doc, _)| PathBuf::from(&doc.path))
+            .collect();
+        let reasons = vz_core::storage::State::review_failure_reasons(index, &paths)?;
+        Ok(candidates
+            .into_iter()
+            .map(|(doc, indexed)| {
+                let indexing_reason = reasons.get(Path::new(&doc.path)).cloned();
+                CandidateDocument {
+                    doc,
+                    indexed,
+                    indexing_reason,
+                }
+            })
+            .collect())
     }
 
     fn check_source(&self, source: &Path) -> Result<()> {
@@ -1627,7 +1632,61 @@ mod tests {
     }
 
     #[test]
-    fn gaining_shallower_selected_root_durably_invalidates_legacy_names() {
+    fn selected_source_guards_reject_parent_and_subfolder() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        let deep = source.join("reports");
+        fs::create_dir(&deep).unwrap();
+        fs::rename(source.join("original.txt"), deep.join("original.txt")).unwrap();
+        let index = fixture.0.join("index");
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer
+            .db
+            .execute(
+                "INSERT INTO index_metadata VALUES('selected_folder',?1)",
+                [source.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+        let (_, policy) = policy();
+        let store_root = tempfile::tempdir().unwrap();
+        let store = ReviewStore::open(&store_root.path().join("reviews")).unwrap();
+        for wrong in [&deep, &fixture.0] {
+            let native = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
+            stale(native.capture(wrong));
+            // Bind current index bytes to an incompatible source to isolate the
+            // edit-origin guard from ordinary index-byte invalidation.
+            let mut binding =
+                ReviewBinding::capture(wrong, &index, &index.join("recipe.json")).unwrap();
+            binding.selection = Some(native.index.selection.clone());
+            let current = fixture.freeze_bound(&native.pack, binding);
+            stale(native.edit_origin(&current));
+        }
+        stale(NativeIndexFence::candidate_documents(&index, &deep));
+        stale(NativeIndexFence::candidate_documents(&index, &fixture.0));
+        assert_eq!(
+            NativeIndexFence::candidate_documents(&index, &source)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn obsolete_failure_history_does_not_block_current_review() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer.db.execute_batch("WITH RECURSIVE paths(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM paths WHERE n<50001) INSERT INTO jobs(path,status,reason) SELECT '/obsolete-folder/file-' || n,'failed','old failure' FROM paths;").unwrap();
+        drop(writer);
+        let candidates =
+            NativeIndexFence::candidate_documents(&index, &fixture.0.join("source")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].indexing_reason.is_none());
+    }
+
+    #[test]
+    fn selected_root_metadata_write_durably_invalidates_accepted_generation() {
         let fixture = Fixture::new();
         let source = fixture.0.join("source");
         let deep = source.join("reports");

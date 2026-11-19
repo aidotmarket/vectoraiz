@@ -96,7 +96,13 @@ fn candidate(
         // Preserve the known content failure's useful explanation. Otherwise a
         // current named projection refusal wins over historical raw worker errors.
         // Recorded reasons describe the last attempt, never a final verdict.
-        let recorded = indexing_reason.map(|reason| format!("Last indexing attempt: {reason}"));
+        let recorded = indexing_reason.map(|reason| {
+            let reason = match reason {
+                "document has no text" | "needs text recognition (OCR)" => reason,
+                _ => "indexing did not complete",
+            };
+            format!("Last indexing attempt: {reason}")
+        });
         let reason = if doc.kind != "pdf" && indexing_reason == Some("document has no text") {
             recorded
         } else {
@@ -106,6 +112,12 @@ fn candidate(
             }
         };
         Some(match reason {
+            Some(reason)
+                if reason.contains("PROJECTION_")
+                    || reason.contains("needs text recognition (OCR)") =>
+            {
+                format!("{reason}; exclude it before rebuilding")
+            }
             Some(reason) => format!("{reason}; re-index or exclude it before rebuilding"),
             None => "Document is not indexed; re-index or exclude it before rebuilding".into(),
         })
@@ -837,8 +849,9 @@ mod tests {
             .unwrap();
             assert!(!refused.supported);
             let reason = refused.refusal.unwrap();
-            assert!(reason.contains("re-index or exclude"), "{reason}");
+            assert!(reason.contains("exclude it"), "{reason}");
             if entry.doc.kind == "pdf" {
+                assert!(!reason.contains("re-index"), "{reason}");
                 assert_eq!(refused.source, pdf_name);
                 assert!(reason.contains("PROJECTION_PDF_NEEDS_OCR"), "{reason}");
             } else {
@@ -862,6 +875,84 @@ mod tests {
             guard.accept(&current).unwrap();
             let (payload, _) = guard.reviewed_payload(&current).unwrap();
             assert_eq!(crate::verify(&payload).unwrap()["counts"]["documents"], 1);
+        }
+    }
+
+    #[test]
+    fn failed_and_cancelled_folder_switch_leave_review_openable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let a = root.join("folder-a");
+        let b = root.join("folder-b");
+        let library = root.join("library");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("good.txt"), "A usable review document.").unwrap();
+        std::fs::write(b.join("a-good.txt"), "A replacement review document.").unwrap();
+        std::fs::write(b.join("z-bad.pdf"), "broken").unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        for cancel in [false, true] {
+            let stopped = AtomicBool::new(false);
+            let used_assets = if cancel {
+                assets.clone()
+            } else {
+                root.join("missing-assets")
+            };
+            assert!(rt
+                .block_on(vz_core::active_index::reindex(
+                    &library,
+                    &b,
+                    &engines,
+                    &used_assets,
+                    |_| {
+                        if cancel {
+                            stopped.store(true, Ordering::SeqCst);
+                        }
+                    },
+                    || stopped.load(Ordering::SeqCst)
+                ))
+                .is_err());
+            let selected = vz_core::active_index::last_indexed_folder(
+                &vz_core::active_index::resolve(&library),
+            )
+            .unwrap();
+            assert_eq!(Path::new(&selected), a);
+            let candidates = crate::review_store::NativeIndexFence::candidate_documents(
+                &library,
+                Path::new(&selected),
+            )
+            .unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates[0].indexed);
+            let candidate = candidate(
+                &candidates[0].doc,
+                true,
+                None,
+                "projection/document-0001".into(),
+                &a,
+                &mut Budget::default(),
+                None,
+            )
+            .unwrap();
+            assert!(candidate.supported, "{:?}", candidate.refusal);
         }
     }
 
@@ -898,7 +989,11 @@ mod tests {
             .unwrap()
             .refusal
             .unwrap();
-            assert!(refusal.starts_with("Last indexing attempt:"), "{refusal}");
+            assert!(
+                refusal.starts_with("Last indexing attempt: indexing did not complete"),
+                "{refusal}"
+            );
+            assert!(!refusal.contains(reason));
             assert!(refusal.contains("re-index or exclude"), "{refusal}");
         }
     }
@@ -934,7 +1029,8 @@ mod tests {
         .unwrap();
         assert!(refusal.contains("PROJECTION_"), "{refusal}");
         assert!(!refusal.contains("raw infrastructure"), "{refusal}");
-        assert!(refusal.contains("re-index or exclude"));
+        assert!(refusal.contains("exclude it"));
+        assert!(!refusal.contains("re-index"));
     }
 
     #[test]

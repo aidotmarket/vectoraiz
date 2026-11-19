@@ -30,7 +30,7 @@ impl Progress {
         anyhow::ensure!(
             self.infrastructure_failed == 0,
             "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {}; Re-index to resume",
-            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, if self.infrastructure_failed > 0 { &self.infrastructure_examples } else { &self.failure_examples }.join("; ")
+            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, self.infrastructure_examples.join("; ")
         );
         Ok(())
     }
@@ -109,18 +109,62 @@ pub async fn index(
     folder: &Path,
     engines: &Engines,
     assets: &Path,
-    mut progress: impl FnMut(&Progress),
+    progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let unavailable = |state: &State| -> Result<()> {
-        state.db.execute("DELETE FROM documents", [])?;
-        state.recover()?;
-        Ok(())
+    let (stats, seen) = match scan(state, folder, engines, assets, progress).await {
+        Err(error)
+            if error.to_string() == "source missing"
+                || error.to_string() == "source unavailable during scan" =>
+        {
+            // Explicit-index callers retain their source-revocation contract.
+            // Library re-indexing uses scan() and preserves the previous folder
+            // when a replacement source cannot be scanned.
+            state.db.execute("DELETE FROM documents", [])?;
+            state.recover()?;
+            return Err(error).context("source unavailable");
+        }
+        result => result?,
     };
+    if stats.infrastructure_failed == 0 {
+        publish_source(state, folder, &seen)?;
+    }
+    Ok(stats)
+}
+
+pub(crate) fn publish_source(state: &State, folder: &Path, seen: &HashSet<String>) -> Result<()> {
+    let folder = folder.canonicalize()?;
+    let indexed: Vec<String> = state
+        .db
+        .prepare("SELECT path FROM documents")?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let tx = state.db.unchecked_transaction()?;
+    for path in indexed {
+        if !seen.contains(&path) {
+            tx.execute("DELETE FROM documents WHERE path=?1", [&path])?;
+        }
+    }
+    tx.execute(
+        "INSERT INTO index_metadata(key,value) VALUES('selected_folder',?1)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        [folder.to_str().context("source path must be UTF-8")?],
+    )?;
+    tx.commit()?;
+    state.recover()?;
+    Ok(())
+}
+
+pub(crate) async fn scan(
+    state: &mut State,
+    folder: &Path,
+    engines: &Engines,
+    assets: &Path,
+    mut progress: impl FnMut(&Progress),
+) -> Result<(Progress, HashSet<String>)> {
     let folder = match folder.canonicalize() {
         Ok(folder) if folder.is_dir() => folder,
         _ => {
-            unavailable(state)?;
-            bail!("source unavailable");
+            bail!("source missing");
         }
     };
     initialize_recipe(&state.root, &engines.recipe, || Ok(()))?;
@@ -129,7 +173,6 @@ pub async fn index(
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                unavailable(state)?;
                 return Err(error).context("source unavailable during scan");
             }
         };
@@ -157,13 +200,6 @@ pub async fn index(
         }
     }
     files.sort();
-    // Persist the seller's selection, including when every supported file fails.
-    // SQLite and the native writer fence make this part of the review commitment.
-    state.db.execute(
-        "INSERT INTO index_metadata(key,value) VALUES('selected_folder',?1)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        [folder.to_str().context("source path must be UTF-8")?],
-    )?;
     let mut stats = Progress {
         total: files.len(),
         ..Default::default()
@@ -325,22 +361,7 @@ pub async fn index(
         }
         progress(&stats);
     }
-    // This spike indexes one source folder per index. A subsequent successful scan
-    // revokes deleted files; unreadable scans fail before querying is offered by the UI.
-    let indexed: Vec<String> = state
-        .db
-        .prepare("SELECT path FROM documents")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for path in indexed {
-        if !seen.contains(&path) {
-            state
-                .db
-                .execute("DELETE FROM documents WHERE path=?1", [&path])?;
-        }
-    }
-    state.recover()?;
-    Ok(stats)
+    Ok((stats, seen))
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Citation {
@@ -555,6 +576,7 @@ mod tests {
         )
         .await
         .unwrap_err();
+        assert!(error.to_string().contains("source missing"));
         assert!(!format!("{error:#}").contains(source.path().to_str().unwrap()));
     }
 

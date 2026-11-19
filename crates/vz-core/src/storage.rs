@@ -82,21 +82,29 @@ impl State {
             .transpose()
     }
 
-    /// Latest recorded failure per path, under the caller's native writer fence.
-    /// A later successful or skipped job supersedes an older failure.
+    /// Read the latest job only for current unindexed candidates. Historical
+    /// folders and already indexed paths never consume the review candidate cap.
     pub fn review_failure_reasons(
         root: &Path,
+        candidates: &[PathBuf],
     ) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+        anyhow::ensure!(candidates.len() <= 50_000, "review job path limit");
         let db = Self::review_connection(root)?;
-        let mut statement = db.prepare(
-            "SELECT path,reason FROM jobs WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY path)
-             AND status='failed' AND reason IS NOT NULL AND reason != '' LIMIT 50001",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
-        })?;
-        let reasons = rows.collect::<rusqlite::Result<std::collections::BTreeMap<_, _>>>()?;
-        anyhow::ensure!(reasons.len() <= 50_000, "review job path limit");
+        let mut statement =
+            db.prepare("SELECT status,reason FROM jobs WHERE path=?1 ORDER BY id DESC LIMIT 1")?;
+        let mut reasons = std::collections::BTreeMap::new();
+        for path in candidates {
+            let latest: Option<(String, Option<String>)> = statement
+                .query_row([path.to_str().context("UTF-8 source")?], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+            if let Some((status, Some(reason))) = latest {
+                if status == "failed" && !reason.is_empty() {
+                    reasons.insert(path.clone(), reason);
+                }
+            }
+        }
         Ok(reasons)
     }
 
@@ -538,7 +546,18 @@ mod tests {
         }
         drop(state);
         let before = std::fs::read(root.path().join("state.sqlite")).unwrap();
-        let reasons = State::review_failure_reasons(root.path()).unwrap();
+        let reasons = State::review_failure_reasons(
+            root.path(),
+            &[
+                "empty.txt",
+                "recovered.txt",
+                "skipped.txt",
+                "unknown.txt",
+                "blank.txt",
+            ]
+            .map(PathBuf::from),
+        )
+        .unwrap();
         assert_eq!(
             reasons,
             std::collections::BTreeMap::from([(
@@ -555,15 +574,12 @@ mod tests {
     }
 
     #[test]
-    fn review_failure_history_has_a_hard_path_limit() {
+    fn current_unindexed_candidates_have_a_hard_path_limit() {
         let root = tempfile::tempdir().unwrap();
-        let state = State::open(root.path()).unwrap();
-        state.db.execute_batch(
-            "WITH RECURSIVE paths(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM paths WHERE n<50001)
-             INSERT INTO jobs(path,status,reason) SELECT 'file-' || n,'failed','no text' FROM paths;"
-        ).unwrap();
-        drop(state);
-        let error = State::review_failure_reasons(root.path()).unwrap_err();
+        drop(State::open(root.path()).unwrap());
+        let error =
+            State::review_failure_reasons(root.path(), &vec![PathBuf::from("current"); 50_001])
+                .unwrap_err();
         assert!(error.to_string().contains("review job path limit"));
     }
 

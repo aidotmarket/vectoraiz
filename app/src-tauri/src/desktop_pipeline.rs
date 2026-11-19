@@ -2,6 +2,22 @@
 use std::{collections::HashMap, path::Path};
 use vz_core::storage::State;
 
+/// Keep engine model paths behind the desktop command boundary.
+pub(crate) fn model_load_error(_: anyhow::Error) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Re-index did not finish: search model unavailable; reinstall the search model and retry"
+    )
+}
+
+pub(crate) fn reindex_error(error: anyhow::Error) -> String {
+    let detail = error.to_string();
+    if detail.starts_with("Re-index did not finish") {
+        detail
+    } else {
+        "Re-index did not finish: indexing unavailable; retry indexing".into()
+    }
+}
+
 /// Presentation only: keep canonical internal and source paths unchanged.
 pub(crate) fn display_path(path: &str) -> String {
     if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
@@ -199,6 +215,19 @@ mod tests {
             "preflight changed database contents"
         );
         assert_eq!(snapshot(root), files, "preflight changed files");
+    }
+
+    #[test]
+    fn missing_model_reindex_error_is_path_free() {
+        let temp = Temp::new();
+        let pins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spike/fixtures/models.json");
+        let error = vz_core::engine::Engines::load_embedding(&temp.0, &pins, true)
+            .err()
+            .unwrap();
+        assert!(format!("{error:#}").contains(temp.0.to_str().unwrap()));
+        let message = reindex_error(model_load_error(error));
+        assert!(message.contains("search model unavailable"));
+        assert!(!message.contains(temp.0.to_str().unwrap()));
     }
 
     #[test]
