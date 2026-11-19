@@ -832,6 +832,9 @@ async fn refused_different_source_preserves_retry_workspace_until_first_write() 
     .is_err());
     let workspace = active_index::resolve(data.path()).join(".vz-scan");
     let before = snapshot(&workspace);
+    // An empty, completed source is publishable by the existing decision table.
+    // Use a content-refused source to exercise a switch with no first write.
+    fs::write(b.path().join("bad.pdf"), b"invalid PDF").unwrap();
     for other in [b.path().join("missing"), b.path().to_owned()] {
         assert!(
             active_index::reindex(data.path(), &other, &engines, &assets, |_| {}, || false)
