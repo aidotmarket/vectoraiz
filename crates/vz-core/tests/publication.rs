@@ -607,3 +607,241 @@ async fn t5_reverting_to_published_hash_removes_unconfirmed_staged_revision() {
         "Published original bytes."
     );
 }
+
+#[tokio::test]
+async fn cleanup_preserves_unowned_siblings_and_reclaims_superseded_recipe() {
+    let (mut engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("a.txt"), "Ownership regression content.").unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let old = active_index::resolve(data.path());
+    let unrelated = data.path().join("indexes/unrelated");
+    fs::create_dir_all(unrelated.join("nested")).unwrap();
+    fs::write(unrelated.join("nested/precious"), b"keep exactly\x00\xff").unwrap();
+    let before = fs::read(unrelated.join("nested/precious")).unwrap();
+    // A syntactically valid recipe name and copied recipe are insufficient:
+    // a directory without a verified index schema is still not ours.
+    let decoy = data
+        .path()
+        .join("indexes")
+        .join(active_index::recipe_id(&engines.recipe).unwrap());
+    fs::create_dir(&decoy).unwrap();
+    fs::write(
+        decoy.join("recipe.json"),
+        serde_json::to_vec(&engines.recipe).unwrap(),
+    )
+    .unwrap();
+    fs::write(decoy.join("writer.lock"), b"unrelated lock bytes").unwrap();
+    fs::write(decoy.join("state.sqlite"), b"unrelated database bytes").unwrap();
+    active_index::cleanup_start(data.path()).unwrap();
+    assert!(!unrelated.join("writer.lock").exists());
+    engines.recipe.model.push_str("-replacement");
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert!(!old.exists());
+    assert_eq!(
+        fs::read(decoy.join("writer.lock")).unwrap(),
+        b"unrelated lock bytes"
+    );
+    assert_eq!(
+        fs::read(decoy.join("state.sqlite")).unwrap(),
+        b"unrelated database bytes"
+    );
+    assert_eq!(fs::read_dir(&decoy).unwrap().count(), 3);
+    assert_eq!(fs::read(unrelated.join("nested/precious")).unwrap(), before);
+    assert_eq!(fs::read_dir(&unrelated).unwrap().count(), 1);
+    assert!(!unrelated.join("writer.lock").exists());
+}
+
+#[tokio::test]
+async fn missing_current_source_case_follows_actual_volume_semantics() {
+    let (engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let parent = tempfile::tempdir().unwrap();
+    let source = parent.path().join("CaseSource");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("a.txt"), "Volume-sensitive revocation content.").unwrap();
+    active_index::reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    let alternate = parent.path().join("cASEsOURCE");
+    let insensitive = alternate.canonicalize().ok() == source.canonicalize().ok();
+    println!("missing-source identity: case_insensitive={insensitive}");
+    fs::remove_dir_all(&source).unwrap();
+    assert!(
+        active_index::reindex(data.path(), &alternate, &engines, &assets, |_| {}, || false)
+            .await
+            .is_err()
+    );
+    assert_eq!(documents(data.path()).is_empty(), insensitive);
+    if !insensitive {
+        assert!(
+            active_index::reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+                .await
+                .is_err()
+        );
+        assert!(documents(data.path()).is_empty());
+    }
+}
+
+/// The baseline driver is compiled from examples/r10-baseline.rs against the
+/// pinned base, outside this checkout. Run serially on an idle machine.
+#[tokio::test]
+#[ignore = "requires VZ_R10_BASELINE_BIN built against ef34f139"]
+async fn t15_r10_measured_nochange_against_ef34f139() {
+    use std::{process::Command, time::Instant};
+    let baseline = std::env::var_os("VZ_R10_BASELINE_BIN").expect("baseline driver");
+    let (engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    for i in 0..200 {
+        fs::write(
+            source.path().join(format!("{i:04}.txt")),
+            format!("Orbital archive retention is thirty days. Fixture document {i}. "),
+        )
+        .unwrap();
+    }
+    let initial =
+        active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+    assert_eq!(initial.completed, 200);
+    let generations = || {
+        fs::read_dir(data.path().join("generations"))
+            .unwrap()
+            .count()
+    };
+    let count = generations();
+    let pins = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../spike/fixtures/models.json");
+    let mut base_times = vec![];
+    let mut candidate_times = vec![];
+    // One warm-up pair and seven recorded pairs on identical files and index.
+    for round in 0..8 {
+        let output = Command::new("rtk")
+            .arg("run")
+            .arg(&baseline)
+            .args([data.path(), source.path(), &assets, &pins])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let base: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(base["completed"], 0);
+        assert_eq!(base["skipped"], 200);
+        let before = fs::read(data.path().join("state.sqlite")).unwrap();
+        let start = Instant::now();
+        let result =
+            active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+                .await
+                .unwrap();
+        let elapsed = start.elapsed().as_secs_f64();
+        assert_eq!((result.completed, result.skipped), (0, 200));
+        assert_eq!(generations(), count);
+        assert!(!data.path().join(".vz-scan/scan.sqlite").exists());
+        assert_eq!(fs::read(data.path().join("state.sqlite")).unwrap(), before);
+        if round > 0 {
+            base_times.push(base["seconds"].as_f64().unwrap());
+            candidate_times.push(elapsed);
+            println!("R10 round={round} base_ms={:.3} candidate_ms={:.3} generations={count}->{count} workspace_rows=0 reembeddings=0", base_times.last().unwrap()*1000., elapsed*1000.);
+        }
+    }
+    base_times.sort_by(f64::total_cmp);
+    candidate_times.sort_by(f64::total_cmp);
+    let ratio = candidate_times[3] / base_times[3];
+    println!(
+        "R10 median base_ms={:.3} candidate_ms={:.3} ratio={ratio:.4}",
+        base_times[3] * 1000.,
+        candidate_times[3] * 1000.
+    );
+    assert!(ratio <= 1.2, "R10 exceeds 1.2x: {ratio:.4}");
+}
+
+#[tokio::test]
+async fn refused_different_source_preserves_retry_workspace_until_first_write() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    fn snapshot(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+        fn visit(
+            root: &Path,
+            path: &Path,
+            files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+        ) {
+            for entry in fs::read_dir(path).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(root, &path, files);
+                } else {
+                    files.insert(
+                        path.strip_prefix(root).unwrap().to_owned(),
+                        fs::read(path).unwrap(),
+                    );
+                }
+            }
+        }
+        let mut files = Default::default();
+        visit(root, root, &mut files);
+        files
+    }
+    let (engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    fs::write(
+        a.path().join("a.txt"),
+        "Original published workspace content.",
+    )
+    .unwrap();
+    active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    fs::write(
+        a.path().join("a.txt"),
+        "Reusable private changed workspace content.",
+    )
+    .unwrap();
+    let stop = AtomicBool::new(false);
+    assert!(active_index::reindex(
+        data.path(),
+        a.path(),
+        &engines,
+        &assets,
+        |_| stop.store(true, Ordering::SeqCst),
+        || stop.load(Ordering::SeqCst)
+    )
+    .await
+    .is_err());
+    let workspace = active_index::resolve(data.path()).join(".vz-scan");
+    let before = snapshot(&workspace);
+    for other in [b.path().join("missing"), b.path().to_owned()] {
+        assert!(
+            active_index::reindex(data.path(), &other, &engines, &assets, |_| {}, || false)
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot(&workspace), before);
+    }
+    let resumed = active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+        .await
+        .unwrap();
+    assert_eq!((resumed.completed, resumed.skipped), (0, 1));
+}

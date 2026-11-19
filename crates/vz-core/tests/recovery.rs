@@ -241,3 +241,69 @@ async fn unreadable_published_generation_is_revoked_when_repair_has_infrastructu
     assert_eq!(result.completed, 1);
     assert_eq!(State::review_documents(&root).unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn published_lance_manifest_and_data_damage_are_cache_misses() {
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("a.txt"),
+        "Readable generation structural recovery.",
+    )
+    .unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let root = active_index::resolve(data.path());
+    for damage in ["manifest", "data"] {
+        let generation: String = State::review_connection(&root)
+            .unwrap()
+            .query_row("SELECT generation FROM documents", [], |r| r.get(0))
+            .unwrap();
+        let table = root
+            .join("generations")
+            .join(&generation)
+            .join("lance/chunks.lance");
+        if damage == "manifest" {
+            let latest = std::fs::read_dir(table.join("_versions"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .max_by_key(|p| {
+                    p.file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .unwrap();
+            std::fs::write(latest, b"damaged").unwrap();
+        } else {
+            std::fs::remove_dir_all(table.join("data")).unwrap();
+        }
+        let result = active_index::reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap();
+        assert_eq!((result.completed, result.skipped), (1, 0), "{damage}");
+        assert!(!root.join("generations").join(generation).exists());
+    }
+}

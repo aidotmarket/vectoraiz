@@ -807,9 +807,11 @@ async fn pipeline_index<R: tauri::Runtime>(
     progress: tauri::ipc::Channel<vz_core::index::Progress>,
 ) -> Result<serde_json::Value, String> {
     let _timer = vz_core::engine::PhaseTimer::new("pipeline_index_total");
-    models::validate_folder(&folder)?;
-    let guard = operations.acquire()?;
-    let (_cancel, scan_control) = operations.start_index();
+    let desktop_pipeline::IndexOperation {
+        cache: guard,
+        cancel: _cancel,
+        control: scan_control,
+    } = desktop_pipeline::begin_index(&operations, &folder)?;
     #[cfg(feature = "smoke-test")]
     let hold =
         smoke_test_requested() && HOLD_NEXT_INDEX.swap(false, std::sync::atomic::Ordering::SeqCst);
@@ -842,8 +844,8 @@ async fn pipeline_index<R: tauri::Runtime>(
             })?;
             #[cfg(feature = "smoke-test")]
             record_loaded_models(&assets, &pins, engines.chat_loaded())?;
-            let result = tokio::runtime::Runtime::new()?.block_on(
-                vz_core::active_index::reindex_controlled(
+            let result =
+                tokio::runtime::Runtime::new()?.block_on(desktop_pipeline::index_command(
                     &data,
                     std::path::Path::new(&folder),
                     engines,
@@ -852,8 +854,7 @@ async fn pipeline_index<R: tauri::Runtime>(
                         let _ = progress.send(desktop_pipeline::display_progress(value));
                     },
                     &scan_control,
-                ),
-            )?;
+                ))?;
             Ok(serde_json::to_value(result)?)
         };
         run().map_err(desktop_pipeline::reindex_error)

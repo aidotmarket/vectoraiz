@@ -427,11 +427,9 @@ impl ReviewStore {
         let index = match NativeIndexFence::acquire_existing(library) {
             Ok(index) => index,
             Err(error) => {
-                if !error.chain().any(|e| {
-                    e.downcast_ref::<std::io::Error>().is_some_and(|e| {
-                        e.kind() == std::io::ErrorKind::WouldBlock
-                            || e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
-                    })
+                if error.chain().any(|e| {
+                    e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
                 }) {
                     pack.invalidate(current, "native index lock missing or invalid")?;
                     return Err(ListingError::StaleGeneration.into());
@@ -1252,74 +1250,62 @@ fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
         (None, Default::default())
     };
     let mut files = BTreeMap::new();
-    let entries = walkdir::WalkDir::new(root)
-        .max_depth(64)
-        .into_iter()
-        .filter_entry(|entry| {
-            let Ok(relative) = entry.path().strip_prefix(root) else {
-                return true;
-            };
-            if ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"]
-                .iter()
-                .any(|name| relative == Path::new(name))
-            {
-                return false;
-            }
-            if relative == Path::new(".vz-scan")
-                || (flat
-                    && (relative == Path::new("indexes")
-                        || relative == Path::new("active-index.json")))
-            {
-                return false;
-            }
-            if relative.parent() == Some(Path::new("generations")) {
-                return referenced.contains(&entry.file_name().to_string_lossy().into_owned());
-            }
-            true
-        });
-    for (count, entry) in entries.enumerate() {
-        ensure!(count <= MAX_FILES, "review tree entry count limit");
-        let entry = entry?;
-        let relative = entry.path().strip_prefix(root)?;
-        if entry.file_type().is_dir() {
-            plain_directory(entry.path())?;
-        } else {
-            let file = hash_file(entry.path())?;
-            bytes = bytes
-                .checked_add(file.size)
-                .context("review byte overflow")?;
-            files.insert(
-                relative
-                    .to_str()
-                    .context("UTF-8 index path")?
-                    .replace('\\', "/"),
-                file,
-            );
-        }
-        ensure!(bytes <= MAX_BYTES, "review tree byte limit");
-    }
     if let Some(sha256) = content {
         files.insert("state.sqlite".into(), FileHash { size: 0, sha256 });
     }
-    Ok(files)
+    strict_tree(root, bytes, files, |entry| {
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            return true;
+        };
+        if ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"]
+            .iter()
+            .any(|name| relative == Path::new(name))
+        {
+            return false;
+        }
+        if relative == Path::new(".vz-scan")
+            || (flat
+                && (relative == Path::new("indexes") || relative == Path::new("active-index.json")))
+        {
+            return false;
+        }
+        if relative.parent() == Some(Path::new("generations")) {
+            return referenced.contains(&entry.file_name().to_string_lossy().into_owned());
+        }
+        true
+    })
 }
 
 fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
+    strict_tree(root, 0, BTreeMap::new(), |_| true)
+}
+
+fn strict_tree(
+    root: &Path,
+    mut bytes: u64,
+    mut files: BTreeMap<String, FileHash>,
+    include: impl FnMut(&walkdir::DirEntry) -> bool,
+) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
-    let mut files = BTreeMap::new();
-    let mut bytes = 0_u64;
+    // Logical SQLite rows do not consume the physical file-entry budget.
+    let logical_entries = files.len();
     for (count, entry) in walkdir::WalkDir::new(root)
         .max_depth(64)
         .into_iter()
+        .filter_entry(include)
         .enumerate()
     {
         ensure!(count <= MAX_FILES, "review tree entry count limit");
         let entry = entry?;
         if entry.file_type().is_dir() {
             ensure!(entry.depth() < 64, "review directory depth limit");
+            plain_directory(entry.path())?;
             continue;
         }
-        ensure!(files.len() < MAX_FILES, "review file count limit");
+        ensure!(
+            files.len() - logical_entries < MAX_FILES,
+            "review file count limit"
+        );
         let hash = hash_file(entry.path())?;
         bytes = bytes
             .checked_add(hash.size)
@@ -1761,6 +1747,30 @@ mod tests {
     }
 
     #[test]
+    fn v2_rejects_over_depth_ordinary_subtrees() {
+        let f = Fixture::new();
+        let mut deep = f.0.join("index/ordinary");
+        for _ in 0..65 {
+            deep.push("d");
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("hidden"), b"bound content").unwrap();
+        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        assert!(format!("{error:#}").contains("depth limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v2_rejects_duplicate_normalized_paths() {
+        let f = Fixture::new();
+        fs::create_dir(f.0.join("index/ordinary")).unwrap();
+        fs::write(f.0.join("index/ordinary/name"), b"one").unwrap();
+        fs::write(f.0.join("index/ordinary\\name"), b"two").unwrap();
+        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate review path"));
+    }
+
+    #[test]
     fn t15_version_one_remains_strict_and_every_new_capture_is_v2() {
         let f = Fixture::new();
         let old = ReviewBinding::capture_version(
@@ -1813,7 +1823,19 @@ mod tests {
                 .inspect(&current)
                 .unwrap();
             fs::remove_file(index.join("index-selection.lock")).unwrap();
-            stale(store.lock_native_current(&policy, &current, &index));
+            if export_first {
+                stale(
+                    store
+                        .lock_native_current(&policy, &current, &index)
+                        .and_then(|native| native.reviewed_payload(&current)),
+                );
+            } else {
+                stale(
+                    store
+                        .lock_native_current(&policy, &current, &index)
+                        .and_then(|native| native.accept(&current)),
+                );
+            }
             assert!(!index.join("index-selection.lock").exists());
             fs::write(index.join("index-selection.lock"), b"").unwrap();
             let result = store.lock_native_current(&policy, &current, &index);

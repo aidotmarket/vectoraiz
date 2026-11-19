@@ -100,16 +100,27 @@ impl<E: CachedEngine> OperationState<E> {
     }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     // A fresh channel identifies this operation; successors cannot reset old receivers.
+    #[cfg(test)]
     pub fn start(&self) -> watch::Receiver<bool> {
-        *self.scan.lock().unwrap() = None;
+        let mut scan = self.scan.lock().unwrap();
+        *scan = None;
         let (sender, receiver) = watch::channel(false);
         *self.cancel.lock().unwrap() = sender;
         receiver
     }
     pub fn start_index(&self) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
-        let receiver = self.start();
+        self.register_index(|| {})
+    }
+    fn register_index(
+        &self,
+        registered: impl FnOnce(),
+    ) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
+        let mut scan = self.scan.lock().unwrap();
+        let (sender, receiver) = watch::channel(false);
+        *self.cancel.lock().unwrap() = sender;
         let control = vz_core::active_index::ScanControl::default();
-        *self.scan.lock().unwrap() = Some(control.clone());
+        registered();
+        *scan = Some(control.clone());
         (receiver, control)
     }
     pub fn promotion_lock(&self) -> Arc<Mutex<EngineCache<E>>> {
@@ -183,13 +194,8 @@ impl<E: CachedEngine> OperationState<E> {
         let _ = self.request_cancel();
     }
     pub fn request_cancel(&self) -> bool {
-        if self
-            .scan
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|scan| !scan.cancel())
-        {
+        let scan = self.scan.lock().unwrap();
+        if scan.as_ref().is_some_and(|scan| !scan.cancel()) {
             return false;
         }
         self.checks.lock().unwrap().clear();
@@ -441,12 +447,9 @@ pub fn status(dir: &Path, pins: &[Pin]) -> Value {
         .collect();
     json!({"ready": files.iter().all(|f| f["verified"] == true), "files": files})
 }
-pub fn validate_folder(folder: &str) -> Result<(), String> {
+pub fn validate_index_request(folder: &str) -> Result<(), String> {
     if folder.trim().is_empty() {
         return Err("Choose a folder to index".into());
-    }
-    if !Path::new(folder).is_dir() {
-        return Err("Folder not found".into());
     }
     Ok(())
 }
@@ -999,4 +1002,39 @@ pub fn index_snapshot(root: &Path) -> Result<Value> {
     let mut files = std::collections::BTreeMap::new();
     visit(root, root, &mut files)?;
     Ok(json!(files))
+}
+
+#[cfg(test)]
+mod scan_registration_tests {
+    use super::*;
+    #[test]
+    fn cancel_during_registration_observes_registered_scan() {
+        let operations = Arc::new(Operations::default());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let registrar = operations.clone();
+        let start = std::thread::spawn(move || {
+            registrar.register_index(|| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+        entered_rx.recv().unwrap();
+        let canceller = operations.clone();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cancel = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let accepted = canceller.request_cancel();
+            done_tx.send(()).unwrap();
+            accepted
+        });
+        attempt_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        release_tx.send(()).unwrap();
+        let (receiver, control) = start.join().unwrap();
+        assert!(cancel.join().unwrap());
+        assert!(*receiver.borrow());
+        assert!(control.is_cancelled());
+    }
 }

@@ -398,17 +398,14 @@ pub(crate) fn source_identity(folder: &Path) -> Option<PathBuf> {
 // Existing paths canonicalize to the volume's spelling. For a removed tail,
 // compare against the persisted spelling only after proving its surviving
 // ancestor accepts alternate case. Case-sensitive volumes keep exact identity.
-#[cfg(test)]
-pub(crate) fn same_source(folder: &Path, previous: &Path) -> bool {
-    let Some(current) = source_identity(folder) else {
-        return false;
-    };
+pub(crate) fn same_source(current: &Path, previous: &Path) -> bool {
     // The persisted canonical path is historical evidence. Resolving it again
     // could follow a new symlink to a different source.
     if current == previous {
         return true;
     }
-    for ancestor in current.ancestors() {
+    // Probe the surviving parent volume, never resolve the requested leaf again.
+    for ancestor in current.ancestors().skip(1) {
         let Some(name) = ancestor.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -576,9 +573,94 @@ fn remove_unreferenced(root: &Path, db: &rusqlite::Connection) -> Result<()> {
     Ok(())
 }
 
+// Names alone are not ownership: require an ordinary recipe file with its
+// content-derived id, and a real index/workspace database plus existing lock.
+fn owned_database(root: &Path, name: &str, table: &str) -> bool {
+    let path = root.join(name);
+    if !path.symlink_metadata().is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let connection = if name == "state.sqlite" {
+        crate::storage::State::review_connection(root)
+    } else {
+        rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(anyhow::Error::from)
+    };
+    connection.ok().is_some_and(|db| {
+        db.prepare(&format!(
+            "SELECT doc_id,path,generation FROM {table} LIMIT 0"
+        ))
+        .is_ok()
+    })
+}
+
+fn owned_legacy_directory(root: &Path) -> bool {
+    root.symlink_metadata()
+        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+        && root
+            .join("writer.lock")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file())
+        && root
+            .join("state.sqlite")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file())
+        && root
+            .join("recipe.json")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file())
+        && owned_database(root, "state.sqlite", "documents")
+        && fs::read(root.join("recipe.json"))
+            .ok()
+            .and_then(|b| serde_json::from_slice::<Recipe>(&b).ok())
+            .is_some()
+}
+
+fn owned_recipe_directory(data: &Path, root: &Path) -> bool {
+    let Ok(relative) = root.strip_prefix(data) else {
+        return false;
+    };
+    if !root
+        .join("recipe.json")
+        .symlink_metadata()
+        .is_ok_and(|m| m.is_file())
+    {
+        return false;
+    }
+    let Ok(bytes) = fs::read(root.join("recipe.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return false;
+    };
+    if serde_json::from_value::<Recipe>(value.clone()).is_err() {
+        return false;
+    }
+    let Ok(id) = canonical_id(value) else {
+        return false;
+    };
+    valid_directory(&relative.to_string_lossy().replace('\\', "/"), &id)
+        && root
+            .canonicalize()
+            .ok()
+            .zip(data.canonicalize().ok())
+            .is_some_and(|(root, data)| root.parent() == Some(data.join("indexes").as_path()))
+        && root
+            .join("writer.lock")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file())
+        && (owned_database(root, "state.sqlite", "documents")
+            || owned_database(root, "scan.sqlite", "scan_documents"))
+}
+
 /// Run under the selection fence at application/scan start and after publication.
 /// Reader-pinned indexes are retried on the next invocation.
 pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
+    // Preserve recoverable snapshots when the selection is damaged. A later
+    // successful pointer publication will make reclamation safe again.
+    if needs_pointer_repair(data) {
+        return Ok(());
+    }
     let active = resolve_state(data);
     let active = active.canonicalize().unwrap_or(active);
     if let Ok(entries) = fs::read_dir(data.join(".vz-scan")) {
@@ -594,13 +676,20 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
     if let Ok(entries) = fs::read_dir(data.join("indexes")) {
         for entry in entries {
             let entry = entry?;
-            if entry.file_type()?.is_dir() {
+            if entry.file_type()?.is_dir() && owned_recipe_directory(data, &entry.path()) {
                 roots.push(entry.path());
             }
         }
     }
-    roots.push(data.join("phase0-index"));
-    if data.join("state.sqlite").exists() {
+    if owned_legacy_directory(&data.join("phase0-index")) {
+        roots.push(data.join("phase0-index"));
+    }
+    if owned_legacy_directory(data)
+        || data
+            .join(".vz-flat-cleanup")
+            .symlink_metadata()
+            .is_ok_and(|m| m.is_file())
+    {
         roots.push(data.to_owned());
     }
     for root in roots {
@@ -611,10 +700,22 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
         if canonical == active || keep.is_some_and(|p| p == root || p == canonical) {
             continue;
         }
-        let Ok(lock) = writer_fence(&root, true) else {
+        let Ok(lock) = writer_fence(&root, false) else {
             continue;
         };
         if root == data {
+            // Durable discovery survives removal of state.sqlite and any later
+            // cleanup error or process death. Remove this marker last.
+            let marker = root.join(".vz-flat-cleanup");
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&marker)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(unix)]
+            fs::File::open(&root)?.sync_all()?;
             for name in [
                 "state.sqlite",
                 "state.sqlite-wal",
@@ -626,12 +727,14 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
                     fs::remove_file(path)?;
                 }
             }
+            publication_step(data, "flat database removal")?;
             for name in ["generations", ".vz-scan"] {
                 let path = root.join(name);
                 if path.exists() {
                     fs::remove_dir_all(path)?;
                 }
             }
+            fs::remove_file(marker)?;
         } else {
             // Windows requires the lock handle closed before deleting its directory.
             drop(lock);
@@ -650,6 +753,7 @@ pub fn cleanup_start(data: &Path) -> Result<()> {
         .flatten()
         .filter_map(|e| e.ok())
         .map(|e| e.path())
+        .filter(|p| owned_recipe_directory(data, p))
         .filter(|p| p.join("scan.sqlite").is_file())
         .max_by_key(|p| {
             fs::metadata(p.join("scan.sqlite"))
@@ -667,6 +771,9 @@ fn retry_candidate(
 ) -> Option<(String, PathBuf)> {
     for entry in fs::read_dir(data.join("indexes")).ok()?.flatten() {
         let root = entry.path();
+        if !owned_recipe_directory(data, &root) {
+            continue;
+        }
         if root.canonicalize().ok() == active.canonicalize().ok() {
             continue;
         }
@@ -774,7 +881,9 @@ pub(crate) async fn scan_candidate(
         cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path()))?;
     }
     let previous = last_indexed_folder(&active);
-    let current = previous.as_deref() == Some(source);
+    let current = previous
+        .as_deref()
+        .is_some_and(|p| same_source(&identity, Path::new(p)));
     let populated = State::has_persisted_documents(&active).unwrap_or(true);
     let published = if same_recipe && active.join("state.sqlite").exists() {
         {
@@ -843,7 +952,10 @@ pub(crate) async fn scan_candidate(
                 || published
                     .iter()
                     .any(|r| !outcome.succeeded.contains(&r.path))
-                || outcome.unchanged.iter().any(|r| !published.contains(r))
+                || outcome
+                    .unchanged
+                    .iter()
+                    .any(|r| !workspace.matches_published(r))
                 || previous.as_deref() != Some(source)
                 || candidate.is_some();
             if changed {
@@ -908,7 +1020,9 @@ pub(crate) async fn scan_candidate(
                         if cancelled() {
                             control.cancel();
                         }
-                        control.commit()?;
+                        control
+                            .commit()
+                            .context("Indexing cancelled; Re-index to resume")?;
                         publication_step(data, "commit entered")
                     })?;
                 }
@@ -937,14 +1051,6 @@ pub(crate) async fn scan_candidate(
         }
         ScanDecision::RevokeSource | ScanDecision::RevokeFailedPaths => {
             if active.join("state.sqlite").exists() {
-                let _old_lock = if same_recipe || explicit.is_some() {
-                    None
-                } else {
-                    Some(
-                        writer_fence(&active, false)
-                            .context("revocation pending; re-index to apply")?,
-                    )
-                };
                 let db = State::review_connection(&active)?;
                 let rows = ScanRow::read(&db, "documents")?;
                 drop(db);
@@ -966,6 +1072,15 @@ pub(crate) async fn scan_candidate(
                     .map(|r| r.path.clone())
                     .collect();
                 if !revoked.is_empty() {
+                    let _old_lock = if same_recipe || explicit.is_some() {
+                        None
+                    } else {
+                        Some(
+                            writer_fence(&active, false)
+                                .context("revocation pending; re-index to apply")?,
+                        )
+                    };
+
                     if cancelled() {
                         control.cancel();
                     }
@@ -989,7 +1104,8 @@ pub(crate) async fn scan_candidate(
                     tx.commit()?;
                     publication_step(data, "after revoke commit")
                         .context(PublishedFailure("cleanup"))?;
-                    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+                    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                        .context(PublishedFailure("checkpoint"))?;
                     remove_unreferenced(&active, &db)
                         .context(PublishedFailure("generation cleanup"))?;
                 }
@@ -2598,6 +2714,68 @@ mod tests {
                 .unwrap()
                 .is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn flat_cleanup_restarts_after_database_removal() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        fs::write(
+            source.path().join("a.txt"),
+            "Flat cleanup durable generation.",
+        )
+        .unwrap();
+        index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        let old = fs::read_dir(data.path().join("generations"))
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        use std::process::{Command, Stdio};
+        let ready = data.path().join("cleanup-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "active_index::tests::publication_crash_child",
+                "--nocapture",
+            ])
+            .env("VZ_PUBLICATION_DATA", data.path())
+            .env("VZ_PUBLICATION_SOURCE", source.path())
+            .env("VZ_PUBLICATION_READY", &ready)
+            .env("VZ_PUBLICATION_CRASH_STEP", "flat database removal")
+            .env("VZ_PUBLICATION_RECIPE_CHANGE", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+        while !ready.exists() {
+            if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("child did not reach flat database removal");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!data.path().join("state.sqlite").exists());
+        assert!(data.path().join(".vz-flat-cleanup").exists());
+        assert!(old.exists());
+        let active = resolve(data.path());
+        cleanup_start(data.path()).unwrap();
+        assert!(!old.exists());
+        assert!(!data.path().join(".vz-flat-cleanup").exists());
+        assert_eq!(
+            crate::storage::State::review_documents(&active)
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

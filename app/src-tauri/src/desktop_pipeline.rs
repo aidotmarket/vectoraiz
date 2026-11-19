@@ -18,6 +18,43 @@ pub(crate) fn reindex_error(error: anyhow::Error) -> String {
     }
 }
 
+pub(crate) struct IndexOperation {
+    pub cache: tokio::sync::OwnedMutexGuard<crate::models::EngineCache<vz_core::engine::Engines>>,
+    pub cancel: tokio::sync::watch::Receiver<bool>,
+    pub control: vz_core::active_index::ScanControl,
+}
+
+/// Shared command entry, including all request guards and cancellation setup.
+pub(crate) fn begin_index(
+    operations: &crate::models::Operations,
+    folder: &str,
+) -> Result<IndexOperation, String> {
+    // Syntax only: availability belongs to the scanner's revocation decision.
+    crate::models::validate_index_request(folder)?;
+    let cache = operations.acquire()?;
+    let (cancel, control) = operations.start_index();
+    Ok(IndexOperation {
+        cache,
+        cancel,
+        control,
+    })
+}
+
+/// The desktop indexing command delegates source availability to the scanner:
+/// missing current selections must revoke, while a missing different source must
+/// preserve the published selection.
+pub(crate) async fn index_command(
+    data: &Path,
+    folder: &Path,
+    engines: &vz_core::engine::Engines,
+    assets: &Path,
+    progress: impl FnMut(&vz_core::index::Progress),
+    control: &vz_core::active_index::ScanControl,
+) -> anyhow::Result<vz_core::index::Progress> {
+    vz_core::active_index::reindex_controlled(data, folder, engines, assets, progress, control)
+        .await
+}
+
 /// Presentation only: keep canonical internal and source paths unchanged.
 pub(crate) fn display_path(path: &str) -> String {
     if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
@@ -91,6 +128,81 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[tokio::test]
+    async fn desktop_index_missing_source_and_startup_cancel() {
+        use vz_core::{active_index, engine::Engines};
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let a = parent.path().join("A");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::write(a.join("a.txt"), "Desktop searchable archive content.").unwrap();
+        let operations = crate::models::Operations::default();
+        async fn command(
+            operations: &crate::models::Operations,
+            data: &Path,
+            folder: &Path,
+            engines: &Engines,
+            assets: &Path,
+        ) -> anyhow::Result<()> {
+            let IndexOperation {
+                cache: _guard,
+                cancel: _cancel,
+                control,
+            } = begin_index(operations, folder.to_str().unwrap()).map_err(anyhow::Error::msg)?;
+            index_command(data, folder, engines, assets, |_| {}, &control).await?;
+            Ok(())
+        }
+        command(&operations, data.path(), &a, &engines, &assets)
+            .await
+            .unwrap();
+        let root = active_index::resolve(data.path());
+        let vector = engines.vector("archive", true).unwrap();
+        let search = || async {
+            State::open(&root)
+                .unwrap()
+                .search("archive", &vector, 5)
+                .await
+                .unwrap()
+        };
+        assert!(!search().await.is_empty());
+        assert!(command(
+            &operations,
+            data.path(),
+            &parent.path().join("missing-B"),
+            &engines,
+            &assets
+        )
+        .await
+        .is_err());
+        assert!(!search().await.is_empty());
+        std::fs::write(a.join("new.txt"), "Cancelled startup must stay private.").unwrap();
+        let before = std::fs::read(root.join("state.sqlite")).unwrap();
+        let IndexOperation {
+            cache: guard,
+            cancel: _cancel,
+            control,
+        } = begin_index(&operations, a.to_str().unwrap()).unwrap();
+        assert!(operations.request_cancel());
+        assert!(control.is_cancelled());
+        assert!(
+            index_command(data.path(), &a, &engines, &assets, |_| {}, &control)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read(root.join("state.sqlite")).unwrap(), before);
+        drop(guard);
+        std::fs::remove_dir_all(&a).unwrap();
+        assert!(command(&operations, data.path(), &a, &engines, &assets)
+            .await
+            .is_err());
+        assert!(search().await.is_empty());
     }
 
     #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]

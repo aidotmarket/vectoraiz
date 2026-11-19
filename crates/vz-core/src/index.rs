@@ -116,6 +116,7 @@ pub(crate) struct ScanWorkspace {
     pub state: Option<State>,
     source: String,
     recipe: String,
+    reset_before_write: bool,
 }
 impl ScanWorkspace {
     pub fn new(
@@ -125,7 +126,8 @@ impl ScanWorkspace {
         source: &str,
         recipe: &str,
     ) -> Result<Self> {
-        if root.join("scan.sqlite").exists() {
+        let mut reuse = root.join("scan.sqlite").exists();
+        if reuse {
             let matches = (|| -> Result<bool> {
                 let db = rusqlite::Connection::open_with_flags(
                     root.join("scan.sqlite"),
@@ -139,10 +141,10 @@ impl ScanWorkspace {
             })()
             .unwrap_or(false);
             if !matches {
-                std::fs::remove_dir_all(root)?;
+                reuse = false;
             }
         }
-        let state = if root.join("scan.sqlite").exists() {
+        let state = if reuse {
             Some(State::open_workspace(root, source, recipe)?)
         } else {
             None
@@ -159,15 +161,22 @@ impl ScanWorkspace {
                 .map(|r| (r.path.clone(), r.clone()))
                 .collect(),
             state,
+            reset_before_write: !reuse && root.join("scan.sqlite").exists(),
             source: source.into(),
             recipe: recipe.into(),
         })
+    }
+    pub fn matches_published(&self, row: &ScanRow) -> bool {
+        self.published_by_path.get(&row.path) == Some(row)
     }
     pub fn set_baseline(&mut self, rows: Vec<ScanRow>) {
         self.baseline_rows = rows.into_iter().map(|r| (r.path.clone(), r)).collect();
     }
     fn writable(&mut self) -> Result<&mut State> {
         if self.state.is_none() {
+            if self.reset_before_write {
+                std::fs::remove_dir_all(&self.root)?;
+            }
             self.state = Some(State::open_workspace(
                 &self.root,
                 &self.source,
@@ -210,7 +219,7 @@ impl ScanWorkspace {
             ),
         ] {
             if let Some(row) = row.filter(|r| r.hash == hash) {
-                if let Some(doc) = readable_generation(root, &row).await {
+                if let Some(doc) = readable_generation(root, &row, staged).await {
                     return Ok(Some((doc, row, staged)));
                 }
             }
@@ -219,7 +228,7 @@ impl ScanWorkspace {
     }
 }
 
-async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
+async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option<Document> {
     if row.generation.is_empty()
         || !row
             .generation
@@ -234,6 +243,36 @@ async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
     if doc.path != row.path || doc.sha256 != row.hash || !generation.join("lance").is_dir() {
         return None;
     }
+    // Published generations were fully validated before publication. Check the
+    // document and manifest nodes cheaply; staged retries still open the table.
+    if !staged {
+        let table = generation.join("lance/chunks.lance");
+        let manifest = std::fs::read_dir(table.join("_versions"))
+            .ok()?
+            .filter_map(Result::ok)
+            .filter_map(|e| {
+                Some((
+                    e.path().file_stem()?.to_str()?.parse::<u64>().ok()?,
+                    e.path(),
+                ))
+            })
+            .max_by_key(|(version, _)| *version)?
+            .1;
+        if !readable_lance_node(&manifest) {
+            return None;
+        }
+        let mut found_data = false;
+        for entry in std::fs::read_dir(table.join("data")).ok()? {
+            let path = entry.ok()?.path();
+            if path.extension().is_some_and(|x| x == "lance") {
+                found_data = true;
+                if !readable_lance_node(&path) {
+                    return None;
+                }
+            }
+        }
+        return found_data.then_some(doc);
+    }
     use futures::TryStreamExt;
     use lancedb::query::{ExecutableQuery, QueryBase};
     let db = lancedb::connect(generation.join("lance").to_str()?)
@@ -244,6 +283,27 @@ async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
     let mut batches = table.query().limit(1).execute().await.ok()?;
     batches.try_next().await.ok()??;
     Some(doc)
+}
+
+// Local Lance nodes carry a LANC footer. Keep structural damage and missing
+// data a cache miss without constructing a database/query for every unchanged
+// published document. Staged rows still take the full table-read path below.
+fn readable_lance_node(path: &Path) -> bool {
+    use std::io::{Read, Seek, SeekFrom};
+    (|| -> std::io::Result<bool> {
+        if !std::fs::symlink_metadata(path)?.is_file() {
+            return Ok(false);
+        }
+        let mut file = std::fs::File::open(path)?;
+        if file.metadata()?.len() < 16 {
+            return Ok(false);
+        }
+        file.seek(SeekFrom::End(-4))?;
+        let mut magic = [0; 4];
+        file.read_exact(&mut magic)?;
+        Ok(&magic == b"LANC")
+    })()
+    .unwrap_or(false)
 }
 
 pub async fn index(
@@ -504,7 +564,7 @@ pub(crate) async fn scan(
             }
             Err(error) => {
                 if let Some(row) = state.baseline_rows.get(&path_text) {
-                    if readable_generation(&state.published_root, row)
+                    if readable_generation(&state.published_root, row, true)
                         .await
                         .is_none()
                     {

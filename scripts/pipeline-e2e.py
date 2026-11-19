@@ -15,7 +15,7 @@ from office_fixtures import write_pptx
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
-RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
+RTK = ["rtk", "run"] if shutil.which("rtk") else []
 TARGET = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 CLI = TARGET / 'debug' / ('vectoraiz-cli.exe' if os.name == 'nt' else 'vectoraiz-cli')
 # This CLI acceptance build uses the harness feature. The debug desktop has a
