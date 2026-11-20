@@ -1,5 +1,8 @@
 //! Immutable Lance generations with SQLite as the sole visibility authority.
-use crate::pipeline::{Chunk, Document};
+use crate::{
+    generation_seal,
+    pipeline::{Chunk, Document},
+};
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
@@ -23,7 +26,7 @@ pub struct State {
     pub root: PathBuf,
     pub(crate) location: PathBuf,
     _lock: FileLock,
-    workspace: bool,
+    workspace_recipe: Option<String>,
 }
 struct FileLock(std::fs::File);
 
@@ -334,7 +337,7 @@ impl State {
             root: root.to_owned(),
             location,
             _lock: FileLock(lock),
-            workspace: false,
+            workspace_recipe: None,
         };
         state.recover()?;
         Ok(state)
@@ -380,14 +383,14 @@ impl State {
             root: root.to_owned(),
             location: root.to_owned(),
             _lock: FileLock(lock),
-            workspace: true,
+            workspace_recipe: Some(recipe.to_owned()),
         };
         state.recover()?;
         Ok(state)
     }
 
     pub(crate) fn table(&self) -> &'static str {
-        if self.workspace {
+        if self.workspace_recipe.is_some() {
             "scan_documents"
         } else {
             "documents"
@@ -436,13 +439,7 @@ impl State {
             .prepare(&format!("SELECT generation FROM {}", self.table()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for entry in std::fs::read_dir(self.root.join("generations"))? {
-            let entry = entry?;
-            if !active.contains(&entry.file_name().to_string_lossy().into_owned()) {
-                std::fs::remove_dir_all(entry.path())?;
-            }
-        }
-        Ok(())
+        recover_generations(&self.root, &active)
     }
     pub fn generations(&self) -> Result<Vec<String>> {
         Ok(self
@@ -455,12 +452,11 @@ impl State {
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn document(&self, generation: &str) -> Result<Document> {
-        Ok(serde_json::from_slice(&std::fs::read(
-            self.root
-                .join("generations")
-                .join(generation)
-                .join("document.json"),
-        )?)?)
+        anyhow::ensure!(
+            generation_seal::valid_id(generation),
+            "invalid generation ID"
+        );
+        read_document(&self.root.join("generations").join(generation))
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
         self.generations()?
@@ -492,22 +488,40 @@ impl State {
         let file = std::fs::File::create(path.join("document.json"))?;
         serde_json::to_writer(&file, doc)?;
         file.sync_all()?;
+        drop(file);
         #[cfg(unix)]
         std::fs::File::open(&path)?.sync_all()?;
-        let row = crate::index::ScanRow {
-            doc_id: doc.doc_id.clone(),
-            path: doc.path.clone(),
-            size: doc.bytes,
-            mtime: String::new(),
-            hash: doc.sha256.clone(),
-            generation: id.clone(),
+        let worker = crate::worker::executable()?;
+        let request = crate::worker::Request {
+            path,
+            generation_readback: Some(crate::worker::GenerationReadback {
+                doc_id: doc.doc_id.clone(),
+                source_path: doc.path.clone(),
+                source_hash: doc.sha256.clone(),
+            }),
+            pdfium: None,
+            office: None,
+            projection: None,
+            readback: None,
         };
-        anyhow::ensure!(
-            crate::index::validate_generation(&self.root, &row, true)
-                .await?
-                .is_some(),
-            "new generation failed full storage validation"
-        );
+        tokio::task::spawn_blocking(move || {
+            crate::worker::run(&worker, &request, std::time::Duration::from_secs(5))
+        })
+        .await?
+        .context("staged generation readback failed")?;
+        let recipe;
+        let recipe_id = if let Some(workspace_recipe) = &self.workspace_recipe {
+            workspace_recipe
+        } else {
+            recipe = match std::fs::read(self.root.join("recipe.json")) {
+                Ok(bytes) => crate::active_index::recipe_id(&serde_json::from_slice(&bytes)?)?,
+                // A caller can use the lower-level State store before configuring a recipe.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            };
+            &recipe
+        };
+        generation_seal::Seal::validated(&self.root, &id, recipe_id, doc)?;
         Ok(id)
     }
     pub fn commit(&mut self, doc: &Document, mtime: &str, generation: &str) -> Result<()> {
@@ -518,20 +532,56 @@ impl State {
         Ok(())
     }
     pub async fn search(&self, query: &str, vector: &[f32], top_k: usize) -> Result<Vec<Hit>> {
+        let report = self.search_with_availability(query, vector, top_k).await?;
+        for document in report.unavailable {
+            eprintln!(
+                "Search unavailable: {} (generation {})",
+                document.path, document.generation
+            );
+        }
+        Ok(report.hits)
+    }
+
+    pub async fn search_with_availability(
+        &self,
+        query: &str,
+        vector: &[f32],
+        top_k: usize,
+    ) -> Result<SearchReport> {
         let _timer = crate::engine::PhaseTimer::new("search");
         let mut lexical = Vec::new();
         let mut semantic = Vec::new();
-        let docs = self.documents()?;
-        let chunks = docs
-            .into_iter()
-            .flat_map(|d| d.chunks)
-            .map(|c| (c.chunk_id.clone(), c))
-            .collect::<std::collections::HashMap<_, _>>();
-        for id in self.generations()? {
-            let path = self.root.join("generations").join(id).join("lance");
-            let (mut vectors, mut words) = search_generation(&path, query, vector, top_k).await?;
-            semantic.append(&mut vectors);
-            lexical.append(&mut words);
+        let mut chunks = std::collections::HashMap::new();
+        let mut paths = std::collections::HashMap::new();
+        let mut unavailable = Vec::new();
+        for row in crate::index::ScanRow::read(&self.db, self.table())? {
+            let result = async {
+                let doc = self.document(&row.generation)?;
+                let path = self
+                    .root
+                    .join("generations")
+                    .join(&row.generation)
+                    .join("lance");
+                let rankings = search_generation(&path, query, vector, top_k).await?;
+                Ok::<_, anyhow::Error>((doc, rankings))
+            }
+            .await;
+            match result {
+                Ok((doc, (mut vectors, mut words))) => {
+                    chunks.extend(
+                        doc.chunks
+                            .into_iter()
+                            .map(|chunk| (chunk.chunk_id.clone(), chunk)),
+                    );
+                    paths.insert(row.doc_id, row.path);
+                    semantic.append(&mut vectors);
+                    lexical.append(&mut words);
+                }
+                Err(_) => unavailable.push(UnavailableDocument {
+                    generation: row.generation,
+                    path: row.path,
+                }),
+            }
         }
         semantic.sort_by(|a, b| a.1.total_cmp(&b.1));
         lexical.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -543,18 +593,105 @@ impl State {
         }
         let mut merged: Vec<_> = scores.into_iter().collect();
         merged.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        Ok(merged
+        let hits = merged
             .into_iter()
             .take(top_k)
-            .filter_map(|(id, score)| chunks.get(&id).cloned().map(|chunk| Hit { chunk, score }))
-            .collect())
+            .filter_map(|(id, score)| chunks.remove(&id).map(|chunk| Hit { chunk, score }))
+            .collect();
+        Ok(SearchReport {
+            hits,
+            unavailable,
+            paths,
+        })
     }
 }
-// Deep reuse validation and user search both open the dataset and exercise its
-// vector reader and full-text index through this path.
+
+pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Result<()> {
+    let mut present = HashSet::with_capacity(active.len());
+    match std::fs::read_dir(root.join("generations")) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if let Some(id) = active.get(entry.file_name().to_string_lossy().as_ref()) {
+                    present.insert(id.as_str());
+                } else {
+                    remove_index_node(&entry.path())?;
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            present.extend(active.iter().map(String::as_str));
+        }
+        Err(error) => return Err(error.into()),
+    }
+    generation_seal::recover(root, &present)?;
+    Ok(())
+}
+
+pub(crate) fn remove_index_node(path: &Path) -> std::io::Result<()> {
+    let kind = path.symlink_metadata()?.file_type();
+    if kind.is_dir() {
+        return std::fs::remove_dir_all(path);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if kind.is_symlink_dir() {
+            return std::fs::remove_dir(path);
+        }
+    }
+    std::fs::remove_file(path)
+}
+
+fn read_document(generation: &Path) -> Result<Document> {
+    Ok(serde_json::from_slice(&std::fs::read(
+        generation.join("document.json"),
+    )?)?)
+}
+
+/// Worker entry point for the one-time readback of an unpublished generation.
+pub fn readback_staged_generation(
+    generation: &Path,
+    job: &crate::worker::GenerationReadback,
+) -> Result<()> {
+    let read = async {
+        let doc = read_document(generation)?;
+        anyhow::ensure!(
+            doc.doc_id == job.doc_id
+                && doc.path == job.source_path
+                && doc.sha256 == job.source_hash,
+            "staged generation does not match its source"
+        );
+        let chunk = doc
+            .chunks
+            .first()
+            .context("staged generation has no chunks")?;
+        let query = chunk.text.split_whitespace().next().unwrap_or("probe");
+        search_generation(&generation.join("lance"), query, &chunk.embedding, 1).await?;
+        Ok(())
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(read)
+}
+
+#[derive(serde::Serialize)]
+pub struct UnavailableDocument {
+    pub generation: String,
+    pub path: String,
+}
+
+pub struct SearchReport {
+    pub hits: Vec<Hit>,
+    pub unavailable: Vec<UnavailableDocument>,
+    pub paths: std::collections::HashMap<String, String>,
+}
+
 type RankedChunks = Vec<(String, f32)>;
 
-pub(crate) async fn search_generation(
+async fn search_generation(
     path: &Path,
     query: &str,
     vector: &[f32],
@@ -562,6 +699,7 @@ pub(crate) async fn search_generation(
 ) -> Result<(RankedChunks, RankedChunks)> {
     let mut semantic = Vec::new();
     let mut lexical = Vec::new();
+    anyhow::ensure!(path.is_dir(), "generation Lance directory unavailable");
     let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
         .execute()
         .await?;

@@ -1,4 +1,4 @@
-//! Bounded framed JSON, validation-start acknowledgment and process supervision.
+//! Bounded framed JSON and process supervision.
 use crate::pipeline::Page;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -50,8 +50,10 @@ pub struct ReadbackJob {
     pub identity_terms: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
-pub struct ValidationJob {
-    pub(crate) row: crate::index::ScanRow,
+pub struct GenerationReadback {
+    pub doc_id: String,
+    pub source_path: String,
+    pub source_hash: String,
 }
 #[derive(Serialize, Deserialize)]
 pub struct Request {
@@ -64,12 +66,11 @@ pub struct Request {
     #[serde(default)]
     pub readback: Option<ReadbackJob>,
     #[serde(default)]
-    pub validation: Option<ValidationJob>,
+    pub generation_readback: Option<GenerationReadback>,
 }
 impl Request {
     pub fn memory_bytes(&self) -> u64 {
-        if self.validation.is_some()
-            || self.projection.as_ref().is_some_and(|j| j.kind == "pdf")
+        if self.projection.as_ref().is_some_and(|j| j.kind == "pdf")
             || self.office_label().is_none()
         {
             MEMORY_BYTES
@@ -78,9 +79,6 @@ impl Request {
         }
     }
     pub fn office_label(&self) -> Option<&str> {
-        if self.validation.is_some() {
-            return None;
-        }
         if let Some(job) = &self.readback {
             return Some(&job.name);
         }
@@ -131,14 +129,11 @@ pub fn read_frame<T: DeserializeOwned>(mut reader: impl Read) -> Result<T> {
 }
 #[cfg(test)]
 thread_local! {
-    pub(crate) static TEST_EXECUTABLE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static WORKER_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 pub fn executable() -> Result<PathBuf> {
     #[cfg(test)]
-    if let Some(path) = TEST_EXECUTABLE.with(|path| path.borrow().clone()) {
-        return Ok(path);
-    }
-
+    WORKER_REQUESTS.with(|count| count.set(count.get() + 1));
     let name = if cfg!(windows) {
         "vz-parser-worker.exe"
     } else {
@@ -298,22 +293,8 @@ fn run_command_with_watchdog(
     drop(stdin);
     let stdout = child.stdout.take().context("worker stdout")?;
     let (sender, receiver) = std::sync::mpsc::channel();
-    let validation = request.validation.is_some();
-    let started = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
-    let reader_started = started.clone();
     std::thread::spawn(move || {
         let mut stdout = BufReader::new(stdout);
-        if validation {
-            let mut ack = [0];
-            if stdout.read_exact(&mut ack).is_err() || ack != *b"V" {
-                let _ = sender.send((
-                    true,
-                    Err(anyhow::anyhow!("validation worker did not start")),
-                ));
-                return;
-            }
-            *reader_started.lock().unwrap() = Some(Instant::now());
-        }
         let no_response_bytes = matches!(stdout.fill_buf(), Ok([]));
         let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
     });
@@ -344,22 +325,6 @@ fn run_command_with_watchdog(
                 let diagnostic = diagnostic_rx
                     .recv_timeout(Duration::from_millis(100))
                     .unwrap_or_default();
-                if validation && started.lock().unwrap().is_some() {
-                    let allocation_denied = diagnostic
-                        .windows(b"memory allocation of ".len())
-                        .any(|w| w == b"memory allocation of ")
-                        && diagnostic
-                            .windows(b"bytes failed".len())
-                            .any(|w| w == b"bytes failed");
-                    #[cfg(windows)]
-                    let allocation_denied =
-                        allocation_denied || windows_memory_refusal(status.code(), false);
-                    if allocation_denied {
-                        return Err(crate::failures::content(
-                            "validation worker memory cap while reading",
-                        ));
-                    }
-                }
                 if let Some(label) = request.office_label() {
                     if diagnostic
                         .windows(b"memory allocation of ".len())
@@ -383,31 +348,18 @@ fn run_command_with_watchdog(
                 {
                     bail!("parser sandbox failed to start the worker: {status}");
                 }
-                if validation {
-                    bail!("validation worker exited without reporting damage: {status}");
-                }
                 return Err(crate::failures::content(format!(
                     "worker crashed: {status}"
                 )));
             }
-            if validation && started.lock().unwrap().is_none() {
-                bail!("validation worker unavailable before probe startup");
-            }
             if let Some(error) = request_error {
-                if validation {
-                    bail!("validation worker request unavailable: {error:#}");
-                }
                 return Err(crate::failures::content(format!(
                     "worker request failed: {error:#}"
                 )));
             }
-            let response = response.and_then(|(_, r)| r).map_err(|e| {
-                if validation {
-                    anyhow::anyhow!("validation worker response unavailable: {e:#}")
-                } else {
-                    crate::failures::content(format!("worker response failed: {e:#}"))
-                }
-            })?;
+            let response = response
+                .and_then(|(_, r)| r)
+                .map_err(|e| crate::failures::content(format!("worker response failed: {e:#}")))?;
             if let Some(error) = response.error {
                 return Err(if response.content_failure {
                     crate::failures::content(error)
@@ -422,9 +374,6 @@ fn run_command_with_watchdog(
             let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
-            if validation && started.lock().unwrap().is_none() {
-                bail!("validation worker memory limit before probe startup");
-            }
             return Err(crate::failures::content(
                 if let Some(label) = request.office_label() {
                     format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {}: limit {memory_limit} bytes; last observed {usage} bytes",label)
@@ -433,19 +382,9 @@ fn run_command_with_watchdog(
                 },
             ));
         }
-        let reading_expired = validation
-            && started
-                .lock()
-                .unwrap()
-                .is_some_and(|ack| ack.elapsed() >= timeout);
-        // Keep the overall deadline. Startup time cannot be counted as time
-        // spent reading: expiry without a full reading allowance is unavailable.
-        if start.elapsed() >= timeout || reading_expired {
+        if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
-            if validation && !reading_expired {
-                bail!("validation worker timeout without full reading allowance");
-            }
             let prefix = if request.projection.is_some() || request.readback.is_some() {
                 "PROJECTION_RESOURCE_LIMIT: "
             } else {
@@ -646,108 +585,13 @@ mod tests {
                 pdfium: None,
                 office: None,
                 projection: None,
-                validation: None,
+                generation_readback: None,
                 readback: None,
             },
             Duration::from_secs(5),
             sandboxed,
         )
         .unwrap_err()
-    }
-
-    #[test]
-    fn delayed_validation_ack_preserves_reading_allowance_and_overall_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let response = directory.path().join("response");
-        write_frame(
-            std::fs::File::create(&response).unwrap(),
-            &Response {
-                pages: vec![],
-                error: None,
-                content_failure: false,
-            },
-        )
-        .unwrap();
-        let request = Request {
-            path: "index".into(),
-            pdfium: None,
-            office: None,
-            projection: None,
-            readback: None,
-            validation: Some(ValidationJob {
-                row: crate::index::ScanRow {
-                    doc_id: "doc".into(),
-                    path: "source.txt".into(),
-                    size: 1,
-                    mtime: String::new(),
-                    hash: "hash".into(),
-                    generation: "generation".into(),
-                },
-            }),
-        };
-        // Delayed startup is followed by a healthy read within the deadline.
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            &format!(
-                "cat >/dev/null; /bin/sleep 0.3; printf V; /bin/sleep 0.1; /bin/cat '{}'",
-                response.display()
-            ),
-        ]);
-        assert!(
-            run_command(command, &request, Duration::from_secs(3), false)
-                .unwrap()
-                .is_empty()
-        );
-        // Very late acknowledgement cannot convert the overall deadline to damage.
-        let mut command = Command::new("/bin/sh");
-        command.args([
-            "-c",
-            "cat >/dev/null; /bin/sleep 0.3; printf V; /bin/sleep 2",
-        ]);
-        let error = run_command(command, &request, Duration::from_secs(1), false).unwrap_err();
-        assert!(!crate::failures::is_content(&error), "{error:#}");
-    }
-
-    #[test]
-    fn validation_requires_start_ack_and_full_reading_allowance_for_timeout_damage() {
-        for (script, content) in [
-            ("/bin/sleep 1", false),
-            ("/bin/sleep 0.05; printf V; /bin/sleep 1", false),
-            ("exit 1", false),
-            ("printf V; exit 1", false),
-        ] {
-            let mut cmd = Command::new("/bin/sh");
-            cmd.args(["-c", script]);
-            let error = run_command(
-                cmd,
-                &Request {
-                    path: "index".into(),
-                    pdfium: None,
-                    office: None,
-                    projection: None,
-                    readback: None,
-                    validation: Some(ValidationJob {
-                        row: crate::index::ScanRow {
-                            doc_id: "doc".into(),
-                            path: "source.txt".into(),
-                            size: 1,
-                            mtime: String::new(),
-                            hash: "hash".into(),
-                            generation: "generation".into(),
-                        },
-                    }),
-                },
-                Duration::from_millis(100),
-                false,
-            )
-            .unwrap_err();
-            assert_eq!(
-                crate::failures::is_content(&error),
-                content,
-                "{script}: {error:#}"
-            );
-        }
     }
 
     #[test]

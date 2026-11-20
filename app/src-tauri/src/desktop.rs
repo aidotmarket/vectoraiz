@@ -905,16 +905,19 @@ async fn pipeline_search<R: tauri::Runtime>(
             #[cfg(feature = "smoke-test")]
             record_loaded_models(&assets, &pins, engines.chat_loaded())?;
             let (state, _) = vz_core::storage::State::open_index(&root, &engines.recipe)?;
-            let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
+            let report = tokio::runtime::Runtime::new()?.block_on(state.search_with_availability(
                 &query,
                 &engines.vector(&query, true)?,
                 5,
             ))?;
-            let names = desktop_pipeline::file_names(&state);
-            Ok(serde_json::Value::Array(hits.into_iter().map(|hit| serde_json::json!({
-                "file_name": names.get(&hit.chunk.doc_id),
+            let hits: Vec<_> = report.hits.into_iter().map(|hit| serde_json::json!({
+                "file_name": report.paths.get(&hit.chunk.doc_id).and_then(|path| path.rsplit(['/', '\\']).next()),
                 "chunk":{"chunk_id":hit.chunk.chunk_id,"doc_id":hit.chunk.doc_id,"text":hit.chunk.text,"page":hit.chunk.page},"score":hit.score
-            })).collect()))
+            })).collect();
+            let unavailable: Vec<_> = report.unavailable.iter().map(|item| {
+                item.path.rsplit(['/', '\\']).next().unwrap_or(&item.generation)
+            }).collect();
+            Ok(serde_json::json!({"hits": hits, "unavailable": unavailable}))
         };
         run().map_err(|e| format!("{e:#}"))
     })

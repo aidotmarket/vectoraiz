@@ -10,12 +10,12 @@ fn main() {
             usize::from(request.projection.is_some())
                 + usize::from(request.readback.is_some())
                 + usize::from(request.office.is_some())
-                + usize::from(request.validation.is_some())
+                + usize::from(request.generation_readback.is_some())
                 <= 1,
             "ambiguous worker request"
         );
-        if request.validation.is_some() {
-            vz_core::index::validation_worker(&request)
+        if let Some(job) = &request.generation_readback {
+            vz_core::storage::readback_staged_generation(&request.path, job).map(|()| Vec::new())
         } else if let Some(job) = &request.readback {
             let input = std::fs::read(&request.path)?;
             let inventory =

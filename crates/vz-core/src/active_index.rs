@@ -648,15 +648,7 @@ fn remove_unreferenced(root: &Path, db: &rusqlite::Connection) -> Result<()> {
         .prepare("SELECT generation FROM documents")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    if let Ok(entries) = fs::read_dir(root.join("generations")) {
-        for entry in entries {
-            let entry = entry?;
-            if !referenced.contains(&entry.file_name().to_string_lossy().into_owned()) {
-                fs::remove_dir_all(entry.path())?;
-            }
-        }
-    }
-    Ok(())
+    crate::storage::recover_generations(root, &referenced)
 }
 
 // Names alone are not ownership: require an ordinary recipe file with its
@@ -1134,9 +1126,9 @@ pub(crate) async fn scan_candidate(
             let staged = workspace.staged()?;
             let changed = !staged.is_empty()
                 || !outcome.jobs.is_empty()
-                || published
-                    .iter()
-                    .any(|r| !outcome.succeeded.contains(&r.path))
+                || published.iter().any(|r| {
+                    !outcome.succeeded.contains(&r.path) && !outcome.retain.contains(&r.path)
+                })
                 || outcome
                     .unchanged
                     .iter()
@@ -1157,12 +1149,14 @@ pub(crate) async fn scan_candidate(
                     let from = workspace_root.join("generations").join(&row.generation);
                     let to = root.join("generations").join(&row.generation);
                     if from != to {
-                        fs::rename(from, to)?;
-                        crate::index::install_validation_marker(
-                            &workspace_root,
-                            root,
-                            &row.generation,
-                        );
+                        fs::rename(&from, &to)?;
+                        if let Err(error) =
+                            crate::generation_seal::install(&workspace_root, root, &row.generation)
+                        {
+                            fs::rename(&to, &from)
+                                .context("restore staged generation after seal install failed")?;
+                            return Err(error).context("install generation seal");
+                        }
                     }
                 }
                 #[cfg(unix)]
@@ -1173,7 +1167,8 @@ pub(crate) async fn scan_candidate(
                 State::initialize_schema(&tx)?;
                 tx.execute("UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running'",[])?;
                 for row in ScanRow::read(&tx, "documents")? {
-                    if !outcome.succeeded.contains(&row.path) {
+                    if !outcome.succeeded.contains(&row.path) && !outcome.retain.contains(&row.path)
+                    {
                         tx.execute("DELETE FROM documents WHERE path=?1", [&row.path])?;
                     }
                 }
@@ -1247,6 +1242,19 @@ pub(crate) async fn scan_candidate(
                 drop(workspace.state.take());
                 fs::remove_dir_all(&workspace_root)?;
             }
+            if !outcome.seal_updates.is_empty() {
+                if !changed {
+                    if cancelled() {
+                        control.cancel();
+                    }
+                    control.commit()?;
+                }
+                for (path, seal) in outcome.seal_updates {
+                    if let Err(error) = seal.write(root) {
+                        outcome.stats.seal_warning(Path::new(&path), &error);
+                    }
+                }
+            }
         }
         ScanDecision::RevokeSource | ScanDecision::RevokeFailedPaths => {
             if active.join("state.sqlite").exists() {
@@ -1256,8 +1264,12 @@ pub(crate) async fn scan_candidate(
                 let revoked: std::collections::HashSet<_> = rows
                     .iter()
                     .filter(|r| {
+                        if outcome.retain.contains(&r.path) {
+                            return false;
+                        }
                         if decision == ScanDecision::RevokeFailedPaths {
-                            outcome.failed_content.contains(&r.path)
+                            outcome.damaged.contains(&r.path)
+                                || outcome.failed_content.contains(&r.path)
                                 || outcome.failed_infrastructure.contains(&r.path)
                         } else {
                             outcome.unavailable

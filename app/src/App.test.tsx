@@ -311,7 +311,7 @@ it("indexes with progress then runs a search and a streaming chat", async () => 
       (params.progress as { onmessage: (p: unknown) => void }).onmessage({ completed: 1, failed: 0, skipped: 0, total: 1, path: "fixture.txt" });
       return {};
     }
-    if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "thirty days" }, score: 1 }];
+    if (command === "pipeline_search") return { hits: [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "thirty days" }, score: 1 }], unavailable: [] };
     if (command === "pipeline_ask") {
       (params.tokens as { onmessage: (p: unknown) => void }).onmessage("Thirty days [1].");
       return { kind: "answer", text: "Thirty days [1].", citations: [{ number: 1, doc_id: "doc", page: 1 }] };
@@ -433,7 +433,7 @@ it.each(["Index folder", "Search", "Ask", "Run self-test"])("prevents installing
   expect(installButton()).toBeDisabled();
   await userEvent.click(installButton());
   expect(installCalls()).toHaveLength(0);
-  await act(async () => pending.resolve(name === "Ask" ? { text: "", citations: [] } : name === "Search" ? [] : {}));
+  await act(async () => pending.resolve(name === "Ask" ? { text: "", citations: [] } : name === "Search" ? { hits: [], unavailable: [] } : {}));
   expect(installButton()).toBeEnabled();
 });
 
@@ -654,12 +654,12 @@ it.each(["Index folder", "Search", "Ask"])("keeps the self-test label while %s r
   await userEvent.click(controlView(name).getByRole("button", { name }));
   expect(at("Diagnostics").getByRole("button", { name: "Run self-test" })).toBeDisabled();
   expect(screen.queryByRole("button", { name: "Running…" })).not.toBeInTheDocument();
-  await act(async () => pending.resolve(name === "Ask" ? { text: "", citations: [] } : name === "Search" ? [] : {}));
+  await act(async () => pending.resolve(name === "Ask" ? { text: "", citations: [] } : name === "Search" ? { hits: [], unavailable: [] } : {}));
 });
 
 it.each(["lighthouse.txt", undefined, null, ""])("renders filenames or the ID fallback in both hits and citations (%j)", async file_name => {
   invoke.mockImplementation(async command => {
-    if (command === "pipeline_search") return [{ file_name, chunk: { chunk_id: "chunk", doc_id: "1234567890", page: 2, text: "lighthouse" }, score: 1 }];
+    if (command === "pipeline_search") return { hits: [{ file_name, chunk: { chunk_id: "chunk", doc_id: "1234567890", page: 2, text: "lighthouse" }, score: 1 }], unavailable: [] };
     if (command === "pipeline_ask") return { kind: "answer", text: "Answer [1]", citations: [{ file_name, number: 1, doc_id: "1234567890", page: 2 }] };
     return { available: false };
   });
@@ -688,7 +688,7 @@ it.each([["Search", false], ["Ask", false], ["Ask", true]] as const)("shows busy
     expect(screen.getByRole("status")).toBeEmptyDOMElement();
     expect(screen.getByText("First token")).toBeInTheDocument();
   }
-  await act(async () => pending.resolve(name === "Ask" ? { text: "Done", citations: [] } : []));
+  await act(async () => pending.resolve(name === "Ask" ? { text: "Done", citations: [] } : { hits: [], unavailable: [] }));
   expect(screen.getByRole("status")).toBeEmptyDOMElement();
 });
 
@@ -802,7 +802,7 @@ it.each(["Search", "Ask"])("clears the previous result when %s starts, before it
   invoke.mockImplementation(async command => {
     if (command === "update_check") return { available: false };
     if (next) return pending.promise;
-    if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
+    if (command === "pipeline_search") return { hits: [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }], unavailable: [] };
     if (command === "pipeline_ask") return { kind: "answer", text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
   });
   render(<App />);
@@ -815,7 +815,7 @@ it.each(["Search", "Ask"])("clears the previous result when %s starts, before it
   expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
   expect(screen.queryByText("Previous search hit")).not.toBeInTheDocument();
   expect(controlView(name).getByRole("button", { name })).toBeDisabled();
-  await act(async () => pending.resolve(name === "Ask" ? { text: "No indexed sources answer this question.", citations: [] } : []));
+  await act(async () => pending.resolve(name === "Ask" ? { text: "No indexed sources answer this question.", citations: [] } : { hits: [], unavailable: [] }));
   expect(screen.queryByText(/Previous source.txt/)).not.toBeInTheDocument();
 });
 
@@ -823,7 +823,7 @@ it.each(["Ask", "Search"])("clears the previous %s result when Index folder star
   const pending = deferred();
   invoke.mockImplementation(async command => {
     if (command === "pipeline_index") return pending.promise;
-    if (command === "pipeline_search") return [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }];
+    if (command === "pipeline_search") return { hits: [{ chunk: { chunk_id: "c", doc_id: "doc", page: 1, text: "Previous search hit" }, score: 1 }], unavailable: [] };
     if (command === "pipeline_ask") return { kind: "answer", text: "Previous answer", citations: [{ number: 1, doc_id: "doc", page: 1, file_name: "Previous source.txt" }] };
     return { available: false };
   });
@@ -863,9 +863,10 @@ it("ignores settled Ask tokens while Search runs and after its results arrive", 
   expect(answer).not.toBeInTheDocument();
   expect(screen.getByRole("status")).toHaveTextContent("Searching…");
   expect(at("Ask").getByRole("button", { name: "Search" })).toBeDisabled();
-  await act(async () => searchPending.resolve([{ chunk: { chunk_id: "new", doc_id: "doc", page: 2, text: "New search result" }, score: 1 }]));
+  await act(async () => searchPending.resolve({ hits: [{ chunk: { chunk_id: "new", doc_id: "doc", page: 2, text: "New search result" }, score: 1 }], unavailable: ["Unavailable.txt"] }));
   expect(screen.getByText("New search result")).toBeInTheDocument();
-  expect(screen.getByRole("status")).toBeEmptyDOMElement();
+  expect(screen.getByText("Unavailable for search: Unavailable.txt")).toBeInTheDocument();
+  expect(screen.getByRole("status")).not.toHaveTextContent("Searching…");
   expect(answer).not.toBeInTheDocument();
   expect(at("Ask").getByRole("button", { name: "Search" })).toBeEnabled();
 });
@@ -1212,7 +1213,7 @@ it("keeps Search and Index enabled during cloud Ask and ignores cancelled callba
  cloudInvoke.mockResolvedValue(apiReady);const pending=deferred();let tokens:{onmessage:(t:string)=>void}|undefined;
  invoke.mockImplementation(async(command,args)=>{
   if(command==="pipeline_ask"){tokens=args.tokens;tokens!.onmessage("First token");return pending.promise;}
-  if(command==="pipeline_search")return [{chunk:{chunk_id:"hit",doc_id:"doc",page:1,text:"Search hit"},score:1}];
+  if(command==="pipeline_search")return { hits: [{chunk:{chunk_id:"hit",doc_id:"doc",page:1,text:"Search hit"},score:1}], unavailable: [] };
   return {available:false};
  });
  render(<App />);await at("Settings").findByText("Saved key ending in 1234",{exact:false});
@@ -1445,7 +1446,7 @@ it("shows channel and failed-save notices, activity and Retry", async () => {
 it("keeps Search retryable after an MCP-held inference lock reports busy", async () => {
   let attempts = 0;
   invoke.mockImplementation(async command => {
-    if (command === "pipeline_search") {if (++attempts === 1) throw "vectorAIz is busy indexing. Try again in a moment."; return [{chunk: {chunk_id: "c", doc_id: "d", page: 1, text: "Available after MCP"}, score: 1}];}
+    if (command === "pipeline_search") {if (++attempts === 1) throw "vectorAIz is busy indexing. Try again in a moment."; return { hits: [{chunk: {chunk_id: "c", doc_id: "d", page: 1, text: "Available after MCP"}, score: 1}], unavailable: [] };}
     return {};
   });
   render(<App />);

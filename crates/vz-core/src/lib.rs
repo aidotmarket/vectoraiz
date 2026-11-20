@@ -78,6 +78,7 @@ mod tests {
 
 pub mod active_index;
 pub mod engine;
+mod generation_seal;
 pub mod index;
 pub mod parsers;
 pub mod pipeline;

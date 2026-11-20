@@ -1678,7 +1678,7 @@ mod tests {
     }
 
     #[test]
-    fn t15_version_one_survives_real_nochange_scan_and_expires_after_cancelled_success() {
+    fn t15_version_one_expires_on_adoption_then_survives_warm_scan_until_cancelled_success() {
         use std::sync::atomic::{AtomicBool, Ordering};
         let f = Fixture::new();
         let index = f.0.join("real-index");
@@ -1700,7 +1700,7 @@ mod tests {
             |_| {},
         ))
         .unwrap();
-        // Reproduce the pre-fold-16 layout, before validation markers existed.
+        // Reproduce the pre-seal layout.
         fs::remove_dir_all(index.join(".vz-validation")).unwrap();
         let old =
             ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
@@ -1718,9 +1718,24 @@ mod tests {
             .unwrap();
         assert_eq!(report.skipped, 1);
         assert!(!index.join(".vz-scan/scan.sqlite").exists());
-        old.check().unwrap();
+        stale(old.check());
         new.check().unwrap();
-        assert!(!index.join(".vz-validation").exists());
+        assert!(index.join(".vz-validation").is_dir());
+        let sealed =
+            ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
+                .unwrap();
+        let warm = rt
+            .block_on(vz_core::active_index::index_explicit(
+                &index,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(warm.skipped, 1);
+        assert!(!index.join(".vz-scan/scan.sqlite").exists());
+        sealed.check().unwrap();
         let b = f.0.join("other-source");
         fs::create_dir(&b).unwrap();
         fs::write(b.join("good.txt"), "Reusable cancelled success.").unwrap();
@@ -1735,7 +1750,7 @@ mod tests {
                 || stopped.load(Ordering::SeqCst)
             ))
             .is_err());
-        stale(old.check());
+        stale(sealed.check());
         new.check().unwrap();
     }
 

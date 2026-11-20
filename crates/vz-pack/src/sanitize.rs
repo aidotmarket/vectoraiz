@@ -1024,7 +1024,7 @@ pub(crate) fn office_worker(
             path: source,
             pdfium: None,
             projection: None,
-            validation: None,
+            generation_readback: None,
             readback: None,
             office: Some(vz_core::worker::OfficeJob {
                 name: name.into(),

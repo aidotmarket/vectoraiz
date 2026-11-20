@@ -49,6 +49,11 @@ async fn t1_t4_t6_recipe_change_content_revocation_reader_pin_and_reclamation() 
     .await
     .unwrap();
     let old_root = active_index::resolve(data.path());
+    let old_seal = old_root
+        .join(".vz-validation")
+        .join(format!("{}.json", rows(data.path())[0].1));
+    let seal: serde_json::Value = serde_json::from_slice(&fs::read(&old_seal).unwrap()).unwrap();
+    assert_eq!(seal["origin"], "validated");
     let old = State::open(&old_root).unwrap();
     fs::write(source.path().join("good.txt"), "").unwrap();
     engines.recipe.model.push_str("-new");
@@ -68,13 +73,14 @@ async fn t1_t4_t6_recipe_change_content_revocation_reader_pin_and_reclamation() 
         old.documents().unwrap()[0].chunks[0].text,
         "First searchable revision."
     );
-    assert!(old_root.exists());
+    assert!(old_seal.is_file());
     drop(old);
     {
         let _fence = active_index::selection_fence(data.path(), true).unwrap();
         active_index::cleanup_start(data.path()).unwrap();
     }
     assert!(!old_root.exists());
+    assert!(!old_seal.exists());
     for n in 0..4 {
         fs::write(
             source.path().join("good.txt"),
@@ -97,6 +103,12 @@ async fn t1_t4_t6_recipe_change_content_revocation_reader_pin_and_reclamation() 
                 .count(),
             1
         );
+        let root = active_index::resolve(data.path());
+        let seals = root.join(".vz-validation");
+        assert_eq!(fs::read_dir(&seals).unwrap().count(), 1);
+        assert!(seals
+            .join(format!("{}.json", rows(data.path())[0].1))
+            .is_file());
         assert_eq!(
             fs::read_dir(data.path().join("indexes")).unwrap().count(),
             1

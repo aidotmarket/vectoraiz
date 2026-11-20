@@ -7,8 +7,10 @@ pub fn sha256(bytes: &[u8]) -> String {
 }
 
 pub fn file_sha256(path: &std::path::Path) -> std::io::Result<String> {
-    use std::io::Read;
-    let mut file = std::fs::File::open(path)?;
+    reader_sha256(std::fs::File::open(path)?)
+}
+
+pub(crate) fn reader_sha256(mut file: impl std::io::Read) -> std::io::Result<String> {
     let mut digest = Sha256::new();
     let mut bytes = [0; 65536];
     loop {

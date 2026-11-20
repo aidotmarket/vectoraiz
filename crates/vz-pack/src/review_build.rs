@@ -878,6 +878,108 @@ mod tests {
         }
     }
 
+    include!("../../vz-core/tests/support/deny_read.rs");
+
+    #[test]
+    fn listing_review_and_pack_build_refuse_unavailable_search_generation() {
+        let f = Fixture::new();
+        let library = f.root.join("seal-library");
+        let source = f.root.join("seal-source");
+        std::fs::create_dir(&source).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(
+                source.join(format!("{name}.txt")),
+                format!("Orbital archive {name}."),
+            )
+            .unwrap();
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let scan = || {
+            rt.block_on(vz_core::active_index::reindex(
+                &library,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+                || false,
+            ))
+            .unwrap()
+        };
+        assert_eq!(scan().completed, 2);
+        let index = vz_core::active_index::resolve_state(&library);
+        let generation: String = State::review_connection(&index)
+            .unwrap()
+            .query_row(
+                "SELECT generation FROM documents ORDER BY path LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let document = index
+            .join("generations")
+            .join(&generation)
+            .join("document.json");
+        assert_eq!(
+            crate::review_store::NativeIndexFence::candidate_documents(&library, &source)
+                .unwrap()
+                .len(),
+            2
+        );
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("seal-reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        let current = build(
+            &guard,
+            &source,
+            id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        drop(guard);
+
+        let access = deny_read(&document);
+        let stats = scan();
+        assert_eq!((stats.skipped, stats.failed), (2, 0));
+        let search = || {
+            let state = State::open(&index).unwrap();
+            rt.block_on(state.search_with_availability(
+                "orbital",
+                &engines.vector("orbital", true).unwrap(),
+                5,
+            ))
+            .unwrap()
+        };
+        let result = search();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.unavailable.len(), 1);
+        assert_eq!(result.unavailable[0].generation, generation);
+        assert!(
+            crate::review_store::NativeIndexFence::candidate_documents(&library, &source).is_err()
+        );
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        assert!(guard.reviewed_payload(&current).is_err());
+        assert!(build(
+            &guard,
+            &source,
+            id,
+            &engines,
+            "orbital",
+            &Changes::default()
+        )
+        .is_err());
+        drop(guard);
+        drop(access);
+        assert_eq!(search().hits.len(), 2);
+    }
+
     #[test]
     fn t15_publication_process_child() {
         let Some(library) = std::env::var_os("VZ_REVIEW_PUBLICATION_LIBRARY") else {

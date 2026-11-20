@@ -385,7 +385,7 @@ mod tests {
                 pdfium: None,
                 office: None,
                 projection: None,
-                validation: None,
+                generation_readback: None,
                 readback: None,
             })
             .unwrap();
@@ -455,7 +455,7 @@ mod tests {
                 pdfium: None,
                 office: None,
                 projection: None,
-                validation: None,
+                generation_readback: None,
                 readback: None,
             })
             .unwrap();
@@ -491,7 +491,7 @@ mod tests {
             pdfium: None,
             office: None,
             projection: None,
-            validation: None,
+            generation_readback: None,
             readback: None,
         })
         .unwrap();
