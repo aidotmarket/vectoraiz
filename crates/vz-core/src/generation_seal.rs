@@ -424,17 +424,21 @@ fn sync_directory(_directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) {
+pub(crate) fn recover(
+    root: &Path,
+    active: &std::collections::HashSet<&str>,
+    mut warn: impl FnMut(String),
+) {
     let directory = root.join(DIRECTORY);
     let entries = ordinary_directory(&directory).and_then(|()| fs::read_dir(&directory));
     let entries = match entries {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return,
         Err(error) => {
-            eprintln!(
+            warn(format!(
                 "Deferred generation seal cleanup in {}: {error}",
                 directory.display()
-            );
+            ));
             return;
         }
     };
@@ -442,10 +446,10 @@ pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                eprintln!(
+                warn(format!(
                     "Deferred generation seal cleanup in {}: {error}",
                     directory.display()
-                );
+                ));
                 continue;
             }
         };
@@ -457,10 +461,10 @@ pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) {
         }
         if generation.is_some() || name.ends_with(".tmp") {
             if let Err(error) = crate::storage::remove_index_node(&entry.path()) {
-                eprintln!(
+                warn(format!(
                     "Deferred generation seal cleanup for {}: {error}",
                     entry.path().display()
-                );
+                ));
             }
         }
     }

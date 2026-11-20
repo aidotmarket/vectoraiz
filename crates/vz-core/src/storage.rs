@@ -438,7 +438,8 @@ impl State {
             .prepare(&format!("SELECT generation FROM {}", self.table()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        recover_generations(&self.root, &active)
+        recover_generations(&self.root, &active, |warning| eprintln!("{warning}"));
+        Ok(())
     }
     pub fn generations(&self) -> Result<Vec<String>> {
         Ok(self
@@ -631,7 +632,11 @@ pub(crate) fn generation_entries(root: &Path) -> std::io::Result<std::fs::ReadDi
     std::fs::read_dir(directory)
 }
 
-pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Result<()> {
+pub(crate) fn recover_generations(
+    root: &Path,
+    active: &HashSet<String>,
+    mut warn: impl FnMut(String),
+) {
     let mut present = HashSet::with_capacity(active.len());
     match generation_entries(root) {
         Ok(entries) => {
@@ -639,7 +644,10 @@ pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Resu
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
-                        eprintln!("Deferred generation cleanup in {}: {error}", root.display());
+                        warn(format!(
+                            "Deferred generation cleanup in {}: {error}",
+                            root.display()
+                        ));
                         present.extend(active.iter().map(String::as_str));
                         break;
                     }
@@ -647,21 +655,23 @@ pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Resu
                 if let Some(id) = active.get(entry.file_name().to_string_lossy().as_ref()) {
                     present.insert(id.as_str());
                 } else if let Err(error) = remove_index_node(&entry.path()) {
-                    eprintln!(
+                    warn(format!(
                         "Deferred generation cleanup at {}: {error}",
                         entry.path().display()
-                    );
+                    ));
                 }
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
-            eprintln!("Deferred generation cleanup in {}: {error}", root.display());
+            warn(format!(
+                "Deferred generation cleanup in {}: {error}",
+                root.display()
+            ));
             present.extend(active.iter().map(String::as_str));
         }
     }
-    generation_seal::recover(root, &present);
-    Ok(())
+    generation_seal::recover(root, &present, warn);
 }
 
 pub(crate) fn remove_index_node(path: &Path) -> std::io::Result<()> {

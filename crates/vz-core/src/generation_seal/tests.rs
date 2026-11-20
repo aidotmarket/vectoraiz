@@ -115,7 +115,7 @@ async fn stage_recipe_retry(f: &mut Fixture, blocked: &str) -> (PathBuf, ScanRow
     (candidate, rows.pop().unwrap())
 }
 
-fn deny_private_seal(f: &Fixture, candidate: &Path, row: &ScanRow) -> impl Drop {
+fn deny_private_seal(f: &Fixture, candidate: &Path, row: &ScanRow) -> DenyRead {
     let seal = path(candidate, &row.generation);
     #[cfg(unix)]
     let seal = {
@@ -813,7 +813,7 @@ async fn read_only_seals_defer_cleanup_and_install_without_blocking_search() {
 
 #[tokio::test]
 async fn read_only_private_seals_defer_workspace_cleanup_after_commit() {
-    let f = Fixture::new().await;
+    let mut f = Fixture::new().await;
     let root = f.root();
     let workspace = root.join(".vz-scan");
     fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
@@ -850,14 +850,70 @@ async fn read_only_private_seals_defer_workspace_cleanup_after_commit() {
         .any(|warning| warning.contains("Deferred private workspace cleanup")));
     assert_eq!(&f.rows()[2], retained);
     assert!(seal.exists());
+    assert!(workspace.join("scan.sqlite").is_file());
+    assert!(workspace.join("scan-writer.lock").is_file());
+    f.assert_search(3, &[]).await;
+
+    f.engines.recipe.model.push_str("-new");
+    let stats = f.scan().await;
+    assert_eq!((stats.completed, stats.skipped, stats.failed), (3, 0, 0));
+    assert!(stats.seal_warnings.iter().any(|warning| {
+        warning.contains("Deferred library cleanup") && warning.contains(".vz-scan")
+    }));
+    assert_ne!(f.root(), root);
+    for marker in ["recipe.json", "writer.lock", "state.sqlite"] {
+        assert!(root.join(marker).is_file());
+    }
+    drop(State::open_index(&f.library(), &f.engines.recipe).unwrap());
     f.assert_search(3, &[]).await;
 
     #[cfg(windows)]
     drop(seal_lock);
     restrict_directory(directory, false);
     assert_eq!(f.scan().await.skipped, 3);
-    assert!(!workspace.exists());
+    assert!(!root.exists());
     f.assert_search(3, &[]).await;
+}
+
+#[tokio::test]
+async fn protected_retired_generations_defer_recipe_cleanup_after_commit() {
+    let mut f = Fixture::new().await;
+    let root = f.root();
+    let directory = root.join("generations");
+    #[cfg(windows)]
+    let lock = deny_read(
+        &directory
+            .join(&f.rows()[0].generation)
+            .join("document.json"),
+    );
+    restrict_directory(&directory, true);
+
+    f.engines.recipe.model.push_str("-new");
+    let stats = f.scan().await;
+    assert_eq!((stats.completed, stats.skipped, stats.failed), (2, 0, 0));
+    assert!(stats.seal_warnings.iter().any(|warning| {
+        warning.contains("Deferred library cleanup") && warning.contains("generations")
+    }));
+    assert_ne!(f.root(), root);
+    for marker in ["recipe.json", "writer.lock", "state.sqlite"] {
+        assert!(root.join(marker).is_file());
+    }
+    drop(State::open_index(&f.library(), &f.engines.recipe).unwrap());
+    f.assert_search(2, &[]).await;
+    let retry = f.scan().await;
+    assert_eq!(retry.skipped, 2);
+    assert!(retry
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("Deferred library cleanup")));
+
+    #[cfg(windows)]
+    drop(lock);
+    restrict_directory(&directory, false);
+    let _fence = active_index::selection_fence(&f.library(), true).unwrap();
+    active_index::cleanup_start(&f.library()).unwrap();
+    assert!(!root.exists());
+    f.assert_search(2, &[]).await;
 }
 
 #[tokio::test]
@@ -875,6 +931,10 @@ async fn read_only_generations_defer_orphan_cleanup_without_blocking_search() {
     for _ in 0..2 {
         let stats = f.scan().await;
         assert_eq!((stats.completed, stats.skipped, stats.failed), (0, 1, 0));
+        assert!(stats
+            .seal_warnings
+            .iter()
+            .any(|warning| warning.contains("Deferred generation cleanup")));
         assert_eq!(f.rows(), rows[..1]);
         f.assert_search(1, &[]).await;
         assert!(retired.exists());

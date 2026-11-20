@@ -271,7 +271,13 @@ fn publication_step(_data: &Path, _step: &'static str) -> Result<()> {
 /// Call only after the indexer returned successfully and cancellation was checked.
 #[cfg(test)]
 fn activate(data: &Path, recipe: &Recipe) -> Result<()> {
-    activate_with(data, recipe, &publication_dir(data, recipe)?, || Ok(()))
+    activate_with(
+        data,
+        recipe,
+        &publication_dir(data, recipe)?,
+        || Ok(()),
+        &mut Default::default(),
+    )
 }
 
 fn activate_with(
@@ -279,6 +285,7 @@ fn activate_with(
     recipe: &Recipe,
     relative: &str,
     before_rename: impl FnOnce() -> Result<()>,
+    stats: &mut crate::index::Progress,
 ) -> Result<()> {
     let id = recipe_id(recipe)?;
     ensure!(valid_directory(relative, &id), "invalid index directory");
@@ -311,7 +318,12 @@ fn activate_with(
         before_rename()?;
         publication_step(data, "before pointer rename")?;
         fs::rename(&temp, data.join("active-index.json"))?;
-        publication_step(data, "after pointer rename").context(PublishedFailure("cleanup"))?;
+        defer_cleanup(
+            stats,
+            data,
+            "publication",
+            publication_step(data, "after pointer rename"),
+        );
         (|| -> Result<()> {
             publication_step(data, "directory sync")?;
             #[cfg(unix)]
@@ -643,23 +655,86 @@ fn writer_fence(root: &Path, create: bool) -> Result<SelectionFence> {
     Ok(SelectionFence(file))
 }
 
-fn remove_unreferenced(root: &Path, db: &rusqlite::Connection) -> Result<()> {
+fn remove_unreferenced(
+    root: &Path,
+    db: &rusqlite::Connection,
+    stats: &mut crate::index::Progress,
+) -> Result<()> {
     let referenced: std::collections::HashSet<String> = db
         .prepare("SELECT generation FROM documents")?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    crate::storage::recover_generations(root, &referenced)
+    crate::storage::recover_generations(root, &referenced, |warning| {
+        cleanup_warning(stats, warning)
+    });
+    Ok(())
+}
+
+fn cleanup_warning(stats: &mut crate::index::Progress, warning: String) {
+    if !stats.seal_warnings.contains(&warning) {
+        eprintln!("{warning}");
+        stats.seal_warnings.push(warning);
+    }
+}
+
+fn defer_cleanup(stats: &mut crate::index::Progress, root: &Path, kind: &str, result: Result<()>) {
+    if let Err(error) = result {
+        cleanup_warning(
+            stats,
+            format!("Deferred {kind} cleanup in {}: {error:#}", root.display()),
+        );
+    }
+}
+
+const SCAN_FILES: &[&str] = &[
+    "scan.sqlite-journal",
+    "scan.sqlite-wal",
+    "scan.sqlite-shm",
+    "scan-writer.lock",
+    "scan.sqlite",
+];
+
+fn remove_cleanup_node(path: &Path) -> std::io::Result<()> {
+    match crate::storage::remove_index_node(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
+
+fn remove_scan_files(root: &Path) -> Result<()> {
+    for name in SCAN_FILES {
+        let path = root.join(name);
+        match fs::remove_file(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            result => result.with_context(|| path.display().to_string())?,
+        }
+    }
+    Ok(())
+}
+
+fn remove_directory_contents(root: &Path, markers: &[&str]) -> Result<()> {
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !markers.iter().any(|name| entry.file_name() == *name) {
+            remove_cleanup_node(&entry.path())
+                .with_context(|| entry.path().display().to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn cleanup_scan_workspace(root: &Path, stats: &mut crate::index::Progress) {
-    if let Err(error) = fs::remove_dir_all(root) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            stats.seal_warnings.push(format!(
-                "Deferred private workspace cleanup in {}: {error}",
-                root.display()
-            ));
+    let result = (|| -> Result<()> {
+        if !root.try_exists()? {
+            return Ok(());
         }
-    }
+        crate::generation_seal::ordinary_directory(root)?;
+        remove_directory_contents(root, SCAN_FILES)?;
+        remove_scan_files(root)?;
+        fs::remove_dir(root)?;
+        Ok(())
+    })();
+    defer_cleanup(stats, root, "private workspace", result);
 }
 
 // Names alone are not ownership: require an ordinary recipe file with its
@@ -815,11 +890,8 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
     }
     let active = resolve_state(data);
     let active = active.canonicalize().unwrap_or(active);
-    if let Some(entries) = pointer_workspace(data, false)
-        .ok()
-        .and_then(|p| fs::read_dir(p).ok())
-    {
-        for entry in entries {
+    if let Ok(workspace) = pointer_workspace(data, false) {
+        for entry in fs::read_dir(workspace)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name
@@ -833,13 +905,17 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
         }
     }
     let mut roots = Vec::new();
-    if let Ok(entries) = fs::read_dir(data.join("indexes")) {
-        for entry in entries {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() && owned_recipe_directory(data, &entry.path()) {
-                roots.push(entry.path());
+    match fs::read_dir(data.join("indexes")) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() && owned_recipe_directory(data, &entry.path()) {
+                    roots.push(entry.path());
+                }
             }
         }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
     }
     if owned_legacy_directory(&data.join("phase0-index")) {
         roots.push(data.join("phase0-index"));
@@ -907,9 +983,26 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
             fs::remove_file(marker)?;
             fs::remove_file(root.join("recipe.json"))?;
         } else {
+            // Keep ownership evidence until all content has been reclaimed.
+            let markers = [
+                "scan.sqlite-journal",
+                "scan.sqlite-wal",
+                "scan.sqlite-shm",
+                "state.sqlite-journal",
+                "state.sqlite-wal",
+                "state.sqlite-shm",
+                "scan.sqlite",
+                "state.sqlite",
+                "writer.lock",
+                "recipe.json",
+            ];
+            remove_directory_contents(&root, &markers)?;
             // Windows requires the lock handle closed before deleting its directory.
             drop(lock);
-            fs::remove_dir_all(root)?;
+            for name in markers {
+                remove_cleanup_node(&root.join(name))?;
+            }
+            fs::remove_dir(&root)?;
         }
     }
     Ok(())
@@ -931,7 +1024,20 @@ pub fn cleanup_start(data: &Path) -> Result<()> {
                 .and_then(|m| m.modified())
                 .ok()
         });
-    cleanup_library(data, keep.as_deref())
+    let workspace = (|| -> Result<()> {
+        if let Some(root) = published_candidate(data) {
+            if let Ok(_lock) = writer_fence(&root, false) {
+                remove_scan_files(&root)?;
+            }
+        }
+        Ok(())
+    })();
+    cleanup_library(data, keep.as_deref()).and(workspace)
+}
+
+fn published_candidate(data: &Path) -> Option<PathBuf> {
+    let root = verified_target(data)?;
+    (root.parent()? == data.canonicalize().ok()?.join("indexes")).then_some(root)
 }
 
 fn retry_candidate(
@@ -1059,8 +1165,22 @@ pub(crate) async fn scan_candidate(
         let _recovery_writer = writer_fence(&active, true)?;
         State::quarantine_orphan_wal(&active)?;
     }
+    let mut cleanup_report = crate::index::Progress::default();
     if is_library_root(data) {
-        cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path()))?;
+        defer_cleanup(
+            &mut cleanup_report,
+            data,
+            "library",
+            cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path())),
+        );
+    }
+    if same_recipe && published_candidate(data).as_deref() == Some(root) {
+        defer_cleanup(
+            &mut cleanup_report,
+            root,
+            "published workspace",
+            remove_scan_files(root),
+        );
     }
     let previous = last_indexed_folder(&active);
     let current = previous
@@ -1070,7 +1190,8 @@ pub(crate) async fn scan_candidate(
     let published = if same_recipe && active.join("state.sqlite").exists() {
         {
             let db = State::review_connection(&active)?;
-            remove_unreferenced(&active, &db)?;
+            let cleanup = remove_unreferenced(&active, &db, &mut cleanup_report);
+            defer_cleanup(&mut cleanup_report, &active, "generation", cleanup);
             ScanRow::read(&db, "documents")?
         }
     } else {
@@ -1117,6 +1238,10 @@ pub(crate) async fn scan_candidate(
             })
         }
     };
+    outcome
+        .stats
+        .seal_warnings
+        .extend(cleanup_report.seal_warnings);
     ensure!(
         !cancelled(),
         if workspace.staged()?.is_empty() {
@@ -1196,56 +1321,59 @@ pub(crate) async fn scan_candidate(
                 tx.execute("INSERT INTO index_metadata VALUES('selected_folder',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",[source])?;
                 publication_step(data, "before sqlite commit")?;
                 tx.commit()?;
-                publication_step(data, "after sqlite commit").map_err(|error| {
-                    if same_recipe {
-                        error.context(PublishedFailure("cleanup"))
-                    } else {
-                        error
-                    }
-                })?;
-                db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                    .map_err(|e| {
-                        let error = anyhow::Error::from(e);
-                        if same_recipe {
-                            error.context(PublishedFailure("checkpoint"))
-                        } else {
-                            error
-                        }
-                    })?;
-                if let Some((relative, _)) = &candidate {
-                    activate_with(data, &engines.recipe, relative, || {
-                        if cancelled() {
-                            control.cancel();
-                        }
-                        control
-                            .commit()
-                            .context("Indexing cancelled; Re-index to resume")?;
-                        publication_step(data, "commit entered")
-                    })?;
+                let after_commit = publication_step(data, "after sqlite commit");
+                if same_recipe {
+                    defer_cleanup(&mut outcome.stats, root, "publication", after_commit);
+                } else {
+                    after_commit?;
                 }
-                publication_step(data, "generation cleanup")
-                    .context(PublishedFailure("generation cleanup"))?;
-                remove_unreferenced(root, &db).context(PublishedFailure("generation cleanup"))?;
+                let checkpoint = db
+                    .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .map_err(Into::into);
+                if same_recipe {
+                    defer_cleanup(&mut outcome.stats, root, "WAL checkpoint", checkpoint);
+                } else {
+                    checkpoint?;
+                }
+                if let Some((relative, _)) = &candidate {
+                    activate_with(
+                        data,
+                        &engines.recipe,
+                        relative,
+                        || {
+                            if cancelled() {
+                                control.cancel();
+                            }
+                            control
+                                .commit()
+                                .context("Indexing cancelled; Re-index to resume")?;
+                            publication_step(data, "commit entered")
+                        },
+                        &mut outcome.stats,
+                    )?;
+                }
+                let cleanup = publication_step(data, "generation cleanup")
+                    .and_then(|()| remove_unreferenced(root, &db, &mut outcome.stats));
+                defer_cleanup(&mut outcome.stats, root, "generation", cleanup);
                 drop(db);
                 drop(workspace.state.take());
                 if same_recipe {
                     cleanup_scan_workspace(&workspace_root, &mut outcome.stats);
                 } else {
-                    for name in [
-                        "scan.sqlite",
-                        "scan.sqlite-journal",
-                        "scan.sqlite-wal",
-                        "scan.sqlite-shm",
-                        "scan-writer.lock",
-                    ] {
-                        let p = root.join(name);
-                        if p.exists() {
-                            fs::remove_file(p).context(PublishedFailure("workspace cleanup"))?;
-                        }
-                    }
+                    defer_cleanup(
+                        &mut outcome.stats,
+                        root,
+                        "published workspace",
+                        remove_scan_files(root),
+                    );
                 }
                 if is_library_root(data) {
-                    cleanup_library(data, None).context(PublishedFailure("generation cleanup"))?;
+                    defer_cleanup(
+                        &mut outcome.stats,
+                        data,
+                        "library",
+                        cleanup_library(data, None),
+                    );
                 }
             } else if same_recipe && workspace_root.exists() {
                 drop(workspace.state.take());
@@ -1322,12 +1450,21 @@ pub(crate) async fn scan_candidate(
                     }
                     publication_step(data, "before revoke commit")?;
                     tx.commit()?;
-                    publication_step(data, "after revoke commit")
-                        .context(PublishedFailure("cleanup"))?;
-                    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
-                        .context(PublishedFailure("checkpoint"))?;
-                    remove_unreferenced(&active, &db)
-                        .context(PublishedFailure("generation cleanup"))?;
+                    defer_cleanup(
+                        &mut outcome.stats,
+                        &active,
+                        "publication",
+                        publication_step(data, "after revoke commit"),
+                    );
+                    defer_cleanup(
+                        &mut outcome.stats,
+                        &active,
+                        "WAL checkpoint",
+                        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+                            .map_err(Into::into),
+                    );
+                    let cleanup = remove_unreferenced(&active, &db, &mut outcome.stats);
+                    defer_cleanup(&mut outcome.stats, &active, "generation", cleanup);
                 }
             }
         }
@@ -1490,7 +1627,7 @@ async fn finish_reindex(
     let replacing_documents =
         crate::storage::State::has_persisted_documents(&resolve(data)).unwrap_or(true);
     let mut run = Box::pin(run);
-    let result = futures::future::poll_fn(|cx| {
+    let mut result = futures::future::poll_fn(|cx| {
         if cancelled() {
             std::task::Poll::Ready(Err(anyhow::anyhow!(
                 "Indexing cancelled; Re-index to resume"
@@ -1502,7 +1639,7 @@ async fn finish_reindex(
     .await?;
     ensure!(!cancelled(), "Indexing cancelled; Re-index to resume");
     validate_publication(&result, replacing_documents)?;
-    activate_with(data, recipe, selected, || Ok(()))?;
+    activate_with(data, recipe, selected, || Ok(()), &mut result)?;
     Ok(result)
 }
 
@@ -1864,6 +2001,7 @@ mod tests {
                 assert_eq!(fs::read(data.path().join("active-index.json"))?, before);
                 anyhow::bail!("simulated rename failure")
             },
+            &mut Default::default(),
         );
         assert!(error.is_err());
         assert_eq!(
@@ -1880,7 +2018,8 @@ mod tests {
             data.path(),
             &new,
             &publication_dir(data.path(), &new).unwrap(),
-            || anyhow::bail!("failed first write")
+            || anyhow::bail!("failed first write"),
+            &mut Default::default(),
         )
         .is_err());
         assert!(!data.path().join("active-index.json").exists());
@@ -2894,7 +3033,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_rename_failures_keep_published_documents_and_review_source() {
+    async fn post_rename_durability_error_and_cleanup_warning_keep_publication() {
         let (mut engines, assets) = embedding_fixture();
         for step in ["directory sync", "generation cleanup"] {
             let data = tempfile::tempdir().unwrap();
@@ -2918,15 +3057,17 @@ mod tests {
                 .truncate(engines.recipe.model.len() - "-interim".len());
             engines.recipe.model.push_str("-published");
             FAULTS.with(|faults| faults.borrow_mut().push((data.path().to_owned(), step)));
-            let error = reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
-                .await
-                .unwrap_err();
+            let result = reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false).await;
             FAULTS.with(|faults| faults.borrow_mut().clear());
-            assert!(
-                error.to_string().starts_with("Index published;"),
-                "{error:#}"
-            );
-            assert!(!error.to_string().contains("previous folder"));
+            if step == "directory sync" {
+                let error = result.unwrap_err();
+                assert!(error.is::<PublishedFailure>(), "{error:#}");
+            } else {
+                assert!(result.unwrap().seal_warnings.iter().any(|warning| {
+                    warning.contains("Deferred generation cleanup")
+                        && warning.contains("injected generation cleanup failure")
+                }));
+            }
             let published = resolve(data.path());
             assert_ne!(
                 published, candidate,
