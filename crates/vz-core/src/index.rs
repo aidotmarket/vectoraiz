@@ -247,9 +247,9 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
     if doc.path != row.path || doc.sha256 != row.hash || !generation.join("lance").is_dir() {
         return None;
     }
-    // Published generations were fully validated before publication. Check the
-    // document and manifest nodes cheaply; staged retries still open the table.
-    if !staged {
+    // Validate storage before any Lance query, including staged recovery and
+    // failed rebuilds. Damaged fragments can panic inside the Lance reader.
+    {
         let table = generation.join("lance/chunks.lance");
         let manifest = std::fs::read_dir(table.join("_versions"))
             .ok()?
@@ -297,18 +297,29 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
                 }
             }
         }
-        return found_data.then_some(doc);
+        if !found_data {
+            return None;
+        }
+        if !staged {
+            return Some(doc);
+        }
     }
-    use futures::TryStreamExt;
+    use futures::{FutureExt, TryStreamExt};
     use lancedb::query::{ExecutableQuery, QueryBase};
-    let db = lancedb::connect(generation.join("lance").to_str()?)
-        .execute()
-        .await
-        .ok()?;
-    let table = db.open_table("chunks").execute().await.ok()?;
-    let mut batches = table.query().limit(1).execute().await.ok()?;
-    batches.try_next().await.ok()??;
-    Some(doc)
+    std::panic::AssertUnwindSafe(async {
+        let db = lancedb::connect(generation.join("lance").to_str()?)
+            .execute()
+            .await
+            .ok()?;
+        let table = db.open_table("chunks").execute().await.ok()?;
+        let mut batches = table.query().limit(1).execute().await.ok()?;
+        batches.try_next().await.ok()??;
+        Some(doc)
+    })
+    .catch_unwind()
+    .await
+    .ok()
+    .flatten()
 }
 
 // Match the manifest's recorded fragment length as well as the LANC footer.
@@ -344,6 +355,7 @@ fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u
             // Lance's v2.0 writer uses 0.3 in the footer; manifests use 2.0.
             && (if actual_version == (0, 3) { (2, 0) } else { actual_version })
                 == (if version == (0, 3) { (2, 0) } else { version })
+            && matches!(actual_version, (0, 3) | (2, 1..=2))
             && matches!(version, (0, 3) | (2, 0..=2))
             && columns <= column_offsets
             && column_offsets.checked_add(u64::from(u32_at(28)) * 16) == Some(global_offsets)
@@ -354,6 +366,11 @@ fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u
         // Cross-check the metadata start against the actual descriptor table:
         // a smaller, in-bounds corrupted offset is just as unreadable as an
         // offset past EOF. Current v2 writers serialize these nodes contiguously.
+        file.seek(SeekFrom::Start(columns))?;
+        let mut metadata = Vec::new();
+        (&mut file)
+            .take(column_offsets - columns)
+            .read_to_end(&mut metadata)?;
         file.seek(SeekFrom::Start(column_offsets))?;
         let mut next = columns;
         let mut descriptor = [0; 16];
@@ -367,7 +384,19 @@ fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u
             if start != next || size == 0 || end > column_offsets {
                 return Ok(false);
             }
-            next = end;
+            use prost::Message;
+            let (Ok(start), Ok(end)) = (
+                usize::try_from(start - columns),
+                usize::try_from(end - columns),
+            ) else {
+                return Ok(false);
+            };
+            if metadata.get(start..end).is_none_or(|bytes| {
+                lance_file::format::pbfile::ColumnMetadata::decode(bytes).is_err()
+            }) {
+                return Ok(false);
+            }
+            next = columns + end as u64;
         }
         if next != column_offsets {
             return Ok(false);

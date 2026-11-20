@@ -1103,6 +1103,35 @@ mod tests {
             )
             .unwrap();
         }
+        // Outside tools may orphan a WAL without SHM. Keep the accepted review
+        // retryable, preserve both files, and read content again after recovery.
+        let index = vz_core::active_index::resolve_state(&library);
+        let database_before = std::fs::read(index.join("state.sqlite")).unwrap();
+        let wal = index.join("state.sqlite-wal");
+        assert!(!index.join("state.sqlite-shm").exists());
+        std::fs::write(&wal, [0_u8; 32]).unwrap();
+        for export_first in [false, true] {
+            let error = if export_first {
+                guard.reviewed_payload(&current).unwrap_err()
+            } else {
+                guard.accept(&current).unwrap_err()
+            };
+            assert!(
+                error
+                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                    .is_some(),
+                "{error:#}"
+            );
+            assert_eq!(std::fs::read(&wal).unwrap(), [0_u8; 32]);
+            assert_eq!(
+                std::fs::read(index.join("state.sqlite")).unwrap(),
+                database_before
+            );
+            assert!(!index.join("state.sqlite-shm").exists());
+        }
+        std::fs::remove_file(wal).unwrap();
+        guard.accept(&current).unwrap();
+        guard.reviewed_payload(&current).unwrap();
         drop(guard);
         for cancel in [true, false] {
             let stopped = AtomicBool::new(false);

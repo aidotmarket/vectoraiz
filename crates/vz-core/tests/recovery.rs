@@ -124,6 +124,37 @@ fn ocr_status_commits_with_generation_and_old_metadata_reopens() {
     assert!(state.documents().unwrap()[0].needs_ocr_pages.is_empty());
 }
 
+fn damage_fragment(table: &Path, damage: &str) {
+    let fragment = std::fs::read_dir(table.join("data"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let mut bytes = std::fs::read(&fragment).unwrap();
+    let footer = bytes.len() - 40;
+    match damage {
+        "footer version 2.0" => bytes[footer + 32..footer + 36].copy_from_slice(&[2, 0, 0, 0]),
+        "column metadata tag" => {
+            let start = u64::from_le_bytes(bytes[footer..footer + 8].try_into().unwrap()) as usize;
+            bytes[start] = 0; // Protobuf field zero is invalid; record bounds stay intact.
+        }
+        "column count" => {
+            let count = u32::from_le_bytes(bytes[footer + 28..footer + 32].try_into().unwrap());
+            bytes[footer + 28..footer + 32].copy_from_slice(&(count + 1).to_le_bytes());
+        }
+        "global buffer offset" => {
+            let start =
+                u64::from_le_bytes(bytes[footer + 16..footer + 24].try_into().unwrap()) as usize;
+            let beyond = bytes.len() as u64 + 1;
+            bytes[start..start + 8].copy_from_slice(&beyond.to_le_bytes());
+        }
+        "metadata offset zero" => bytes[footer..footer + 8].fill(0),
+        _ => panic!("unknown damage {damage}"),
+    }
+    std::fs::write(fragment, bytes).unwrap();
+}
+
 #[tokio::test]
 async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_misses() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -141,36 +172,58 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
         .await
         .unwrap();
     let root = active_index::resolve(data.path());
-    let stopped = AtomicBool::new(false);
-    assert!(active_index::reindex(
-        data.path(),
-        b.path(),
-        &engines,
-        &assets,
-        |_| stopped.store(true, Ordering::SeqCst),
-        || stopped.load(Ordering::SeqCst)
-    )
-    .await
-    .is_err());
-    let staged = {
-        let db = rusqlite::Connection::open(root.join(".vz-scan/scan.sqlite")).unwrap();
-        db.query_row("SELECT generation FROM scan_documents", [], |r| {
-            r.get::<_, String>(0)
-        })
-        .unwrap()
-    };
-    std::fs::write(
-        root.join(".vz-scan/generations")
-            .join(&staged)
-            .join("document.json"),
-        "damaged",
-    )
-    .unwrap();
-    let result = active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+    for damage in [
+        "document",
+        "metadata offset zero",
+        "footer version 2.0",
+        "column metadata tag",
+    ] {
+        let stopped = AtomicBool::new(false);
+        assert!(active_index::reindex(
+            data.path(),
+            b.path(),
+            &engines,
+            &assets,
+            |_| stopped.store(true, Ordering::SeqCst),
+            || stopped.load(Ordering::SeqCst)
+        )
         .await
-        .unwrap();
-    assert_eq!((result.completed, result.skipped), (1, 0));
-    assert!(!root.join(".vz-scan/generations").join(staged).exists());
+        .is_err());
+        let staged = {
+            let db = rusqlite::Connection::open(root.join(".vz-scan/scan.sqlite")).unwrap();
+            db.query_row("SELECT generation FROM scan_documents", [], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+        };
+        if damage == "document" {
+            std::fs::write(
+                root.join(".vz-scan/generations")
+                    .join(&staged)
+                    .join("document.json"),
+                "damaged",
+            )
+            .unwrap();
+        } else {
+            damage_fragment(
+                &root
+                    .join(".vz-scan/generations")
+                    .join(&staged)
+                    .join("lance/chunks.lance"),
+                damage,
+            );
+        }
+        let result =
+            active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
+                .await
+                .unwrap();
+        assert_eq!((result.completed, result.skipped), (1, 0));
+        assert!(!root.join(".vz-scan/generations").join(staged).exists());
+        assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+        active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+    }
     let generation = State::review_connection(&root)
         .unwrap()
         .query_row("SELECT generation FROM documents", [], |r| {
@@ -210,36 +263,47 @@ async fn unreadable_published_generation_is_revoked_when_repair_has_infrastructu
     .await
     .unwrap();
     let root = active_index::resolve(data.path());
-    let generation = State::review_connection(&root)
-        .unwrap()
-        .query_row("SELECT generation FROM documents", [], |r| {
-            r.get::<_, String>(0)
-        })
+    for damage in [
+        "column count",
+        "global buffer offset",
+        "footer version 2.0",
+        "column metadata tag",
+    ] {
+        let generation: String = State::review_connection(&root)
+            .unwrap()
+            .query_row("SELECT generation FROM documents", [], |r| r.get(0))
+            .unwrap();
+        damage_fragment(
+            &root
+                .join("generations")
+                .join(generation)
+                .join("lance/chunks.lance"),
+            damage,
+        );
+        assert!(active_index::reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &source.path().join("no-assets"),
+            |_| {},
+            || false
+        )
+        .await
+        .is_err());
+        assert!(State::review_documents(&root).unwrap().is_empty());
+        let result = active_index::reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
         .unwrap();
-    std::fs::remove_dir_all(root.join("generations").join(generation)).unwrap();
-    assert!(active_index::reindex(
-        data.path(),
-        source.path(),
-        &engines,
-        &source.path().join("no-assets"),
-        |_| {},
-        || false
-    )
-    .await
-    .is_err());
-    assert!(State::review_documents(&root).unwrap().is_empty());
-    let result = active_index::reindex(
-        data.path(),
-        source.path(),
-        &engines,
-        &assets,
-        |_| {},
-        || false,
-    )
-    .await
-    .unwrap();
-    assert_eq!(result.completed, 1);
-    assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+        assert_eq!(result.completed, 1);
+        assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+    }
 }
 
 #[tokio::test]
@@ -275,6 +339,8 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         "fragment version",
         "fragment metadata offset",
         "fragment metadata offset zero",
+        "footer version 2.0",
+        "column metadata tag",
     ] {
         let generation: String = State::review_connection(&root)
             .unwrap()
@@ -310,6 +376,8 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
             std::fs::write(latest, bytes).unwrap();
         } else if damage == "data" {
             std::fs::remove_dir_all(table.join("data")).unwrap();
+        } else if matches!(damage, "footer version 2.0" | "column metadata tag") {
+            damage_fragment(&table, damage);
         } else {
             let fragment = std::fs::read_dir(table.join("data"))
                 .unwrap()

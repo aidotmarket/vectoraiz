@@ -34,6 +34,7 @@ encoding_rs = "0.8"
 lancedb = { version = "=0.22.2", default-features = false }
 lance-index = "=0.38.2"
 lance-table = "=0.38.2"
+lance-file = "=0.38.2"
 prost = "0.13.2"
 arrow-array = "56.2"
 arrow-schema = "56.2"

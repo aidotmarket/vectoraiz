@@ -420,11 +420,11 @@ pub(crate) fn same_source(current: &Path, previous: &Path) -> bool {
 }
 
 fn directory_is_case_insensitive(directory: &Path) -> bool {
-    // Missing intermediate directories inherit the nearest surviving container's
-    // rules. Query the directory itself, including a mount point or drive root.
-    let Some(directory) = directory.ancestors().find(|p| p.is_dir()) else {
+    // Case rules belong to this exact containing directory. A surviving
+    // ancestor cannot tell us the rules of a removed case-sensitive child.
+    if !directory.is_dir() {
         return false;
-    };
+    }
     #[cfg(target_os = "macos")]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -3214,20 +3214,109 @@ mod tests {
             .is_empty());
     }
 
+    #[test]
+    fn missing_container_requires_exact_spelling_without_writes() {
+        let parent = tempfile::tempdir().unwrap();
+        let missing = parent.path().join("S");
+        let before = fs::metadata(parent.path()).unwrap().modified().unwrap();
+        assert!(!same_source(&missing.join("docs"), &missing.join("Docs")));
+        assert!(same_source(&missing.join("Docs"), &missing.join("Docs")));
+        assert_eq!(fs::read_dir(parent.path()).unwrap().count(), 0);
+        assert_eq!(
+            fs::metadata(parent.path()).unwrap().modified().unwrap(),
+            before
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn missing_tail_reads_mount_case_rules_without_writes() {
         // A pre-existing sensitive mount is optional; do not create a volume.
-        let mount = Path::new("/Volumes/Backups of Koskadeux");
-        if !mount.is_dir() || directory_is_case_insensitive(mount) {
+        let Some(mount) = std::env::var_os("VZ_CASE_SENSITIVE_TEST_ROOT") else {
+            eprintln!("optional mount regression skipped: set VZ_CASE_SENSITIVE_TEST_ROOT");
             return;
-        }
+        };
+        let mount = Path::new(&mount);
+        assert!(mount.is_dir(), "configured case-sensitive mount must exist");
+        assert!(
+            !directory_is_case_insensitive(mount),
+            "configured mount must be case-sensitive"
+        );
         eprintln!("case-sensitive mount regression ran on {}", mount.display());
         assert!(!same_source(&mount.join("Docs"), &mount.join("docs")));
         assert!(!same_source(
             &mount.join("2024/Docs"),
             &mount.join("2024/docs")
         ));
+    }
+
+    #[tokio::test]
+    async fn renamed_container_preserves_case_variant_and_exact_request_revokes() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let parent = outer.path().join("S");
+        let source = parent.join("Docs");
+        fs::create_dir_all(&source).unwrap();
+        fs::write(
+            source.join("good.txt"),
+            "Renamed container retains searchable document.",
+        )
+        .unwrap();
+        reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        let root = resolve(data.path());
+        let selection = last_indexed_folder(&root);
+        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let state = crate::storage::State::open(&root).unwrap();
+        let generations = state.generations().unwrap();
+        let documents = serde_json::to_value(state.documents().unwrap()).unwrap();
+        drop(state);
+        fs::rename(&parent, outer.path().join("renamed-S")).unwrap();
+        assert!(reindex(
+            data.path(),
+            &parent.join("docs"),
+            &engines,
+            &assets,
+            |_| {},
+            || false
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("previous folder is still active"));
+        assert_eq!(last_indexed_folder(&root), selection);
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).unwrap(),
+            pointer
+        );
+        let state = crate::storage::State::open(&root).unwrap();
+        assert_eq!(state.generations().unwrap(), generations);
+        assert_eq!(
+            serde_json::to_value(state.documents().unwrap()).unwrap(),
+            documents
+        );
+        assert!(!state
+            .search(
+                "Renamed container",
+                &engines.vector("Renamed container", true).unwrap(),
+                3
+            )
+            .await
+            .unwrap()
+            .is_empty());
+        drop(state);
+        assert!(
+            reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+                .await
+                .is_err()
+        );
+        assert_eq!(last_indexed_folder(&root), selection);
+        assert!(crate::storage::State::review_documents(&root)
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 0);
     }
 
     #[cfg(windows)]
@@ -3283,11 +3372,13 @@ mod tests {
         };
         let (engines, assets) = embedding_fixture();
         let data = tempfile::tempdir().unwrap();
-        let parent = tempfile::tempdir().unwrap();
+        let outer = tempfile::tempdir().unwrap();
+        let parent = outer.path().join("S");
+        fs::create_dir(&parent).unwrap();
         let handle = fs::OpenOptions::new()
             .access_mode(0x100) // FILE_WRITE_ATTRIBUTES
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
-            .open(parent.path())
+            .open(parent.as_path())
             .unwrap();
         let info = FILE_CASE_SENSITIVE_INFO { Flags: 1 };
         if unsafe {
@@ -3306,7 +3397,7 @@ mod tests {
             return;
         }
         drop(handle);
-        let source = parent.path().join("Docs");
+        let source = parent.as_path().join("Docs");
         fs::create_dir(&source).unwrap();
         fs::write(
             source.join("good.txt"),
@@ -3322,26 +3413,56 @@ mod tests {
         let generations = state.generations().unwrap();
         let documents = serde_json::to_value(state.documents().unwrap()).unwrap();
         drop(state);
-        assert!(!directory_is_case_insensitive(parent.path()));
-        assert!(reindex(
-            data.path(),
-            &parent.path().join("docs"),
-            &engines,
-            &assets,
-            |_| {},
-            || false
-        )
-        .await
-        .unwrap_err()
-        .to_string()
-        .contains("previous folder is still active"));
-        assert_eq!(last_indexed_folder(&root), selection);
-        let state = crate::storage::State::open(&root).unwrap();
-        assert_eq!(state.generations().unwrap(), generations);
-        assert_eq!(
-            serde_json::to_value(state.documents().unwrap()).unwrap(),
-            documents
+        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        assert!(!directory_is_case_insensitive(&parent));
+        for rename in [false, true] {
+            if rename {
+                fs::rename(&parent, outer.path().join("renamed-S")).unwrap();
+            }
+            assert!(reindex(
+                data.path(),
+                &parent.join("docs"),
+                &engines,
+                &assets,
+                |_| {},
+                || false
+            )
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("previous folder is still active"));
+            assert_eq!(last_indexed_folder(&root), selection);
+            assert_eq!(
+                fs::read(data.path().join("active-index.json")).unwrap(),
+                pointer
+            );
+            let state = crate::storage::State::open(&root).unwrap();
+            assert_eq!(state.generations().unwrap(), generations);
+            assert_eq!(
+                serde_json::to_value(state.documents().unwrap()).unwrap(),
+                documents
+            );
+            assert!(!state
+                .search(
+                    "Distinct case",
+                    &engines.vector("Distinct case", true).unwrap(),
+                    3
+                )
+                .await
+                .unwrap()
+                .is_empty());
+        }
+        // Exact stored spelling still identifies the unavailable selected source.
+        assert!(
+            reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+                .await
+                .is_err()
         );
+        assert_eq!(last_indexed_folder(&root), selection);
+        assert!(crate::storage::State::review_documents(&root)
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 0);
     }
 
     #[tokio::test]

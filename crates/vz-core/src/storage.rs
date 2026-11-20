@@ -48,6 +48,14 @@ impl State {
     pub fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
+            // An outside writer may leave WAL without its shared-memory index.
+            // Read-only SQLite cannot recover it. This is temporarily unreadable,
+            // not evidence that committed review content changed; never create
+            // sidecars here or fall back to an immutable (potentially stale) DB.
+            if !root.join("state.sqlite-shm").try_exists()? {
+                return Err(anyhow::Error::new(ReviewDatabaseBusy)
+                    .context("review WAL requires shared-memory recovery; retry after indexing"));
+            }
             "readonly_shm=1"
         } else {
             "immutable=1"
