@@ -9,7 +9,7 @@ fn deny_read(path: &std::path::Path) -> impl Drop {
         }
     }
     let restore = Restore(path.to_owned(), path.metadata().unwrap().permissions());
-    fs::set_permissions(path, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
     restore
 }
 

@@ -119,7 +119,22 @@ pub fn execute(
                     &engines.vector(query, true)?,
                     args["top_k"].as_u64().unwrap_or(8) as usize,
                 ))?;
-            let hits: Vec<_> = report.hits.into_iter().map(|h|json!({"chunk_id":h.chunk.chunk_id,"doc_id":h.chunk.doc_id,"file_name":report.paths.get(&h.chunk.doc_id).map(|p| name(p)).unwrap_or_default(),"page":h.chunk.page,"text":h.chunk.text,"score":h.score})).collect();
+            let hits: Vec<_> = report
+                .hits
+                .into_iter()
+                .map(|hit| {
+                    let chunk = hit.chunk;
+                    let file_name = report.paths.get(&chunk.doc_id).map(|path| name(path));
+                    json!({
+                        "chunk_id": chunk.chunk_id,
+                        "doc_id": chunk.doc_id,
+                        "file_name": file_name.unwrap_or_default(),
+                        "page": chunk.page,
+                        "text": chunk.text,
+                        "score": hit.score,
+                    })
+                })
+                .collect();
             let unavailable: Vec<_> = report
                 .unavailable
                 .iter()
@@ -145,7 +160,7 @@ pub fn execute(
             )
         }
         "get_chunk" => {
-            for doc in &docs {
+            for doc in state.documents()? {
                 if let Some(c) = doc
                     .chunks
                     .iter()
