@@ -75,7 +75,7 @@ pub(crate) fn initialize_recipe(
 }
 
 /// Private retry state. Opening an unchanged scan never creates a workspace.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ScanRow {
     pub doc_id: String,
     pub path: String,
@@ -303,20 +303,12 @@ fn generation_fingerprint(path: &Path) -> Option<Vec<(std::path::PathBuf, u64, u
 }
 
 pub(crate) async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
-    use futures::FutureExt;
-    // Both the cheap fingerprint and the full probe stay off the scan runtime.
-    // Cache records live outside the bound index tree, so first validation of
-    // an older generation cannot change a listing review's committed files.
+    // Fingerprinting and child supervision stay off the scan runtime.
+    // The private validation directory is excluded from review commitments.
     let root = root.to_owned();
     let row = row.clone();
-    let runtime = tokio::runtime::Handle::current();
     tokio::task::spawn_blocking(move || {
-        // All reuse, published or staged, crosses this boundary, including
-        // dataset reader-feature checks, FTS reads and fragment decoding.
-        runtime
-            .block_on(
-                std::panic::AssertUnwindSafe(validated_generation(&root, &row)).catch_unwind(),
-            )
+        std::panic::catch_unwind(|| validated_generation(&root, &row))
             .ok()
             .flatten()
     })
@@ -325,7 +317,7 @@ pub(crate) async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Ve
     .flatten()
 }
 
-async fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
+fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
     if row.generation.is_empty()
         || !row
             .generation
@@ -336,16 +328,17 @@ async fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
     }
     let generation = root.join("generations").join(&row.generation);
     let files = generation_fingerprint(&generation)?;
-    let cache_name = "vectoraiz-generation-validation-v1";
-    #[cfg(unix)]
-    let cache_name = format!("{cache_name}-{}", unsafe { libc::geteuid() });
-    let cache = std::env::temp_dir().join(cache_name);
+    let cache = root.join(".vz-validation");
+    // Never read markers through a symlink or an insecure directory. Failure
+    // only disables caching; validated content remains publishable.
+    let cache_ready = crate::private_fs::directory(&cache).is_ok();
     let marker_path = cache.join(format!("{}.json", row.generation));
-    if let Some(marker) = std::fs::read(&marker_path)
-        .ok()
+    if let Some(marker) = cache_ready
+        .then(|| std::fs::read(&marker_path).ok())
+        .flatten()
         .and_then(|bytes| serde_json::from_slice::<ValidationMarker>(&bytes).ok())
     {
-        if marker.version == 1
+        if marker.version == 2
             && marker.generation == row.generation
             && marker.path == row.path
             && marker.hash == row.hash
@@ -354,41 +347,87 @@ async fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
             return Some(marker.needs_ocr_pages);
         }
     }
-    let doc = probe_generation(root, row).await?;
+    let status = supervised_probe(root, row)?;
     if generation_fingerprint(&generation)? != files {
         return None;
     }
-    let status = doc.needs_ocr_pages.clone();
     let marker = ValidationMarker {
-        version: 1,
+        version: 2,
         generation: row.generation.clone(),
         path: row.path.clone(),
         hash: row.hash.clone(),
         files,
-        needs_ocr_pages: doc.needs_ocr_pages,
+        needs_ocr_pages: status.clone(),
     };
-    #[cfg(unix)]
-    let directory = {
-        use std::os::unix::fs::DirBuilderExt;
-        let mut directory = std::fs::DirBuilder::new();
-        directory.mode(0o700);
-        directory
-    };
-    #[cfg(not(unix))]
-    let directory = std::fs::DirBuilder::new();
-    match directory.create(&cache) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(_) => return None,
+    if cache_ready {
+        // A marker is an optimization, never part of validation success.
+        let _ = (|| -> Result<()> {
+            let mut temporary = tempfile::NamedTempFile::new_in(&cache)?;
+            serde_json::to_writer(&mut temporary, &marker)?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(marker_path)?;
+            Ok(())
+        })();
     }
-    if !std::fs::symlink_metadata(&cache).ok()?.file_type().is_dir() {
-        return None;
-    }
-    let mut temporary = tempfile::NamedTempFile::new_in(&cache).ok()?;
-    serde_json::to_writer(&mut temporary, &marker).ok()?;
-    temporary.as_file().sync_all().ok()?;
-    temporary.persist(marker_path).ok()?;
     Some(status)
+}
+
+/// Keep an already validated generation warm across its publication rename.
+/// Cache movement is best-effort, just like initial marker persistence.
+pub(crate) fn install_validation_marker(from: &Path, to: &Path, generation: &str) {
+    let _ = (|| -> Result<()> {
+        let from = from.join(".vz-validation");
+        let to = to.join(".vz-validation");
+        crate::private_fs::directory(&from)?;
+        crate::private_fs::directory(&to)?;
+        let name = format!("{generation}.json");
+        std::fs::rename(from.join(&name), to.join(&name))?;
+        Ok(())
+    })();
+}
+
+const VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn supervised_probe(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
+    let request = worker::Request {
+        path: root.to_owned(),
+        pdfium: None,
+        office: None,
+        projection: None,
+        readback: None,
+        validation: Some(worker::ValidationJob { row: row.clone() }),
+    };
+    let pages = worker::run(&worker::executable().ok()?, &request, VALIDATION_TIMEOUT).ok()?;
+    Some(pages.into_iter().map(|page| page.page).collect())
+}
+
+/// Deep read entry point used only by the supervised worker. No marker I/O and
+/// no recursive process launch; all Lance reads, including search, stay here.
+pub fn validation_worker(request: &worker::Request) -> Result<Vec<crate::pipeline::Page>> {
+    use futures::FutureExt;
+    let job = request
+        .validation
+        .as_ref()
+        .context("validation job missing")?;
+    let doc = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?
+        .block_on(
+            std::panic::AssertUnwindSafe(probe_generation(&request.path, &job.row)).catch_unwind(),
+        )
+        .ok()
+        .flatten()
+        .context("unreadable generation")?;
+    Ok(doc
+        .needs_ocr_pages
+        .into_iter()
+        .map(|number| crate::pipeline::Page {
+            page: number,
+            text: String::new(),
+            needs_ocr: true,
+        })
+        .collect())
 }
 
 async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
@@ -878,6 +917,7 @@ pub(crate) async fn scan(
                     path: path.clone(),
                     office: None,
                     projection: None,
+                    validation: None,
                     readback: None,
                     pdfium: if path
                         .extension()

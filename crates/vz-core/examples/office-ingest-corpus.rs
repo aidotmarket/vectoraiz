@@ -30,6 +30,7 @@ fn main() -> anyhow::Result<()> {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         });
         let (pages, error) = match result {

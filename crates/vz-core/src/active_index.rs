@@ -893,10 +893,14 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
                 }
             }
             publication_step(data, "flat database removal")?;
-            for name in ["generations", ".vz-scan"] {
+            for name in ["generations", ".vz-scan", ".vz-validation"] {
                 let path = root.join(name);
                 if path.exists() {
-                    fs::remove_dir_all(path)?;
+                    if name == ".vz-validation" && !fs::symlink_metadata(&path)?.is_dir() {
+                        fs::remove_file(path)?;
+                    } else {
+                        fs::remove_dir_all(path)?;
+                    }
                 }
             }
             fs::remove_file(marker)?;
@@ -1154,6 +1158,11 @@ pub(crate) async fn scan_candidate(
                     let to = root.join("generations").join(&row.generation);
                     if from != to {
                         fs::rename(from, to)?;
+                        crate::index::install_validation_marker(
+                            &workspace_root,
+                            root,
+                            &row.generation,
+                        );
                     }
                 }
                 #[cfg(unix)]

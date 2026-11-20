@@ -95,10 +95,7 @@ impl State {
                     .to_string_lossy(),
                 uuid::Uuid::new_v4()
             ));
-            let mut copy = std::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&target)?;
+            let mut copy = crate::private_fs::create_file(&target)?;
             std::io::copy(&mut std::fs::File::open(&wal)?, &mut copy)?;
             copy.sync_all()?;
             #[cfg(unix)]
@@ -809,13 +806,46 @@ mod tests {
             .unwrap()
             .any(|entry| {
                 let entry = entry.unwrap();
-                entry.file_name().to_string_lossy().starts_with(&prefix)
-                    && std::fs::read(entry.path()).unwrap() == bytes
+                entry.file_name().to_string_lossy().starts_with(&prefix) && {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            entry.metadata().unwrap().permissions().mode() & 0o777,
+                            0o600
+                        );
+                    }
+                    std::fs::read(entry.path()).unwrap() == bytes
+                }
             }));
         for bytes in [vec![], vec![0; 31], vec![0; 32]] {
             std::fs::write(&damaged, bytes).unwrap();
             assert!(unusable_wal_header(&damaged).unwrap());
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_diagnostic_is_private_under_umask_022() {
+        if std::env::var_os("VZ_WAL_UMASK_CHILD").is_some() {
+            unsafe {
+                libc::umask(0o022);
+            }
+            wal_header_checks_protect_real_sqlite_commits();
+            return;
+        }
+        let status = std::process::Command::new("rtk")
+            .arg("proxy")
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "storage::tests::wal_diagnostic_is_private_under_umask_022",
+                "--nocapture",
+            ])
+            .env("VZ_WAL_UMASK_CHILD", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
     }
 
     #[test]

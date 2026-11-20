@@ -50,6 +50,10 @@ pub struct ReadbackJob {
     pub identity_terms: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
+pub struct ValidationJob {
+    pub(crate) row: crate::index::ScanRow,
+}
+#[derive(Serialize, Deserialize)]
 pub struct Request {
     pub path: PathBuf,
     pub pdfium: Option<PathBuf>,
@@ -59,10 +63,13 @@ pub struct Request {
     pub projection: Option<ProjectionJob>,
     #[serde(default)]
     pub readback: Option<ReadbackJob>,
+    #[serde(default)]
+    pub validation: Option<ValidationJob>,
 }
 impl Request {
     pub fn memory_bytes(&self) -> u64 {
-        if self.projection.as_ref().is_some_and(|j| j.kind == "pdf")
+        if self.validation.is_some()
+            || self.projection.as_ref().is_some_and(|j| j.kind == "pdf")
             || self.office_label().is_none()
         {
             MEMORY_BYTES
@@ -71,6 +78,9 @@ impl Request {
         }
     }
     pub fn office_label(&self) -> Option<&str> {
+        if self.validation.is_some() {
+            return None;
+        }
         if let Some(job) = &self.readback {
             return Some(&job.name);
         }
@@ -571,6 +581,7 @@ mod tests {
                 pdfium: None,
                 office: None,
                 projection: None,
+                validation: None,
                 readback: None,
             },
             Duration::from_secs(5),

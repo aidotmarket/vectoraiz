@@ -636,11 +636,8 @@ async fn noninitial_posting_damage_invalidates_fingerprint_and_rebuilds_only_one
     };
     let before = rows();
     let generation = root.join("generations").join(&before[0]);
-    let cache_name = "vectoraiz-generation-validation-v1";
-    #[cfg(unix)]
-    let cache_name = format!("{cache_name}-{}", unsafe { libc::geteuid() });
-    let marker_path = std::env::temp_dir()
-        .join(cache_name)
+    let marker_path = root
+        .join(".vz-validation")
         .join(format!("{}.json", before[0]));
     let marker = std::fs::read(&marker_path).unwrap();
     // An evicted/missing cache record triggers first validation without changing
@@ -811,4 +808,152 @@ async fn full_validation_accepts_empty_full_text_vocabulary() {
         let generation = state.stage(&document(text)).await.unwrap();
         assert!(root.path().join("generations").join(generation).is_dir());
     }
+}
+
+#[tokio::test]
+async fn unavailable_marker_location_preserves_unchanged_and_publishes_new_document() {
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(source.path().join("a.txt"), "healthy archive").unwrap();
+    active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap();
+    let rows = || {
+        State::review_connection(data.path())
+            .unwrap()
+            .query_row(
+                "SELECT generation FROM documents WHERE path LIKE '%a.txt'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap()
+    };
+    let original = rows();
+    let cache = data.path().join(".vz-validation");
+    if cache.exists() {
+        std::fs::remove_dir_all(&cache).unwrap();
+    }
+    std::fs::write(&cache, "unusable marker location").unwrap();
+    let unchanged =
+        active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+    assert_eq!(
+        (unchanged.completed, unchanged.skipped, unchanged.failed),
+        (0, 1, 0)
+    );
+    assert_eq!(rows(), original);
+    assert!(data.path().join("generations").join(&original).is_dir());
+    std::fs::write(source.path().join("b.txt"), "new searchable document").unwrap();
+    // Also prevent the staged generation's marker from being written.
+    std::fs::create_dir_all(data.path().join(".vz-scan")).unwrap();
+    std::fs::write(data.path().join(".vz-scan/.vz-validation"), "blocked").unwrap();
+    let added = active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap();
+    assert_eq!((added.completed, added.skipped, added.failed), (1, 1, 0));
+    assert_eq!(rows(), original);
+    assert_eq!(
+        State::open(data.path()).unwrap().documents().unwrap().len(),
+        2
+    );
+    // A usable directory with an unreplaceable marker exercises persistence
+    // failure after successful deep validation, rather than directory failure.
+    std::fs::remove_file(&cache).unwrap();
+    std::fs::create_dir(&cache).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cache, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    std::fs::create_dir(cache.join(format!("{original}.json"))).unwrap();
+    let unchanged =
+        active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+    assert_eq!(
+        (unchanged.completed, unchanged.skipped, unchanged.failed),
+        (0, 2, 0)
+    );
+    assert_eq!(rows(), original);
+}
+
+#[tokio::test]
+async fn damaged_token_first_third_is_bounded_and_rebuilds_only_one_document() {
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(
+        source.path().join("a.txt"),
+        "alpha bravo charlie delta echo foxtrot zebras zebras yankee",
+    )
+    .unwrap();
+    std::fs::write(source.path().join("b.txt"), "untouched document").unwrap();
+    active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap();
+    let rows = || {
+        let db = State::review_connection(data.path()).unwrap();
+        let mut stmt = db
+            .prepare("SELECT generation FROM documents ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let original = rows();
+    let generation = data.path().join("generations").join(&original[0]);
+    let tokens = walkdir::WalkDir::new(generation.join("lance/chunks.lance/_indices"))
+        .into_iter()
+        .map(|e| e.unwrap())
+        .find(|e| e.file_name() == "part_0_tokens.lance")
+        .unwrap()
+        .into_path();
+    let mut bytes = std::fs::read(&tokens).unwrap();
+    let third = bytes.len() / 3;
+    for byte in &mut bytes[..third] {
+        *byte = !*byte;
+    }
+    std::fs::write(tokens, bytes).unwrap();
+    let start = Instant::now();
+    let repaired =
+        active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+    let elapsed = start.elapsed();
+    println!(
+        "fold16 damaged token first third: elapsed_ms={} completed={} skipped={} failed={}",
+        elapsed.as_millis(),
+        repaired.completed,
+        repaired.skipped,
+        repaired.failed
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "supervised validation must remain bounded"
+    );
+    assert_eq!(
+        (repaired.completed, repaired.skipped, repaired.failed),
+        (1, 1, 0)
+    );
+    let after = rows();
+    assert_ne!(after[0], original[0]);
+    assert_eq!(after[1], original[1]);
+    let state = State::open(data.path()).unwrap();
+    assert!(state
+        .search("zebras", &engines.vector("zebras", true).unwrap(), 5)
+        .await
+        .unwrap()
+        .iter()
+        .any(|hit| hit.chunk.text.contains("zebras")));
 }

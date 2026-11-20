@@ -1273,6 +1273,7 @@ fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
             return false;
         }
         if relative == Path::new(".vz-scan")
+            || relative == Path::new(".vz-validation")
             || (flat
                 && (relative == Path::new("indexes") || relative == Path::new("active-index.json")))
         {
@@ -1577,6 +1578,8 @@ mod tests {
         }
         fs::create_dir_all(root.join("generations/orphan")).unwrap();
         fs::write(root.join("generations/orphan/uncommitted"), "private").unwrap();
+        fs::create_dir_all(root.join(".vz-validation")).unwrap();
+        fs::write(root.join(".vz-validation/marker.json"), "disposable").unwrap();
         binding.check().unwrap();
         let writer = vz_core::storage::State::open(&root).unwrap();
         let tx = writer.db.unchecked_transaction().unwrap();

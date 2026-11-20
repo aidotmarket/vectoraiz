@@ -92,3 +92,5 @@ pub mod cloud_gate;
 pub mod credentials;
 
 pub mod office;
+
+pub(crate) mod private_fs;

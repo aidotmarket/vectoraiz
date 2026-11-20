@@ -104,6 +104,7 @@ fn relationship_aliases_reopen_through_production_parsers() {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         };
         std::fs::write(&path, archive(&parts)).unwrap();
@@ -888,6 +889,7 @@ fn office_capacity() {
         path: input,
         pdfium: None,
         projection: None,
+        validation: None,
         readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "office_capacity.xlsx".into(),
@@ -1377,6 +1379,7 @@ fn office_saved_files_with_listing_refused_parts_still_ingest() {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         })
         .unwrap();
@@ -1934,6 +1937,7 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         })
         .unwrap();
@@ -1974,6 +1978,7 @@ fn office_s1934_unmodified_microsoft_saved_graphics_and_parity() {
                 pdfium: None,
                 office: None,
                 projection: None,
+                validation: None,
                 readback: None,
             })
             .unwrap();
@@ -2076,6 +2081,7 @@ fn office_smartart_ingest_resolves_cache_from_host_or_data_only_when_internal() 
                 pdfium: None,
                 office: None,
                 projection: None,
+                validation: None,
                 readback: None,
             })
             .unwrap();
@@ -2638,6 +2644,7 @@ fn office_ingest_keeps_host_pages_and_order_with_graphics() {
                 pdfium: None,
                 office: None,
                 projection: None,
+                validation: None,
                 readback: None,
             })
             .unwrap();
@@ -2859,6 +2866,7 @@ fn office_graphics_ingest_joins_runs_like_review_inventory() {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         })
         .unwrap();
@@ -2895,6 +2903,7 @@ fn office_smartart_ingest_falls_back_to_model_without_usable_cache() {
             pdfium: None,
             office: None,
             projection: None,
+            validation: None,
             readback: None,
         })
         .unwrap();
@@ -2936,6 +2945,7 @@ fn office_smartart_ingest_shared_cache_preserves_second_model_text() {
         pdfium: None,
         office: None,
         projection: None,
+        validation: None,
         readback: None,
     })
     .unwrap();

@@ -10,10 +10,13 @@ fn main() {
             usize::from(request.projection.is_some())
                 + usize::from(request.readback.is_some())
                 + usize::from(request.office.is_some())
+                + usize::from(request.validation.is_some())
                 <= 1,
             "ambiguous worker request"
         );
-        if let Some(job) = &request.readback {
+        if request.validation.is_some() {
+            vz_core::index::validation_worker(&request)
+        } else if let Some(job) = &request.readback {
             let input = std::fs::read(&request.path)?;
             let inventory =
                 vz_pack::sanitize::inspect_vector_artifact(&job.name, &input, &job.identity_terms)?;
