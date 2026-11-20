@@ -596,3 +596,219 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         );
     }
 }
+
+#[tokio::test]
+async fn noninitial_posting_damage_invalidates_fingerprint_and_rebuilds_only_one_document() {
+    use arrow_array::{Array, LargeBinaryArray, ListArray, RecordBatch};
+    use futures::FutureExt;
+    use lance_core::cache::LanceCache;
+    use lance_index::scalar::{inverted::TokenSet, lance_format::LanceIndexStore, IndexStore};
+    use std::sync::Arc;
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    std::fs::write(source.path().join("a.txt"), "initial zebras").unwrap();
+    std::fs::write(source.path().join("b.txt"), "untouched document").unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let root = active_index::resolve_state(data.path());
+    let rows = || {
+        let db = State::review_connection(&root).unwrap();
+        let mut stmt = db
+            .prepare("SELECT generation FROM documents ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    };
+    let before = rows();
+    let generation = root.join("generations").join(&before[0]);
+    let cache_name = "vectoraiz-generation-validation-v1";
+    #[cfg(unix)]
+    let cache_name = format!("{cache_name}-{}", unsafe { libc::geteuid() });
+    let marker_path = std::env::temp_dir()
+        .join(cache_name)
+        .join(format!("{}.json", before[0]));
+    let marker = std::fs::read(&marker_path).unwrap();
+    // An evicted/missing cache record triggers first validation without changing
+    // any file bound by a listing review, and survives process-independent reuse.
+    let snapshot = || {
+        walkdir::WalkDir::new(&generation)
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.path().to_owned(),
+                    (
+                        entry.metadata().unwrap().len(),
+                        entry.metadata().unwrap().modified().unwrap(),
+                    ),
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let bound_files = snapshot();
+    std::fs::remove_file(&marker_path).unwrap();
+    let first_validation = active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        (first_validation.completed, first_validation.skipped),
+        (0, 2)
+    );
+    assert_eq!(snapshot(), bound_files);
+    assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
+    // A normal no-change scan uses the marker without rewriting it.
+    let unchanged = active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((unchanged.completed, unchanged.skipped), (0, 2));
+    assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
+    let directory = std::fs::read_dir(generation.join("lance/chunks.lance/_indices"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let (objects, path) =
+        lance_io::object_store::ObjectStore::from_uri(directory.to_str().unwrap())
+            .await
+            .unwrap();
+    let store = LanceIndexStore::new(objects, path, Arc::new(LanceCache::no_cache()));
+    let metadata = store.open_index_file("metadata.lance").await.unwrap();
+    let ids: Vec<u64> = serde_json::from_str(&metadata.schema().metadata["partitions"]).unwrap();
+    let id = ids[0];
+    let format = metadata.schema().metadata["token_set_format"]
+        .parse()
+        .unwrap();
+    let tokens = TokenSet::load(
+        store
+            .open_index_file(&format!("part_{id}_tokens.lance"))
+            .await
+            .unwrap(),
+        format,
+    )
+    .await
+    .unwrap();
+    let target = tokens.get("zebra").expect("stemmed noninitial term") as usize;
+    assert_ne!(target, tokens.get("initi").expect("initial term") as usize);
+    let name = format!("part_{id}_invert.lance");
+    let reader = store.open_index_file(&name).await.unwrap();
+    let batch = reader.read_range(0..reader.num_rows(), None).await.unwrap();
+    let posting_column = batch.schema().index_of("_posting").unwrap();
+    let lists = batch
+        .column(posting_column)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let blocks = lists
+        .values()
+        .as_any()
+        .downcast_ref::<LargeBinaryArray>()
+        .unwrap();
+    let target_block = lists.value_offsets()[target] as usize;
+    // Change exactly one compressed posting payload; all other terms/columns survive.
+    let damaged = LargeBinaryArray::from_iter_values((0..blocks.len()).map(|i| {
+        if i == target_block {
+            vec![0xff]
+        } else {
+            blocks.value(i).to_vec()
+        }
+    }));
+    let lists = ListArray::try_new(
+        match lists.data_type() {
+            arrow_schema::DataType::List(field) => field.clone(),
+            _ => unreachable!(),
+        },
+        lists.offsets().clone(),
+        Arc::new(damaged),
+        lists.nulls().cloned(),
+    )
+    .unwrap();
+    let mut columns = batch.columns().to_vec();
+    columns[posting_column] = Arc::new(lists);
+    let batch = RecordBatch::try_new(batch.schema(), columns).unwrap();
+    let mut writer = store
+        .new_index_file("replacement.lance", batch.schema())
+        .await
+        .unwrap();
+    writer.write_record_batch(batch).await.unwrap();
+    writer
+        .finish_with_metadata(reader.schema().metadata.clone())
+        .await
+        .unwrap();
+    drop(writer);
+    std::fs::rename(directory.join("replacement.lance"), directory.join(name)).unwrap();
+    let state = State::open(&root).unwrap();
+    let vector = engines.vector("zebras", true).unwrap();
+    assert!(
+        state.search("initial", &vector, 5).await.is_ok(),
+        "initial term must remain readable"
+    );
+    let broken = std::panic::AssertUnwindSafe(state.search("zebras", &vector, 5))
+        .catch_unwind()
+        .await;
+    assert!(
+        !matches!(broken, Ok(Ok(_))),
+        "noninitial posting must be unreadable"
+    );
+    drop(state);
+    let result = active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((result.completed, result.skipped), (1, 1));
+    let after = rows();
+    assert_ne!(before[0], after[0]);
+    assert_eq!(before[1], after[1]);
+    let state = State::open(&root).unwrap();
+    assert!(state
+        .search("zebras", &vector, 5)
+        .await
+        .unwrap()
+        .iter()
+        .any(|hit| hit.chunk.text.contains("zebras")));
+}
+
+#[tokio::test]
+async fn full_validation_accepts_empty_full_text_vocabulary() {
+    let root = tempfile::tempdir().unwrap();
+    let state = State::open(root.path()).unwrap();
+    for text in ["the and", "---", "🚀"] {
+        let generation = state.stage(&document(text)).await.unwrap();
+        assert!(root.path().join("generations").join(generation).is_dir());
+    }
+}

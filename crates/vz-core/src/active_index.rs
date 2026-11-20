@@ -1045,6 +1045,14 @@ pub(crate) async fn scan_candidate(
     };
     if same_recipe {
         State::quarantine_orphan_wal(&active)?;
+    } else if active.join("state.sqlite-wal").try_exists()?
+        && !active.join("state.sqlite-shm").try_exists()?
+    {
+        // Recipe changes must also recover the old publication before cleanup.
+        // Take its writer fence only for an orphan WAL; held readers otherwise
+        // keep the existing recipe-change publication semantics.
+        let _recovery_writer = writer_fence(&active, true)?;
+        State::quarantine_orphan_wal(&active)?;
     }
     if is_library_root(data) {
         cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path()))?;

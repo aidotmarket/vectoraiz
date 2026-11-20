@@ -80,66 +80,37 @@ impl State {
         if !wal.try_exists()? || root.join("state.sqlite-shm").try_exists()? {
             return Ok(());
         }
-        // Deliberately conservative: only empty/truncated or invalid WAL headers
-        // qualify. A valid header can precede committed frames; never move it.
-        let unusable = unusable_wal_header(&wal)?;
-        let recover = || -> rusqlite::Result<()> {
-            let db = Connection::open_with_flags(
-                root.join("state.sqlite"),
-                OpenFlags::SQLITE_OPEN_READ_WRITE,
-            )?;
-            db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
-            db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
-            Ok(())
-        };
-        match recover() {
-            Ok(()) => Ok(()),
-            Err(rusqlite::Error::SqliteFailure(code, _))
-                if unusable
-                    && matches!(
-                        code.code,
-                        rusqlite::ErrorCode::CannotOpen
-                            | rusqlite::ErrorCode::DatabaseCorrupt
-                            | rusqlite::ErrorCode::NotADatabase
-                    )
-                    && wal.try_exists()?
-                    && unusable_wal_header(&wal)? =>
-            {
-                // A corrupt main database is not a WAL recovery failure. Prove
-                // it is independently readable before attributing this error
-                // to the unusable sidecar; immutable mode is confined to this
-                // diagnostic, never used for the recovered publication state.
-                let uri = root.join("state.sqlite");
-                let uri = uri
-                    .to_str()
-                    .context("index path must be UTF-8")?
-                    .replace('%', "%25")
-                    .replace('?', "%3F")
-                    .replace('#', "%23");
-                let main = Connection::open_with_flags(
-                    format!("file:{uri}?immutable=1"),
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-                )?;
-                let check: String = main.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
-                anyhow::ensure!(check == "ok", "main review database is corrupt: {check}");
-                drop(main);
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)?
-                    .as_nanos();
-                let root = root.canonicalize()?;
-                let target = root.with_file_name(format!(
-                    "{}.state.sqlite-wal.orphan-{timestamp}-{}",
-                    root.file_name()
-                        .context("index directory name")?
-                        .to_string_lossy(),
-                    uuid::Uuid::new_v4()
-                ));
-                std::fs::rename(&wal, &target).context("quarantine unusable review WAL")?;
-                recover()?;
-                Ok(())
-            }
-            Err(error) => Err(error.into()),
+        // Copy before SQLite can consume a malformed sidecar. The original is
+        // deliberately left in place: SQLite remains the recovery authority.
+        if unusable_wal_header(&wal)? {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let canonical = root.canonicalize()?;
+            let target = canonical.with_file_name(format!(
+                "{}.state.sqlite-wal.orphan-{timestamp}-{}",
+                canonical
+                    .file_name()
+                    .context("index directory name")?
+                    .to_string_lossy(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut copy = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            std::io::copy(&mut std::fs::File::open(&wal)?, &mut copy)?;
+            copy.sync_all()?;
+            #[cfg(unix)]
+            std::fs::File::open(target.parent().context("diagnostic parent")?)?.sync_all()?;
         }
+        let db = Connection::open_with_flags(
+            root.join("state.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
     }
 
     /// Canonical committed DB commitment and referenced generations from one read
@@ -526,6 +497,20 @@ impl State {
         file.sync_all()?;
         #[cfg(unix)]
         std::fs::File::open(&path)?.sync_all()?;
+        let row = crate::index::ScanRow {
+            doc_id: doc.doc_id.clone(),
+            path: doc.path.clone(),
+            size: doc.bytes,
+            mtime: String::new(),
+            hash: doc.sha256.clone(),
+            generation: id.clone(),
+        };
+        anyhow::ensure!(
+            crate::index::readable_generation(&self.root, &row)
+                .await
+                .is_some(),
+            "new generation failed full storage validation"
+        );
         Ok(id)
     }
     pub fn commit(&mut self, doc: &Document, mtime: &str, generation: &str) -> Result<()> {
@@ -568,8 +553,8 @@ impl State {
             .collect())
     }
 }
-// Both reuse validation and user search open the dataset and exercise its
-// vector reader and full-text index through this exact path.
+// Deep reuse validation and user search both open the dataset and exercise its
+// vector reader and full-text index through this path.
 type RankedChunks = Vec<(String, f32)>;
 
 pub(crate) async fn search_generation(
@@ -619,7 +604,6 @@ fn unusable_wal_header(path: &Path) -> Result<bool> {
     let word = |i| u32::from_be_bytes(header[i..i + 4].try_into().unwrap());
     let magic = word(0);
     if !matches!(magic, 0x377f0682 | 0x377f0683)
-        || word(4) != 3007000
         || !(512..=65536).contains(&word(8))
         || !word(8).is_power_of_two()
     {
@@ -637,7 +621,15 @@ fn unusable_wal_header(path: &Path) -> Result<bool> {
         sums.0 = sums.0.wrapping_add(value(&pair[..4])).wrapping_add(sums.1);
         sums.1 = sums.1.wrapping_add(value(&pair[4..])).wrapping_add(sums.0);
     }
-    Ok(sums != (word(24), word(28)))
+    if sums != (word(24), word(28)) {
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        word(4) == 3007000,
+        "unsupported SQLite WAL format version {}; re-index stopped before cleanup; WAL retained",
+        word(4)
+    );
+    Ok(false)
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
@@ -803,8 +795,23 @@ mod tests {
         let mut bytes = std::fs::read(&wal).unwrap();
         bytes[16] ^= 1; // Salt is part of the header checksum.
         let damaged = root.path().join("damaged-wal");
-        std::fs::write(&damaged, bytes).unwrap();
+        std::fs::write(&damaged, &bytes).unwrap();
         assert!(unusable_wal_header(&damaged).unwrap());
+        let preserved = tempfile::tempdir().unwrap();
+        drop(State::open(preserved.path()).unwrap());
+        std::fs::write(preserved.path().join("state.sqlite-wal"), &bytes).unwrap();
+        State::quarantine_orphan_wal(preserved.path()).unwrap();
+        let prefix = format!(
+            "{}.state.sqlite-wal.orphan-",
+            preserved.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(std::fs::read_dir(preserved.path().parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                let entry = entry.unwrap();
+                entry.file_name().to_string_lossy().starts_with(&prefix)
+                    && std::fs::read(entry.path()).unwrap() == bytes
+            }));
         for bytes in [vec![], vec![0; 31], vec![0; 32]] {
             std::fs::write(&damaged, bytes).unwrap();
             assert!(unusable_wal_header(&damaged).unwrap());
@@ -812,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn corrupt_main_database_is_not_a_quarantine_reason() {
+    fn corrupt_main_database_still_fails_after_diagnostic_copy() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("state.sqlite"), b"not a SQLite database").unwrap();
         let wal = root.path().join("state.sqlite-wal");
@@ -826,7 +833,7 @@ mod tests {
             "{}.state.sqlite-wal.orphan-",
             root.path().file_name().unwrap().to_string_lossy()
         );
-        assert!(!std::fs::read_dir(root.path().parent().unwrap())
+        assert!(std::fs::read_dir(root.path().parent().unwrap())
             .unwrap()
             .any(|entry| entry
                 .unwrap()

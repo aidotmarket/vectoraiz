@@ -228,9 +228,7 @@ impl ScanWorkspace {
         let mut probes = stream::iter(candidates)
             .map(|(row, staged)| async move {
                 let root = if staged { root } else { published };
-                let result = readable_generation(root, &row)
-                    .await
-                    .map(|doc| doc.needs_ocr_pages);
+                let result = readable_generation(root, &row).await;
                 ((staged, row), result)
             })
             .buffer_unordered(8);
@@ -257,9 +255,7 @@ impl ScanWorkspace {
             if let Some(row) = row.filter(|r| r.hash == hash) {
                 let status = match self.probed.get(&(staged, row.clone())) {
                     Some(result) => result.clone(),
-                    None => readable_generation(root, &row)
-                        .await
-                        .map(|doc| doc.needs_ocr_pages),
+                    None => readable_generation(root, &row).await,
                 };
                 if let Some(status) = status {
                     return Ok(Some((status, row, staged)));
@@ -270,10 +266,47 @@ impl ScanWorkspace {
     }
 }
 
-async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+struct ValidationMarker {
+    version: u32,
+    generation: String,
+    path: String,
+    hash: String,
+    files: Vec<(std::path::PathBuf, u64, u128)>,
+    needs_ocr_pages: Vec<u32>,
+}
+
+fn generation_fingerprint(path: &Path) -> Option<Vec<(std::path::PathBuf, u64, u128)>> {
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(path) {
+        let entry = entry.ok()?;
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        if !entry.file_type().is_file() {
+            return None;
+        }
+        let metadata = entry.metadata().ok()?;
+        files.push((
+            entry.path().strip_prefix(path).ok()?.to_owned(),
+            metadata.len(),
+            metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_nanos(),
+        ));
+    }
+    files.sort();
+    Some(files)
+}
+
+pub(crate) async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
     use futures::FutureExt;
-    // Keep dataset opening/query planning off the scan runtime thread. The
-    // caller bounds concurrent probes; no validation state outlives this scan.
+    // Both the cheap fingerprint and the full probe stay off the scan runtime.
+    // Cache records live outside the bound index tree, so first validation of
+    // an older generation cannot change a listing review's committed files.
     let root = root.to_owned();
     let row = row.clone();
     let runtime = tokio::runtime::Handle::current();
@@ -281,13 +314,81 @@ async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
         // All reuse, published or staged, crosses this boundary, including
         // dataset reader-feature checks, FTS reads and fragment decoding.
         runtime
-            .block_on(std::panic::AssertUnwindSafe(probe_generation(&root, &row)).catch_unwind())
+            .block_on(
+                std::panic::AssertUnwindSafe(validated_generation(&root, &row)).catch_unwind(),
+            )
             .ok()
             .flatten()
     })
     .await
     .ok()
     .flatten()
+}
+
+async fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
+    if row.generation.is_empty()
+        || !row
+            .generation
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return None;
+    }
+    let generation = root.join("generations").join(&row.generation);
+    let files = generation_fingerprint(&generation)?;
+    let cache_name = "vectoraiz-generation-validation-v1";
+    #[cfg(unix)]
+    let cache_name = format!("{cache_name}-{}", unsafe { libc::geteuid() });
+    let cache = std::env::temp_dir().join(cache_name);
+    let marker_path = cache.join(format!("{}.json", row.generation));
+    if let Some(marker) = std::fs::read(&marker_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<ValidationMarker>(&bytes).ok())
+    {
+        if marker.version == 1
+            && marker.generation == row.generation
+            && marker.path == row.path
+            && marker.hash == row.hash
+            && marker.files == files
+        {
+            return Some(marker.needs_ocr_pages);
+        }
+    }
+    let doc = probe_generation(root, row).await?;
+    if generation_fingerprint(&generation)? != files {
+        return None;
+    }
+    let status = doc.needs_ocr_pages.clone();
+    let marker = ValidationMarker {
+        version: 1,
+        generation: row.generation.clone(),
+        path: row.path.clone(),
+        hash: row.hash.clone(),
+        files,
+        needs_ocr_pages: doc.needs_ocr_pages,
+    };
+    #[cfg(unix)]
+    let directory = {
+        use std::os::unix::fs::DirBuilderExt;
+        let mut directory = std::fs::DirBuilder::new();
+        directory.mode(0o700);
+        directory
+    };
+    #[cfg(not(unix))]
+    let directory = std::fs::DirBuilder::new();
+    match directory.create(&cache) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    if !std::fs::symlink_metadata(&cache).ok()?.file_type().is_dir() {
+        return None;
+    }
+    let mut temporary = tempfile::NamedTempFile::new_in(&cache).ok()?;
+    serde_json::to_writer(&mut temporary, &marker).ok()?;
+    temporary.as_file().sync_all().ok()?;
+    temporary.persist(marker_path).ok()?;
+    Some(status)
 }
 
 async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
@@ -360,12 +461,58 @@ async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
             return None;
         }
     }
+    validate_full_text(&generation.join("lance/chunks.lance")).await?;
     let chunk = doc.chunks.first()?;
     let query = chunk.text.split_whitespace().next().unwrap_or("probe");
     crate::storage::search_generation(&generation.join("lance"), query, &chunk.embedding, 1)
         .await
         .ok()?;
     Some(doc)
+}
+
+// Load every partition and decode every posting, including positions. A query
+// of a single token (or all text with a result limit) cannot establish this.
+async fn validate_full_text(table: &Path) -> Option<()> {
+    use lance_core::cache::LanceCache;
+    use lance_index::scalar::{
+        inverted::{InvertedPartition, TokenSetFormat},
+        lance_format::LanceIndexStore,
+        IndexStore,
+    };
+    use std::sync::Arc;
+    let mut found = false;
+    for entry in std::fs::read_dir(table.join("_indices")).ok()? {
+        let path = entry.ok()?.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let (store, directory) = lance_io::object_store::ObjectStore::from_uri(path.to_str()?)
+            .await
+            .ok()?;
+        let cache = Arc::new(LanceCache::no_cache());
+        let store = Arc::new(LanceIndexStore::new(store, directory, cache.clone()));
+        let metadata = store.open_index_file("metadata.lance").await.ok()?;
+        let schema = metadata.schema();
+        let partitions: Vec<u64> = serde_json::from_str(schema.metadata.get("partitions")?).ok()?;
+        let format = schema
+            .metadata
+            .get("token_set_format")
+            .map(|value| value.parse::<TokenSetFormat>())
+            .transpose()
+            .ok()?
+            .unwrap_or(TokenSetFormat::Arrow);
+        // An empty vocabulary is valid (for example, stop words only).
+        found = true;
+        for id in partitions {
+            InvertedPartition::load(store.clone(), id, None, &cache, format)
+                .await
+                .ok()?
+                .into_builder()
+                .await
+                .ok()?;
+        }
+    }
+    found.then_some(())
 }
 
 // Reject corrupt indirect ranges before Lance splits them into read chunks.

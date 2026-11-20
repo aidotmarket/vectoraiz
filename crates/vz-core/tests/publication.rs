@@ -1054,3 +1054,65 @@ async fn committed_publication_wal_without_shm_survives_reindex() {
         .to_string_lossy()
         .contains(".orphan-")));
 }
+
+#[tokio::test]
+async fn unsupported_checksum_valid_wal_stops_before_cleanup() {
+    let (mut engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("a.txt"), "Publication to preserve.").unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let root = active_index::resolve_state(data.path());
+    let orphan = root.join("generations/unreferenced-sentinel");
+    fs::create_dir(&orphan).unwrap();
+    fs::write(orphan.join("bytes"), b"must survive rejected recovery").unwrap();
+    let main = fs::read(root.join("state.sqlite")).unwrap();
+    let mut header = [0_u8; 32];
+    header[..4].copy_from_slice(&0x377f0682_u32.to_be_bytes());
+    header[4..8].copy_from_slice(&3007001_u32.to_be_bytes());
+    header[8..12].copy_from_slice(&4096_u32.to_be_bytes());
+    let mut sums = (0_u32, 0_u32);
+    for pair in header[..24].chunks_exact(8) {
+        sums.0 = sums
+            .0
+            .wrapping_add(u32::from_le_bytes(pair[..4].try_into().unwrap()))
+            .wrapping_add(sums.1);
+        sums.1 = sums
+            .1
+            .wrapping_add(u32::from_le_bytes(pair[4..].try_into().unwrap()))
+            .wrapping_add(sums.0);
+    }
+    header[24..28].copy_from_slice(&sums.0.to_be_bytes());
+    header[28..].copy_from_slice(&sums.1.to_be_bytes());
+    let wal = root.join("state.sqlite-wal");
+    fs::write(&wal, header).unwrap();
+    for recipe_change in [false, true] {
+        if recipe_change {
+            engines.recipe.model.push_str("-new");
+        }
+        let error = active_index::reindex(
+            data.path(),
+            source.path(),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("unsupported SQLite WAL format version 3007001"));
+        assert!(orphan.join("bytes").exists());
+    }
+    assert_eq!(fs::read(&wal).unwrap(), header);
+    assert_eq!(fs::read(root.join("state.sqlite")).unwrap(), main);
+    assert!(orphan.join("bytes").exists());
+}
