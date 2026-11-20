@@ -939,3 +939,118 @@ async fn t6_nochange_a_reclaims_refused_b_and_missing_recipe_candidates_are_boun
         1
     );
 }
+
+#[tokio::test]
+async fn committed_publication_wal_without_shm_survives_reindex() {
+    let (engines, assets) = fixture();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    fs::write(source.path().join("a.txt"), "First publication document.").unwrap();
+    fs::write(
+        source.path().join("b.txt"),
+        "Surviving publication document.",
+    )
+    .unwrap();
+    active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    let root = active_index::resolve_state(data.path());
+    let original = rows(data.path());
+    let old_generation = &original[1].1;
+    let generation = uuid::Uuid::new_v4().simple().to_string();
+    // Stage an independently named generation that only the WAL references.
+    fn copy_tree(from: &Path, to: &Path) {
+        fs::create_dir(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let dest = to.join(entry.file_name());
+            if entry.path().is_dir() {
+                copy_tree(&entry.path(), &dest);
+            } else {
+                fs::copy(entry.path(), dest).unwrap();
+            }
+        }
+    }
+    copy_tree(
+        &root.join("generations").join(old_generation),
+        &root.join("generations").join(&generation),
+    );
+    let db = rusqlite::Connection::open(root.join("state.sqlite")).unwrap();
+    db.execute(
+        "UPDATE index_metadata SET value='old selection' WHERE key='selected_folder'",
+        [],
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    let main = fs::read(root.join("state.sqlite")).unwrap();
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; BEGIN IMMEDIATE")
+        .unwrap();
+    db.execute("DELETE FROM documents WHERE path=?1", [&original[0].0])
+        .unwrap();
+    db.execute(
+        "UPDATE documents SET generation=?1 WHERE path=?2",
+        rusqlite::params![generation, original[1].0],
+    )
+    .unwrap();
+    db.execute(
+        "UPDATE index_metadata SET value=?1 WHERE key='selected_folder'",
+        [source.path().canonicalize().unwrap().to_str().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO jobs(path,status,reason) VALUES(?1,'completed','committed WAL publication')",
+        [&original[1].0],
+    )
+    .unwrap();
+    db.execute_batch("COMMIT").unwrap();
+    let wal = fs::read(root.join("state.sqlite-wal")).unwrap();
+    assert!(wal.len() > 32);
+    drop(db);
+    // Model a live backup/restore: committed DB + WAL, with only SHM absent.
+    fs::write(root.join("state.sqlite"), main).unwrap();
+    fs::write(root.join("state.sqlite-wal"), wal).unwrap();
+    assert!(!root.join("state.sqlite-shm").exists());
+    fs::remove_file(source.path().join("a.txt")).unwrap();
+    let result = active_index::reindex(
+        data.path(),
+        source.path(),
+        &engines,
+        &assets,
+        |_| {},
+        || false,
+    )
+    .await
+    .unwrap();
+    assert_eq!((result.completed, result.skipped), (0, 1));
+    assert_eq!(
+        rows(data.path()),
+        vec![(original[1].0.clone(), generation.clone())]
+    );
+    assert!(root.join("generations").join(&generation).exists());
+    assert!(!root.join("generations").join(&original[0].1).exists());
+    assert_eq!(
+        State::review_selected_folder(&root).unwrap(),
+        Some(source.path().canonicalize().unwrap())
+    );
+    let db = State::review_connection(&root).unwrap();
+    let reason: String = db
+        .query_row(
+            "SELECT reason FROM jobs WHERE path=?1 ORDER BY id DESC LIMIT 1",
+            [&original[1].0],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(reason, "committed WAL publication");
+    assert!(!fs::read_dir(root.parent().unwrap()).unwrap().any(|e| e
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains(".orphan-")));
+}

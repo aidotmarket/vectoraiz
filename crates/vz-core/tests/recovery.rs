@@ -410,6 +410,8 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
     let root = active_index::resolve(data.path());
     for damage in [
         "manifest",
+        "reader feature",
+        "full text index",
         "data",
         "truncated fragment",
         "fragment version",
@@ -452,6 +454,48 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
                     as usize;
             bytes[offset + 4] = 0xff;
             std::fs::write(latest, bytes).unwrap();
+        } else if damage == "reader feature" {
+            use prost::Message;
+            let latest = std::fs::read_dir(table.join("_versions"))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .max_by_key(|p| {
+                    p.file_stem()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                })
+                .unwrap();
+            let bytes = std::fs::read(&latest).unwrap();
+            let offset =
+                u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().unwrap())
+                    as usize;
+            let mut manifest =
+                lance_table::format::pb::Manifest::decode(&bytes[offset + 4..bytes.len() - 16])
+                    .unwrap();
+            manifest.reader_feature_flags |= 1 << 63;
+            let message = manifest.encode_to_vec();
+            let mut damaged = bytes[..offset].to_vec();
+            damaged.extend_from_slice(&(message.len() as u32).to_le_bytes());
+            damaged.extend_from_slice(&message);
+            damaged.extend_from_slice(&bytes[bytes.len() - 16..]);
+            std::fs::write(latest, damaged).unwrap();
+        } else if damage == "full text index" {
+            // Preserve the dataset and fragments; damage only the FTS artifacts.
+            fn damage_files(path: &Path) {
+                for entry in std::fs::read_dir(path).unwrap() {
+                    let path = entry.unwrap().path();
+                    if path.is_dir() {
+                        damage_files(&path);
+                    } else {
+                        std::fs::write(path, b"damaged full text index").unwrap();
+                    }
+                }
+            }
+            assert!(table.join("_indices").is_dir());
+            damage_files(&table.join("_indices"));
         } else if damage == "data" {
             std::fs::remove_dir_all(table.join("data")).unwrap();
         } else if matches!(
@@ -507,6 +551,19 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
                     "damage must make Lance unreadable: {damage}"
                 );
             }
+        }
+        if matches!(damage, "reader feature" | "full text index") {
+            use futures::FutureExt;
+            let state = State::open(&root).unwrap();
+            let vector = engines.vector("structural recovery", true).unwrap();
+            let result =
+                std::panic::AssertUnwindSafe(state.search("structural recovery", &vector, 1))
+                    .catch_unwind()
+                    .await;
+            assert!(
+                !matches!(result, Ok(Ok(_))),
+                "mutation must break real search: {damage}"
+            );
         }
         let result = active_index::reindex(
             data.path(),

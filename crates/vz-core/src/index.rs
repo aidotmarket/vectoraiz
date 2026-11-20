@@ -272,13 +272,22 @@ impl ScanWorkspace {
 
 async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
     use futures::FutureExt;
-    // All reuse, published or staged, crosses this boundary. Lance conversion,
-    // metadata parsing and page decoding can panic on malformed persisted data.
-    std::panic::AssertUnwindSafe(probe_generation(root, row))
-        .catch_unwind()
-        .await
-        .ok()
-        .flatten()
+    // Keep dataset opening/query planning off the scan runtime thread. The
+    // caller bounds concurrent probes; no validation state outlives this scan.
+    let root = root.to_owned();
+    let row = row.clone();
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        // All reuse, published or staged, crosses this boundary, including
+        // dataset reader-feature checks, FTS reads and fragment decoding.
+        runtime
+            .block_on(std::panic::AssertUnwindSafe(probe_generation(&root, &row)).catch_unwind())
+            .ok()
+            .flatten()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
@@ -351,6 +360,11 @@ async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
             return None;
         }
     }
+    let chunk = doc.chunks.first()?;
+    let query = chunk.text.split_whitespace().next().unwrap_or("probe");
+    crate::storage::search_generation(&generation.join("lance"), query, &chunk.embedding, 1)
+        .await
+        .ok()?;
     Some(doc)
 }
 

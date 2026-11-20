@@ -54,7 +54,7 @@ impl State {
             // sidecars here or fall back to an immutable (potentially stale) DB.
             if !root.join("state.sqlite-shm").try_exists()? {
                 return Err(anyhow::Error::new(ReviewDatabaseBusy).context(
-                    "review WAL has no shared-memory file; re-index to quarantine the orphan WAL",
+                    "review WAL has no shared-memory file; re-index to recover the review WAL",
                 ));
             }
             "readonly_shm=1"
@@ -73,37 +73,60 @@ impl State {
         )?)
     }
 
-    /// Called only by re-index while holding the exclusive writer fence.
-    /// Preserve an orphan that read-only SQLite cannot open, rather than leaving
-    /// every future scan blocked behind review_connection's read-only policy.
+    /// Recover under the exclusive writer fence before reading publication state
+    /// or deleting generations. A valid WAL may contain the entire publication.
     pub(crate) fn quarantine_orphan_wal(root: &Path) -> Result<()> {
         let wal = root.join("state.sqlite-wal");
         if !wal.try_exists()? || root.join("state.sqlite-shm").try_exists()? {
             return Ok(());
         }
-        let uri = root.join("state.sqlite");
-        let uri = uri
-            .to_str()
-            .context("index path must be UTF-8")?
-            .replace('%', "%25")
-            .replace('?', "%3F")
-            .replace('#', "%23");
-        let probe = (|| -> rusqlite::Result<()> {
+        // Deliberately conservative: only empty/truncated or invalid WAL headers
+        // qualify. A valid header can precede committed frames; never move it.
+        let unusable = unusable_wal_header(&wal)?;
+        let recover = || -> rusqlite::Result<()> {
             let db = Connection::open_with_flags(
-                format!("file:{uri}?readonly_shm=1"),
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                root.join("state.sqlite"),
+                OpenFlags::SQLITE_OPEN_READ_WRITE,
             )?;
-            db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
-        })();
-        match probe {
+            db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+            db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+            Ok(())
+        };
+        match recover() {
+            Ok(()) => Ok(()),
             Err(rusqlite::Error::SqliteFailure(code, _))
-                if code.code == rusqlite::ErrorCode::CannotOpen =>
+                if unusable
+                    && matches!(
+                        code.code,
+                        rusqlite::ErrorCode::CannotOpen
+                            | rusqlite::ErrorCode::DatabaseCorrupt
+                            | rusqlite::ErrorCode::NotADatabase
+                    )
+                    && wal.try_exists()?
+                    && unusable_wal_header(&wal)? =>
             {
+                // A corrupt main database is not a WAL recovery failure. Prove
+                // it is independently readable before attributing this error
+                // to the unusable sidecar; immutable mode is confined to this
+                // diagnostic, never used for the recovered publication state.
+                let uri = root.join("state.sqlite");
+                let uri = uri
+                    .to_str()
+                    .context("index path must be UTF-8")?
+                    .replace('%', "%25")
+                    .replace('?', "%3F")
+                    .replace('#', "%23");
+                let main = Connection::open_with_flags(
+                    format!("file:{uri}?immutable=1"),
+                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+                )?;
+                let check: String = main.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
+                anyhow::ensure!(check == "ok", "main review database is corrupt: {check}");
+                drop(main);
                 let timestamp = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)?
                     .as_nanos();
-                // A sibling lies outside the bound index and all generation /
-                // workspace cleanup. Never delete quarantined bytes on retry.
+                let root = root.canonicalize()?;
                 let target = root.with_file_name(format!(
                     "{}.state.sqlite-wal.orphan-{timestamp}-{}",
                     root.file_name()
@@ -111,11 +134,11 @@ impl State {
                         .to_string_lossy(),
                     uuid::Uuid::new_v4()
                 ));
-                std::fs::rename(&wal, &target).context("quarantine orphan review WAL")?;
+                std::fs::rename(&wal, &target).context("quarantine unusable review WAL")?;
+                recover()?;
                 Ok(())
             }
             Err(error) => Err(error.into()),
-            Ok(()) => Ok(()),
         }
     }
 
@@ -524,29 +547,9 @@ impl State {
             .collect::<std::collections::HashMap<_, _>>();
         for id in self.generations()? {
             let path = self.root.join("generations").join(id).join("lance");
-            let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
-                .execute()
-                .await?;
-            let table = db.open_table("chunks").execute().await?;
-            let batches = table
-                .vector_search(vector)?
-                .limit(top_k * 3)
-                .execute()
-                .await?
-                .try_collect::<Vec<_>>()
-                .await?;
-            collect_scores(&batches, "_distance", &mut semantic)?;
-            let batches = table
-                .query()
-                .full_text_search(lance_index::scalar::FullTextSearchQuery::new(
-                    query.to_owned(),
-                ))
-                .limit(top_k * 3)
-                .execute()
-                .await?
-                .try_collect::<Vec<_>>()
-                .await?;
-            collect_scores(&batches, "_score", &mut lexical)?;
+            let (mut vectors, mut words) = search_generation(&path, query, vector, top_k).await?;
+            semantic.append(&mut vectors);
+            lexical.append(&mut words);
         }
         semantic.sort_by(|a, b| a.1.total_cmp(&b.1));
         lexical.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -565,6 +568,78 @@ impl State {
             .collect())
     }
 }
+// Both reuse validation and user search open the dataset and exercise its
+// vector reader and full-text index through this exact path.
+type RankedChunks = Vec<(String, f32)>;
+
+pub(crate) async fn search_generation(
+    path: &Path,
+    query: &str,
+    vector: &[f32],
+    top_k: usize,
+) -> Result<(RankedChunks, RankedChunks)> {
+    let mut semantic = Vec::new();
+    let mut lexical = Vec::new();
+    let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
+        .execute()
+        .await?;
+    let table = db.open_table("chunks").execute().await?;
+    let batches = table
+        .vector_search(vector)?
+        .limit(top_k * 3)
+        .execute()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    collect_scores(&batches, "_distance", &mut semantic)?;
+    let batches = table
+        .query()
+        .full_text_search(lance_index::scalar::FullTextSearchQuery::new(
+            query.to_owned(),
+        ))
+        .limit(top_k * 3)
+        .execute()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    collect_scores(&batches, "_score", &mut lexical)?;
+    Ok((semantic, lexical))
+}
+
+// SQLite WAL header: big-endian fields, magic selects checksum word order.
+fn unusable_wal_header(path: &Path) -> Result<bool> {
+    use std::io::Read;
+    let mut header = [0_u8; 32];
+    let mut file = std::fs::File::open(path)?;
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(true),
+        Err(error) => return Err(error.into()),
+    }
+    let word = |i| u32::from_be_bytes(header[i..i + 4].try_into().unwrap());
+    let magic = word(0);
+    if !matches!(magic, 0x377f0682 | 0x377f0683)
+        || word(4) != 3007000
+        || !(512..=65536).contains(&word(8))
+        || !word(8).is_power_of_two()
+    {
+        return Ok(true);
+    }
+    let mut sums = (0_u32, 0_u32);
+    for pair in header[..24].chunks_exact(8) {
+        let value = |bytes: &[u8]| {
+            if magic == 0x377f0682 {
+                u32::from_le_bytes(bytes.try_into().unwrap())
+            } else {
+                u32::from_be_bytes(bytes.try_into().unwrap())
+            }
+        };
+        sums.0 = sums.0.wrapping_add(value(&pair[..4])).wrapping_add(sums.1);
+        sums.1 = sums.1.wrapping_add(value(&pair[4..])).wrapping_add(sums.0);
+    }
+    Ok(sums != (word(24), word(28)))
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Hit {
     pub chunk: Chunk,
@@ -717,6 +792,48 @@ impl crate::Store for State {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wal_header_checks_protect_real_sqlite_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Connection::open(root.path().join("state.sqlite")).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE committed(value); INSERT INTO committed VALUES(42)").unwrap();
+        let wal = root.path().join("state.sqlite-wal");
+        assert!(!unusable_wal_header(&wal).unwrap());
+        let mut bytes = std::fs::read(&wal).unwrap();
+        bytes[16] ^= 1; // Salt is part of the header checksum.
+        let damaged = root.path().join("damaged-wal");
+        std::fs::write(&damaged, bytes).unwrap();
+        assert!(unusable_wal_header(&damaged).unwrap());
+        for bytes in [vec![], vec![0; 31], vec![0; 32]] {
+            std::fs::write(&damaged, bytes).unwrap();
+            assert!(unusable_wal_header(&damaged).unwrap());
+        }
+    }
+
+    #[test]
+    fn corrupt_main_database_is_not_a_quarantine_reason() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("state.sqlite"), b"not a SQLite database").unwrap();
+        let wal = root.path().join("state.sqlite-wal");
+        std::fs::write(&wal, [0; 32]).unwrap();
+        assert!(State::quarantine_orphan_wal(root.path()).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("state.sqlite")).unwrap(),
+            b"not a SQLite database"
+        );
+        let prefix = format!(
+            "{}.state.sqlite-wal.orphan-",
+            root.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(!std::fs::read_dir(root.path().parent().unwrap())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)));
+    }
 
     #[test]
     fn review_content_observes_only_committed_rows_during_a_writer_transaction() {
