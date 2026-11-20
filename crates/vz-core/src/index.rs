@@ -280,7 +280,6 @@ pub(crate) struct ScanOutcome {
     pub damaged: HashSet<String>,
     pub retain: HashSet<String>,
     pub seal_updates: Vec<(String, Seal)>,
-    pub recipe_blocked: bool,
 }
 
 pub(crate) async fn scan(
@@ -364,14 +363,14 @@ pub(crate) async fn scan(
         stats.needs_ocr_pages.clear();
         let mut unknown = false;
         let mut damaged = false;
+        let mut private_unreadable = false;
         let result: Result<bool> = async {
-            if let Some(error) = &generation_directory_error {
+            if let Some(error) = generation_directory_error
+                .as_ref()
+                .filter(|_| !recipe_change)
+            {
                 unknown = true;
                 outcome.retain.insert(path_text.clone());
-                if recipe_change {
-                    outcome.recipe_blocked = true;
-                    keep_staged.insert(path_text.clone());
-                }
                 return Err(anyhow::anyhow!("generation directory unavailable: {error}"));
             }
             let metadata =
@@ -386,6 +385,12 @@ pub(crate) async fn scan(
                 .is_some_and(|old| old.hash != hash)
             {
                 outcome.changed.insert(path_text.clone());
+            }
+            if let Some(error) = &generation_directory_error {
+                if !outcome.changed.contains(&path_text) {
+                    outcome.retain.insert(path_text.clone());
+                }
+                return Err(anyhow::anyhow!("generation directory unavailable: {error}"));
             }
             let [staged, published] = state.unchanged(&path_text, &hash)?;
             let mut staged_error = None;
@@ -435,13 +440,11 @@ pub(crate) async fn scan(
                 return Ok(false);
             }
             if let Some(error) = staged_error.filter(|_| !damaged) {
-                unknown = true;
-                outcome.retain.insert(path_text.clone());
                 if recipe_change {
-                    // A private row cannot substitute for the old recipe's
-                    // published row until its generation can be observed.
-                    outcome.recipe_blocked = true;
-                    keep_staged.insert(path_text.clone());
+                    private_unreadable = true;
+                } else {
+                    unknown = true;
+                    outcome.retain.insert(path_text.clone());
                 }
                 return Err(anyhow::Error::new(error).context("staged generation unavailable"));
             }
@@ -557,20 +560,27 @@ pub(crate) async fn scan(
                 if damaged {
                     outcome.damaged.insert(path_text.clone());
                 }
-                // Unknown storage is reported without making it a revocation
-                // or refusing publication of the rest of the walk.
+                // An unknown published generation is retained per R9.
                 if !unknown {
-                    let readback_failed = error.is::<crate::storage::CandidateReadback>();
-                    if readback_failed
+                    let candidate_failed =
+                        private_unreadable || error.is::<crate::storage::CandidateReadback>();
+                    let protects_old_row = candidate_failed
                         && !damaged
                         && !outcome.changed.contains(&path_text)
-                        && state.baseline_rows.contains_key(&path_text)
-                    {
+                        && state.baseline_rows.contains_key(&path_text);
+                    // R11 keeps an unchanged old-recipe row on an infrastructure
+                    // failure. The failed private row is omitted from keep_staged.
+                    if protects_old_row {
                         outcome.retain.insert(path_text.clone());
-                        outcome.recipe_blocked |= recipe_change;
-                    } else if readback_failed || crate::failures::is_content(&error) {
-                        outcome.failed_content.insert(path_text.clone());
+                    }
+                    let content_failure = if candidate_failed {
+                        !protects_old_row
                     } else {
+                        crate::failures::is_content(&error)
+                    };
+                    if content_failure {
+                        outcome.failed_content.insert(path_text.clone());
+                    } else if recipe_change || !protects_old_row {
                         outcome.failed_infrastructure.insert(path_text.clone());
                         stats.infrastructure_failed += 1;
                         if stats.infrastructure_examples.len() < 3 {

@@ -544,14 +544,13 @@ fn decide_scan(
         return ScanDecision::RevokeSource;
     }
     if current && outcome.completed_walk {
-        return if outcome.stats.infrastructure_failed == 0 && !outcome.recipe_blocked {
+        return if outcome.stats.infrastructure_failed == 0 {
             ScanDecision::Publish
         } else {
             ScanDecision::RevokeSource
         };
     }
     if !outcome.unavailable
-        && !outcome.recipe_blocked
         && outcome.completed_walk
         && validate_publication(&outcome.stats, populated).is_ok()
     {
@@ -650,6 +649,17 @@ fn remove_unreferenced(root: &Path, db: &rusqlite::Connection) -> Result<()> {
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     crate::storage::recover_generations(root, &referenced)
+}
+
+fn cleanup_scan_workspace(root: &Path, stats: &mut crate::index::Progress) {
+    if let Err(error) = fs::remove_dir_all(root) {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            stats.seal_warnings.push(format!(
+                "Deferred private workspace cleanup in {}: {error}",
+                root.display()
+            ));
+        }
+    }
 }
 
 // Names alone are not ownership: require an ordinary recipe file with its
@@ -1219,10 +1229,7 @@ pub(crate) async fn scan_candidate(
                 drop(db);
                 drop(workspace.state.take());
                 if same_recipe {
-                    if workspace_root.exists() {
-                        fs::remove_dir_all(&workspace_root)
-                            .context(PublishedFailure("workspace cleanup"))?;
-                    }
+                    cleanup_scan_workspace(&workspace_root, &mut outcome.stats);
                 } else {
                     for name in [
                         "scan.sqlite",
@@ -1242,7 +1249,7 @@ pub(crate) async fn scan_candidate(
                 }
             } else if same_recipe && workspace_root.exists() {
                 drop(workspace.state.take());
-                fs::remove_dir_all(&workspace_root)?;
+                cleanup_scan_workspace(&workspace_root, &mut outcome.stats);
             }
             if !outcome.seal_updates.is_empty() {
                 if !changed {
@@ -1362,16 +1369,9 @@ pub(crate) async fn scan_candidate(
     }
     if decision != ScanDecision::Publish {
         let resume = !workspace.staged()?.is_empty();
-        let error = if outcome.recipe_blocked && outcome.stats.infrastructure_failed == 0 {
-            anyhow::anyhow!(
-                "recipe publication deferred: {}",
-                outcome.stats.failure_examples.join("; ")
-            )
-        } else {
-            validate_publication(&outcome.stats, populated)
-                .err()
-                .unwrap_or_else(|| anyhow::anyhow!("publication refused"))
-        };
+        let error = validate_publication(&outcome.stats, populated)
+            .err()
+            .unwrap_or_else(|| anyhow::anyhow!("publication refused"));
         let message = error.to_string().replace("; Re-index to resume", "");
         anyhow::bail!(
             "{message}{}{}",

@@ -646,8 +646,11 @@ pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Resu
                 };
                 if let Some(id) = active.get(entry.file_name().to_string_lossy().as_ref()) {
                     present.insert(id.as_str());
-                } else {
-                    remove_index_node(&entry.path())?;
+                } else if let Err(error) = remove_index_node(&entry.path()) {
+                    eprintln!(
+                        "Deferred generation cleanup at {}: {error}",
+                        entry.path().display()
+                    );
                 }
             }
         }

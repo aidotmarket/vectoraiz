@@ -104,39 +104,141 @@ fn private_rows(library: &Path) -> (PathBuf, Vec<ScanRow>) {
     (root, rows)
 }
 
+async fn stage_recipe_retry(f: &mut Fixture, blocked: &str) -> (PathBuf, ScanRow) {
+    f.engines.recipe.model.push_str("-new");
+    let locked_source = deny_read(&f.source().join(blocked));
+    let error = f.try_scan(|_| {}).await.unwrap_err();
+    assert!(error.to_string().contains("Re-index to resume"));
+    drop(locked_source);
+    let (candidate, mut rows) = private_rows(&f.library());
+    assert_eq!(rows.len(), 1);
+    (candidate, rows.pop().unwrap())
+}
+
+fn deny_private_seal(f: &Fixture, candidate: &Path, row: &ScanRow) -> impl Drop {
+    let seal = path(candidate, &row.generation);
+    #[cfg(unix)]
+    let seal = {
+        // chmod also denies reads through the original path. Keep a link so
+        // restoring access works even after recovery unlinks the private seal.
+        let link = f.temp.path().join("unreadable-seal");
+        fs::hard_link(seal, &link).unwrap();
+        link
+    };
+    #[cfg(windows)]
+    let _ = f;
+    deny_read(&seal)
+}
+
 #[tokio::test]
-async fn unreadable_private_seal_defers_recipe_publication_and_keeps_old_hits() {
+async fn unreadable_private_seal_preserves_unchanged_old_row_on_recipe_refusal() {
     let mut f = Fixture::new().await;
     let old_root = f.root();
     let old_rows = f.rows();
-    f.engines.recipe.model.push_str("-new");
-    let locked_source = deny_read(&f.source().join("b.txt"));
-    assert!(f.try_scan(|_| {}).await.is_err());
-    drop(locked_source);
-    assert_eq!(f.root(), old_root);
-    assert_eq!(f.rows(), old_rows);
-    let (candidate, rows) = private_rows(&f.library());
-    assert_eq!(rows.len(), 1);
-    assert!(rows[0].path.ends_with("a.txt"));
+    let (candidate, rejected) = stage_recipe_retry(&mut f, "b.txt").await;
+    assert!(rejected.path.ends_with("a.txt"));
 
-    let access = deny_read(&path(&candidate, &rows[0].generation));
+    let _access = deny_private_seal(&f, &candidate, &rejected);
     let mut last = Progress::default();
     let error = f
         .try_scan(|progress| last = progress.clone())
         .await
         .unwrap_err();
-    assert!(format!("{error:#}").contains("staged generation unavailable"));
+    assert!(error.to_string().contains("Re-index to resume"));
+    assert!(last.failure_examples[0].contains("staged generation unavailable"));
     assert_eq!(
         (last.completed, last.failed, last.infrastructure_failed),
-        (1, 1, 0)
+        (1, 1, 1)
     );
     assert_eq!(f.root(), old_root);
     assert_eq!(f.rows(), old_rows);
     f.assert_search(2, &[]).await;
-    assert!(private_rows(&f.library()).1.contains(&rows[0]));
-    drop(access);
-    assert_reused(f.scan().await);
+    let (_, retained) = private_rows(&f.library());
+    assert_eq!(retained.len(), 1);
+    assert!(retained[0].path.ends_with("b.txt"));
+    assert!(!candidate
+        .join("generations")
+        .join(&rejected.generation)
+        .exists());
+
+    let stats = f.scan().await;
+    assert_eq!((stats.completed, stats.skipped, stats.failed), (1, 1, 0));
     assert_eq!(f.root(), candidate.canonicalize().unwrap());
+    assert_eq!(f.rows()[1], retained[0]);
+    f.assert_search(2, &[]).await;
+}
+
+#[tokio::test]
+async fn unreadable_private_seal_revokes_changed_old_row_on_recipe_refusal() {
+    let mut f = Fixture::new().await;
+    let old_root = f.root();
+    let old_rows = f.rows();
+    fs::write(f.source().join("a.txt"), "Orbital archive a, revised.").unwrap();
+    let (candidate, rejected) = stage_recipe_retry(&mut f, "b.txt").await;
+    assert_ne!(rejected.hash, old_rows[0].hash);
+    assert_eq!(f.rows(), old_rows);
+
+    let _access = deny_private_seal(&f, &candidate, &rejected);
+    let locked_source = deny_read(&f.source().join("b.txt"));
+    let mut last = Progress::default();
+    f.try_scan(|progress| last = progress.clone())
+        .await
+        .unwrap_err();
+    assert!(last.failure_examples[0].contains("staged generation unavailable"));
+    assert_eq!(
+        (last.completed, last.failed, last.infrastructure_failed),
+        (0, 2, 1)
+    );
+    assert_eq!(f.root(), old_root);
+    assert_eq!(f.rows(), old_rows[1..]);
+    assert!(!old_root
+        .join("generations")
+        .join(&old_rows[0].generation)
+        .exists());
+    assert!(!candidate
+        .join("generations")
+        .join(&rejected.generation)
+        .exists());
+    assert!(private_rows(&f.library()).1.is_empty());
+    f.assert_search(1, &[]).await;
+    drop(locked_source);
+}
+
+#[tokio::test]
+async fn unreadable_new_private_seal_allows_recipe_publish_then_rebuilds_from_source() {
+    let mut f = Fixture::new().await;
+    fs::remove_file(f.source().join("b.txt")).unwrap();
+    fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
+    let old_root = f.root();
+    let (candidate, rejected) = stage_recipe_retry(&mut f, "a.txt").await;
+    assert!(rejected.path.ends_with("c.txt"));
+
+    let _access = deny_private_seal(&f, &candidate, &rejected);
+    let stats = f.scan().await;
+    assert_eq!(
+        (stats.completed, stats.failed, stats.infrastructure_failed),
+        (1, 1, 0)
+    );
+    assert!(stats.failure_examples[0].contains("staged generation unavailable"));
+    assert_ne!(f.root(), old_root);
+    assert_eq!(f.root(), candidate.canonicalize().unwrap());
+    let published = f.rows();
+    assert_eq!(published.len(), 1);
+    assert!(published[0].path.ends_with("a.txt"));
+    assert!(!candidate.join("scan.sqlite").exists());
+    assert!(!candidate
+        .join("generations")
+        .join(&rejected.generation)
+        .exists());
+    f.assert_search(1, &[]).await;
+
+    let stats = f.scan().await;
+    assert_eq!((stats.completed, stats.skipped, stats.failed), (1, 1, 0));
+    let rows = f.rows();
+    assert_eq!(rows[0], published[0]);
+    assert_eq!(rows[1].path, rejected.path);
+    assert_eq!(rows[1].hash, rejected.hash);
+    assert_ne!(rows[1].generation, rejected.generation);
     f.assert_search(2, &[]).await;
 }
 
@@ -185,14 +287,15 @@ async fn staging_readback_errors_and_crashes_are_candidate_failures() {
         let result = f.try_scan(|progress| last = progress.clone()).await;
         READBACK_PROBE.with(|probe| *probe.borrow_mut() = None);
         let error = result.unwrap_err();
-        assert!(format!("{error:#}").contains(if crash {
+        assert!(error.to_string().contains("Re-index to resume"));
+        assert!(last.failure_examples[0].contains(if crash {
             "worker crashed"
         } else {
             "staged generation does not match its source"
         }));
         assert_eq!(
             (last.completed, last.failed, last.infrastructure_failed),
-            (3, 1, 0)
+            (3, 1, 1)
         );
         assert_eq!(f.root(), old_root);
         assert_eq!(f.rows(), old_rows);
@@ -611,7 +714,7 @@ async fn unreadable_seal_or_file_at_time_refresh_reports_unknown() {
 }
 
 #[cfg(unix)]
-fn restrict_seal_directory(dir: &Path, readonly: bool) {
+fn restrict_directory(dir: &Path, readonly: bool) {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(
         dir,
@@ -621,7 +724,7 @@ fn restrict_seal_directory(dir: &Path, readonly: bool) {
 }
 
 #[cfg(windows)]
-fn restrict_seal_directory(dir: &Path, readonly: bool) {
+fn restrict_directory(dir: &Path, readonly: bool) {
     set_directory_access(dir, if readonly { "FRFX" } else { "FA" });
 }
 
@@ -677,7 +780,7 @@ async fn read_only_seals_defer_cleanup_and_install_without_blocking_search() {
     }
     #[cfg(windows)]
     let locks = [&orphan, &temp, &retired].map(|path| deny_read(path));
-    restrict_seal_directory(&directory, true);
+    restrict_directory(&directory, true);
 
     fs::remove_file(f.source().join("b.txt")).unwrap();
     fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
@@ -699,13 +802,90 @@ async fn read_only_seals_defer_cleanup_and_install_without_blocking_search() {
 
     #[cfg(windows)]
     drop(locks);
-    restrict_seal_directory(&directory, false);
+    restrict_directory(&directory, false);
     f.assert_search(2, &[]).await;
     for leftover in [&orphan, &temp, &retired] {
         assert!(!leftover.exists());
     }
     assert_reused(f.scan().await);
     assert!(matches!(origin(&root, &f.rows()[1]), Origin::Adopted));
+}
+
+#[tokio::test]
+async fn read_only_private_seals_defer_workspace_cleanup_after_commit() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let workspace = root.join(".vz-scan");
+    fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
+    let locked_source = deny_read(&f.source().join("b.txt"));
+    let error = f.try_scan(|_| {}).await.unwrap_err();
+    assert!(error.to_string().contains("Re-index to resume"));
+    drop(locked_source);
+    let db = rusqlite::Connection::open(workspace.join("scan.sqlite")).unwrap();
+    let rows = ScanRow::read(&db, "scan_documents").unwrap();
+    drop(db);
+    assert_eq!(rows.len(), 1);
+    let retained = &rows[0];
+    assert!(retained.path.ends_with("c.txt"));
+    let seal = path(&workspace, &retained.generation);
+    let directory = seal.parent().unwrap();
+    #[cfg(windows)]
+    let seal_lock = {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        // Allow the reuse check to read the seal while denying its removal.
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&seal)
+            .unwrap()
+    };
+    restrict_directory(directory, true);
+
+    let stats = f.scan().await;
+    assert_eq!((stats.completed, stats.skipped, stats.failed), (0, 3, 0));
+    assert!(stats
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("Deferred private workspace cleanup")));
+    assert_eq!(&f.rows()[2], retained);
+    assert!(seal.exists());
+    f.assert_search(3, &[]).await;
+
+    #[cfg(windows)]
+    drop(seal_lock);
+    restrict_directory(directory, false);
+    assert_eq!(f.scan().await.skipped, 3);
+    assert!(!workspace.exists());
+    f.assert_search(3, &[]).await;
+}
+
+#[tokio::test]
+async fn read_only_generations_defer_orphan_cleanup_without_blocking_search() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let rows = f.rows();
+    let directory = root.join("generations");
+    let retired = directory.join(&rows[1].generation);
+    #[cfg(windows)]
+    let lock = deny_read(&retired.join("document.json"));
+    restrict_directory(&directory, true);
+
+    fs::remove_file(f.source().join("b.txt")).unwrap();
+    for _ in 0..2 {
+        let stats = f.scan().await;
+        assert_eq!((stats.completed, stats.skipped, stats.failed), (0, 1, 0));
+        assert_eq!(f.rows(), rows[..1]);
+        f.assert_search(1, &[]).await;
+        assert!(retired.exists());
+    }
+
+    #[cfg(windows)]
+    drop(lock);
+    restrict_directory(&directory, false);
+    f.assert_search(1, &[]).await;
+    assert!(!retired.exists());
+    assert_eq!(f.scan().await.skipped, 1);
 }
 
 fn link_directory(target: &Path, link: &Path) {
@@ -812,7 +992,7 @@ async fn unreadable_generations_parent_reports_unknown_and_preserves_rows() {
     set_directory_access(&directory, "");
     let blocked = fs::read_dir(&directory).is_err();
     let result = f.try_scan(|_| {}).await;
-    restrict_seal_directory(&directory, false);
+    restrict_directory(&directory, false);
     assert!(blocked);
     let stats = result.unwrap();
     assert_eq!(
@@ -843,7 +1023,7 @@ async fn read_only_seal_directory_reports_adoption_and_retries_time_refresh() {
         &document,
         document.metadata().unwrap().modified().unwrap() + Duration::from_secs(2),
     );
-    restrict_seal_directory(&directory, true);
+    restrict_directory(&directory, true);
     let (workers, hashes) = counters();
     for _ in 0..2 {
         let stats = f.scan().await;
@@ -852,7 +1032,7 @@ async fn read_only_seal_directory_reports_adoption_and_retries_time_refresh() {
         assert_eq!(fs::read(&refresh).unwrap(), original);
         assert!(!adoption.exists());
     }
-    restrict_seal_directory(&directory, false);
+    restrict_directory(&directory, false);
     let retry = f.scan().await;
     assert!(retry.seal_warnings.is_empty());
     assert_reused(retry);
