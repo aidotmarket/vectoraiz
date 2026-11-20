@@ -129,7 +129,16 @@ pub fn read_frame<T: DeserializeOwned>(mut reader: impl Read) -> Result<T> {
     reader.read_exact(&mut bytes)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_EXECUTABLE: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 pub fn executable() -> Result<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_EXECUTABLE.with(|path| path.borrow().clone()) {
+        return Ok(path);
+    }
+
     let name = if cfg!(windows) {
         "vz-parser-worker.exe"
     } else {
@@ -290,7 +299,7 @@ fn run_command_with_watchdog(
     let stdout = child.stdout.take().context("worker stdout")?;
     let (sender, receiver) = std::sync::mpsc::channel();
     let validation = request.validation.is_some();
-    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let started = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
     let reader_started = started.clone();
     std::thread::spawn(move || {
         let mut stdout = BufReader::new(stdout);
@@ -303,7 +312,7 @@ fn run_command_with_watchdog(
                 ));
                 return;
             }
-            reader_started.store(true, std::sync::atomic::Ordering::Release);
+            *reader_started.lock().unwrap() = Some(Instant::now());
         }
         let no_response_bytes = matches!(stdout.fill_buf(), Ok([]));
         let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
@@ -335,7 +344,7 @@ fn run_command_with_watchdog(
                 let diagnostic = diagnostic_rx
                     .recv_timeout(Duration::from_millis(100))
                     .unwrap_or_default();
-                if validation && started.load(std::sync::atomic::Ordering::Acquire) {
+                if validation && started.lock().unwrap().is_some() {
                     let allocation_denied = diagnostic
                         .windows(b"memory allocation of ".len())
                         .any(|w| w == b"memory allocation of ")
@@ -381,7 +390,7 @@ fn run_command_with_watchdog(
                     "worker crashed: {status}"
                 )));
             }
-            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
+            if validation && started.lock().unwrap().is_none() {
                 bail!("validation worker unavailable before probe startup");
             }
             if let Some(error) = request_error {
@@ -413,7 +422,7 @@ fn run_command_with_watchdog(
             let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
-            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
+            if validation && started.lock().unwrap().is_none() {
                 bail!("validation worker memory limit before probe startup");
             }
             return Err(crate::failures::content(
@@ -424,11 +433,18 @@ fn run_command_with_watchdog(
                 },
             ));
         }
-        if start.elapsed() >= timeout {
+        let reading_expired = validation
+            && started
+                .lock()
+                .unwrap()
+                .is_some_and(|ack| ack.elapsed() >= timeout);
+        // Keep the overall deadline. Startup time cannot be counted as time
+        // spent reading: expiry without a full reading allowance is unavailable.
+        if start.elapsed() >= timeout || reading_expired {
             terminate(&mut child)?;
             child.wait()?;
-            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
-                bail!("validation worker timeout before probe startup");
+            if validation && !reading_expired {
+                bail!("validation worker timeout without full reading allowance");
             }
             let prefix = if request.projection.is_some() || request.readback.is_some() {
                 "PROJECTION_RESOURCE_LIMIT: "
@@ -640,10 +656,64 @@ mod tests {
     }
 
     #[test]
-    fn validation_requires_start_ack_and_reports_resource_caps_only_after_start() {
+    fn delayed_validation_ack_preserves_reading_allowance_and_overall_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let response = directory.path().join("response");
+        write_frame(
+            std::fs::File::create(&response).unwrap(),
+            &Response {
+                pages: vec![],
+                error: None,
+                content_failure: false,
+            },
+        )
+        .unwrap();
+        let request = Request {
+            path: "index".into(),
+            pdfium: None,
+            office: None,
+            projection: None,
+            readback: None,
+            validation: Some(ValidationJob {
+                row: crate::index::ScanRow {
+                    doc_id: "doc".into(),
+                    path: "source.txt".into(),
+                    size: 1,
+                    mtime: String::new(),
+                    hash: "hash".into(),
+                    generation: "generation".into(),
+                },
+            }),
+        };
+        // Delayed startup is followed by a healthy read within the deadline.
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!(
+                "cat >/dev/null; /bin/sleep 0.3; printf V; /bin/sleep 0.1; /bin/cat '{}'",
+                response.display()
+            ),
+        ]);
+        assert!(
+            run_command(command, &request, Duration::from_secs(3), false)
+                .unwrap()
+                .is_empty()
+        );
+        // Very late acknowledgement cannot convert the overall deadline to damage.
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            "cat >/dev/null; /bin/sleep 0.3; printf V; /bin/sleep 2",
+        ]);
+        let error = run_command(command, &request, Duration::from_secs(1), false).unwrap_err();
+        assert!(!crate::failures::is_content(&error), "{error:#}");
+    }
+
+    #[test]
+    fn validation_requires_start_ack_and_full_reading_allowance_for_timeout_damage() {
         for (script, content) in [
             ("/bin/sleep 1", false),
-            ("printf V; /bin/sleep 1", true),
+            ("/bin/sleep 0.05; printf V; /bin/sleep 1", false),
             ("exit 1", false),
             ("printf V; exit 1", false),
         ] {

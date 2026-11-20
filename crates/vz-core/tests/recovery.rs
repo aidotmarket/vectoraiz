@@ -960,6 +960,29 @@ async fn damaged_token_first_third_is_bounded_and_rebuilds_only_one_document() {
 
 #[tokio::test]
 async fn markerless_legacy_index_retains_every_row_when_worker_is_unavailable() {
+    // Run from a private executable directory so hiding the worker cannot race
+    // any other test or job using Cargo's shared build executable.
+    if std::env::var_os("VZ_PRIVATE_WORKER_TEST").is_none() {
+        let private = tempfile::tempdir().unwrap();
+        let executable = private
+            .path()
+            .join(std::env::current_exe().unwrap().file_name().unwrap());
+        std::fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let worker = vz_core::worker::executable().unwrap();
+        std::fs::copy(&worker, private.path().join(worker.file_name().unwrap())).unwrap();
+        let status = std::process::Command::new(executable)
+            .args([
+                "--exact",
+                "markerless_legacy_index_retains_every_row_when_worker_is_unavailable",
+                "--nocapture",
+            ])
+            .env("VZ_PRIVATE_WORKER_TEST", "1")
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+
     use vz_core::{active_index, engine::Engines};
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let assets = repo.join(".assets");
@@ -1048,6 +1071,13 @@ async fn markerless_legacy_index_retains_every_row_when_worker_is_unavailable() 
         assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
     }
     std::fs::remove_dir_all(data.path().join(".vz-validation")).unwrap();
+    let external = data.path().with_file_name(format!(
+        ".{}.vz-validation",
+        data.path().file_name().unwrap().to_string_lossy()
+    ));
+    if external.exists() {
+        std::fs::remove_dir_all(external).unwrap();
+    }
     let before = snapshot();
     let error = active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
         .await

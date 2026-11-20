@@ -276,30 +276,28 @@ struct ValidationMarker {
     needs_ocr_pages: Vec<u32>,
 }
 
-fn generation_fingerprint(path: &Path) -> Option<Vec<(std::path::PathBuf, u64, u128)>> {
+fn generation_fingerprint(path: &Path) -> Result<Option<Vec<(std::path::PathBuf, u64, u128)>>> {
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(path) {
-        let entry = entry.ok()?;
+        let entry = entry?;
         if entry.file_type().is_dir() {
             continue;
         }
         if !entry.file_type().is_file() {
-            return None;
+            return Ok(None);
         }
-        let metadata = entry.metadata().ok()?;
+        let metadata = entry.metadata()?;
         files.push((
-            entry.path().strip_prefix(path).ok()?.to_owned(),
+            entry.path().strip_prefix(path)?.to_owned(),
             metadata.len(),
             metadata
-                .modified()
-                .ok()?
-                .duration_since(std::time::UNIX_EPOCH)
-                .ok()?
+                .modified()?
+                .duration_since(std::time::UNIX_EPOCH)?
                 .as_nanos(),
         ));
     }
     files.sort();
-    Some(files)
+    Ok(Some(files))
 }
 
 #[derive(Debug)]
@@ -324,17 +322,21 @@ pub(crate) async fn validate_generation(
 ) -> Result<Option<Vec<u32>>> {
     let root = root.to_owned();
     let row = row.clone();
-    tokio::task::spawn_blocking(move || validated_generation(&root, &row, write_marker))
-        .await
-        .context("generation validation supervisor unavailable")
-        .and_then(|result| result)
-        .map_err(|error| error.context(ValidationUnavailable))
+    let executable = worker::executable()?;
+    tokio::task::spawn_blocking(move || {
+        validated_generation(&root, &row, write_marker, &executable)
+    })
+    .await
+    .context("generation validation supervisor unavailable")
+    .and_then(|result| result)
+    .map_err(|error| error.context(ValidationUnavailable))
 }
 
 fn validated_generation(
     root: &Path,
     row: &ScanRow,
     write_marker: bool,
+    executable: &Path,
 ) -> Result<Option<Vec<u32>>> {
     if row.generation.is_empty()
         || !row
@@ -342,21 +344,43 @@ fn validated_generation(
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        return supervised_probe(root, row);
+        return supervised_probe(root, row, executable);
     }
     let generation = root.join("generations").join(&row.generation);
-    let Some(files) = generation_fingerprint(&generation) else {
-        return supervised_probe(root, row);
+    let files = match generation_fingerprint(&generation) {
+        Ok(Some(files)) => files,
+        Ok(None) => return Ok(None),
+        Err(error)
+            if error.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            }) =>
+        {
+            return Ok(None)
+        }
+        Err(error) => return Err(error),
     };
-    let cache = root.join(".vz-validation");
+    let legacy_cache = root.join(".vz-validation");
+    let cache = if write_marker {
+        legacy_cache.clone()
+    } else {
+        reuse_validation_cache(root)
+    };
+    // A pre-existing in-tree marker can still be read without changing review bytes.
+    let legacy_ready = legacy_cache.exists() && crate::private_fs::directory(&legacy_cache).is_ok();
     // Never read markers through a symlink or an insecure directory. Failure
     // only disables caching; validated content remains publishable.
-    let cache_ready =
-        (write_marker || cache.exists()) && crate::private_fs::directory(&cache).is_ok();
+    let cache_ready = crate::private_fs::directory(&cache).is_ok();
     let marker_path = cache.join(format!("{}.json", row.generation));
     if let Some(marker) = cache_ready
         .then(|| std::fs::read(&marker_path).ok())
         .flatten()
+        .or_else(|| {
+            legacy_ready
+                .then(|| std::fs::read(legacy_cache.join(format!("{}.json", row.generation))).ok())
+                .flatten()
+        })
         .and_then(|bytes| serde_json::from_slice::<ValidationMarker>(&bytes).ok())
     {
         if marker.version == 2
@@ -368,11 +392,11 @@ fn validated_generation(
             return Ok(Some(marker.needs_ocr_pages));
         }
     }
-    let Some(status) = supervised_probe(root, row)? else {
+    let Some(status) = supervised_probe(root, row, executable)? else {
         return Ok(None);
     };
     anyhow::ensure!(
-        generation_fingerprint(&generation).as_ref() == Some(&files),
+        generation_fingerprint(&generation)?.as_ref() == Some(&files),
         "generation changed during validation; retry scan"
     );
     let marker = ValidationMarker {
@@ -383,7 +407,7 @@ fn validated_generation(
         files,
         needs_ocr_pages: status.clone(),
     };
-    if cache_ready && write_marker {
+    if cache_ready {
         // A marker is an optimization, never part of validation success.
         let _ = (|| -> Result<()> {
             let temporary_path = cache.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
@@ -405,6 +429,20 @@ fn validated_generation(
     Ok(Some(status))
 }
 
+/// Reuse markers live outside the tree bound by version-1 listing reviews.
+fn reuse_validation_cache(root: &Path) -> std::path::PathBuf {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_owned());
+    let root = if root.file_name().is_some_and(|name| name == ".vz-scan") {
+        root.parent().unwrap_or(&root)
+    } else {
+        &root
+    };
+    root.with_file_name(format!(
+        ".{}.vz-validation",
+        root.file_name().unwrap_or_default().to_string_lossy()
+    ))
+}
+
 /// Keep an already validated generation warm across its publication rename.
 /// Cache movement is best-effort, just like initial marker persistence.
 pub(crate) fn install_validation_marker(from: &Path, to: &Path, generation: &str) {
@@ -421,7 +459,7 @@ pub(crate) fn install_validation_marker(from: &Path, to: &Path, generation: &str
 
 const VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn supervised_probe(root: &Path, row: &ScanRow) -> Result<Option<Vec<u32>>> {
+fn supervised_probe(root: &Path, row: &ScanRow, executable: &Path) -> Result<Option<Vec<u32>>> {
     let request = worker::Request {
         path: root.to_owned(),
         pdfium: None,
@@ -430,7 +468,7 @@ fn supervised_probe(root: &Path, row: &ScanRow) -> Result<Option<Vec<u32>>> {
         readback: None,
         validation: Some(worker::ValidationJob { row: row.clone() }),
     };
-    match worker::run(&worker::executable()?, &request, VALIDATION_TIMEOUT) {
+    match worker::run(executable, &request, VALIDATION_TIMEOUT) {
         Ok(pages) => Ok(Some(pages.into_iter().map(|page| page.page).collect())),
         Err(error) if crate::failures::is_content(&error) => Ok(None),
         Err(error) => Err(error),
@@ -458,9 +496,7 @@ pub fn validation_worker(request: &worker::Request) -> Result<Vec<crate::pipelin
         .block_on(
             std::panic::AssertUnwindSafe(probe_generation(&request.path, &job.row)).catch_unwind(),
         )
-        .ok()
-        .flatten()
-        .ok_or_else(|| crate::failures::content("unreadable generation"))?;
+        .map_err(|_| crate::failures::content("generation reader panicked"))??;
     Ok(doc
         .needs_ocr_pages
         .into_iter()
@@ -472,51 +508,109 @@ pub fn validation_worker(request: &worker::Request) -> Result<Vec<crate::pipelin
         .collect())
 }
 
-async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
+fn validation_io_error(error: std::io::Error) -> anyhow::Error {
+    match error.kind() {
+        std::io::ErrorKind::NotFound
+        | std::io::ErrorKind::UnexpectedEof
+        | std::io::ErrorKind::InvalidData => {
+            crate::failures::content(format!("damaged generation storage: {error}"))
+        }
+        _ => error.into(),
+    }
+}
+fn validation_error(error: impl Into<anyhow::Error>) -> anyhow::Error {
+    let error = error.into();
+    if error.chain().any(|cause| {
+        cause.downcast_ref::<std::io::Error>().is_some_and(|e| {
+            !matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::InvalidData
+            )
+        })
+    }) {
+        return error;
+    }
+    crate::failures::content(format!("unreadable generation: {error:#}"))
+}
+
+fn validation_io<T>(result: std::io::Result<T>) -> Result<T> {
+    result.map_err(validation_io_error)
+}
+
+async fn probe_generation(root: &Path, row: &ScanRow) -> Result<Document> {
     if row.generation.is_empty()
         || !row
             .generation
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        return None;
+        return Err(crate::failures::content("unreadable generation"));
     }
     let generation = root.join("generations").join(&row.generation);
-    let doc: Document =
-        serde_json::from_slice(&std::fs::read(generation.join("document.json")).ok()?).ok()?;
-    if doc.path != row.path || doc.sha256 != row.hash || !generation.join("lance").is_dir() {
-        return None;
+    let doc: Document = serde_json::from_slice(&validation_io(std::fs::read(
+        generation.join("document.json"),
+    ))?)
+    .map_err(|_| crate::failures::content("invalid document JSON"))?;
+    if doc.path != row.path
+        || doc.sha256 != row.hash
+        || !validation_io(std::fs::symlink_metadata(generation.join("lance")))?.is_dir()
+    {
+        return Err(crate::failures::content("unreadable generation"));
     }
     // Validate storage before any Lance query, including staged recovery and
     // failed rebuilds. Damaged fragments can panic inside the Lance reader.
     {
         let table = generation.join("lance/chunks.lance");
-        let manifest = std::fs::read_dir(table.join("_versions"))
-            .ok()?
-            .filter_map(Result::ok)
+        let manifest = validation_io(std::fs::read_dir(table.join("_versions")))?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(validation_io_error)?
+            .into_iter()
             .filter_map(|e| {
                 Some((
                     e.path().file_stem()?.to_str()?.parse::<u64>().ok()?,
                     e.path(),
                 ))
             })
-            .max_by_key(|(version, _)| *version)?
+            .max_by_key(|(version, _)| *version)
+            .context(crate::failures::content("missing manifest"))?
             .1;
-        let bytes = std::fs::read(manifest).ok()?;
+        let bytes = validation_io(std::fs::read(manifest))?;
         if bytes.len() < 20 || !bytes.ends_with(b"LANC") {
-            return None;
+            return Err(crate::failures::content("unreadable generation"));
         }
-        let offset = u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().ok()?);
-        let offset = usize::try_from(offset).ok()?;
-        let message = bytes.get(offset..bytes.len() - 16)?;
-        let length = u32::from_le_bytes(message.get(..4)?.try_into().ok()?) as usize;
-        let message = message.get(4..)?;
+        let offset = u64::from_le_bytes(
+            bytes[bytes.len() - 16..bytes.len() - 8]
+                .try_into()
+                .ok()
+                .context(crate::failures::content("invalid manifest"))?,
+        );
+        let offset = usize::try_from(offset)
+            .ok()
+            .context(crate::failures::content("invalid offset"))?;
+        let message = bytes
+            .get(offset..bytes.len() - 16)
+            .context(crate::failures::content("invalid manifest range"))?;
+        let length = u32::from_le_bytes(
+            message
+                .get(..4)
+                .context(crate::failures::content("invalid manifest length"))?
+                .try_into()
+                .ok()
+                .context(crate::failures::content("invalid manifest"))?,
+        ) as usize;
+        let message = message
+            .get(4..)
+            .context(crate::failures::content("invalid manifest body"))?;
         if length != message.len() {
-            return None;
+            return Err(crate::failures::content("unreadable generation"));
         }
         use prost::Message;
-        let manifest = lance_table::format::pb::Manifest::decode(message).ok()?;
-        let manifest = lance_table::format::Manifest::try_from(manifest).ok()?;
+        let manifest = lance_table::format::pb::Manifest::decode(message)
+            .map_err(|_| crate::failures::content("invalid manifest"))?;
+        let manifest = lance_table::format::Manifest::try_from(manifest)
+            .map_err(|_| crate::failures::content("invalid manifest"))?;
         let mut found_data = false;
         for fragment in manifest.fragments.iter() {
             for file in &fragment.files {
@@ -525,35 +619,38 @@ async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
                     .components()
                     .any(|c| !matches!(c, std::path::Component::Normal(_)))
                 {
-                    return None;
+                    return Err(crate::failures::content("unreadable generation"));
                 }
                 found_data = true;
                 if !readable_lance_node(
                     &table.join("data").join(relative),
                     file.file_size_bytes.get().map(|size| size.get()),
                     (file.file_major_version, file.file_minor_version),
-                ) {
-                    return None;
+                )? {
+                    return Err(crate::failures::content("unreadable generation"));
                 }
                 decode_lance_node(&table.join("data").join(relative)).await?;
             }
         }
         if !found_data {
-            return None;
+            return Err(crate::failures::content("unreadable generation"));
         }
     }
     validate_full_text(&generation.join("lance/chunks.lance")).await?;
-    let chunk = doc.chunks.first()?;
+    let chunk = doc
+        .chunks
+        .first()
+        .context(crate::failures::content("missing chunks"))?;
     let query = chunk.text.split_whitespace().next().unwrap_or("probe");
     crate::storage::search_generation(&generation.join("lance"), query, &chunk.embedding, 1)
         .await
-        .ok()?;
-    Some(doc)
+        .map_err(validation_error)?;
+    Ok(doc)
 }
 
 // Load every partition and decode every posting, including positions. A query
 // of a single token (or all text with a result limit) cannot establish this.
-async fn validate_full_text(table: &Path) -> Option<()> {
+async fn validate_full_text(table: &Path) -> Result<()> {
     use lance_core::cache::LanceCache;
     use lance_index::scalar::{
         inverted::{InvertedPartition, TokenSetFormat},
@@ -562,38 +659,51 @@ async fn validate_full_text(table: &Path) -> Option<()> {
     };
     use std::sync::Arc;
     let mut found = false;
-    for entry in std::fs::read_dir(table.join("_indices")).ok()? {
-        let path = entry.ok()?.path();
-        if !path.is_dir() {
+    for entry in validation_io(std::fs::read_dir(table.join("_indices")))? {
+        let path = validation_io(entry)?.path();
+        if !validation_io(std::fs::symlink_metadata(&path))?.is_dir() {
             continue;
         }
-        let (store, directory) = lance_io::object_store::ObjectStore::from_uri(path.to_str()?)
-            .await
-            .ok()?;
+        let (store, directory) = lance_io::object_store::ObjectStore::from_uri(
+            path.to_str()
+                .context(crate::failures::content("invalid index path"))?,
+        )
+        .await
+        .map_err(validation_error)?;
         let cache = Arc::new(LanceCache::no_cache());
         let store = Arc::new(LanceIndexStore::new(store, directory, cache.clone()));
-        let metadata = store.open_index_file("metadata.lance").await.ok()?;
+        let metadata = store
+            .open_index_file("metadata.lance")
+            .await
+            .map_err(validation_error)?;
         let schema = metadata.schema();
-        let partitions: Vec<u64> = serde_json::from_str(schema.metadata.get("partitions")?).ok()?;
+        let partitions: Vec<u64> = serde_json::from_str(
+            schema
+                .metadata
+                .get("partitions")
+                .context(crate::failures::content("missing partitions"))?,
+        )
+        .map_err(validation_error)?;
         let format = schema
             .metadata
             .get("token_set_format")
             .map(|value| value.parse::<TokenSetFormat>())
             .transpose()
-            .ok()?
+            .map_err(validation_error)?
             .unwrap_or(TokenSetFormat::Arrow);
         // An empty vocabulary is valid (for example, stop words only).
         found = true;
         for id in partitions {
             InvertedPartition::load(store.clone(), id, None, &cache, format)
                 .await
-                .ok()?
+                .map_err(validation_error)?
                 .into_builder()
                 .await
-                .ok()?;
+                .map_err(validation_error)?;
         }
     }
-    found.then_some(())
+    anyhow::ensure!(found, crate::failures::content("missing full text index"));
+    Ok(())
 }
 
 // Reject corrupt indirect ranges before Lance splits them into read chunks.
@@ -603,6 +713,7 @@ struct BoundedFragmentIo {
     inner: lance_file::v2::LanceEncodingsIo,
     length: u64,
     small_file: Option<prost::bytes::Bytes>,
+    rejected_range: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 impl lance_encoding::EncodingsIo for BoundedFragmentIo {
     fn submit_request(
@@ -614,6 +725,8 @@ impl lance_encoding::EncodingsIo for BoundedFragmentIo {
             .iter()
             .any(|r| r.start > r.end || r.end > self.length)
         {
+            self.rejected_range
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             return Box::pin(std::future::ready(Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "fragment read outside file bounds",
@@ -633,7 +746,7 @@ impl lance_encoding::EncodingsIo for BoundedFragmentIo {
 
 // Use the same v2 reader/decoders as Lance search, with every column projected.
 // Decode the full document so damage in a later page cannot escape the probe.
-async fn decode_lance_node(path: &Path) -> Option<()> {
+async fn decode_lance_node(path: &Path) -> Result<()> {
     use lance_core::cache::LanceCache;
     use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
     use lance_file::v2::reader::{FileReader, FileReaderOptions};
@@ -643,27 +756,38 @@ async fn decode_lance_node(path: &Path) -> Option<()> {
         ReadBatchParams,
     };
     use std::sync::Arc;
-    let length = std::fs::metadata(path).ok()?.len();
+    let length = validation_io(std::fs::metadata(path))?.len();
     // Small fragments avoid per-buffer async I/O; large documents stay streamed.
     let small_file = if length <= 1024 * 1024 {
-        Some(prost::bytes::Bytes::from(std::fs::read(path).ok()?))
+        Some(prost::bytes::Bytes::from(validation_io(std::fs::read(
+            path,
+        ))?))
     } else {
         None
     };
-    let (store, path) = lance_io::object_store::ObjectStore::from_uri(path.to_str()?)
-        .await
-        .ok()?;
+    let (store, path) = lance_io::object_store::ObjectStore::from_uri(
+        path.to_str()
+            .context(crate::failures::content("invalid fragment path"))?,
+    )
+    .await
+    .map_err(validation_error)?;
     let config = SchedulerConfig::max_bandwidth(&store);
     let scheduler = ScanScheduler::new(store, config);
     let file = scheduler
         .open_file(&path, &CachedFileSize::unknown())
         .await
-        .ok()?;
-    let metadata = Arc::new(FileReader::read_all_metadata(&file).await.ok()?);
+        .map_err(validation_error)?;
+    let metadata = Arc::new(
+        FileReader::read_all_metadata(&file)
+            .await
+            .map_err(validation_error)?,
+    );
+    let rejected_range = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let io = BoundedFragmentIo {
         inner: lance_file::v2::LanceEncodingsIo::new(file),
         length,
         small_file,
+        rejected_range: rejected_range.clone(),
     };
     let reader = FileReader::try_open_with_file_metadata(
         Arc::new(io),
@@ -675,10 +799,10 @@ async fn decode_lance_node(path: &Path) -> Option<()> {
         FileReaderOptions::default(),
     )
     .await
-    .ok()?;
+    .map_err(validation_error)?;
     // Lance exposes a synchronous decoder for small local reads. Run it off
     // the runtime thread; it uses the same column/page decoders as search.
-    tokio::task::spawn_blocking(move || {
+    let decoded = tokio::task::spawn_blocking(move || {
         let batches = reader
             .read_stream_projected_blocking(
                 ReadBatchParams::RangeFull,
@@ -686,24 +810,42 @@ async fn decode_lance_node(path: &Path) -> Option<()> {
                 None,
                 FilterExpression::no_filter(),
             )
-            .ok()?;
+            .map_err(validation_error)?;
         for batch in batches {
-            let batch = batch.ok()?;
+            let batch = batch.map_err(validation_error)?;
             // Some decoders construct Arrow buffers without validating values.
             for column in batch.columns() {
-                column.to_data().validate_full().ok()?;
+                column.to_data().validate_full().map_err(validation_error)?;
             }
         }
-        Some(())
+        Ok(())
     })
     .await
-    .ok()?
+    .map_err(|error| {
+        if error.is_panic() {
+            crate::failures::content("fragment decoder panicked")
+        } else {
+            anyhow::Error::new(error)
+        }
+    })?;
+    // Lance converts its errors to Arrow I/O errors by stringifying them,
+    // losing InvalidData. Preserve our own confirmed structural rejection.
+    if rejected_range.load(std::sync::atomic::Ordering::Relaxed) {
+        return Err(crate::failures::content(
+            "fragment read outside file bounds",
+        ));
+    }
+    decoded
 }
 
 // Match the manifest's recorded fragment length as well as the LANC footer.
 // Unknown lengths conservatively rebuild rather than reuse unverified storage.
 // This rejects cheap structural failures before invoking the full Lance decoder.
-fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u32)) -> bool {
+fn readable_lance_node(
+    path: &Path,
+    expected_size: Option<u64>,
+    version: (u32, u32),
+) -> Result<bool> {
     use std::io::{Read, Seek, SeekFrom};
     (|| -> std::io::Result<bool> {
         if !std::fs::symlink_metadata(path)?.is_file() {
@@ -789,7 +931,7 @@ fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u
         }
         Ok(true)
     })()
-    .unwrap_or(false)
+    .map_err(validation_io_error)
 }
 
 pub async fn index(
@@ -1222,6 +1364,182 @@ fn validate_citations(text: &str, count: usize) -> Result<()> {
 mod tests {
     use super::*;
     include!("../tests/support/image_only_pdf.rs");
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn markerless_reuse_persists_outside_index_and_second_scan_spawns_no_workers() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let data = sandbox.path().join("index");
+        let source = sandbox.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for n in 0..4 {
+            std::fs::write(
+                source.join(format!("{n}.txt")),
+                format!("Healthy archive {n}"),
+            )
+            .unwrap();
+        }
+        crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        std::fs::remove_dir_all(data.join(".vz-validation")).unwrap();
+        let cache = reuse_validation_cache(&data);
+        if cache.exists() {
+            std::fs::remove_dir_all(&cache).unwrap();
+        }
+        let snapshot = || {
+            walkdir::WalkDir::new(&data)
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    (
+                        entry.path().strip_prefix(&data).unwrap().to_owned(),
+                        if entry.file_type().is_file() {
+                            std::fs::read(entry.path()).unwrap()
+                        } else {
+                            Vec::new()
+                        },
+                    )
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        };
+        let bound_tree = snapshot();
+        let real_worker = worker::executable().unwrap();
+        let count = sandbox.path().join("spawns");
+        let wrapper = sandbox.path().join("worker");
+        std::fs::write(
+            &wrapper,
+            format!(
+                "#!/bin/sh\necho spawn >> '{}'\nexec '{}'\n",
+                count.display(),
+                real_worker.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                worker::TEST_EXECUTABLE.with(|p| *p.borrow_mut() = None);
+            }
+        }
+        worker::TEST_EXECUTABLE.with(|p| *p.borrow_mut() = Some(wrapper));
+        let _reset = Reset;
+        let first = crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        assert_eq!((first.completed, first.skipped), (0, 4));
+        assert_eq!(std::fs::read_to_string(&count).unwrap().lines().count(), 4);
+        let second = crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        assert_eq!((second.completed, second.skipped), (0, 4));
+        assert_eq!(
+            std::fs::read_to_string(&count).unwrap().lines().count(),
+            4,
+            "second scan must spawn zero workers"
+        );
+        assert_eq!(
+            snapshot(),
+            bound_tree,
+            "version-1 review tree must stay identical"
+        );
+        assert!(!data.join(".vz-validation").exists());
+        assert_eq!(std::fs::read_dir(cache).unwrap().count(), 4);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn markerless_document_read_error_aborts_before_failed_rebuild_and_retains_publication() {
+        use std::os::unix::fs::PermissionsExt;
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let data = sandbox.path().join("index");
+        let source = sandbox.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let input = source.join("a.txt");
+        std::fs::write(&input, "Healthy archive").unwrap();
+        crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        let rows = ScanRow::read(&State::review_connection(&data).unwrap(), "documents").unwrap();
+        std::fs::remove_dir_all(data.join(".vz-validation")).unwrap();
+        let cache = reuse_validation_cache(&data);
+        if cache.exists() {
+            std::fs::remove_dir_all(cache).unwrap();
+        }
+        // Empty source content cannot rebuild the healthy published generation.
+        std::fs::write(&input, "").unwrap();
+        let document = data
+            .join("generations")
+            .join(&rows[0].generation)
+            .join("document.json");
+        let bytes = std::fs::read(&document).unwrap();
+        let permissions = std::fs::metadata(&document).unwrap().permissions();
+        std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0)).unwrap();
+        let database = std::fs::read(data.join("state.sqlite")).unwrap();
+        let result =
+            crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {}).await;
+        std::fs::set_permissions(&document, permissions).unwrap();
+        let error = result.unwrap_err();
+        assert!(
+            format!("{error:#}").contains("infrastructure unavailable"),
+            "{error:#}"
+        );
+        assert_eq!(
+            ScanRow::read(&State::review_connection(&data).unwrap(), "documents").unwrap(),
+            rows
+        );
+        assert_eq!(std::fs::read(data.join("state.sqlite")).unwrap(), database);
+        assert_eq!(std::fs::read(document).unwrap(), bytes);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn symlinked_identical_document_prevents_unchanged_skip() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let sandbox = tempfile::tempdir().unwrap();
+        let data = sandbox.path().join("index");
+        let source = sandbox.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("a.txt"), "Healthy archive").unwrap();
+        crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        let row = ScanRow::read(&State::review_connection(&data).unwrap(), "documents")
+            .unwrap()
+            .remove(0);
+        let document = data
+            .join("generations")
+            .join(&row.generation)
+            .join("document.json");
+        let copy = sandbox.path().join("copy.json");
+        std::fs::rename(&document, &copy).unwrap();
+        std::os::unix::fs::symlink(copy, document).unwrap();
+        let result = crate::active_index::index_explicit(&data, &source, &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        assert_eq!((result.completed, result.skipped, result.failed), (1, 0, 0));
+        assert_ne!(
+            ScanRow::read(&State::review_connection(&data).unwrap(), "documents").unwrap()[0]
+                .generation,
+            row.generation
+        );
+    }
 
     #[tokio::test]
     async fn image_only_pdf_is_a_named_content_failure_alongside_good_files() {
