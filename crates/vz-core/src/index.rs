@@ -269,7 +269,6 @@ pub(crate) struct ScanOutcome {
     pub source: Option<std::path::PathBuf>,
     pub seen: HashSet<String>,
     pub succeeded: HashSet<String>,
-    pub publishable: HashSet<String>,
     pub failed_content: HashSet<String>,
     pub failed_infrastructure: HashSet<String>,
     pub stats: Progress,
@@ -281,11 +280,13 @@ pub(crate) struct ScanOutcome {
     pub damaged: HashSet<String>,
     pub retain: HashSet<String>,
     pub seal_updates: Vec<(String, Seal)>,
+    pub recipe_blocked: bool,
 }
 
 pub(crate) async fn scan(
     state: &mut ScanWorkspace,
     folder: &Path,
+    publication_root: &Path,
     engines: &Engines,
     assets: &Path,
     mut progress: impl FnMut(&Progress),
@@ -347,6 +348,11 @@ pub(crate) async fn scan(
         source: Some(folder.clone()),
         ..Default::default()
     };
+    let recipe_change = publication_root != state.published_root;
+    let generation_directory_error = crate::storage::generation_entries(publication_root)
+        .err()
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
+    let mut keep_staged = HashSet::new();
     for path in files {
         let path_text = path
             .to_str()
@@ -359,6 +365,15 @@ pub(crate) async fn scan(
         let mut unknown = false;
         let mut damaged = false;
         let result: Result<bool> = async {
+            if let Some(error) = &generation_directory_error {
+                unknown = true;
+                outcome.retain.insert(path_text.clone());
+                if recipe_change {
+                    outcome.recipe_blocked = true;
+                    keep_staged.insert(path_text.clone());
+                }
+                return Err(anyhow::anyhow!("generation directory unavailable: {error}"));
+            }
             let metadata =
                 std::fs::metadata(&path).map_err(|e| crate::failures::source_io(e.into()))?;
             let mtime = format!("{:?}", metadata.modified()?);
@@ -408,12 +423,12 @@ pub(crate) async fn scan(
                 row.size = metadata.len();
                 row.mtime = mtime;
                 if staged {
-                    outcome.publishable.insert(path_text.clone());
                     let db = &state.state.as_ref().unwrap().db;
                     db.execute(
                         "UPDATE scan_documents SET size=?1,mtime=?2 WHERE path=?3",
                         params![row.size, row.mtime, row.path],
                     )?;
+                    keep_staged.insert(path_text.clone());
                 } else {
                     outcome.unchanged.push(row);
                 }
@@ -421,6 +436,13 @@ pub(crate) async fn scan(
             }
             if let Some(error) = staged_error.filter(|_| !damaged) {
                 unknown = true;
+                outcome.retain.insert(path_text.clone());
+                if recipe_change {
+                    // A private row cannot substitute for the old recipe's
+                    // published row until its generation can be observed.
+                    outcome.recipe_blocked = true;
+                    keep_staged.insert(path_text.clone());
+                }
                 return Err(anyhow::Error::new(error).context("staged generation unavailable"));
             }
             let library = assets.join(if cfg!(windows) {
@@ -500,7 +522,10 @@ pub(crate) async fn scan(
                 chunks,
             };
             let staged = state.writable()?;
-            let generation = staged.stage(&doc).await?;
+            let (generation, warning) = staged.stage_with_seal_warning(&doc).await?;
+            if let Some(error) = warning {
+                stats.seal_warning(&path, &error);
+            }
             staged.commit(&doc, &mtime, &generation)?;
             stats.needs_ocr_pages = doc.needs_ocr_pages.clone();
             Ok(true)
@@ -510,7 +535,7 @@ pub(crate) async fn scan(
             Ok(changed) => {
                 outcome.succeeded.insert(path_text.clone());
                 if changed {
-                    outcome.publishable.insert(path_text.clone());
+                    keep_staged.insert(path_text.clone());
                     stats.completed += 1;
                 } else {
                     stats.skipped += 1;
@@ -535,7 +560,15 @@ pub(crate) async fn scan(
                 // Unknown storage is reported without making it a revocation
                 // or refusing publication of the rest of the walk.
                 if !unknown {
-                    if crate::failures::is_content(&error) {
+                    let readback_failed = error.is::<crate::storage::CandidateReadback>();
+                    if readback_failed
+                        && !damaged
+                        && !outcome.changed.contains(&path_text)
+                        && state.baseline_rows.contains_key(&path_text)
+                    {
+                        outcome.retain.insert(path_text.clone());
+                        outcome.recipe_blocked |= recipe_change;
+                    } else if readback_failed || crate::failures::is_content(&error) {
                         outcome.failed_content.insert(path_text.clone());
                     } else {
                         outcome.failed_infrastructure.insert(path_text.clone());
@@ -563,7 +596,7 @@ pub(crate) async fn scan(
         }
         progress(&stats);
     }
-    state.retain(&outcome.publishable)?;
+    state.retain(&keep_staged)?;
     outcome.stats = stats;
     Ok(outcome)
 }

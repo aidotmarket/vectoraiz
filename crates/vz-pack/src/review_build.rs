@@ -978,6 +978,39 @@ mod tests {
         drop(guard);
         drop(access);
         assert_eq!(search().hits.len(), 2);
+
+        let lance = document.with_file_name("lance");
+        let saved = f.root.join("saved-lance");
+        std::fs::rename(&lance, &saved).unwrap();
+        let result = search();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.unavailable.len(), 1);
+        assert_eq!(result.unavailable[0].generation, generation);
+        let error = crate::review_store::NativeIndexFence::candidate_documents(&library, &source)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains("generation Lance directory unavailable"),
+            "{error:#}"
+        );
+        let fresh_id = Uuid::new_v4();
+        let guard = store.lock_native(&f.policy, fresh_id, &library).unwrap();
+        let error = build(
+            &guard,
+            &source,
+            fresh_id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("generation Lance directory unavailable"),
+            "{error:#}"
+        );
+        drop(guard);
+        std::fs::rename(saved, lance).unwrap();
+        assert_eq!(search().hits.len(), 2);
     }
 
     #[test]
@@ -1894,7 +1927,7 @@ mod tests {
                 };
                 let generation = Uuid::new_v4().to_string();
                 let directory = index.join("generations").join(&generation);
-                std::fs::create_dir(&directory).unwrap();
+                std::fs::create_dir_all(directory.join("lance")).unwrap();
                 std::fs::write(
                     directory.join("document.json"),
                     serde_json::to_vec(&doc).unwrap(),
@@ -2007,7 +2040,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = f.root.join("index/generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -2243,7 +2276,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -2361,7 +2394,7 @@ mod tests {
             };
             let generation = Uuid::new_v4().to_string();
             let directory = index.join("generations").join(&generation);
-            std::fs::create_dir(&directory).unwrap();
+            std::fs::create_dir_all(directory.join("lance")).unwrap();
             std::fs::write(
                 directory.join("document.json"),
                 serde_json::to_vec(&doc).unwrap(),
@@ -2452,7 +2485,7 @@ mod tests {
             };
             let generation = Uuid::new_v4().to_string();
             let directory = index.join("generations").join(&generation);
-            std::fs::create_dir(&directory).unwrap();
+            std::fs::create_dir_all(directory.join("lance")).unwrap();
             std::fs::write(
                 directory.join("document.json"),
                 serde_json::to_vec(&doc).unwrap(),
@@ -2509,7 +2542,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -2637,7 +2670,7 @@ mod tests {
         let mut state = State::open(&index).unwrap();
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),

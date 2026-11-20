@@ -50,16 +50,19 @@ impl Fixture {
     }
 
     async fn scan(&self) -> Progress {
+        self.try_scan(|_| {}).await.unwrap()
+    }
+
+    async fn try_scan(&self, progress: impl FnMut(&Progress)) -> anyhow::Result<Progress> {
         active_index::reindex(
             &self.library(),
             &self.source(),
             &self.engines,
             &self.assets,
-            |_| {},
+            progress,
             || false,
         )
         .await
-        .unwrap()
     }
 
     fn rows(&self) -> Vec<ScanRow> {
@@ -87,6 +90,117 @@ impl Fixture {
                 .collect::<Vec<_>>(),
             unavailable,
         );
+    }
+}
+
+fn private_rows(library: &Path) -> (PathBuf, Vec<ScanRow>) {
+    let root = fs::read_dir(library.join("indexes"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|root| root.join("scan.sqlite").is_file())
+        .unwrap();
+    let db = rusqlite::Connection::open(root.join("scan.sqlite")).unwrap();
+    let rows = ScanRow::read(&db, "scan_documents").unwrap();
+    (root, rows)
+}
+
+#[tokio::test]
+async fn unreadable_private_seal_defers_recipe_publication_and_keeps_old_hits() {
+    let mut f = Fixture::new().await;
+    let old_root = f.root();
+    let old_rows = f.rows();
+    f.engines.recipe.model.push_str("-new");
+    let locked_source = deny_read(&f.source().join("b.txt"));
+    assert!(f.try_scan(|_| {}).await.is_err());
+    drop(locked_source);
+    assert_eq!(f.root(), old_root);
+    assert_eq!(f.rows(), old_rows);
+    let (candidate, rows) = private_rows(&f.library());
+    assert_eq!(rows.len(), 1);
+    assert!(rows[0].path.ends_with("a.txt"));
+
+    let access = deny_read(&path(&candidate, &rows[0].generation));
+    let mut last = Progress::default();
+    let error = f
+        .try_scan(|progress| last = progress.clone())
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("staged generation unavailable"));
+    assert_eq!(
+        (last.completed, last.failed, last.infrastructure_failed),
+        (1, 1, 0)
+    );
+    assert_eq!(f.root(), old_root);
+    assert_eq!(f.rows(), old_rows);
+    f.assert_search(2, &[]).await;
+    assert!(private_rows(&f.library()).1.contains(&rows[0]));
+    drop(access);
+    assert_reused(f.scan().await);
+    assert_eq!(f.root(), candidate.canonicalize().unwrap());
+    f.assert_search(2, &[]).await;
+}
+
+#[tokio::test]
+async fn staging_readback_errors_and_crashes_are_candidate_failures() {
+    use crate::storage::{ReadbackProbe, READBACK_PROBE};
+
+    for crash in [false, true] {
+        let mut f = Fixture::new().await;
+        let old_root = f.root();
+        let old_rows = f.rows();
+        let source = f.source().canonicalize().unwrap();
+        fs::write(source.join("c.txt"), "Orbital archive c.").unwrap();
+        fs::write(source.join("d.txt"), "Orbital archive d.").unwrap();
+        READBACK_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(ReadbackProbe {
+                source: source.join("c.txt"),
+                crash,
+            });
+        });
+        let result = f.try_scan(|_| {}).await;
+        READBACK_PROBE.with(|probe| *probe.borrow_mut() = None);
+        let stats = result.unwrap();
+        assert_eq!(
+            (
+                stats.completed,
+                stats.skipped,
+                stats.failed,
+                stats.infrastructure_failed
+            ),
+            (1, 2, 1, 0)
+        );
+        assert_eq!(&f.rows()[..2], old_rows.as_slice());
+        assert!(f.rows()[2].path.ends_with("d.txt"));
+        f.assert_search(3, &[]).await;
+
+        let old_rows = f.rows();
+        f.engines.recipe.model.push_str("-new");
+        let mut last = Progress::default();
+        READBACK_PROBE.with(|probe| {
+            *probe.borrow_mut() = Some(ReadbackProbe {
+                source: source.join("a.txt"),
+                crash,
+            });
+        });
+        let result = f.try_scan(|progress| last = progress.clone()).await;
+        READBACK_PROBE.with(|probe| *probe.borrow_mut() = None);
+        let error = result.unwrap_err();
+        assert!(format!("{error:#}").contains(if crash {
+            "worker crashed"
+        } else {
+            "staged generation does not match its source"
+        }));
+        assert_eq!(
+            (last.completed, last.failed, last.infrastructure_failed),
+            (3, 1, 0)
+        );
+        assert_eq!(f.root(), old_root);
+        assert_eq!(f.rows(), old_rows);
+        assert_eq!(private_rows(&f.library()).1.len(), 3);
+        f.assert_search(3, &[]).await;
+        let retry = f.scan().await;
+        assert_eq!((retry.completed, retry.skipped, retry.failed), (1, 3, 0));
+        f.assert_search(4, &[]).await;
     }
 }
 
@@ -143,6 +257,49 @@ async fn missing_and_malformed_seals_adopt_without_reembedding_then_stay_warm() 
     assert!(matches!(origin(&root, &rows[0]), Origin::Adopted));
     assert_eq!(counters().0, workers);
     assert_eq!(f.rows(), rows);
+}
+
+#[tokio::test]
+async fn adoption_keeps_saved_ocr_omissions() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let row = &f.rows()[1];
+    let state = State::open(&root).unwrap();
+    let mut document = state.document(&row.generation).unwrap();
+    drop(state);
+    // Apple Vision runs on macOS. Seed the omission metadata a Windows
+    // publication of a mixed PDF would have persisted.
+    document.kind = "pdf".into();
+    document.pages = 2;
+    document.needs_ocr_pages = vec![2];
+    fs::write(
+        root.join("generations")
+            .join(&row.generation)
+            .join("document.json"),
+        serde_json::to_vec(&document).unwrap(),
+    )
+    .unwrap();
+    let recipe = active_index::recipe_id(&f.engines.recipe).unwrap();
+    Seal::validated(&root, &row.generation, &recipe, &document)
+        .unwrap()
+        .write(&root)
+        .unwrap();
+
+    let workers = counters().0;
+    for remove_seal in [false, true, false] {
+        if remove_seal {
+            fs::remove_file(path(&root, &row.generation)).unwrap();
+        }
+        let stats = f.scan().await;
+        assert_eq!(stats.needs_ocr_pages, [2]);
+        assert_eq!(
+            stats.reason.as_deref(),
+            Some("needs OCR: pages [2] skipped")
+        );
+        assert_reused(stats);
+        assert_eq!(counters().0, workers);
+        assert_eq!(&f.rows()[1], row);
+    }
 }
 
 fn edit_seal(root: &Path, row: &ScanRow, field: &str, value: serde_json::Value) {
@@ -465,6 +622,11 @@ fn restrict_seal_directory(dir: &Path, readonly: bool) {
 
 #[cfg(windows)]
 fn restrict_seal_directory(dir: &Path, readonly: bool) {
+    set_directory_access(dir, if readonly { "FRFX" } else { "FA" });
+}
+
+#[cfg(windows)]
+fn set_directory_access(dir: &Path, rights: &str) {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::{
         Foundation::LocalFree,
@@ -474,8 +636,12 @@ fn restrict_seal_directory(dir: &Path, readonly: bool) {
         },
     };
     let path: Vec<u16> = dir.as_os_str().encode_wide().chain(Some(0)).collect();
-    let rights = if readonly { "FRFX" } else { "FA" };
-    let sddl: Vec<u16> = format!("D:P(A;;{rights};;;WD)\0").encode_utf16().collect();
+    let sddl = if rights.is_empty() {
+        "D:P\0".to_owned()
+    } else {
+        format!("D:P(A;;{rights};;;WD)\0")
+    };
+    let sddl: Vec<u16> = sddl.encode_utf16().collect();
     let mut descriptor = std::ptr::null_mut();
     unsafe {
         assert_ne!(
@@ -495,6 +661,168 @@ fn restrict_seal_directory(dir: &Path, readonly: bool) {
         LocalFree(descriptor);
         assert_ne!(result, 0);
     }
+}
+
+#[tokio::test]
+async fn read_only_seals_defer_cleanup_and_install_without_blocking_search() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let rows = f.rows();
+    let directory = root.join(DIRECTORY);
+    let orphan = path(&root, "orphan");
+    let temp = directory.join("seal-leftover.tmp");
+    let retired = path(&root, &rows[1].generation);
+    for leftover in [&orphan, &temp] {
+        fs::write(leftover, b"leftover").unwrap();
+    }
+    #[cfg(windows)]
+    let locks = [&orphan, &temp, &retired].map(|path| deny_read(path));
+    restrict_seal_directory(&directory, true);
+
+    fs::remove_file(f.source().join("b.txt")).unwrap();
+    fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
+    let first = f.scan().await;
+    assert_eq!((first.completed, first.skipped, first.failed), (1, 1, 0));
+    assert_eq!(first.seal_warnings.len(), 1);
+    assert!(first.seal_warnings[0].contains("c.txt"));
+    assert_eq!(f.rows()[0], rows[0]);
+    assert!(f.rows()[1].path.ends_with("c.txt"));
+    assert!(!root.join("generations").join(&rows[1].generation).exists());
+    // Both State::open (inside search) and the next scan retry cleanup.
+    f.assert_search(2, &[]).await;
+    let second = f.scan().await;
+    assert_eq!(second.seal_warnings.len(), 1);
+    assert_reused(second);
+    for leftover in [&orphan, &temp, &retired] {
+        assert!(leftover.exists());
+    }
+
+    #[cfg(windows)]
+    drop(locks);
+    restrict_seal_directory(&directory, false);
+    f.assert_search(2, &[]).await;
+    for leftover in [&orphan, &temp, &retired] {
+        assert!(!leftover.exists());
+    }
+    assert_reused(f.scan().await);
+    assert!(matches!(origin(&root, &f.rows()[1]), Origin::Adopted));
+}
+
+fn link_directory(target: &Path, link: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(target, link).unwrap();
+}
+
+#[tokio::test]
+async fn linked_generations_parent_is_never_enumerated_by_recovery() {
+    for scan_first in [true, false] {
+        let f = Fixture::new().await;
+        let root = f.root();
+        let generations = root.join("generations");
+        let outside = f.temp.path().join("outside");
+        fs::rename(&generations, &outside).unwrap();
+        fs::write(outside.join("unreferenced-file"), b"keep").unwrap();
+        fs::create_dir(outside.join("unreferenced-tree")).unwrap();
+        fs::write(outside.join("unreferenced-tree/keep"), b"keep").unwrap();
+        link_directory(&outside, &generations);
+        let rows = f.rows();
+
+        if !scan_first {
+            drop(State::open(&root).unwrap());
+        }
+        let stats = f.scan().await;
+        assert_eq!(
+            (stats.completed, stats.failed, stats.infrastructure_failed),
+            (0, 2, 0)
+        );
+        assert!(stats.failure_examples[0].contains("generation directory unavailable"));
+        drop(State::open(&root).unwrap());
+        assert_eq!(
+            fs::read(outside.join("unreferenced-file")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(
+            fs::read(outside.join("unreferenced-tree/keep")).unwrap(),
+            b"keep"
+        );
+        assert_eq!(f.rows(), rows);
+    }
+}
+
+#[tokio::test]
+async fn wrong_type_seals_adopt_and_never_follow_link_targets() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let rows = f.rows();
+    let seal_directory = root.join(DIRECTORY);
+    let seal = path(&root, &rows[0].generation);
+    let original_seal = fs::read(&seal).unwrap();
+    let outside = f.temp.path().join("outside");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("seal-outside.tmp"), b"keep").unwrap();
+    fs::write(outside.join(seal.file_name().unwrap()), &original_seal).unwrap();
+    let workers = counters().0;
+
+    fs::remove_file(&seal).unwrap();
+    fs::create_dir(&seal).unwrap();
+    assert_reused(f.scan().await);
+    assert!(matches!(origin(&root, &rows[0]), Origin::Adopted));
+    fs::remove_file(&seal).unwrap();
+    link_directory(&outside, &seal);
+    assert_reused(f.scan().await);
+    assert!(matches!(origin(&root, &rows[0]), Origin::Adopted));
+
+    fs::remove_dir_all(&seal_directory).unwrap();
+    link_directory(&outside, &seal_directory);
+    drop(State::open(&root).unwrap());
+    assert_eq!(fs::read(outside.join("seal-outside.tmp")).unwrap(), b"keep");
+    assert_reused(f.scan().await);
+    assert_eq!(fs::read(outside.join("seal-outside.tmp")).unwrap(), b"keep");
+    assert_eq!(
+        fs::read(outside.join(seal.file_name().unwrap())).unwrap(),
+        original_seal
+    );
+
+    fs::remove_dir_all(&seal_directory).unwrap();
+    fs::write(&seal_directory, b"wrong node type").unwrap();
+    assert_reused(f.scan().await);
+    assert_eq!(counters().0, workers);
+    assert_eq!(f.rows(), rows);
+    for row in &rows {
+        assert!(matches!(origin(&root, row), Origin::Adopted));
+    }
+    let before = counters();
+    assert_reused(f.scan().await);
+    assert_eq!(counters(), before);
+}
+
+#[tokio::test]
+async fn unreadable_generations_parent_reports_unknown_and_preserves_rows() {
+    let f = Fixture::new().await;
+    let rows = f.rows();
+    let directory = f.root().join("generations");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    #[cfg(windows)]
+    set_directory_access(&directory, "");
+    let blocked = fs::read_dir(&directory).is_err();
+    let result = f.try_scan(|_| {}).await;
+    restrict_seal_directory(&directory, false);
+    assert!(blocked);
+    let stats = result.unwrap();
+    assert_eq!(
+        (stats.completed, stats.failed, stats.infrastructure_failed),
+        (0, 2, 0)
+    );
+    assert!(stats.failure_examples[0].contains("generation directory unavailable"));
+    assert_eq!(f.rows(), rows);
+    f.assert_search(2, &[]).await;
+    assert_reused(f.scan().await);
 }
 
 #[tokio::test]

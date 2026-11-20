@@ -544,13 +544,14 @@ fn decide_scan(
         return ScanDecision::RevokeSource;
     }
     if current && outcome.completed_walk {
-        return if outcome.stats.infrastructure_failed == 0 {
+        return if outcome.stats.infrastructure_failed == 0 && !outcome.recipe_blocked {
             ScanDecision::Publish
         } else {
             ScanDecision::RevokeSource
         };
     }
     if !outcome.unavailable
+        && !outcome.recipe_blocked
         && outcome.completed_walk
         && validate_publication(&outcome.stats, populated).is_ok()
     {
@@ -887,12 +888,10 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
             publication_step(data, "flat database removal")?;
             for name in ["generations", ".vz-scan", ".vz-validation"] {
                 let path = root.join(name);
-                if path.exists() {
-                    if name == ".vz-validation" && !fs::symlink_metadata(&path)?.is_dir() {
-                        fs::remove_file(path)?;
-                    } else {
-                        fs::remove_dir_all(path)?;
-                    }
+                match crate::storage::remove_index_node(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
                 }
             }
             fs::remove_file(marker)?;
@@ -1087,7 +1086,7 @@ pub(crate) async fn scan_candidate(
         workspace.initialize()?;
     }
     let outcome = {
-        let run = crate::index::scan(&mut workspace, &identity, engines, assets, progress);
+        let run = crate::index::scan(&mut workspace, &identity, root, engines, assets, progress);
         let mut run = Box::pin(run);
         futures::future::poll_fn(|cx| {
             if cancelled() {
@@ -1144,7 +1143,10 @@ pub(crate) async fn scan_candidate(
                     publication_step(data, "commit entered")?;
                 }
                 crate::index::initialize_recipe(root, &engines.recipe, || Ok(()))?;
-                fs::create_dir_all(root.join("generations"))?;
+                crate::storage::create_generations_if_missing(root)?;
+                if !staged.is_empty() {
+                    crate::generation_seal::ordinary_directory(&root.join("generations"))?;
+                }
                 for row in &staged {
                     let from = workspace_root.join("generations").join(&row.generation);
                     let to = root.join("generations").join(&row.generation);
@@ -1153,14 +1155,14 @@ pub(crate) async fn scan_candidate(
                         if let Err(error) =
                             crate::generation_seal::install(&workspace_root, root, &row.generation)
                         {
-                            fs::rename(&to, &from)
-                                .context("restore staged generation after seal install failed")?;
-                            return Err(error).context("install generation seal");
+                            outcome.stats.seal_warning(Path::new(&row.path), &error);
                         }
                     }
                 }
                 #[cfg(unix)]
-                fs::File::open(root.join("generations"))?.sync_all()?;
+                if !staged.is_empty() {
+                    fs::File::open(root.join("generations"))?.sync_all()?;
+                }
                 publication_step(data, "generation install")?;
                 let db = State::publication_connection(root)?;
                 let tx = db.unchecked_transaction()?;
@@ -1360,9 +1362,16 @@ pub(crate) async fn scan_candidate(
     }
     if decision != ScanDecision::Publish {
         let resume = !workspace.staged()?.is_empty();
-        let error = validate_publication(&outcome.stats, populated)
-            .err()
-            .unwrap_or_else(|| anyhow::anyhow!("publication refused"));
+        let error = if outcome.recipe_blocked && outcome.stats.infrastructure_failed == 0 {
+            anyhow::anyhow!(
+                "recipe publication deferred: {}",
+                outcome.stats.failure_examples.join("; ")
+            )
+        } else {
+            validate_publication(&outcome.stats, populated)
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("publication refused"))
+        };
         let message = error.to_string().replace("; Re-index to resume", "");
         anyhow::bail!(
             "{message}{}{}",

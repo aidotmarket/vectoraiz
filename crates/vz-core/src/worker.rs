@@ -188,6 +188,19 @@ fn run_command(
 ) -> Result<Vec<Page>> {
     run_command_checked(cmd, request, timeout, sandboxed, || Ok(()))
 }
+
+#[cfg(test)]
+pub(crate) fn crashed_readback(request: &Request, timeout: Duration) -> Result<Vec<Page>> {
+    #[cfg(windows)]
+    let mut cmd = Command::new("cmd.exe");
+    #[cfg(windows)]
+    cmd.args(["/D", "/C", "more >nul & exit /B 79"]);
+    #[cfg(not(windows))]
+    let mut cmd = Command::new("/bin/sh");
+    #[cfg(not(windows))]
+    cmd.args(["-c", "cat >/dev/null; exit 79"]);
+    run_command(cmd, request, timeout, false)
+}
 fn run_command_checked(
     cmd: Command,
     request: &Request,

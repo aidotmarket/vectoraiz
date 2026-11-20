@@ -256,10 +256,9 @@ impl State {
                             .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
                     "unsafe index generation"
                 );
-                let path = root
-                    .join("generations")
-                    .join(generation)
-                    .join("document.json");
+                let directory = root.join("generations").join(generation);
+                check_lance_directory(&directory.join("lance"))?;
+                let path = directory.join("document.json");
                 anyhow::ensure!(
                     std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
                     "review document size limit"
@@ -285,7 +284,7 @@ impl State {
         let path = root.join("state.sqlite");
         if !path.try_exists()? {
             // A lost database must not hide surviving on-disk index data.
-            return match std::fs::read_dir(root.join("generations")) {
+            return match generation_entries(root) {
                 Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(error.into()),
@@ -320,7 +319,7 @@ impl State {
         let location = crate::active_index::state_location(root);
         let resolved = crate::active_index::resolve_state(root);
         let root = resolved.as_path();
-        std::fs::create_dir_all(root.join("generations"))?;
+        create_generations_if_missing(root)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -343,7 +342,7 @@ impl State {
         Ok(state)
     }
     pub(crate) fn publication_connection(root: &Path) -> Result<Connection> {
-        std::fs::create_dir_all(root.join("generations"))?;
+        create_generations_if_missing(root)?;
         let db = Connection::open(root.join("state.sqlite"))?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
         Ok(db)
@@ -358,7 +357,7 @@ impl State {
     }
 
     pub(crate) fn open_workspace(root: &Path, source: &str, recipe: &str) -> Result<Self> {
-        std::fs::create_dir_all(root.join("generations"))?;
+        create_generations_if_missing(root)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -465,8 +464,21 @@ impl State {
             .collect()
     }
     pub async fn stage(&self, doc: &Document) -> Result<String> {
+        let (id, warning) = self.stage_with_seal_warning(doc).await?;
+        if let Some(error) = warning {
+            eprintln!("{}: could not write generation seal: {error}", doc.path);
+        }
+        Ok(id)
+    }
+
+    pub(crate) async fn stage_with_seal_warning(
+        &self,
+        doc: &Document,
+    ) -> Result<(String, Option<std::io::Error>)> {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let path = self.root.join("generations").join(&id);
+        let directory = self.root.join("generations");
+        generation_seal::ordinary_directory(&directory)?;
+        let path = directory.join(&id);
         std::fs::create_dir(&path)?;
         let batch = chunks_batch(&doc.chunks)?;
         let db = lancedb::connect(
@@ -491,7 +503,6 @@ impl State {
         drop(file);
         #[cfg(unix)]
         std::fs::File::open(&path)?.sync_all()?;
-        let worker = crate::worker::executable()?;
         let request = crate::worker::Request {
             path,
             generation_readback: Some(crate::worker::GenerationReadback {
@@ -504,11 +515,7 @@ impl State {
             projection: None,
             readback: None,
         };
-        tokio::task::spawn_blocking(move || {
-            crate::worker::run(&worker, &request, std::time::Duration::from_secs(5))
-        })
-        .await?
-        .context("staged generation readback failed")?;
+        run_generation_readback(request).await?;
         let recipe;
         let recipe_id = if let Some(workspace_recipe) = &self.workspace_recipe {
             workspace_recipe
@@ -521,8 +528,8 @@ impl State {
             };
             &recipe
         };
-        generation_seal::Seal::validated(&self.root, &id, recipe_id, doc)?;
-        Ok(id)
+        let seal = generation_seal::Seal::validated(&self.root, &id, recipe_id, doc)?;
+        Ok((id, seal.write(&self.root).err()))
     }
     pub fn commit(&mut self, doc: &Document, mtime: &str, generation: &str) -> Result<()> {
         let table = self.table();
@@ -606,12 +613,37 @@ impl State {
     }
 }
 
+pub(crate) fn create_generations_if_missing(root: &Path) -> std::io::Result<()> {
+    let directory = root.join("generations");
+    match directory.symlink_metadata() {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(directory)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn generation_entries(root: &Path) -> std::io::Result<std::fs::ReadDir> {
+    let directory = root.join("generations");
+    generation_seal::ordinary_directory(&directory)?;
+    std::fs::read_dir(directory)
+}
+
 pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Result<()> {
     let mut present = HashSet::with_capacity(active.len());
-    match std::fs::read_dir(root.join("generations")) {
+    match generation_entries(root) {
         Ok(entries) => {
             for entry in entries {
-                let entry = entry?;
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        eprintln!("Deferred generation cleanup in {}: {error}", root.display());
+                        present.extend(active.iter().map(String::as_str));
+                        break;
+                    }
+                };
                 if let Some(id) = active.get(entry.file_name().to_string_lossy().as_ref()) {
                     present.insert(id.as_str());
                 } else {
@@ -620,28 +652,79 @@ pub(crate) fn recover_generations(root: &Path, active: &HashSet<String>) -> Resu
             }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+        Err(error) => {
+            eprintln!("Deferred generation cleanup in {}: {error}", root.display());
             present.extend(active.iter().map(String::as_str));
         }
-        Err(error) => return Err(error.into()),
     }
-    generation_seal::recover(root, &present)?;
+    generation_seal::recover(root, &present);
     Ok(())
 }
 
 pub(crate) fn remove_index_node(path: &Path) -> std::io::Result<()> {
-    let kind = path.symlink_metadata()?.file_type();
-    if kind.is_dir() {
-        return std::fs::remove_dir_all(path);
-    }
+    let metadata = path.symlink_metadata()?;
     #[cfg(windows)]
     {
         use std::os::windows::fs::FileTypeExt;
-        if kind.is_symlink_dir() {
+        if metadata.file_type().is_symlink_dir()
+            || (metadata.is_dir() && generation_seal::is_link(&metadata))
+        {
             return std::fs::remove_dir(path);
         }
     }
+    if metadata.is_dir() && !generation_seal::is_link(&metadata) {
+        return std::fs::remove_dir_all(path);
+    }
     std::fs::remove_file(path)
+}
+
+#[derive(Debug)]
+pub(crate) struct CandidateReadback;
+
+impl std::fmt::Display for CandidateReadback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("staged generation readback failed")
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static READBACK_PROBE: std::cell::RefCell<Option<ReadbackProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ReadbackProbe {
+    pub source: std::path::PathBuf,
+    pub crash: bool,
+}
+
+async fn run_generation_readback(request: crate::worker::Request) -> Result<()> {
+    #[cfg(test)]
+    let probe = READBACK_PROBE.with(|probe| {
+        probe.borrow().as_ref().and_then(|probe| {
+            let job = request.generation_readback.as_ref().unwrap();
+            (Path::new(&job.source_path) == probe.source).then_some(probe.crash)
+        })
+    });
+    tokio::task::spawn_blocking(move || {
+        let timeout = std::time::Duration::from_secs(5);
+        #[cfg(test)]
+        let request = {
+            let mut request = request;
+            match probe {
+                Some(true) => return crate::worker::crashed_readback(&request, timeout),
+                Some(false) => request.generation_readback.as_mut().unwrap().doc_id.clear(),
+                None => {}
+            }
+            request
+        };
+        crate::worker::run(&crate::worker::executable()?, &request, timeout)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result)
+    .context(CandidateReadback)?;
+    Ok(())
 }
 
 fn read_document(generation: &Path) -> Result<Document> {
@@ -691,6 +774,12 @@ pub struct SearchReport {
 
 type RankedChunks = Vec<(String, f32)>;
 
+fn check_lance_directory(path: &Path) -> Result<()> {
+    generation_seal::ordinary_directory(path)
+        .and_then(|()| std::fs::read_dir(path).map(drop))
+        .context("generation Lance directory unavailable")
+}
+
 async fn search_generation(
     path: &Path,
     query: &str,
@@ -699,7 +788,7 @@ async fn search_generation(
 ) -> Result<(RankedChunks, RankedChunks)> {
     let mut semantic = Vec::new();
     let mut lexical = Vec::new();
-    anyhow::ensure!(path.is_dir(), "generation Lance directory unavailable");
+    check_lance_directory(path)?;
     let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
         .execute()
         .await?;

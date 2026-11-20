@@ -70,7 +70,7 @@ fn path(root: &Path, generation: &str) -> PathBuf {
     root.join(DIRECTORY).join(format!("{generation}.json"))
 }
 
-fn is_link(metadata: &fs::Metadata) -> bool {
+pub(crate) fn is_link(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -79,6 +79,18 @@ fn is_link(metadata: &fs::Metadata) -> bool {
     }
     #[cfg(not(windows))]
     metadata.is_symlink()
+}
+
+pub(crate) fn ordinary_directory(path: &Path) -> io::Result<()> {
+    let metadata = path.symlink_metadata()?;
+    if metadata.is_dir() && !is_link(&metadata) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            ErrorKind::InvalidData,
+            format!("expected ordinary directory: {}", path.display()),
+        ))
+    }
 }
 
 fn open_file(path: &Path) -> io::Result<fs::File> {
@@ -115,11 +127,10 @@ fn mtime(time: SystemTime) -> (bool, u64, u32) {
 }
 
 fn inventory(generation: &Path) -> Result<BTreeMap<PathBuf, Node>, Unavailable> {
-    for directory in [generation.parent().unwrap(), generation] {
-        let metadata = directory.symlink_metadata()?;
-        if !metadata.is_dir() || is_link(&metadata) {
-            return Err(Unavailable::Damaged);
-        }
+    ordinary_directory(generation.parent().unwrap())?;
+    let metadata = generation.symlink_metadata()?;
+    if !metadata.is_dir() || is_link(&metadata) {
+        return Err(Unavailable::Damaged);
     }
     let mut current = BTreeMap::new();
     let mut directories = vec![generation.to_owned()];
@@ -150,19 +161,21 @@ fn inventory(generation: &Path) -> Result<BTreeMap<PathBuf, Node>, Unavailable> 
 }
 
 fn read(root: &Path, generation: &str) -> io::Result<Option<Seal>> {
-    let directory = root.join(DIRECTORY);
-    match directory.symlink_metadata() {
-        Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => {}
-        Ok(_) => {
-            return Err(io::Error::new(
-                ErrorKind::InvalidData,
-                "expected seal directory",
-            ))
+    match ordinary_directory(&root.join(DIRECTORY)) {
+        Ok(()) => {}
+        Err(error) if matches!(error.kind(), ErrorKind::NotFound | ErrorKind::InvalidData) => {
+            return Ok(None);
         }
+        Err(error) => return Err(error),
+    }
+    let seal = path(root, generation);
+    match seal.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() && !is_link(&metadata) => {}
+        Ok(_) => return Ok(None),
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error),
     }
-    match open_file(&path(root, generation)) {
+    match open_file(&seal) {
         Ok(mut file) => {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes)?;
@@ -229,9 +242,10 @@ pub(crate) fn check(root: &Path, row: &ScanRow, recipe: &str) -> Result<Reuse, U
         hash_files(&generation, &mut nodes)?;
     }
 
-    let (origin, needs_ocr_pages) = old
-        .map(|seal| (seal.origin, seal.needs_ocr_pages))
-        .unwrap_or((Origin::Adopted, Vec::new()));
+    let (origin, needs_ocr_pages) = match old {
+        Some(seal) => (seal.origin, seal.needs_ocr_pages),
+        None => (Origin::Adopted, adopted_ocr_pages(&generation, &nodes)?),
+    };
     let update = refresh.then(|| {
         Seal::new(
             &row.generation,
@@ -246,6 +260,30 @@ pub(crate) fn check(root: &Path, row: &ScanRow, recipe: &str) -> Result<Reuse, U
         update,
         needs_ocr_pages,
     })
+}
+
+fn adopted_ocr_pages(
+    generation: &Path,
+    nodes: &BTreeMap<PathBuf, Node>,
+) -> Result<Vec<u32>, Unavailable> {
+    #[derive(Deserialize)]
+    struct OcrMetadata {
+        #[serde(default)]
+        needs_ocr_pages: Vec<u32>,
+    }
+
+    let name = Path::new("document.json");
+    if !matches!(nodes.get(name), Some(Node::File { .. })) {
+        return Ok(Vec::new());
+    }
+    match serde_json::from_reader::<_, OcrMetadata>(std::io::BufReader::new(open_file(
+        &generation.join(name),
+    )?)) {
+        Ok(doc) => Ok(doc.needs_ocr_pages),
+        Err(error) if error.is_io() => Err(Unavailable::Unknown(error.into())),
+        // Adoption also covers pre-upgrade storage with malformed JSON.
+        Err(_) => Ok(Vec::new()),
+    }
 }
 
 #[cfg(test)]
@@ -293,7 +331,7 @@ impl Seal {
         generation: &str,
         recipe: &str,
         doc: &crate::pipeline::Document,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Self> {
         let directory = root.join("generations").join(generation);
         let observe = || {
             let mut nodes = inventory(&directory)?;
@@ -304,17 +342,14 @@ impl Seal {
             Unavailable::Damaged => anyhow::anyhow!("staged generation changed after readback"),
             Unavailable::Unknown(error) => anyhow::Error::from(error),
         })?;
-        Self::new(
+        Ok(Self::new(
             generation,
             &doc.sha256,
             recipe,
             nodes,
             Origin::Validated,
             doc.needs_ocr_pages.clone(),
-        )
-        .write(root)?;
-        sync_directory(&root.join(DIRECTORY))?;
-        Ok(())
+        ))
     }
 
     pub(crate) fn write(&self, root: &Path) -> io::Result<()> {
@@ -325,29 +360,42 @@ impl Seal {
             .tempfile_in(&directory)?;
         serde_json::to_writer(&mut file, self)?;
         file.as_file().sync_all()?;
-        file.persist(path(root, &self.generation))?;
-        Ok(())
+        let destination = path(root, &self.generation);
+        match destination.symlink_metadata() {
+            Ok(metadata) if !metadata.is_file() || is_link(&metadata) => {
+                crate::storage::remove_index_node(&destination)?;
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        file.persist(destination)?;
+        sync_directory(&directory)
     }
 }
 
 fn prepare_directory(root: &Path) -> io::Result<PathBuf> {
     let directory = root.join(DIRECTORY);
-    match fs::create_dir(&directory) {
-        Ok(()) => sync_directory(root)?,
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+    match ordinary_directory(&directory) {
+        Ok(()) => return Ok(directory),
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) if error.kind() == ErrorKind::InvalidData => {
+            eprintln!("Replacing malformed generation seal directory: {error}");
+            crate::storage::remove_index_node(&directory)?;
+        }
         Err(error) => return Err(error),
     }
-    let metadata = directory.symlink_metadata()?;
-    if !metadata.is_dir() || is_link(&metadata) {
-        return Err(io::Error::new(
-            ErrorKind::InvalidData,
-            "expected seal directory",
-        ));
-    }
+    fs::create_dir(&directory)?;
+    sync_directory(root)?;
     Ok(directory)
 }
 
 pub(crate) fn install(from: &Path, to: &Path, generation: &str) -> io::Result<()> {
+    match ordinary_directory(&from.join(DIRECTORY)) {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    }
     let source = path(from, generation);
     // An adopted workspace generation can be reused after a seal write failure.
     match source.symlink_metadata() {
@@ -376,28 +424,31 @@ fn sync_directory(_directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) -> io::Result<()> {
+pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) {
     let directory = root.join(DIRECTORY);
-    // Access to seals is optional for cleanup of the generations themselves.
-    let entries = match directory.symlink_metadata() {
-        Ok(metadata) if metadata.is_dir() && !is_link(&metadata) => fs::read_dir(&directory),
-        Ok(_) => return Ok(()),
-        Err(error) => Err(error),
-    };
+    let entries = ordinary_directory(&directory).and_then(|()| fs::read_dir(&directory));
     let entries = match entries {
         Ok(entries) => entries,
-        Err(error)
-            if matches!(
-                error.kind(),
-                ErrorKind::NotFound | ErrorKind::PermissionDenied
-            ) =>
-        {
-            return Ok(())
+        Err(error) if error.kind() == ErrorKind::NotFound => return,
+        Err(error) => {
+            eprintln!(
+                "Deferred generation seal cleanup in {}: {error}",
+                directory.display()
+            );
+            return;
         }
-        Err(error) => return Err(error),
     };
     for entry in entries {
-        let entry = entry?;
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                eprintln!(
+                    "Deferred generation seal cleanup in {}: {error}",
+                    directory.display()
+                );
+                continue;
+            }
+        };
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let generation = name.strip_suffix(".json");
@@ -405,10 +456,14 @@ pub(crate) fn recover(root: &Path, active: &std::collections::HashSet<&str>) -> 
             continue;
         }
         if generation.is_some() || name.ends_with(".tmp") {
-            crate::storage::remove_index_node(&entry.path())?;
+            if let Err(error) = crate::storage::remove_index_node(&entry.path()) {
+                eprintln!(
+                    "Deferred generation seal cleanup for {}: {error}",
+                    entry.path().display()
+                );
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]

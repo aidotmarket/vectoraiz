@@ -26,12 +26,15 @@ try:
         temp = str(Path(temp).resolve())
         state = Path(temp) / 'state'
         pack = Path(temp) / 'pack'
-        def cli(*args):
-            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=600)
+        def cli(*args, forbid_document_embeddings=False):
+            env = dict(os.environ, VZ_ENGINE_TIMING="1") if forbid_document_embeddings else None
+            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, env=env, text=True, encoding="utf-8", capture_output=True, timeout=600)
             print(result.stderr, file=sys.stderr)
             if result.returncode:
                 print(result.stdout)
                 raise RuntimeError(f'CLI {args[0]} failed: {result.returncode}')
+            if forbid_document_embeddings:
+                assert 'VZ_ENGINE_TIMING document_embedding' not in result.stderr, result.stderr
             return json.loads(result.stdout)
         journey_source = Path(temp) / "journey-documents"
         shutil.copytree(ROOT / "spike/fixtures/documents", journey_source)
@@ -401,6 +404,14 @@ try:
             generation = db.execute('SELECT generation FROM documents').fetchone()[0]
         stored = json.loads((state / 'generations' / generation / 'document.json').read_text())
         assert stored['pages'] == 2 and stored['needs_ocr_pages'] == reopened['needs_ocr_pages'], stored
+        seal = state / '.vz-validation' / f'{generation}.json'
+        seal.unlink()
+        for origin in ['adoption', 'warm reuse']:
+            reused = cli('index', str(mixed), forbid_document_embeddings=True)
+            assert (reused['completed'], reused['skipped'], reused['failed']) == (0, 1, 0), (origin, reused)
+            assert reused['needs_ocr_pages'] == reopened['needs_ocr_pages'], (origin, reused)
+            assert reused['reason'] == reopened['reason'], (origin, reused)
+            assert json.loads(seal.read_text())['origin'] == 'adopted'
         # A PDF whose second page object is missing: PDFium loads the document but not
         # page 2. It must be a document failure, never a silently truncated success.
         broken = Path(temp) / 'broken'
