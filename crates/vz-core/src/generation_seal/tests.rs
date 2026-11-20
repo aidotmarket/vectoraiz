@@ -786,15 +786,28 @@ async fn read_only_seals_defer_cleanup_and_install_without_blocking_search() {
     fs::write(f.source().join("c.txt"), "Orbital archive c.").unwrap();
     let first = f.scan().await;
     assert_eq!((first.completed, first.skipped, first.failed), (1, 1, 0));
-    assert_eq!(first.seal_warnings.len(), 1);
-    assert!(first.seal_warnings[0].contains("c.txt"));
+    assert!(first
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("c.txt")));
+    assert!(first
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("Deferred generation seal cleanup")));
     assert_eq!(f.rows()[0], rows[0]);
     assert!(f.rows()[1].path.ends_with("c.txt"));
     assert!(!root.join("generations").join(&rows[1].generation).exists());
     // Both State::open (inside search) and the next scan retry cleanup.
     f.assert_search(2, &[]).await;
     let second = f.scan().await;
-    assert_eq!(second.seal_warnings.len(), 1);
+    assert!(second
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("c.txt")));
+    assert!(second
+        .seal_warnings
+        .iter()
+        .any(|warning| warning.contains("Deferred generation seal cleanup")));
     assert_reused(second);
     for leftover in [&orphan, &temp, &retired] {
         assert!(leftover.exists());
