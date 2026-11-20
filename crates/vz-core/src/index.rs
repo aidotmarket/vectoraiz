@@ -1,6 +1,7 @@
-//! Folder scan and resumable per-file jobs.
+//! Candidate folder scans with explicit per-file outcomes.
 use crate::{
     engine::Engines,
+    generation_seal::{self, Seal, Unavailable},
     pipeline::{chunk, sha256, Document},
     storage::{Hit, State},
     worker,
@@ -19,16 +20,29 @@ pub struct Progress {
     pub total: usize,
     pub failure_examples: Vec<String>,
     pub infrastructure_examples: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub seal_warnings: Vec<String>,
     pub needs_ocr_pages: Vec<u32>,
     pub path: String,
     pub reason: Option<String>,
 }
 impl Progress {
+    pub(crate) fn seal_warning(&mut self, path: &Path, error: &std::io::Error) {
+        let name = path
+            .file_name()
+            .unwrap_or(path.as_os_str())
+            .to_string_lossy();
+        self.seal_warnings
+            .push(format!("{name}: could not write generation seal: {error}"));
+    }
+
     pub fn ensure_publishable(&self) -> Result<()> {
+        // A completed content-only scan is reviewable even with no searchable
+        // documents. Refused candidates still require explicit exclusion to build.
         anyhow::ensure!(
-            self.infrastructure_failed == 0 && (self.completed + self.skipped > 0 || self.total == 0),
+            self.infrastructure_failed == 0,
             "Re-index did not finish: {} indexed, {} skipped, {} failed ({} infrastructure), {} total; {}; Re-index to resume",
-            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, if self.infrastructure_failed > 0 { &self.infrastructure_examples } else { &self.failure_examples }.join("; ")
+            self.completed, self.skipped, self.failed, self.infrastructure_failed, self.total, self.infrastructure_examples.join("; ")
         );
         Ok(())
     }
@@ -36,7 +50,7 @@ impl Progress {
 
 /// Write a complete recipe before exposing its name. An interrupted write leaves
 /// only an unreferenced temporary file; retries never validate partial JSON.
-fn initialize_recipe(
+pub(crate) fn initialize_recipe(
     root: &Path,
     recipe: &crate::engine::Recipe,
     before_rename: impl FnOnce() -> Result<()>,
@@ -72,34 +86,149 @@ fn initialize_recipe(
     result
 }
 
-/// Read only the matching generation when an unchanged file can be skipped.
-fn unchanged_document(
-    state: &State,
-    path: &str,
-    size: u64,
-    mtime: &str,
-    hash: &str,
-) -> Result<Option<Document>> {
-    let previous: Option<(u64, String, String, String)> = state
-        .db
-        .query_row(
-            "SELECT size,mtime,sha256,generation FROM documents WHERE path=?1",
-            [path],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-        )
-        .optional()?;
-    if let Some((old_size, old_mtime, old_hash, generation)) = previous {
-        if old_hash == hash {
-            if old_size != size || old_mtime != mtime {
-                state.db.execute(
-                    "UPDATE documents SET size=?1,mtime=?2 WHERE path=?3",
-                    params![size, mtime, path],
-                )?;
-            }
-            return Ok(Some(state.document(&generation)?));
-        }
+/// Private retry state. Opening an unchanged scan never creates a workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ScanRow {
+    pub doc_id: String,
+    pub path: String,
+    pub size: u64,
+    pub mtime: String,
+    pub hash: String,
+    pub generation: String,
+}
+impl ScanRow {
+    pub(crate) fn read(db: &rusqlite::Connection, table: &str) -> Result<Vec<Self>> {
+        Ok(db
+            .prepare(&format!(
+                "SELECT doc_id,path,size,mtime,sha256,generation FROM {table} ORDER BY doc_id"
+            ))?
+            .query_map([], |r| {
+                Ok(Self {
+                    doc_id: r.get(0)?,
+                    path: r.get(1)?,
+                    size: r.get(2)?,
+                    mtime: r.get(3)?,
+                    hash: r.get(4)?,
+                    generation: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
     }
-    Ok(None)
+    pub(crate) fn put(&self, db: &rusqlite::Connection) -> Result<()> {
+        db.execute("INSERT INTO documents VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path,size=excluded.size,mtime=excluded.mtime,sha256=excluded.sha256,generation=excluded.generation",
+            params![self.doc_id,self.path,self.size,self.mtime,self.hash,self.generation])?;
+        Ok(())
+    }
+}
+pub(crate) struct ScanWorkspace {
+    pub root: std::path::PathBuf,
+    pub published_root: std::path::PathBuf,
+    published_by_path: std::collections::HashMap<String, ScanRow>,
+    baseline_rows: std::collections::HashMap<String, ScanRow>,
+    pub state: Option<State>,
+    source: String,
+    recipe: String,
+    reset_before_write: bool,
+}
+impl ScanWorkspace {
+    pub fn new(
+        root: &Path,
+        published_root: &Path,
+        published: Vec<ScanRow>,
+        source: &str,
+        recipe: &str,
+    ) -> Result<Self> {
+        let mut reuse = root.join("scan.sqlite").exists();
+        if reuse {
+            let matches = (|| -> Result<bool> {
+                let db = rusqlite::Connection::open_with_flags(
+                    root.join("scan.sqlite"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )?;
+                Ok(db.query_row(
+                    "SELECT source_identity,recipe_id FROM scan_state",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )? == (source.into(), recipe.into()))
+            })()
+            .unwrap_or(false);
+            if !matches {
+                reuse = false;
+            }
+        }
+        let state = if reuse {
+            Some(State::open_workspace(root, source, recipe)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            root: root.into(),
+            published_root: published_root.into(),
+            baseline_rows: published
+                .iter()
+                .map(|r| (r.path.clone(), r.clone()))
+                .collect(),
+            published_by_path: published
+                .iter()
+                .map(|r| (r.path.clone(), r.clone()))
+                .collect(),
+            state,
+            reset_before_write: !reuse && root.join("scan.sqlite").exists(),
+            source: source.into(),
+            recipe: recipe.into(),
+        })
+    }
+    pub fn initialize(&mut self) -> Result<()> {
+        self.writable()?;
+        Ok(())
+    }
+    pub fn matches_published(&self, row: &ScanRow) -> bool {
+        self.published_by_path.get(&row.path) == Some(row)
+    }
+    pub fn set_baseline(&mut self, rows: Vec<ScanRow>) {
+        self.baseline_rows = rows.into_iter().map(|r| (r.path.clone(), r)).collect();
+    }
+    fn writable(&mut self) -> Result<&mut State> {
+        if self.state.is_none() {
+            if self.reset_before_write {
+                std::fs::remove_dir_all(&self.root)?;
+            }
+            self.state = Some(State::open_workspace(
+                &self.root,
+                &self.source,
+                &self.recipe,
+            )?);
+        }
+        Ok(self.state.as_mut().unwrap())
+    }
+    pub fn staged(&self) -> Result<Vec<ScanRow>> {
+        self.state
+            .as_ref()
+            .map(|s| ScanRow::read(&s.db, "scan_documents"))
+            .unwrap_or_else(|| Ok(vec![]))
+    }
+    pub fn retain(&self, paths: &HashSet<String>) -> Result<()> {
+        if let Some(state) = &self.state {
+            for row in self.staged()? {
+                if !paths.contains(&row.path) {
+                    state
+                        .db
+                        .execute("DELETE FROM scan_documents WHERE path=?1", [&row.path])?;
+                }
+            }
+            state.recover()?;
+        }
+        Ok(())
+    }
+    fn unchanged(&self, path: &str, hash: &str) -> Result<[Option<ScanRow>; 2]> {
+        let staged = if let Some(state) = &self.state {
+            state.db.query_row("SELECT doc_id,path,size,mtime,sha256,generation FROM scan_documents WHERE path=?1",[path],|r| Ok(ScanRow {doc_id:r.get(0)?,path:r.get(1)?,size:r.get(2)?,mtime:r.get(3)?,hash:r.get(4)?,generation:r.get(5)?})).optional()?
+        } else {
+            None
+        };
+        Ok([staged, self.published_by_path.get(path).cloned()]
+            .map(|row| row.filter(|row| row.hash == hash)))
+    }
 }
 
 pub async fn index(
@@ -107,28 +236,82 @@ pub async fn index(
     folder: &Path,
     engines: &Engines,
     assets: &Path,
-    mut progress: impl FnMut(&Progress),
+    progress: impl FnMut(&Progress),
 ) -> Result<Progress> {
-    let unavailable = |state: &State| -> Result<()> {
-        state.db.execute("DELETE FROM documents", [])?;
-        state.recover()?;
-        Ok(())
-    };
-    let folder = match folder.canonicalize() {
-        Ok(folder) if folder.is_dir() => folder,
-        _ => {
-            unavailable(state)?;
-            bail!("source unavailable");
-        }
-    };
-    initialize_recipe(&state.root, &engines.recipe, || Ok(()))?;
+    let location = state.location.clone();
+    let result = crate::active_index::scan_candidate(
+        &location,
+        folder,
+        engines,
+        assets,
+        progress,
+        || false,
+        crate::active_index::ScanOptions {
+            explicit: Some(state),
+            flat: true,
+            control: None,
+        },
+    )
+    .await;
+    let selected = crate::active_index::resolve_state(&location);
+    if selected.canonicalize().ok() != state.root.canonicalize().ok() {
+        *state = State::open(&location).map_err(|error| {
+            error.context(crate::active_index::PublishedFailure("state reopen"))
+        })?;
+    }
+    result
+}
+
+/// Everything the publication decision needs; scan writes exist only in a candidate.
+#[derive(Default)]
+pub(crate) struct ScanOutcome {
+    pub completed_walk: bool,
+    pub source: Option<std::path::PathBuf>,
+    pub seen: HashSet<String>,
+    pub succeeded: HashSet<String>,
+    pub failed_content: HashSet<String>,
+    pub failed_infrastructure: HashSet<String>,
+    pub stats: Progress,
+    pub unavailable: bool,
+    pub error: Option<anyhow::Error>,
+    pub jobs: Vec<(String, String, Option<String>)>,
+    pub unchanged: Vec<ScanRow>,
+    pub changed: HashSet<String>,
+    pub damaged: HashSet<String>,
+    pub retain: HashSet<String>,
+    pub seal_updates: Vec<(String, Seal)>,
+}
+
+pub(crate) async fn scan(
+    state: &mut ScanWorkspace,
+    folder: &Path,
+    publication_root: &Path,
+    engines: &Engines,
+    assets: &Path,
+    mut progress: impl FnMut(&Progress),
+) -> Result<ScanOutcome> {
+    let folder = folder.to_owned();
+    if !folder.is_dir() {
+        return Ok(ScanOutcome {
+            source: Some(folder),
+            unavailable: true,
+            error: Some(anyhow::anyhow!("source missing")),
+            ..Default::default()
+        });
+    }
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(&folder).follow_links(false) {
         let entry = match entry {
             Ok(entry) => entry,
             Err(error) => {
-                unavailable(state)?;
-                return Err(error).context("source unavailable during scan");
+                return Ok(ScanOutcome {
+                    source: Some(folder),
+                    unavailable: true,
+                    error: Some(
+                        anyhow::Error::new(error).context("source unavailable during scan"),
+                    ),
+                    ..Default::default()
+                });
             }
         };
         if entry.file_type().is_file()
@@ -159,32 +342,111 @@ pub async fn index(
         total: files.len(),
         ..Default::default()
     };
-    let mut seen = HashSet::new();
+    let mut outcome = ScanOutcome {
+        completed_walk: true,
+        source: Some(folder.clone()),
+        ..Default::default()
+    };
+    let recipe_change = publication_root != state.published_root;
+    let generation_directory_error = crate::storage::generation_entries(publication_root)
+        .err()
+        .filter(|error| error.kind() != std::io::ErrorKind::NotFound);
+    let mut keep_staged = HashSet::new();
     for path in files {
         let path_text = path
             .to_str()
             .context("source path must be UTF-8")?
             .to_owned();
-        seen.insert(path_text.clone());
+        outcome.seen.insert(path_text.clone());
         stats.path = path_text.clone();
         stats.reason = None;
         stats.needs_ocr_pages.clear();
-        state.db.execute(
-            "INSERT INTO jobs(path,status) VALUES(?1,'running')",
-            [&path_text],
-        )?;
-        let job = state.db.last_insert_rowid();
+        let mut unknown = false;
+        let mut damaged = false;
+        let mut private_unreadable = false;
         let result: Result<bool> = async {
+            if let Some(error) = generation_directory_error
+                .as_ref()
+                .filter(|_| !recipe_change)
+            {
+                unknown = true;
+                outcome.retain.insert(path_text.clone());
+                return Err(anyhow::anyhow!("generation directory unavailable: {error}"));
+            }
             let metadata =
                 std::fs::metadata(&path).map_err(|e| crate::failures::source_io(e.into()))?;
             let mtime = format!("{:?}", metadata.modified()?);
             // Metadata detects candidates; sha256 confirms content, including same-size edits.
             let hash = crate::pipeline::file_sha256(&path)
                 .map_err(|e| crate::failures::source_io(e.into()))?;
-            if let Some(doc) = unchanged_document(state, &path_text, metadata.len(), &mtime, &hash)?
+            if state
+                .baseline_rows
+                .get(&path_text)
+                .is_some_and(|old| old.hash != hash)
             {
-                stats.needs_ocr_pages = doc.needs_ocr_pages;
+                outcome.changed.insert(path_text.clone());
+            }
+            if let Some(error) = &generation_directory_error {
+                if !outcome.changed.contains(&path_text) {
+                    outcome.retain.insert(path_text.clone());
+                }
+                return Err(anyhow::anyhow!("generation directory unavailable: {error}"));
+            }
+            let [staged, published] = state.unchanged(&path_text, &hash)?;
+            let mut staged_error = None;
+            for (row, root, staged) in [
+                (staged, &state.root, true),
+                (published, &state.published_root, false),
+            ] {
+                let Some(mut row) = row else { continue };
+                let reuse = match generation_seal::check(root, &row, &state.recipe) {
+                    Ok(reuse) => reuse,
+                    Err(Unavailable::Damaged) => {
+                        damaged |= !staged;
+                        continue;
+                    }
+                    Err(Unavailable::Unknown(error)) if staged => {
+                        staged_error = Some(error);
+                        continue;
+                    }
+                    Err(Unavailable::Unknown(error)) => {
+                        unknown = true;
+                        outcome.retain.insert(path_text.clone());
+                        return Err(anyhow::Error::new(error).context("generation unavailable"));
+                    }
+                };
+                if let Some(update) = reuse.update {
+                    if staged {
+                        if let Err(error) = update.write(root) {
+                            stats.seal_warning(&path, &error);
+                        }
+                    } else {
+                        outcome.seal_updates.push((path_text.clone(), update));
+                    }
+                }
+                stats.needs_ocr_pages = reuse.needs_ocr_pages;
+                row.size = metadata.len();
+                row.mtime = mtime;
+                if staged {
+                    let db = &state.state.as_ref().unwrap().db;
+                    db.execute(
+                        "UPDATE scan_documents SET size=?1,mtime=?2 WHERE path=?3",
+                        params![row.size, row.mtime, row.path],
+                    )?;
+                    keep_staged.insert(path_text.clone());
+                } else {
+                    outcome.unchanged.push(row);
+                }
                 return Ok(false);
+            }
+            if let Some(error) = staged_error.filter(|_| !damaged) {
+                if recipe_change {
+                    private_unreadable = true;
+                } else {
+                    unknown = true;
+                    outcome.retain.insert(path_text.clone());
+                }
+                return Err(anyhow::Error::new(error).context("staged generation unavailable"));
             }
             let library = assets.join(if cfg!(windows) {
                 "pdfium/bin/pdfium.dll"
@@ -197,6 +459,7 @@ pub async fn index(
                     path: path.clone(),
                     office: None,
                     projection: None,
+                    generation_readback: None,
                     readback: None,
                     pdfium: if path
                         .extension()
@@ -261,15 +524,21 @@ pub async fn index(
                     .collect(),
                 chunks,
             };
-            let generation = state.stage(&doc).await?;
-            crate::Store::put(state, &doc, &mtime, &generation).map_err(anyhow::Error::msg)?;
+            let staged = state.writable()?;
+            let (generation, warning) = staged.stage_with_seal_warning(&doc).await?;
+            if let Some(error) = warning {
+                stats.seal_warning(&path, &error);
+            }
+            staged.commit(&doc, &mtime, &generation)?;
             stats.needs_ocr_pages = doc.needs_ocr_pages.clone();
             Ok(true)
         }
         .await;
         match result {
             Ok(changed) => {
+                outcome.succeeded.insert(path_text.clone());
                 if changed {
+                    keep_staged.insert(path_text.clone());
                     stats.completed += 1;
                 } else {
                     stats.skipped += 1;
@@ -280,19 +549,48 @@ pub async fn index(
                         stats.needs_ocr_pages
                     ));
                 }
-                state.db.execute(
-                    "UPDATE jobs SET status='done',reason=?1 WHERE id=?2",
-                    params![stats.reason, job],
-                )?;
+                if changed {
+                    outcome
+                        .jobs
+                        .push((path_text.clone(), "done".into(), stats.reason.clone()));
+                }
             }
             Err(error) => {
                 stats.failed += 1;
-                if !crate::failures::is_content(&error) {
-                    stats.infrastructure_failed += 1;
-                    if stats.infrastructure_examples.len() < 3 {
-                        stats
-                            .infrastructure_examples
-                            .push(format!("{path_text}: {error:#}"));
+                if damaged {
+                    outcome.damaged.insert(path_text.clone());
+                }
+                // An unknown published generation is retained per R9.
+                if !unknown {
+                    let candidate_failed =
+                        private_unreadable || error.is::<crate::storage::CandidateReadback>();
+                    let protects_old_row = candidate_failed
+                        && !damaged
+                        && !outcome.changed.contains(&path_text)
+                        && state.baseline_rows.contains_key(&path_text);
+                    // R11 keeps an unchanged old-recipe row on an infrastructure
+                    // failure. The failed private row is omitted from keep_staged.
+                    if protects_old_row {
+                        outcome.retain.insert(path_text.clone());
+                    }
+                    let content_failure = if candidate_failed {
+                        !protects_old_row
+                    } else {
+                        crate::failures::is_content(&error)
+                    };
+                    if content_failure {
+                        outcome.failed_content.insert(path_text.clone());
+                    } else if recipe_change || !protects_old_row {
+                        outcome.failed_infrastructure.insert(path_text.clone());
+                        stats.infrastructure_failed += 1;
+                        if stats.infrastructure_examples.len() < 3 {
+                            stats.infrastructure_examples.push(format!(
+                                "{}: indexing infrastructure unavailable; re-index to retry",
+                                path.strip_prefix(&folder)
+                                    .context("source outside selected folder")?
+                                    .display()
+                            ));
+                        }
                     }
                 }
                 let reason = format!("{error:#}");
@@ -301,34 +599,16 @@ pub async fn index(
                     stats.failure_examples.push(format!("{name}: {reason}"));
                 }
                 stats.reason = Some(reason.clone());
-                // Never serve an older revision when replacement failed.
-                state
-                    .db
-                    .execute("DELETE FROM documents WHERE path=?1", [&path_text])?;
-                state.db.execute(
-                    "UPDATE jobs SET status='failed',reason=?1 WHERE id=?2",
-                    params![reason, job],
-                )?;
+                outcome
+                    .jobs
+                    .push((path_text.clone(), "failed".into(), Some(reason)));
             }
         }
         progress(&stats);
     }
-    // This spike indexes one source folder per index. A subsequent successful scan
-    // revokes deleted files; unreadable scans fail before querying is offered by the UI.
-    let indexed: Vec<String> = state
-        .db
-        .prepare("SELECT path FROM documents")?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for path in indexed {
-        if !seen.contains(&path) {
-            state
-                .db
-                .execute("DELETE FROM documents WHERE path=?1", [&path])?;
-        }
-    }
-    state.recover()?;
-    Ok(stats)
+    state.retain(&keep_staged)?;
+    outcome.stats = stats;
+    Ok(outcome)
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Citation {
@@ -507,6 +787,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn infrastructure_examples_and_reindex_errors_keep_paths_private() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("scan.pdf"), image_only_pdf()).unwrap();
+        let index = tempfile::tempdir().unwrap();
+        let mut state = State::open(index.path()).unwrap();
+        let engines = Engines::load_embedding(
+            &root.join(".assets"),
+            &root.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let assets = source.path().join("missing-private-assets");
+        let stats = super::index(&mut state, source.path(), &engines, &assets, |_| {})
+            .await
+            .unwrap();
+        assert_eq!(stats.infrastructure_failed, 1);
+        assert_eq!(
+            stats.infrastructure_examples,
+            ["scan.pdf: indexing infrastructure unavailable; re-index to retry"]
+        );
+        let error = stats.ensure_publishable().unwrap_err().to_string();
+        assert!(error.contains("scan.pdf"));
+        assert!(!error.contains(source.path().to_str().unwrap()));
+        assert!(!error.contains(assets.to_str().unwrap()));
+        let library = tempfile::tempdir().unwrap();
+        let error = crate::active_index::reindex(
+            library.path(),
+            &source.path().join("missing-private-folder"),
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("source missing"));
+        assert!(!format!("{error:#}").contains(source.path().to_str().unwrap()));
+    }
+
+    #[tokio::test]
     async fn listing_refused_office_original_still_indexes_and_is_searchable() {
         use std::io::{Cursor, Read, Write};
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -562,84 +883,6 @@ mod tests {
             .iter()
             .any(|hit| hit.chunk.doc_id == documents[0].doc_id));
     }
-    #[tokio::test]
-    async fn unchanged_skip_reads_only_matching_document() {
-        let root = tempfile::tempdir().unwrap();
-        let source = tempfile::tempdir().unwrap();
-        let mut state = State::open(root.path()).unwrap();
-        let mut generations = Vec::new();
-        for name in ["first.txt", "other.txt"] {
-            let path = source.path().join(name);
-            std::fs::write(&path, name).unwrap();
-            let path = path.to_str().unwrap();
-            let doc_id = sha256(path.as_bytes());
-            let pages = vec![crate::pipeline::Page {
-                page: 1,
-                text: name.into(),
-                needs_ocr: false,
-            }];
-            let mut chunks = chunk(&doc_id, &pages);
-            for chunk in &mut chunks {
-                chunk.embedding = vec![1.0, 0.0, 0.0, 0.0];
-            }
-            let doc = Document {
-                doc_id,
-                path: path.into(),
-                sha256: crate::pipeline::file_sha256(Path::new(path)).unwrap(),
-                bytes: name.len() as u64,
-                pages: 2,
-                kind: "txt".into(),
-                needs_ocr_pages: vec![2],
-                chunks,
-            };
-            let generation = state.stage(&doc).await.unwrap();
-            state.commit(&doc, "old mtime", &generation).unwrap();
-            generations.push(generation);
-        }
-        let document_path = |generation: &str| {
-            root.path()
-                .join("generations")
-                .join(generation)
-                .join("document.json")
-        };
-        std::fs::write(document_path(&generations[1]), b"invalid JSON").unwrap();
-        assert!(state.documents().is_err());
-        let path = source.path().join("first.txt");
-        let hash = crate::pipeline::file_sha256(&path).unwrap();
-        let skipped = unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash)
-            .unwrap()
-            .expect("unchanged file must be skipped despite unrelated corruption");
-        assert_eq!(skipped.path, path.to_str().unwrap());
-        assert_eq!(skipped.needs_ocr_pages, [2]);
-        let mtime: String = state
-            .db
-            .query_row(
-                "SELECT mtime FROM documents WHERE path=?1",
-                [path.to_str().unwrap()],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(mtime, "new mtime");
-        assert!(unchanged_document(
-            &state,
-            path.to_str().unwrap(),
-            9,
-            "new mtime",
-            "changed hash"
-        )
-        .unwrap()
-        .is_none());
-        // Corruption of the matching generation still fails as infrastructure.
-        std::fs::write(document_path(&generations[0]), b"invalid JSON").unwrap();
-        let error =
-            unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash).unwrap_err();
-        assert!(!crate::failures::is_content(&error));
-        std::fs::remove_file(document_path(&generations[0])).unwrap();
-        let error =
-            unchanged_document(&state, path.to_str().unwrap(), 9, "new mtime", &hash).unwrap_err();
-        assert!(!crate::failures::is_content(&error));
-    }
-
     #[test]
     fn interrupted_initial_recipe_write_retries_without_cleanup() {
         let data = tempfile::tempdir().unwrap();

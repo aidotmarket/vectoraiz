@@ -30,6 +30,7 @@ pub(super) fn project(
             path: input,
             pdfium: pdfium.map(Path::to_path_buf),
             office: None,
+            generation_readback: None,
             readback: None,
             projection: Some(vz_core::worker::ProjectionJob {
                 kind: kind.into(),
@@ -102,6 +103,7 @@ fn readback(
             pdfium: None,
             office: None,
             projection: None,
+            generation_readback: None,
             readback: Some(vz_core::worker::ReadbackJob {
                 name: name.into(),
                 output: root.clone(),

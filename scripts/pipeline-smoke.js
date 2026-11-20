@@ -46,7 +46,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress});
       const skipped = await ipc('models_import',{folder:window.__VZ_SMOKE__.importFolder});
       if (skipped.length !== 3 || skipped.some(file => file.result !== 'already installed')) throw new Error('Import rewrote verified models');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Import changed Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Import changed Search');
       await ipc('answer_add',{tierIndex:0});
       if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Imported answer could not be activated');
       await report('import: all three distinct pins, verified skips, Search and Ask passed');
@@ -56,7 +56,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     const status = await ipc('models_status');
     if (status.offer.length !== 2 || status.offer[0].pin.sha256 === status.offer[1].pin.sha256 || status.offer[0].pin.file === status.offer[1].pin.file) throw new Error('Distinct answer fixture pins not offered');
     if (status.target || status.needs_reindex || status.answer.pin?.sha256 !== status.offer[0].pin.sha256) throw new Error('Migration changed the selection or index');
-    const hits = await ipc('pipeline_search', {query});
+    const { hits } = await ipc('pipeline_search', {query});
     if (!hits[0]?.chunk.text.includes('thirty days')) throw new Error('Migration Search lost seeded hits');
     await report('migration: searched before indexing with adopted tier 0');
     if (window.__VZ_SMOKE__.migration === 'switch') {
@@ -89,7 +89,9 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       const retrySwitch = ipc('answer_switch',{tierIndex:1});
       await statusWait(s => s.target?.state === 'verified');
       await report('release-search');
-      await heldSearch; await retrySwitch;
+      const { hits: heldHits } = await heldSearch;
+      if (!heldHits[0]?.chunk.text.includes('thirty days')) throw new Error('Held Search lost its result');
+      await retrySwitch;
       await statusWait(s => s.answer.state === 'ready' && s.answer.pin.sha256 === s.offer[1].pin.sha256 && !s.target);
       const answer = await ipc('pipeline_ask', {question:query,tokens:progress});
       if (answer.kind !== 'answer' || !answer.citations.length || !/(?:thirty|30) days/i.test(answer.text)) throw new Error('Switched answer lost citations');
@@ -98,7 +100,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       await report('hold-next-transfer');
       const adding = ipc('answer_add', {tierIndex:0});
       await statusWait(s => s.target?.state === 'downloading');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Transfer blocked Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Transfer blocked Search');
       window.__VZ_SMOKE__.askLocked = false;
       const currentAnswer = ipc('pipeline_ask',{question:query,tokens:progress});
       await wait(() => window.__VZ_SMOKE__.askLocked,2000);
@@ -125,13 +127,13 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
         const [indexed,transferred] = await Promise.all([indexing,transfer]);
         if (kind === 'transfer' ? indexed !== 'complete' || transferred !== 'Download paused. vectorAIz kept the partial download and can resume it.' : transferred !== 'complete' || !indexed.toLowerCase().includes('cancel')) throw new Error('Cancellation crossed operation kinds: '+JSON.stringify({kind,indexed,transferred}));
         if (kind === 'transfer' && (await ipc('models_status')).target?.state !== 'paused') throw new Error('Cancelled smoke hold did not pause the target');
-        if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Cancellation blocked Search');
+        if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Cancellation blocked Search');
         if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'answer') throw new Error('Cancellation blocked the current answer');
         await report('independent cancellation: '+kind);
       }
       const freed = await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256});
       if (freed !== status.offer[0].pin.size) throw new Error('Delete freed wrong bytes');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Delete changed Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Delete changed Search');
       for (const sha256 of [status.search.pin.sha256,status.offer[1].pin.sha256]) {
         let refused = false;
         try { await ipc('delete_unused_model',{sha256}); } catch { refused = true; }
@@ -145,7 +147,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       catch { failed = true; }
       const failedStatus = await ipc('models_status');
       if (!failed || failedStatus.target?.state !== 'failed' || failedStatus.answer.pin?.sha256 !== status.offer[1].pin.sha256) throw new Error('Failed acquisition changed selection or target state');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Failed acquisition blocked Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Failed acquisition blocked Search');
       const afterFailure = await ipc('pipeline_ask',{question:query,tokens:progress});
       if (afterFailure.kind !== 'answer' || !afterFailure.citations.length) throw new Error('Failed acquisition blocked current Ask');
       await report('failure: Search and loaded Ask survived unreachable answer_add with failed target');
@@ -154,7 +156,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       if ((await ipc('pipeline_ask',{question:query,tokens:progress})).kind !== 'no_answer') throw new Error('Turn off did not remove answer selection');
       const removed = await ipc('delete_unused_model',{sha256:status.offer[1].pin.sha256});
       if (removed !== status.offer[1].pin.size) throw new Error('Turned-off model deletion freed wrong bytes');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Turning off changed Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Turning off changed Search');
       // Cancel an actual acquisition after bytes arrive, then remove only its
       // resumable partial through the same unused-model command.
       const cancelledAdd = ipc('answer_add',{tierIndex:0}).then(() => 'complete',error => String(error));
@@ -165,7 +167,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
       if (!(partial > 0)) throw new Error('Cancellation did not preserve resumable bytes');
       if (await ipc('delete_unused_model',{sha256:status.offer[0].pin.sha256}) !== partial) throw new Error('Partial delete freed wrong bytes');
       if ((await ipc('models_status')).target) throw new Error('Partial deletion left a stale download target');
-      if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Partial deletion changed Search');
+      if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Partial deletion changed Search');
       await report('migration: transfer exclusion, delete refusals, turn off and unused model deletion passed');
     }
     await ipc('self_test');
@@ -213,7 +215,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   button('Search').click();
   await pipelineWait(() => activeView().querySelector('section ol li')?.textContent.includes('thirty days') && !button('Ask').disabled);
   const previousSearch = [...activeView().querySelectorAll('section ol li')].map(li => li.textContent);
-  const repeatedHits = await window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
+  const { hits: repeatedHits } = await window.__TAURI_INTERNALS__.invoke('pipeline_search', { query });
   if (!repeatedHits[0]?.chunk.text.includes('thirty days')) throw new Error('Repeated Search lost its result');
   await report('searched again');
   await report('guard-before');
@@ -221,8 +223,10 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     let refused = false;
     try { await window.__TAURI_INTERNALS__.invoke('pipeline_index', { folder: invalid, progress }); }
     catch (error) {
-      const expected = invalid.trim() ? 'Folder not found' : 'Choose a folder to index';
+      // This is a missing different source; the scanner must retain the selected folder.
+      const expected = invalid.trim() ? 'Re-index did not finish: source unavailable: source missing; the previous folder is still active' : 'Choose a folder to index';
       if (String(error) !== expected) throw error;
+      if (invalid.trim()) await report('missing different-source refusal: ' + String(error));
       refused = true;
     }
     if (!refused) throw new Error('Invalid Folder reached index: ' + JSON.stringify(invalid));
@@ -253,7 +257,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
     // M2 2.3/2.4: no answer path means the chooser result, with no inference work.
     throw new Error('Overlapping Ask without an answer path did not return no_answer: ' + overlapDetails);
   }
-  const nextHits = await secondSearch;
+  const { hits: nextHits } = await secondSearch;
   const rendered = nextHits.map(hit => `${hit.chunk.text} · ${hit.file_name || `Document ${hit.chunk.doc_id.slice(0, 8)}`} · Page ${hit.chunk.page}`);
   if (JSON.stringify(rendered) !== JSON.stringify(previousSearch)) throw new Error('Invalid Folder changed search results');
   await report('searched; empty/blank/missing-folder IPC preserved seeded index');
@@ -277,7 +281,7 @@ const report = checkpoint => window.__TAURI_INTERNALS__.invoke('self_test', { ch
   const offlineStart = await ipc('models_status');
   if (offlineStart.target || offlineStart.files.some(file => file.partial_bytes > 0)) throw new Error('Offline pipeline began with acquisition state');
   await ipc('pipeline_index',{folder:window.__VZ_SMOKE__.fixture,progress});
-  if (!(await ipc('pipeline_search',{query}))[0]?.chunk.text.includes('thirty days')) throw new Error('Offline Search failed');
+  if (!(await ipc('pipeline_search',{query})).hits[0]?.chunk.text.includes('thirty days')) throw new Error('Offline Search failed');
   button('Ask').click();
   await pipelineWait(() => activeView().querySelector('article ol li')?.textContent.startsWith('[1] ') && !button('Ask').disabled);
   await report('answered');

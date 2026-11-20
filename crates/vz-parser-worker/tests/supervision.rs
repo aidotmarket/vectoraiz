@@ -16,6 +16,7 @@ fn failed_file_does_not_prevent_next_worker() {
             pdfium: None,
             office: None,
             projection: None,
+            generation_readback: None,
             readback: None,
         },
         Duration::from_secs(10),
@@ -30,6 +31,7 @@ fn failed_file_does_not_prevent_next_worker() {
                 pdfium: None,
                 office: None,
                 projection: None,
+                generation_readback: None,
                 readback: None,
             },
             Duration::from_secs(10)
@@ -48,6 +50,7 @@ fn office_time_and_cancel_bounds() {
         path: "timeout".into(),
         pdfium: None,
         projection: None,
+        generation_readback: None,
         readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "fixture.docx".into(),
@@ -64,6 +67,7 @@ fn office_time_and_cancel_bounds() {
             path: request.path.clone(),
             pdfium: None,
             projection: None,
+            generation_readback: None,
             readback: None,
             office: Some(vz_core::worker::OfficeJob {
                 name: "fixture.docx".into(),
@@ -108,6 +112,7 @@ fn crash_probe_exits_without_an_os_exception() {
             pdfium: None,
             office: None,
             projection: None,
+            generation_readback: None,
             readback: None,
         },
     )
@@ -123,6 +128,7 @@ fn timeout_and_crash() {
         pdfium: None,
         office: None,
         projection: None,
+        generation_readback: None,
         readback: None,
     };
     for (path, expected, timeout) in [
@@ -163,6 +169,7 @@ fn macos_worker_denies_outbound_network() {
         pdfium: None,
         office: None,
         projection: None,
+        generation_readback: None,
         readback: None,
     };
     let mut baseline = Command::new(worker)
@@ -192,6 +199,7 @@ fn macos_memory_budget_kills_worker() {
         pdfium: None,
         office: None,
         projection: None,
+        generation_readback: None,
         readback: None,
     };
     let error = run(
@@ -210,6 +218,7 @@ fn office_memory_cap_has_named_refusal() {
         path: "memory".into(),
         pdfium: None,
         projection: None,
+        generation_readback: None,
         readback: None,
         office: Some(vz_core::worker::OfficeJob {
             name: "capacity.xlsx".into(),
@@ -277,6 +286,7 @@ fn pages_without_text_use_platform_ocr_policy() {
             pdfium: Some(library.canonicalize().unwrap()),
             office: None,
             projection: None,
+            generation_readback: None,
             readback: None,
         },
         Duration::from_secs(60),
@@ -295,6 +305,7 @@ fn pdfium_io_and_spawn_failure_remain_infrastructure_through_transport() {
         pdfium: None,
         office: None,
         projection: None,
+        generation_readback: None,
         readback: None,
     };
     let failure = run(worker, &request, Duration::from_secs(5)).unwrap_err();
@@ -322,6 +333,7 @@ fn projection_worker_time_and_cancel_bounds() {
                 kind: "docx".into(),
                 output: "unused".into(),
             }),
+            generation_readback: None,
             readback: readback.then(|| vz_core::worker::ReadbackJob {
                 name: "chunks.parquet".into(),
                 output: "unused".into(),
@@ -356,6 +368,7 @@ fn projection_memory_cap_has_named_refusal() {
         path: "memory".into(),
         pdfium: None,
         office: None,
+        generation_readback: None,
         readback: None,
         projection: Some(vz_core::worker::ProjectionJob {
             kind: "capacity.xlsx".into(),
@@ -388,6 +401,7 @@ fn projection_pdf_and_html_memory_profiles_are_distinct() {
             path: "unused".into(),
             pdfium: None,
             office: None,
+            generation_readback: None,
             readback: None,
             projection: Some(vz_core::worker::ProjectionJob {
                 kind: kind.into(),
@@ -417,6 +431,7 @@ fn projection_html_resource_network_trap() {
         path,
         pdfium: None,
         office: None,
+        generation_readback: None,
         readback: None,
         projection: Some(vz_core::worker::ProjectionJob {
             kind: "html".into(),
@@ -502,6 +517,7 @@ fn projection_pdf_resource_network_trap() {
             path,
             pdfium: Some(library.canonicalize().unwrap()),
             office: None,
+            generation_readback: None,
             readback: None,
             projection: Some(vz_core::worker::ProjectionJob {
                 kind: "pdf".into(),
@@ -559,6 +575,7 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
             path,
             pdfium: None,
             office: None,
+            generation_readback: None,
             readback: None,
             projection: Some(vz_core::worker::ProjectionJob {
                 kind: "pdf".into(),
@@ -594,6 +611,7 @@ fn projection_resource_exhaustion_is_a_named_seller_refusal() {
             pdfium: None,
             office: None,
             projection: None,
+            generation_readback: None,
             readback: None
         },
         Duration::from_secs(5)

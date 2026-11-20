@@ -7,14 +7,15 @@ import { version } from "../package.json";
 import { repositoryLicenceName } from "./licence";
 import { ListingReview } from "./components/ListingReview";
 
-interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
+interface Progress { completed: number; failed: number; infrastructure_failed: number; failure_examples: string[]; seal_warnings?: string[]; infrastructure_examples: string[]; skipped: number; total: number; path: string; reason?: string }
 export function formatIndexProgress(p: Progress) {
   const failures = p.failure_examples ?? [];
   const remaining = Math.max(0, p.failed - failures.length);
-  return `${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${readableFolder(p.path).path}${p.reason ? ` · ${p.reason}` : ""}${failures.length ? ` · Failed files: ${failures.join("; ")}${remaining ? `; and ${remaining} more` : ""}` : ""}`;
+  return `${p.completed + p.failed + p.skipped}/${p.total} · ${p.completed} indexed · ${p.skipped} skipped · ${p.failed} failed · ${readableFolder(p.path).path}${p.reason ? ` · ${p.reason}` : ""}${failures.length ? ` · Failed files: ${failures.join("; ")}${remaining ? `; and ${remaining} more` : ""}` : ""}${p.seal_warnings?.length ? ` · ${p.seal_warnings.join("; ")}` : ""}`;
 }
 
 interface Hit { chunk: { chunk_id: string; doc_id: string; page: number; text: string }; score: number; file_name?: string | null }
+interface SearchReport { hits: Hit[]; unavailable: string[] }
 interface Citation { number: number; doc_id: string; page: number; file_name?: string | null }
 interface SelfTestResult { status: string; version: string; os: string; arch: string }
 
@@ -163,6 +164,7 @@ export default function App() {
   const [indexError, setIndexError] = useState("");
   const [indexProgress, setIndexProgress] = useState("");
   const [hits, setHits] = useState<Hit[]>([]);
+  const [searchUnavailable, setSearchUnavailable] = useState<string[]>([]);
   const [appClients, setAppClients] = useState<AppClient[]>();
   const [claudeDisclosure, setClaudeDisclosure] = useState(false);
   const [appSetup, setAppSetup] = useState(0);
@@ -306,7 +308,7 @@ export default function App() {
     else void indexFolder();
   }
   async function indexFolder() {
-    setIndexing(true); setRunning(true); setIndexError(""); setIndexProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]);
+    setIndexing(true); setRunning(true); setIndexError(""); setIndexProgress("Scanning…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); } setHits([]); setSearchUnavailable([]);
     let active = true;
     let receivedProgress = false;
     setIndexedCount(undefined);
@@ -321,16 +323,22 @@ export default function App() {
     }
     catch (cause) {
       const detail = String(cause);
-      setIndexError(detail.startsWith("Re-index did not finish") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
+      setIndexError(detail.startsWith("Re-index did not finish") || detail.startsWith("Index published;") ? detail : !receivedProgress ? `Re-index did not finish: ${detail}` :
         `Re-index did not finish: ${counts.completed} indexed, ${counts.skipped} skipped, ${counts.failed} failed, ${counts.total} total; ${detail}`);
       setIndexProgress("");
+      if (detail.startsWith("Index published;")) await refreshModels().catch(() => undefined);
     }
     finally { active = false; setIndexing(false); setRunning(false); }
   }
   async function search() {
     setShowFirstRunBrand(false);
+    setSearchUnavailable([]);
     setRunning(true); setError(""); setProgress("Searching…"); if (!answerActive.current) { setAnswer(""); setCitations([]); setAskState(""); }
-    try { setHits(await invoke<Hit[]>("pipeline_search", { query })); }
+    try {
+      const report = await invoke<SearchReport>("pipeline_search", { query });
+      setHits(report.hits);
+      setSearchUnavailable(report.unavailable);
+    }
     catch (cause) { setError(String(cause)); setProgress(""); }
     finally { setRunning(false); setProgress(""); }
   }
@@ -344,7 +352,7 @@ export default function App() {
     if (cloudAsk) setAnswerRunning(true); else setRunning(true);
     const unrecordedAnswer = !cloudAsk && models?.answer?.state === "ready" && models.answer.pin &&
       !models.files.some(file => file.sha256 === models.answer?.pin?.sha256 && file.verified);
-    setError(""); setAnswer(""); setCitations([]); setProgress(unrecordedAnswer ? M1_COPY.checking : "Thinking…"); setHits([]); setAskState("");
+    setError(""); setAnswer(""); setCitations([]); setProgress(unrecordedAnswer ? M1_COPY.checking : "Thinking…"); setHits([]); setSearchUnavailable([]); setAskState("");
     let active = true;
     const channel = new Channel<string>();
     channel.onmessage = token => {
@@ -575,7 +583,7 @@ export default function App() {
             {cloud?.default && <span className="chip">{cloud.default === "local" ? M2_COPY.answered.local : M2_COPY.answered[cloud.api_key.provider ?? "anthropic"]}</span>}
           </div>
           {error && <p role="alert">{error}</p>}
-          <div role="status" aria-live="polite">{progress && <p>{progress}</p>}</div>
+          <div role="status" aria-live="polite">{progress && <p>{progress}</p>}{searchUnavailable.length > 0 && <p>Unavailable for search: {searchUnavailable.join(", ")}</p>}</div>
           {answerRunning && <button className={buttonStyle} onClick={() => void cancelAnswer()}>{M2_COPY.cancelAnswer}</button>}
           {askState === "cloud_error" && <div className="actions">{models?.answer?.state === "ready" && <button className={buttonStyle} onClick={() => void choosePath("local")}>{M2_COPY.useLocal}</button>}<button id="cloud-recovery" className={buttonStyle} onClick={() => void openSetup(cloud?.api_key.provider ?? "anthropic")}>{M2_COPY.setup}</button></div>}
           {models?.needs_reindex && <div className="notice warning stack"><p role="alert">Your library needs re-indexing for the new search model.</p><button className={buttonStyle} disabled={pipelineDisabled} onClick={() => {navigate("Library", folder.trim() ? "#index-feedback" : "#library-folder"); if (folder.trim()) requestIndexFolder();}}>Re-index</button></div>}

@@ -56,6 +56,8 @@ pub struct ReviewBinding {
     recipe_sha256: Sha256,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     selection: Option<NativeSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    index_binding: Option<u8>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,27 +108,63 @@ impl NativeIndexFence {
         source: &Path,
     ) -> Result<Vec<CandidateDocument>> {
         let fence = Self::acquire(library)?;
+        fence.check_source(source)?;
         let index = &fence.selection.index;
-        let binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        let reasons = vz_core::storage::State::review_failure_reasons(index)?;
-        Ok(
-            review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?
-                .into_iter()
-                .map(|(doc, indexed)| {
-                    let indexing_reason = reasons.get(Path::new(&doc.path)).cloned();
-                    CandidateDocument {
-                        doc,
-                        indexed,
-                        indexing_reason,
-                    }
-                })
-                .collect(),
-        )
+        let binding = ReviewBinding::capture_version(
+            source,
+            index,
+            &index.join("recipe.json"),
+            Some(fence.selection.clone()),
+            Some(2),
+        )?;
+        let candidates =
+            review_candidates(&binding, vz_core::storage::State::review_documents(index)?)?;
+        let paths: Vec<_> = candidates
+            .iter()
+            .filter(|(_, indexed)| !indexed)
+            .map(|(doc, _)| PathBuf::from(&doc.path))
+            .collect();
+        let reasons = vz_core::storage::State::review_failure_reasons(index, &paths)?;
+        Ok(candidates
+            .into_iter()
+            .map(|(doc, indexed)| {
+                let indexing_reason = reasons.get(Path::new(&doc.path)).cloned();
+                CandidateDocument {
+                    doc,
+                    indexed,
+                    indexing_reason,
+                }
+            })
+            .collect())
+    }
+
+    fn check_source(&self, source: &Path) -> Result<()> {
+        let index = &self.selection.index;
+        if index.join("state.sqlite").is_file() {
+            if let Some(selected) = vz_core::storage::State::review_selected_folder(index)? {
+                ensure!(
+                    source.canonicalize()? == selected,
+                    ListingError::StaleGeneration
+                );
+            }
+        }
+        Ok(())
     }
 
     fn acquire(library: &Path) -> Result<Self> {
+        Self::acquire_mode(library, false)
+    }
+    fn acquire_existing(library: &Path) -> Result<Self> {
+        Self::acquire_mode(library, true)
+    }
+    fn acquire_mode(library: &Path, existing: bool) -> Result<Self> {
         plain_directory(library)?;
-        let selection = vz_core::active_index::selection_fence(library, false)?;
+        let selection = if existing {
+            check_regular(&library.join("index-selection.lock"))?;
+            vz_core::active_index::existing_selection_fence(library)?
+        } else {
+            vz_core::active_index::selection_fence(library, false)?
+        };
         let snapshot = NativeSelection::capture(library)?;
         let lock_path = snapshot.index.join("writer.lock");
         check_regular(&lock_path)?;
@@ -169,7 +207,7 @@ pub(crate) fn review_candidates(
         {
             continue;
         }
-        // Path equality normalizes native separators (including verbatim Windows roots).
+        // Joining onto the native root supplies native separators, including verbatim Windows roots.
         let path = binding.source.join(relative);
         if indexed_paths.contains(&path) {
             continue;
@@ -201,35 +239,62 @@ impl Drop for NativeIndexFence {
 
 impl ReviewBinding {
     pub fn capture(source: &Path, index: &Path, recipe: &Path) -> Result<Self> {
+        Self::capture_version(source, index, recipe, None, Some(2))
+    }
+    fn capture_version(
+        source: &Path,
+        index: &Path,
+        recipe: &Path,
+        selection: Option<NativeSelection>,
+        version: Option<u8>,
+    ) -> Result<Self> {
+        ensure!(
+            version.is_none() || version == Some(2),
+            "unknown index binding"
+        );
+        let index_files = if version == Some(2) {
+            index_tree(
+                index,
+                selection.as_ref().is_some_and(|s| s.library == s.index),
+            )?
+        } else {
+            tree(index)?
+        };
         Ok(Self {
             source: plain_directory(source)?,
             index: plain_directory(index)?,
             source_files: tree(source)?,
-            index_files: tree(index)?,
+            index_files,
+            index_binding: version,
             recipe: fs::canonicalize(recipe)?,
             recipe_file: hash_file(recipe)?,
             recipe_sha256: digest(&read_input_json::<serde_json::Value>(recipe)?)?,
-            selection: None,
+            selection,
         })
     }
-
     fn revisions(&self) -> Result<(String, String)> {
+        // In v2 the existing map's state.sqlite entry commits to logical DB
+        // content. Its size is zero; physical DB size is charged separately.
         Ok((
             digest(&self.source_files)?.into(),
             digest(&self.index_files)?.into(),
         ))
     }
-
     fn check(&self) -> Result<()> {
-        let mut captured = Self::capture(&self.source, &self.index, &self.recipe)?;
         if let Some(selection) = &self.selection {
-            let current = NativeSelection::capture(&selection.library)?;
             ensure!(
-                current == *selection && current.index == self.index,
+                NativeSelection::capture(&selection.library)? == *selection
+                    && selection.index == self.index,
                 ListingError::StaleGeneration
             );
-            captured.selection = Some(current);
         }
+        let captured = Self::capture_version(
+            &self.source,
+            &self.index,
+            &self.recipe,
+            self.selection.clone(),
+            self.index_binding,
+        )?;
         ensure!(captured == *self, ListingError::StaleGeneration);
         Ok(())
     }
@@ -351,13 +416,27 @@ impl ReviewStore {
         library: &Path,
     ) -> Result<NativePackReview<'a>> {
         let pack = self.lock(policy, current.pack_id)?;
-        let generation = pack.validate(current, false)?;
+        let generation: Generation =
+            read_json(&pack.generation_path(current).join("generation.json"))
+                .map_err(|_| ListingError::StaleGeneration)?;
         let selection = NativeSelection::capture(library);
         if selection.as_ref().ok() != generation.binding.selection.as_ref() {
             pack.invalidate(current, "native index selection changed or binding absent")?;
             return Err(ListingError::StaleGeneration.into());
         }
-        let index = NativeIndexFence::acquire(library)?;
+        let index = match NativeIndexFence::acquire_existing(library) {
+            Ok(index) => index,
+            Err(error) => {
+                if error.chain().any(|e| {
+                    e.downcast_ref::<std::io::Error>()
+                        .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+                }) {
+                    pack.invalidate(current, "native index lock missing or invalid")?;
+                    return Err(ListingError::StaleGeneration.into());
+                }
+                return Err(error);
+            }
+        };
         let native = NativePackReview { pack, index };
         native.inspect(current)?;
         Ok(native)
@@ -389,6 +468,13 @@ impl NativePackReview<'_> {
             generation.binding.selection.as_ref() == Some(&self.index.selection),
             ListingError::StaleGeneration
         );
+        if let Some(source) = vz_core::storage::State::review_selected_folder(self.index_path())? {
+            if source != generation.binding.source {
+                self.pack
+                    .invalidate(current, "selected source folder changed")?;
+                return Err(ListingError::StaleGeneration.into());
+            }
+        }
         let private: serde_json::Value =
             read_json(&self.pack.generation_path(current).join("private.json"))?;
         if generation
@@ -583,9 +669,15 @@ impl NativePackReview<'_> {
     /// Only a sanitizer rebuild may call freeze with this captured binding.
     pub fn capture(&self, source: &Path) -> Result<ReviewBinding> {
         self.pack.lease.check(self.pack.policy)?;
+        self.index.check_source(source)?;
         let index = &self.index.selection.index;
-        let mut binding = ReviewBinding::capture(source, index, &index.join("recipe.json"))?;
-        binding.selection = Some(self.index.selection.clone());
+        let binding = ReviewBinding::capture_version(
+            source,
+            index,
+            &index.join("recipe.json"),
+            Some(self.index.selection.clone()),
+            Some(2),
+        )?;
         binding.check()?;
         self.pack.lease.check(self.pack.policy)?;
         Ok(binding)
@@ -999,9 +1091,18 @@ impl PackReview<'_> {
                 )
             })
             .collect();
-        if generation.binding.check().is_err()
-            || tree(&path.join("payload")).ok().as_ref() != Some(&expected)
-        {
+        let binding_changed = match generation.binding.check() {
+            Ok(()) => false,
+            Err(error)
+                if error
+                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                    .is_some() =>
+            {
+                return Err(error)
+            }
+            Err(_) => true,
+        };
+        if binding_changed || tree(&path.join("payload")).ok().as_ref() != Some(&expected) {
             if edit_origin && !path.join("edit-origin-revoked.json").try_exists()? {
                 write_json(
                     &path.join("edit-origin-revoked.json"),
@@ -1087,11 +1188,19 @@ fn check_regular(path: &Path) -> Result<fs::Metadata> {
 fn hash_file(path: &Path) -> Result<FileHash> {
     let metadata = check_regular(path)?;
     ensure!(metadata.len() <= MAX_BYTES, "review file byte limit");
-    let mut reader = File::open(path)?.take(MAX_BYTES + 1);
+    // An empty writer.lock still participates in the tree commitment. Do not
+    // issue even an EOF read: Windows rejects ReadFile under its byte-range
+    // lock. Taking zero bytes preserves the empty-file hash without that read.
+    let limit = if metadata.len() == 0 {
+        0
+    } else {
+        MAX_BYTES + 1
+    };
+    let mut reader = File::open(path)?.take(limit);
     let mut hasher = Hasher::new();
     let size = std::io::copy(&mut reader, &mut hasher)?;
     ensure!(
-        size == metadata.len() && size <= MAX_BYTES,
+        size == metadata.len() && size <= MAX_BYTES && check_regular(path)?.len() == size,
         "review input changed while hashing"
     );
     Ok(FileHash {
@@ -1121,22 +1230,92 @@ fn plain_directory(path: &Path) -> Result<PathBuf> {
     Ok(fs::canonicalize(path)?)
 }
 
-fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
+/// Only the index root has reserved names. Source and payload walkers retain
+/// the original strict tree rule, including directories named `.vz-scan`.
+fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
-    let mut files = BTreeMap::new();
     let mut bytes = 0_u64;
+    for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
+        let path = root.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let metadata = check_regular(&path)?;
+                if name == "state.sqlite" {
+                    bytes = metadata.len();
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    ensure!(bytes <= MAX_BYTES, "review tree byte limit");
+    let (content, referenced) = if root.join("state.sqlite").exists() {
+        let (digest, generations) = vz_core::storage::State::review_content(root)?;
+        (
+            Some(digest.try_into().map_err(anyhow::Error::msg)?),
+            generations,
+        )
+    } else {
+        (None, Default::default())
+    };
+    let mut files = BTreeMap::new();
+    if let Some(sha256) = content {
+        files.insert("state.sqlite".into(), FileHash { size: 0, sha256 });
+    }
+    strict_tree(root, bytes, files, |entry| {
+        let Ok(relative) = entry.path().strip_prefix(root) else {
+            return true;
+        };
+        if ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"]
+            .iter()
+            .any(|name| relative == Path::new(name))
+        {
+            return false;
+        }
+        if relative == Path::new(".vz-scan")
+            || relative == Path::new(".vz-validation")
+            || (flat
+                && (relative == Path::new("indexes") || relative == Path::new("active-index.json")))
+        {
+            return false;
+        }
+        if relative.parent() == Some(Path::new("generations")) {
+            return referenced.contains(&entry.file_name().to_string_lossy().into_owned());
+        }
+        true
+    })
+}
+
+fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
+    strict_tree(root, 0, BTreeMap::new(), |_| true)
+}
+
+fn strict_tree(
+    root: &Path,
+    mut bytes: u64,
+    mut files: BTreeMap<String, FileHash>,
+    include: impl FnMut(&walkdir::DirEntry) -> bool,
+) -> Result<BTreeMap<String, FileHash>> {
+    plain_directory(root)?;
+    // Logical SQLite rows do not consume the physical file-entry budget.
+    let logical_entries = files.len();
     for (count, entry) in walkdir::WalkDir::new(root)
         .max_depth(64)
         .into_iter()
+        .filter_entry(include)
         .enumerate()
     {
         ensure!(count <= MAX_FILES, "review tree entry count limit");
         let entry = entry?;
         if entry.file_type().is_dir() {
             ensure!(entry.depth() < 64, "review directory depth limit");
+            plain_directory(entry.path())?;
             continue;
         }
-        ensure!(files.len() < MAX_FILES, "review file count limit");
+        ensure!(
+            files.len() - logical_entries < MAX_FILES,
+            "review file count limit"
+        );
         let hash = hash_file(entry.path())?;
         bytes = bytes
             .checked_add(hash.size)
@@ -1384,6 +1563,320 @@ mod tests {
     }
 
     #[test]
+    fn t15_v2_committed_database_orphans_and_root_scoped_prunes() {
+        let f = Fixture::new();
+        let root = f.0.join("index");
+        drop(vz_core::storage::State::open(&root).unwrap());
+        let binding = f.binding();
+        assert_eq!(binding.index_binding, Some(2));
+        fs::create_dir_all(root.join(".vz-scan/many/entries")).unwrap();
+        fs::write(root.join(".vz-scan/many/entries/staged"), "private").unwrap();
+        // Exceed the real entry budget inside the reserved workspace. Pruning
+        // must happen before traversal and accounting, including on Windows.
+        for n in 0..=MAX_FILES {
+            File::create(root.join(".vz-scan/many/entries").join(n.to_string())).unwrap();
+        }
+        fs::create_dir_all(root.join("generations/orphan")).unwrap();
+        fs::write(root.join("generations/orphan/uncommitted"), "private").unwrap();
+        fs::create_dir_all(root.join(".vz-validation")).unwrap();
+        fs::write(root.join(".vz-validation/marker.json"), "disposable").unwrap();
+        binding.check().unwrap();
+        let writer = vz_core::storage::State::open(&root).unwrap();
+        let tx = writer.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO index_metadata VALUES('test','uncommitted')",
+            [],
+        )
+        .unwrap();
+        binding.check().unwrap();
+        tx.rollback().unwrap();
+        binding.check().unwrap();
+        writer
+            .db
+            .execute("INSERT INTO index_metadata VALUES('test','committed')", [])
+            .unwrap();
+        stale(binding.check());
+        drop(writer);
+        let current = f.binding();
+        assert_ne!(
+            binding.revisions().unwrap().1,
+            current.revisions().unwrap().1
+        );
+        fs::create_dir_all(f.0.join("source/.vz-scan")).unwrap();
+        fs::write(f.0.join("source/.vz-scan/terms.txt"), "bound source").unwrap();
+        stale(current.check());
+    }
+
+    #[test]
+    fn t15_sidecar_writer_child() {
+        let Some(root) = std::env::var_os("VZ_SIDECAR_CHILD") else {
+            return;
+        };
+        let root = Path::new(&root);
+        let writer = vz_core::storage::State::open(root).unwrap();
+        writer
+            .db
+            .execute_batch("PRAGMA cache_size=1; PRAGMA cache_spill=ON")
+            .unwrap();
+        let tx = writer.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO index_metadata VALUES('pending',?1)",
+            ["uncommitted".repeat(100_000)],
+        )
+        .unwrap();
+        let wal = OpenOptions::new()
+            .write(true)
+            .open(root.join("state.sqlite-wal"))
+            .unwrap();
+        wal.set_len(MAX_BYTES + 4096).unwrap();
+        fs::write(std::env::var_os("VZ_SIDECAR_READY").unwrap(), "ready").unwrap();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn t15_transient_sidecars_are_node_checked_but_never_charged_or_hashed() {
+        use std::process::{Command, Stdio};
+        let f = Fixture::new();
+        let root = f.0.join("index");
+        drop(vz_core::storage::State::open(&root).unwrap());
+        let binding = f.binding();
+        let ready = f.0.join("sidecar-ready");
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "review_store::tests::t15_sidecar_writer_child",
+                "--nocapture",
+            ])
+            .env("VZ_SIDECAR_CHILD", &root)
+            .env("VZ_SIDECAR_READY", &ready)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        while !ready.exists() {
+            if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("sidecar child did not reach uncommitted WAL write");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(fs::metadata(root.join("state.sqlite-wal")).unwrap().len() > MAX_BYTES);
+        // First capture after death, without recovery or another State open.
+        // Windows mandatory locks have gone with the killed writer.
+        binding.check().unwrap();
+        #[cfg(unix)]
+        {
+            fs::hard_link(root.join("state.sqlite"), f.0.join("linked-database")).unwrap();
+            assert!(binding.check().is_err());
+        }
+    }
+
+    #[test]
+    fn t15_version_one_expires_on_adoption_then_survives_warm_scan_until_cancelled_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let f = Fixture::new();
+        let index = f.0.join("real-index");
+        let source = f.0.join("source");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::index_explicit(
+            &index,
+            &source,
+            &engines,
+            &assets,
+            |_| {},
+        ))
+        .unwrap();
+        // Reproduce the pre-seal layout.
+        fs::remove_dir_all(index.join(".vz-validation")).unwrap();
+        let old =
+            ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
+                .unwrap();
+        let new = ReviewBinding::capture(&source, &index, &index.join("recipe.json")).unwrap();
+        old.check().unwrap();
+        let report = rt
+            .block_on(vz_core::active_index::index_explicit(
+                &index,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(report.skipped, 1);
+        assert!(!index.join(".vz-scan/scan.sqlite").exists());
+        stale(old.check());
+        new.check().unwrap();
+        assert!(index.join(".vz-validation").is_dir());
+        let sealed =
+            ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
+                .unwrap();
+        let warm = rt
+            .block_on(vz_core::active_index::index_explicit(
+                &index,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+            ))
+            .unwrap();
+        assert_eq!(warm.skipped, 1);
+        assert!(!index.join(".vz-scan/scan.sqlite").exists());
+        sealed.check().unwrap();
+        let b = f.0.join("other-source");
+        fs::create_dir(&b).unwrap();
+        fs::write(b.join("good.txt"), "Reusable cancelled success.").unwrap();
+        let stopped = AtomicBool::new(false);
+        assert!(rt
+            .block_on(vz_core::active_index::reindex(
+                &index,
+                &b,
+                &engines,
+                &assets,
+                |_| stopped.store(true, Ordering::SeqCst),
+                || stopped.load(Ordering::SeqCst)
+            ))
+            .is_err());
+        stale(sealed.check());
+        new.check().unwrap();
+    }
+
+    #[test]
+    fn t15_payload_named_workspace_is_copied_and_remains_bound() {
+        let f = Fixture::new();
+        let (_, policy) = policy();
+        fs::write(
+            f.0.join("rebuilt/.vz-scan"),
+            "Payload content, not an index workspace.",
+        )
+        .unwrap();
+        let store = ReviewStore::open(&f.0.join("reviews")).unwrap();
+        let pack = store.lock(&policy, Uuid::new_v4()).unwrap();
+        let current = f.freeze(&pack);
+        let payload = pack.generation_path(&current).join("payload/.vz-scan");
+        assert_eq!(
+            fs::read(&payload).unwrap(),
+            b"Payload content, not an index workspace."
+        );
+        pack.validate(&current, false).unwrap();
+        fs::write(payload, "changed payload").unwrap();
+        stale(pack.validate(&current, false));
+    }
+
+    #[test]
+    fn v2_rejects_over_depth_ordinary_subtrees() {
+        let f = Fixture::new();
+        let mut deep = f.0.join("index/ordinary");
+        for _ in 0..65 {
+            deep.push("d");
+        }
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(deep.join("hidden"), b"bound content").unwrap();
+        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        assert!(format!("{error:#}").contains("depth limit"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn v2_rejects_duplicate_normalized_paths() {
+        let f = Fixture::new();
+        fs::create_dir(f.0.join("index/ordinary")).unwrap();
+        fs::write(f.0.join("index/ordinary/name"), b"one").unwrap();
+        fs::write(f.0.join("index/ordinary\\name"), b"two").unwrap();
+        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        assert!(format!("{error:#}").contains("duplicate review path"));
+    }
+
+    #[test]
+    fn t15_version_one_remains_strict_and_every_new_capture_is_v2() {
+        let f = Fixture::new();
+        let old = ReviewBinding::capture_version(
+            &f.0.join("source"),
+            &f.0.join("index"),
+            &f.0.join("index/recipe.json"),
+            None,
+            None,
+        )
+        .unwrap();
+        old.check().unwrap();
+        assert!(serde_json::to_value(&old)
+            .unwrap()
+            .get("index_binding")
+            .is_none());
+        let new = f.binding();
+        assert_eq!(new.index_binding, Some(2));
+        fs::create_dir_all(f.0.join("index/.vz-scan")).unwrap();
+        fs::write(
+            f.0.join("index/.vz-scan/scan.sqlite"),
+            "cancelled scan success",
+        )
+        .unwrap();
+        stale(old.check());
+        new.check().unwrap();
+    }
+
+    #[test]
+    fn t15_missing_bound_selection_lock_invalidates_before_recreation_and_contention_is_busy() {
+        for export_first in [false, true] {
+            let f = Fixture::new();
+            let index = f.0.join("index");
+            fs::write(index.join("writer.lock"), b"").unwrap();
+            let (_, policy) = policy();
+            let store = ReviewStore::open(&f.0.join("reviews")).unwrap();
+            let guard = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
+            let current = f.freeze_bound(&guard.pack, guard.capture(&f.0.join("source")).unwrap());
+            drop(guard);
+            {
+                let _busy = vz_core::active_index::selection_fence(&index, true).unwrap();
+                let error = store
+                    .lock_native_current(&policy, &current, &index)
+                    .err()
+                    .unwrap();
+                assert!(format!("{error:#}").contains("in use"));
+            }
+            store
+                .lock_native_current(&policy, &current, &index)
+                .unwrap()
+                .inspect(&current)
+                .unwrap();
+            fs::remove_file(index.join("index-selection.lock")).unwrap();
+            if export_first {
+                stale(
+                    store
+                        .lock_native_current(&policy, &current, &index)
+                        .and_then(|native| native.reviewed_payload(&current)),
+                );
+            } else {
+                stale(
+                    store
+                        .lock_native_current(&policy, &current, &index)
+                        .and_then(|native| native.accept(&current)),
+                );
+            }
+            assert!(!index.join("index-selection.lock").exists());
+            fs::write(index.join("index-selection.lock"), b"").unwrap();
+            let result = store.lock_native_current(&policy, &current, &index);
+            assert!(
+                result.is_err(),
+                "restoring deleted lock revived review; export-first={export_first}"
+            );
+        }
+    }
+
+    #[test]
     fn accepted_legacy_sanitizer_generation_requires_rebuild_before_delivery() {
         let fixture = Fixture::new();
         let index = fixture.0.join("index");
@@ -1600,6 +2093,100 @@ mod tests {
             .db
             .execute("INSERT INTO jobs VALUES (1, 'neutral', 'ready', NULL)", [])
             .unwrap();
+        drop(writer);
+        stale(store.lock_native_current(&policy, &current, &index));
+    }
+
+    #[test]
+    fn selected_source_guards_reject_parent_and_subfolder() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        let deep = source.join("reports");
+        fs::create_dir(&deep).unwrap();
+        fs::rename(source.join("original.txt"), deep.join("original.txt")).unwrap();
+        let index = fixture.0.join("index");
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer
+            .db
+            .execute(
+                "INSERT INTO index_metadata VALUES('selected_folder',?1)",
+                [source.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+        let (_, policy) = policy();
+        let store_root = tempfile::tempdir().unwrap();
+        let store_root_path = fs::canonicalize(store_root.path()).unwrap();
+        let store = ReviewStore::open(&store_root_path.join("reviews")).unwrap();
+        for wrong in [&deep, &fixture.0] {
+            let native = store.lock_native(&policy, Uuid::new_v4(), &index).unwrap();
+            stale(native.capture(wrong));
+            // Bind current index bytes to an incompatible source to isolate the
+            // edit-origin guard from ordinary index-byte invalidation.
+            let mut binding =
+                ReviewBinding::capture(wrong, &index, &index.join("recipe.json")).unwrap();
+            binding.selection = Some(native.index.selection.clone());
+            let current = fixture.freeze_bound(&native.pack, binding);
+            stale(native.edit_origin(&current));
+        }
+        stale(NativeIndexFence::candidate_documents(&index, &deep));
+        stale(NativeIndexFence::candidate_documents(&index, &fixture.0));
+        assert_eq!(
+            NativeIndexFence::candidate_documents(&index, &source)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn obsolete_failure_history_does_not_block_current_review() {
+        let fixture = Fixture::new();
+        let index = fixture.0.join("index");
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer.db.execute_batch("WITH RECURSIVE paths(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM paths WHERE n<50001) INSERT INTO jobs(path,status,reason) SELECT '/obsolete-folder/file-' || n,'failed','old failure' FROM paths;").unwrap();
+        drop(writer);
+        let candidates =
+            NativeIndexFence::candidate_documents(&index, &fixture.0.join("source")).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].indexing_reason.is_none());
+    }
+
+    #[test]
+    fn selected_root_metadata_write_durably_invalidates_accepted_generation() {
+        let fixture = Fixture::new();
+        let source = fixture.0.join("source");
+        let deep = source.join("reports");
+        fs::create_dir(&deep).unwrap();
+        fs::rename(source.join("original.txt"), deep.join("original.txt")).unwrap();
+        let index = fixture.0.join("index");
+        drop(vz_core::storage::State::open(&index).unwrap());
+        let (_, policy) = policy();
+        let store = ReviewStore::open(&fixture.0.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let current;
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            current = fixture.freeze_bound(&native.pack, native.capture(&deep).unwrap());
+            native.accept(&current).unwrap();
+        }
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer
+            .db
+            .execute(
+                "INSERT INTO index_metadata VALUES('selected_folder',?1)",
+                [source.to_str().unwrap()],
+            )
+            .unwrap();
+        drop(writer);
+        {
+            let native = store.lock_native(&policy, id, &index).unwrap();
+            stale(native.edit_origin(&current));
+        }
+        stale(store.lock_native_current(&policy, &current, &index));
+        // Restoring old metadata cannot restore the invalidated acceptance.
+        let writer = vz_core::storage::State::open(&index).unwrap();
+        writer.db.execute("DELETE FROM index_metadata", []).unwrap();
         drop(writer);
         stale(store.lock_native_current(&policy, &current, &index));
     }

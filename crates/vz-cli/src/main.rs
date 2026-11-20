@@ -306,14 +306,13 @@ fn run() -> Result<()> {
         match args.command {
             Operation::BakeoffSearch { questions, top_k } => {
                 let (state, _) = State::open_index(&args.state, &engines.recipe)?;
-                let paths = state.documents()?.into_iter().map(|d| (d.doc_id, d.path)).collect::<std::collections::HashMap<_, _>>();
                 for item in read_questions(&questions)? {
                     let question = item["question"].as_str().context("question")?;
                     let started = std::time::Instant::now();
-                    let hits = state.search(question, &engines.vector(question, true)?, top_k.clamp(1, 100)).await?;
+                    let report = state.search_with_availability(question, &engines.vector(question, true)?, top_k.clamp(1, 100)).await?;
                     let query_ms = started.elapsed().as_secs_f64() * 1000.0;
-                    let hits = hits.iter().enumerate().map(|(i, h)| Ok(serde_json::json!({"rank": i + 1, "doc_path": paths.get(&h.chunk.doc_id).context("hit document")?, "page": h.chunk.page, "chunk_id": h.chunk.chunk_id, "score": h.score}))).collect::<Result<Vec<_>>>()?;
-                    println!("{}", serde_json::json!({"id": item.get("id").context("id")?, "hits": hits, "query_ms": query_ms}));
+                    let hits = report.hits.iter().enumerate().map(|(i, h)| Ok(serde_json::json!({"rank": i + 1, "doc_path": report.paths.get(&h.chunk.doc_id).context("hit document")?, "page": h.chunk.page, "chunk_id": h.chunk.chunk_id, "score": h.score}))).collect::<Result<Vec<_>>>()?;
+                    println!("{}", serde_json::json!({"id": item.get("id").context("id")?, "hits": hits, "query_ms": query_ms, "unavailable": report.unavailable}));
                 }
             }
             Operation::Embed { text } => { println!("{}",serde_json::to_string(&serde_json::json!({"embedding":engines.vector(&text,true)?,"recipe":engines.recipe}))?); }
@@ -322,11 +321,8 @@ fn run() -> Result<()> {
                     vz_core::active_index::reindex(&args.state, &folder, &engines, &args.assets,
                         |p| eprintln!("{}", serde_json::to_string(p).unwrap()), || false).await?
                 } else {
-                    let mut state = State::open(&args.state)?;
-                    vz_core::index::index(&mut state, &folder, &engines, &args.assets, |p| {
-                        eprintln!("{}", serde_json::to_string(p).unwrap())
-                    })
-                    .await?
+                    vz_core::active_index::index_explicit(&args.state, &folder, &engines, &args.assets,
+                        |p| eprintln!("{}", serde_json::to_string(p).unwrap())).await?
                 };
                 println!("{}", serde_json::to_string(&result)?);
             }

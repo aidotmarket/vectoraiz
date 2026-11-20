@@ -1,4 +1,4 @@
-//! One request per process. stdout is exclusively length-prefixed JSON.
+//! One request per process. stdout is reserved for the bounded worker protocol.
 fn main() {
     let result = vz_core::worker::apply_memory_limit().and_then(|_| {
         let request: vz_core::worker::Request =
@@ -10,10 +10,13 @@ fn main() {
             usize::from(request.projection.is_some())
                 + usize::from(request.readback.is_some())
                 + usize::from(request.office.is_some())
+                + usize::from(request.generation_readback.is_some())
                 <= 1,
             "ambiguous worker request"
         );
-        if let Some(job) = &request.readback {
+        if let Some(job) = &request.generation_readback {
+            vz_core::storage::readback_staged_generation(&request.path, job).map(|()| Vec::new())
+        } else if let Some(job) = &request.readback {
             let input = std::fs::read(&request.path)?;
             let inventory =
                 vz_pack::sanitize::inspect_vector_artifact(&job.name, &input, &job.identity_terms)?;

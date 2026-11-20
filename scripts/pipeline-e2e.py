@@ -15,7 +15,7 @@ from office_fixtures import write_pptx
 import pyarrow.parquet as pq
 
 ROOT = Path(__file__).resolve().parents[1]
-RTK = ["rtk", "proxy"] if shutil.which("rtk") else []
+RTK = ["rtk", "run"] if shutil.which("rtk") else []
 TARGET = Path(os.environ.get('CARGO_TARGET_DIR', ROOT / 'target'))
 CLI = TARGET / 'debug' / ('vectoraiz-cli.exe' if os.name == 'nt' else 'vectoraiz-cli')
 # This CLI acceptance build uses the harness feature. The debug desktop has a
@@ -26,12 +26,15 @@ try:
         temp = str(Path(temp).resolve())
         state = Path(temp) / 'state'
         pack = Path(temp) / 'pack'
-        def cli(*args):
-            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, text=True, encoding="utf-8", capture_output=True, timeout=600)
+        def cli(*args, forbid_document_embeddings=False):
+            env = dict(os.environ, VZ_ENGINE_TIMING="1") if forbid_document_embeddings else None
+            result = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), *args], cwd=ROOT, env=env, text=True, encoding="utf-8", capture_output=True, timeout=600)
             print(result.stderr, file=sys.stderr)
             if result.returncode:
                 print(result.stdout)
                 raise RuntimeError(f'CLI {args[0]} failed: {result.returncode}')
+            if forbid_document_embeddings:
+                assert 'VZ_ENGINE_TIMING document_embedding' not in result.stderr, result.stderr
             return json.loads(result.stdout)
         journey_source = Path(temp) / "journey-documents"
         shutil.copytree(ROOT / "spike/fixtures/documents", journey_source)
@@ -197,7 +200,7 @@ try:
         assert manifest['embedding_recipe'] == json.loads((state / 'recipe.json').read_text())
 
         # Migrate a legacy library through the same recipe-directory/pointer path
-        # used by desktop Re-index; old storage stays byte-for-byte intact.
+        # used by desktop Re-index; superseded legacy storage is reclaimed.
         import shutil
         library = Path(temp) / 'library'
         legacy = library / 'phase0-index'
@@ -215,13 +218,14 @@ try:
         active = library / pointer['dir']
         recipe = json.loads((active / 'recipe.json').read_text())
         recipe_id = hashlib.sha256(json.dumps(recipe, sort_keys=True, separators=(',', ':'), ensure_ascii=False).encode()).hexdigest()[:16]
-        assert pointer == {'dir': f'indexes/{recipe_id}', 'recipe_id': recipe_id}, pointer
+        assert pointer['recipe_id'] == recipe_id and active.resolve().is_dir(), pointer
+        assert pointer['dir'].startswith(f'indexes/{recipe_id}-'), pointer
         assert cli('search', query), 'search after migration'
         assert cli('ask', query)['citations'], 'Ask after migration'
         assert vector_reviewed_journey(Path(temp) / 'migrated-pack')[0]['embedding_recipe'] == recipe
         assert cli('index', str(journey_source))['skipped'] == 21
         assert (library / 'active-index.json').read_bytes() == pointer_bytes
-        assert (legacy / 'recipe.json').read_bytes() == old_bytes
+        assert not legacy.exists(), 'superseded legacy index reclaimed'
         # Gate 3: exercise real indexer failures, publication and retry, rather
         # than constructing only synthetic completion statistics.
         def migration_library(name):
@@ -288,12 +292,43 @@ try:
         assert (state / 'active-index.json').read_bytes() != before
         assert cli('search', query), 'search after infrastructure retry'
 
+        # Interrupt after one durable private success, then retry through a fresh
+        # CLI process. The remaining work must reuse the confirmed success.
+        state = Path(temp) / 'cancel-retry-state'
+        cancel_source = Path(temp) / 'cancel-retry-source'
+        cancel_source.mkdir()
+        (cancel_source / 'a.txt').write_text('A durable reusable private success.')
+        (cancel_source / 'z.txt').write_text('A slower remaining document. ' * 2000)
+        child = subprocess.Popen([*RTK, str(CLI), '--cpu', '--state', str(state), 'index', str(cancel_source)],
+                                 cwd=ROOT, text=True, encoding='utf-8', stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, start_new_session=os.name != 'nt')
+        def stop_interrupted_scan():
+            if os.name == 'nt':
+                subprocess.run([*RTK, 'taskkill', '/PID', str(child.pid), '/T', '/F'], check=True, capture_output=True)
+            else:
+                os.killpg(child.pid, signal.SIGKILL)
+        try:
+            for line in child.stderr:
+                try:
+                    update = json.loads(line)
+                except ValueError:
+                    continue
+                if update.get('completed', 0) >= 1:
+                    stop_interrupted_scan()
+                    break
+            child.wait(timeout=120)
+            assert child.returncode != 0, 'scan must be interrupted before publication'
+        finally:
+            if child.poll() is None:
+                stop_interrupted_scan()
+                child.wait(timeout=120)
+            child.stderr.close()
+        retried = cli('index', str(cancel_source))
+        assert retried['skipped'] >= 1 and retried['completed'] + retried['skipped'] == 2, retried
+
         # A matching legacy recipe is adopted without re-embedding or a new directory.
         state = Path(temp) / 'matching-legacy-library'
         shutil.copytree(explicit_state, state / 'phase0-index')
         assert cli('index', str(journey_source))['skipped'] == 21
-        assert json.loads((state / 'active-index.json').read_text())['dir'] == 'phase0-index'
-        assert not (state / 'indexes').exists()
         assert cli('search', query)
 
         state = Path(temp) / 'interrupted-first-library'
@@ -369,6 +404,14 @@ try:
             generation = db.execute('SELECT generation FROM documents').fetchone()[0]
         stored = json.loads((state / 'generations' / generation / 'document.json').read_text())
         assert stored['pages'] == 2 and stored['needs_ocr_pages'] == reopened['needs_ocr_pages'], stored
+        seal = state / '.vz-validation' / f'{generation}.json'
+        seal.unlink()
+        for origin in ['adoption', 'warm reuse']:
+            reused = cli('index', str(mixed), forbid_document_embeddings=True)
+            assert (reused['completed'], reused['skipped'], reused['failed']) == (0, 1, 0), (origin, reused)
+            assert reused['needs_ocr_pages'] == reopened['needs_ocr_pages'], (origin, reused)
+            assert reused['reason'] == reopened['reason'], (origin, reused)
+            assert json.loads(seal.read_text())['origin'] == 'adopted'
         # A PDF whose second page object is missing: PDFium loads the document but not
         # page 2. It must be a document failure, never a silently truncated success.
         broken = Path(temp) / 'broken'
@@ -398,7 +441,13 @@ try:
         state = Path(temp) / 'state'
         missing = subprocess.run([*RTK, str(CLI), '--cpu', '--state', str(state), 'index', str(Path(temp) / 'missing-source')], cwd=ROOT, capture_output=True, text=True, encoding="utf-8", timeout=120)
         assert missing.returncode != 0 and 'source unavailable' in missing.stderr
-        assert cli('search', query) == [], 'unavailable source must revoke cached content'
+        assert cli('search', query), 'different missing source must keep the selected source'
+        removed_source = Path(temp) / 'removed-journey-source'
+        shutil.copytree(journey_source, removed_source)
+        cli('index', str(removed_source))
+        shutil.rmtree(removed_source)
+        refused_index(removed_source)
+        assert cli('search', query) == [], 'missing current source must revoke cached content'
         print(json.dumps({'source_revocation': 'OK', 'index': indexed, 'unchanged': unchanged, 'search_top': hits[0]['chunk']['doc_id'], 'answer': answer, 'small_answers': small_answers, 'pack_hashes': 'OK', 'example_query': 'OK'}))
 finally:
     subprocess.run([*RTK, "cargo", "build", "-p", "vz-cli"], cwd=ROOT, check=True)

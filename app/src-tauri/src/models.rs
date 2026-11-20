@@ -50,6 +50,7 @@ pub struct OperationState<E> {
     lock: Arc<Mutex<EngineCache<E>>>,
     generation: AtomicU64,
     cancel: std::sync::Mutex<watch::Sender<bool>>,
+    scan: std::sync::Mutex<Option<vz_core::active_index::ScanControl>>,
     transfer: Arc<Mutex<()>>,
     transfer_cancel: std::sync::Mutex<watch::Sender<bool>>,
     pub target: RwLock<Option<Value>>,
@@ -64,6 +65,7 @@ impl<E> Default for OperationState<E> {
             })),
             generation: AtomicU64::new(0),
             cancel: std::sync::Mutex::new(watch::channel(false).0),
+            scan: std::sync::Mutex::new(None),
             transfer: Arc::new(Mutex::new(())),
             transfer_cancel: std::sync::Mutex::new(watch::channel(false).0),
             target: RwLock::new(None),
@@ -71,6 +73,11 @@ impl<E> Default for OperationState<E> {
         }
     }
 }
+type IndexRegistration<E> = (
+    OwnedMutexGuard<EngineCache<E>>,
+    watch::Receiver<bool>,
+    vz_core::active_index::ScanControl,
+);
 impl<E: CachedEngine> OperationState<E> {
     pub fn acquire(&self) -> Result<OwnedMutexGuard<EngineCache<E>>, String> {
         let mut cache = self
@@ -98,10 +105,43 @@ impl<E: CachedEngine> OperationState<E> {
     }
     // Reset only after acquiring the mutation lock; a refused call changes nothing.
     // A fresh channel identifies this operation; successors cannot reset old receivers.
+    #[cfg(test)]
     pub fn start(&self) -> watch::Receiver<bool> {
+        let mut scan = self.scan.lock().unwrap();
+        *scan = None;
         let (sender, receiver) = watch::channel(false);
         *self.cancel.lock().unwrap() = sender;
         receiver
+    }
+    pub fn acquire_index(&self) -> Result<IndexRegistration<E>, String> {
+        self.acquire_index_with(|| {})
+    }
+    fn acquire_index_with(&self, acquired: impl FnOnce()) -> Result<IndexRegistration<E>, String> {
+        let mut scan = self.scan.lock().unwrap();
+        let cache = self.acquire()?;
+        acquired();
+        let (sender, receiver) = watch::channel(false);
+        *self.cancel.lock().unwrap() = sender;
+        let control = vz_core::active_index::ScanControl::default();
+        *scan = Some(control.clone());
+        Ok((cache, receiver, control))
+    }
+    #[cfg(test)]
+    pub fn start_index(&self) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
+        self.register_index(|| {})
+    }
+    #[cfg(test)]
+    fn register_index(
+        &self,
+        registered: impl FnOnce(),
+    ) -> (watch::Receiver<bool>, vz_core::active_index::ScanControl) {
+        let mut scan = self.scan.lock().unwrap();
+        let (sender, receiver) = watch::channel(false);
+        *self.cancel.lock().unwrap() = sender;
+        let control = vz_core::active_index::ScanControl::default();
+        registered();
+        *scan = Some(control.clone());
+        (receiver, control)
     }
     pub fn promotion_lock(&self) -> Arc<Mutex<EngineCache<E>>> {
         self.lock.clone()
@@ -171,6 +211,13 @@ impl<E: CachedEngine> OperationState<E> {
         result
     }
     pub fn cancel(&self) {
+        let _ = self.request_cancel();
+    }
+    pub fn request_cancel(&self) -> bool {
+        let scan = self.scan.lock().unwrap();
+        if scan.as_ref().is_some_and(|scan| !scan.cancel()) {
+            return false;
+        }
         self.checks.lock().unwrap().clear();
         self.cancel.lock().unwrap().send_replace(true);
         self.generation.fetch_add(1, Ordering::AcqRel);
@@ -179,6 +226,7 @@ impl<E: CachedEngine> OperationState<E> {
         if let Ok(mut cache) = self.lock.try_lock() {
             cache.invalidate();
         }
+        true
     }
 }
 
@@ -419,12 +467,9 @@ pub fn status(dir: &Path, pins: &[Pin]) -> Value {
         .collect();
     json!({"ready": files.iter().all(|f| f["verified"] == true), "files": files})
 }
-pub fn validate_folder(folder: &str) -> Result<(), String> {
+pub fn validate_index_request(folder: &str) -> Result<(), String> {
     if folder.trim().is_empty() {
         return Err("Choose a folder to index".into());
-    }
-    if !Path::new(folder).is_dir() {
-        return Err("Folder not found".into());
     }
     Ok(())
 }
@@ -977,4 +1022,63 @@ pub fn index_snapshot(root: &Path) -> Result<Value> {
     let mut files = std::collections::BTreeMap::new();
     visit(root, root, &mut files)?;
     Ok(json!(files))
+}
+
+#[cfg(test)]
+mod scan_registration_tests {
+    use super::*;
+    #[test]
+    fn cancel_during_registration_observes_registered_scan() {
+        let operations = Arc::new(Operations::default());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let registrar = operations.clone();
+        let start = std::thread::spawn(move || {
+            registrar
+                .acquire_index_with(|| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                })
+                .unwrap()
+        });
+        entered_rx.recv().unwrap();
+        let canceller = operations.clone();
+        let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let cancel = std::thread::spawn(move || {
+            attempt_tx.send(()).unwrap();
+            let accepted = canceller.request_cancel();
+            done_tx.send(()).unwrap();
+            accepted
+        });
+        attempt_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        release_tx.send(()).unwrap();
+        let (_cache, receiver, control) = start.join().unwrap();
+        assert!(cancel.join().unwrap());
+        assert!(*receiver.borrow());
+        assert!(control.is_cancelled());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let data = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let result = tokio::runtime::Runtime::new().unwrap().block_on(
+            vz_core::active_index::reindex_controlled(
+                data.path(),
+                source.path(),
+                &engines,
+                &assets,
+                |_| {},
+                &control,
+            ),
+        );
+        assert!(result.is_err());
+        assert!(!data.path().join("active-index.json").exists());
+    }
 }

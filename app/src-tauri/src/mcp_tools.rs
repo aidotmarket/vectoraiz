@@ -103,28 +103,47 @@ pub fn execute(
     vz_pack::listing_policy::system().refresh();
     let engines = cache.get_or_load(false, || Engines::load_embedding(assets, pins, cpu))?;
     let state = open_index(root, engines)?;
-    let docs = state.documents()?;
     let name = |path: &str| path.rsplit(['/', '\\']).next().unwrap_or("").to_owned();
     match tool {
         "list_collections" => {
             let folder = vz_core::active_index::last_indexed_folder(root).unwrap_or_default();
             Ok(
-                json!({"collections":[{"id":"library","name":name(&folder),"documents":docs.len()}]}),
+                json!({"collections":[{"id":"library","name":name(&folder),"documents":state.documents()?.len()}]}),
             )
         }
         "search" => {
             let query = args["query"].as_str().unwrap();
-            let hits = tokio::runtime::Runtime::new()?.block_on(state.search(
-                query,
-                &engines.vector(query, true)?,
-                args["top_k"].as_u64().unwrap_or(8) as usize,
-            ))?;
-            let names = crate::desktop_pipeline::file_names(&state);
-            Ok(
-                json!({"hits":hits.into_iter().map(|h|json!({"chunk_id":h.chunk.chunk_id,"doc_id":h.chunk.doc_id,"file_name":names.get(&h.chunk.doc_id).cloned().unwrap_or_default(),"page":h.chunk.page,"text":h.chunk.text,"score":h.score})).collect::<Vec<_>>()}),
-            )
+            let report =
+                tokio::runtime::Runtime::new()?.block_on(state.search_with_availability(
+                    query,
+                    &engines.vector(query, true)?,
+                    args["top_k"].as_u64().unwrap_or(8) as usize,
+                ))?;
+            let hits: Vec<_> = report
+                .hits
+                .into_iter()
+                .map(|hit| {
+                    let chunk = hit.chunk;
+                    let file_name = report.paths.get(&chunk.doc_id).map(|path| name(path));
+                    json!({
+                        "chunk_id": chunk.chunk_id,
+                        "doc_id": chunk.doc_id,
+                        "file_name": file_name.unwrap_or_default(),
+                        "page": chunk.page,
+                        "text": chunk.text,
+                        "score": hit.score,
+                    })
+                })
+                .collect();
+            let unavailable: Vec<_> = report
+                .unavailable
+                .iter()
+                .map(|item| name(&item.path))
+                .collect();
+            Ok(json!({"hits": hits, "unavailable": unavailable}))
         }
         "get_document" => {
+            let docs = state.documents()?;
             let doc = docs
                 .iter()
                 .find(|d| Some(d.doc_id.as_str()) == args["doc_id"].as_str())
@@ -141,7 +160,7 @@ pub fn execute(
             )
         }
         "get_chunk" => {
-            for doc in &docs {
+            for doc in state.documents()? {
                 if let Some(c) = doc
                     .chunks
                     .iter()

@@ -1,5 +1,8 @@
 //! Immutable Lance generations with SQLite as the sole visibility authority.
-use crate::pipeline::{Chunk, Document};
+use crate::{
+    generation_seal,
+    pipeline::{Chunk, Document},
+};
 use anyhow::{Context, Result};
 use arrow_array::{
     Array, ArrayRef, FixedSizeListArray, Float32Array, RecordBatch, RecordBatchIterator,
@@ -11,7 +14,7 @@ use lancedb::{
     index::{scalar::FtsIndexBuilder, Index},
     query::{ExecutableQuery, QueryBase},
 };
-use rusqlite::{params, Connection, OpenFlags};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use std::{
     collections::HashSet,
     path::{Path, PathBuf},
@@ -21,9 +24,22 @@ use std::{
 pub struct State {
     pub db: Connection,
     pub root: PathBuf,
+    pub(crate) location: PathBuf,
     _lock: FileLock,
+    workspace_recipe: Option<String>,
 }
 struct FileLock(std::fs::File);
+
+/// A committed review snapshot could not be obtained within the retry budget.
+#[derive(Debug)]
+pub struct ReviewDatabaseBusy;
+impl std::fmt::Display for ReviewDatabaseBusy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("review database busy; retry after indexing")
+    }
+}
+impl std::error::Error for ReviewDatabaseBusy {}
+
 impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = fs2::FileExt::unlock(&self.0);
@@ -32,9 +48,18 @@ impl Drop for FileLock {
 impl State {
     // Review callers already hold the selected index writer fence. Never
     // recover, upgrade locks, or create SQLite sidecar files on this path.
-    fn review_connection(root: &Path) -> Result<Connection> {
+    pub fn review_connection(root: &Path) -> Result<Connection> {
         let path = root.join("state.sqlite");
         let mode = if root.join("state.sqlite-wal").try_exists()? {
+            // An outside writer may leave WAL without its shared-memory index.
+            // Read-only SQLite cannot recover it. This is temporarily unreadable,
+            // not evidence that committed review content changed; never create
+            // sidecars here or fall back to an immutable (potentially stale) DB.
+            if !root.join("state.sqlite-shm").try_exists()? {
+                return Err(anyhow::Error::new(ReviewDatabaseBusy).context(
+                    "review WAL has no shared-memory file; re-index to recover the review WAL",
+                ));
+            }
             "readonly_shm=1"
         } else {
             "immutable=1"
@@ -51,20 +76,162 @@ impl State {
         )?)
     }
 
-    /// Latest recorded failure per path, under the caller's native writer fence.
-    /// A later successful or skipped job supersedes an older failure.
+    /// Recover under the exclusive writer fence before reading publication state
+    /// or deleting generations. A valid WAL may contain the entire publication.
+    pub(crate) fn quarantine_orphan_wal(root: &Path) -> Result<()> {
+        let wal = root.join("state.sqlite-wal");
+        if !wal.try_exists()? || root.join("state.sqlite-shm").try_exists()? {
+            return Ok(());
+        }
+        // Copy before SQLite can consume a malformed sidecar. The original is
+        // deliberately left in place: SQLite remains the recovery authority.
+        if unusable_wal_header(&wal)? {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_nanos();
+            let canonical = root.canonicalize()?;
+            let target = canonical.with_file_name(format!(
+                "{}.state.sqlite-wal.orphan-{timestamp}-{}",
+                canonical
+                    .file_name()
+                    .context("index directory name")?
+                    .to_string_lossy(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut copy = crate::private_fs::create_file(&target)?;
+            std::io::copy(&mut std::fs::File::open(&wal)?, &mut copy)?;
+            copy.sync_all()?;
+            #[cfg(unix)]
+            std::fs::File::open(target.parent().context("diagnostic parent")?)?.sync_all()?;
+        }
+        let db = Connection::open_with_flags(
+            root.join("state.sqlite"),
+            OpenFlags::SQLITE_OPEN_READ_WRITE,
+        )?;
+        db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))?;
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    }
+
+    /// Canonical committed DB commitment and referenced generations from one read
+    /// transaction. Values have explicit type tags and big-endian length prefixes;
+    /// table/row boundaries and NULL are distinct. Jobs expose the latest per path.
+    pub fn review_content(root: &Path) -> Result<(String, HashSet<String>)> {
+        // Retry the whole read transaction, never a partial digest. Keep SQLite
+        // lock contention bounded and distinguish it from changed content.
+        let mut retries = 2;
+        loop {
+            match Self::review_content_once(root) {
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<rusqlite::Error>(),
+                        Some(rusqlite::Error::SqliteFailure(code, _))
+                            if matches!(code.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                    ) =>
+                {
+                    if retries == 0 {
+                        return Err(error.context(ReviewDatabaseBusy));
+                    }
+                    retries -= 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn review_content_once(root: &Path) -> Result<(String, HashSet<String>)> {
+        use sha2::{Digest, Sha256};
+        let db = Self::review_connection(root)?;
+        db.busy_timeout(std::time::Duration::from_millis(100))?;
+        let tx = db.unchecked_transaction()?;
+        let mut hash = Sha256::new();
+        let mut generations = HashSet::new();
+        for (table, query) in [
+            ("documents", "SELECT doc_id,path,size,mtime,sha256,generation FROM documents ORDER BY doc_id"),
+            ("index_metadata", "SELECT key,value FROM index_metadata ORDER BY key"),
+            ("jobs", "SELECT path,status,reason FROM jobs WHERE id IN (SELECT max(id) FROM jobs GROUP BY path) ORDER BY path"),
+        ] {
+            hash.update((table.len() as u64).to_be_bytes()); hash.update(table.as_bytes());
+            let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[table],|r| r.get(0))?;
+            if !exists { hash.update([0]); continue; }
+            let mut statement = tx.prepare(query)?;
+            let columns = statement.column_count();
+            let mut rows = statement.query([])?;
+            while let Some(row) = rows.next()? {
+                hash.update([1]);
+                for col in 0..columns {
+                    use rusqlite::types::ValueRef;
+                    match row.get_ref(col)? {
+                        ValueRef::Null => hash.update([0]),
+                        ValueRef::Integer(n) => { hash.update([1]); hash.update(8_u64.to_be_bytes()); hash.update(n.to_be_bytes()); },
+                        ValueRef::Text(bytes) => { hash.update([2]); hash.update((bytes.len() as u64).to_be_bytes()); hash.update(bytes); },
+                        _ => anyhow::bail!("invalid index value"),
+                    }
+                }
+                if table == "documents" { generations.insert(row.get(5)?); }
+            }
+            hash.update([0]);
+        }
+        tx.commit()?;
+        Ok((format!("{:x}", hash.finalize()), generations))
+    }
+
+    /// Private seller selection; absent on indexes created before this metadata.
+    /// Call under the native writer fence, without migrating legacy storage.
+    pub fn review_selected_folder(root: &Path) -> Result<Option<PathBuf>> {
+        let db = Self::review_connection(root)?;
+        Self::selected_folder(&db)
+    }
+
+    pub(crate) fn selected_folder(db: &Connection) -> Result<Option<PathBuf>> {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='index_metadata')",
+            [], |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let selected: Option<String> = db
+            .query_row(
+                "SELECT value FROM index_metadata WHERE key='selected_folder'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        selected
+            .map(|selected| {
+                let path = PathBuf::from(selected);
+                anyhow::ensure!(path.is_absolute(), "invalid selected source folder");
+                Ok(path)
+            })
+            .transpose()
+    }
+
+    /// Read the latest job only for current unindexed candidates. Historical
+    /// folders and already indexed paths never consume the review candidate cap.
     pub fn review_failure_reasons(
         root: &Path,
+        candidates: &[PathBuf],
     ) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+        anyhow::ensure!(candidates.len() <= 50_000, "review job path limit");
         let db = Self::review_connection(root)?;
-        let mut statement = db.prepare(
-            "SELECT path,reason FROM jobs WHERE id IN (SELECT MAX(id) FROM jobs GROUP BY path)
-             AND status='failed' AND reason IS NOT NULL AND reason != ''",
-        )?;
-        let rows = statement.query_map([], |row| {
-            Ok((PathBuf::from(row.get::<_, String>(0)?), row.get(1)?))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut statement =
+            db.prepare("SELECT status,reason FROM jobs WHERE path=?1 ORDER BY id DESC LIMIT 1")?;
+        let mut reasons = std::collections::BTreeMap::new();
+        for path in candidates {
+            let latest: Option<(String, Option<String>)> = statement
+                .query_row([path.to_str().context("UTF-8 source")?], |row| {
+                    Ok((row.get(0)?, row.get(1)?))
+                })
+                .optional()?;
+            if let Some((status, Some(reason))) = latest {
+                if status == "failed" && !reason.is_empty() {
+                    reasons.insert(path.clone(), reason);
+                }
+            }
+        }
+        Ok(reasons)
     }
 
     /// Read committed visibility without recovery, lock upgrade or SQLite writes.
@@ -89,10 +256,9 @@ impl State {
                             .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
                     "unsafe index generation"
                 );
-                let path = root
-                    .join("generations")
-                    .join(generation)
-                    .join("document.json");
+                let directory = root.join("generations").join(generation);
+                check_lance_directory(&directory.join("lance"))?;
+                let path = directory.join("document.json");
                 anyhow::ensure!(
                     std::fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
                     "review document size limit"
@@ -118,7 +284,7 @@ impl State {
         let path = root.join("state.sqlite");
         if !path.try_exists()? {
             // A lost database must not hide surviving on-disk index data.
-            return match std::fs::read_dir(root.join("generations")) {
+            return match generation_entries(root) {
                 Ok(mut entries) => Ok(entries.next().transpose()?.is_some()),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(error) => Err(error.into()),
@@ -150,31 +316,92 @@ impl State {
         )
     }
     pub fn open(root: &Path) -> Result<Self> {
-        std::fs::create_dir_all(root.join("generations"))?;
+        let location = crate::active_index::state_location(root);
+        let resolved = crate::active_index::resolve_state(root);
+        let root = resolved.as_path();
+        create_generations_if_missing(root)?;
         let lock = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
             .open(root.join("writer.lock"))?;
         fs2::FileExt::try_lock_exclusive(&lock).context("index already open by another process")?;
-        let db = Connection::open(root.join("state.sqlite"))?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,path TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
-            UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running';")?;
+        let db = Self::publication_connection(root)?;
+        let tx = db.unchecked_transaction()?;
+        Self::initialize_schema(&tx)?;
+        tx.execute("UPDATE jobs SET status='failed',reason='interrupted before completion' WHERE status='running'",[])?;
+        tx.commit()?;
         let state = Self {
             db,
             root: root.to_owned(),
+            location,
             _lock: FileLock(lock),
+            workspace_recipe: None,
         };
         state.recover()?;
         Ok(state)
     }
+    pub(crate) fn publication_connection(root: &Path) -> Result<Connection> {
+        create_generations_if_missing(root)?;
+        let db = Connection::open(root.join("state.sqlite"))?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
+        Ok(db)
+    }
+
+    pub(crate) fn initialize_schema(db: &Connection) -> Result<()> {
+        db.execute_batch("CREATE TABLE IF NOT EXISTS documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS jobs(id INTEGER PRIMARY KEY,path TEXT NOT NULL,status TEXT NOT NULL,reason TEXT);
+            CREATE INDEX IF NOT EXISTS jobs_path ON jobs(path);
+            CREATE TABLE IF NOT EXISTS index_metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL);")?;
+        Ok(())
+    }
+
+    pub(crate) fn open_workspace(root: &Path, source: &str, recipe: &str) -> Result<Self> {
+        create_generations_if_missing(root)?;
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join("scan-writer.lock"))?;
+        fs2::FileExt::try_lock_exclusive(&lock)?;
+        let db = Connection::open(root.join("scan.sqlite"))?;
+        db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+            CREATE TABLE IF NOT EXISTS scan_state(source_identity TEXT NOT NULL, recipe_id TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS scan_documents(doc_id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,size INTEGER NOT NULL,mtime TEXT NOT NULL,sha256 TEXT NOT NULL,generation TEXT NOT NULL);")?;
+        if db.query_row("SELECT count(*) FROM scan_state", [], |r| {
+            r.get::<_, usize>(0)
+        })? == 0
+        {
+            db.execute(
+                "INSERT INTO scan_state VALUES(?1,?2)",
+                params![source, recipe],
+            )?;
+        }
+        let state = Self {
+            db,
+            root: root.to_owned(),
+            location: root.to_owned(),
+            _lock: FileLock(lock),
+            workspace_recipe: Some(recipe.to_owned()),
+        };
+        state.recover()?;
+        Ok(state)
+    }
+
+    pub(crate) fn table(&self) -> &'static str {
+        if self.workspace_recipe.is_some() {
+            "scan_documents"
+        } else {
+            "documents"
+        }
+    }
+
     /// All query/export entry points open through this recipe gate before inference.
     pub fn open_index(
         root: &Path,
         selected: &crate::engine::Recipe,
     ) -> Result<(Self, crate::engine::Recipe)> {
+        let location = crate::active_index::state_location(root);
         anyhow::ensure!(
             !crate::active_index::needs_pointer_repair(root),
             "active index pointer invalid; re-index required"
@@ -185,7 +412,8 @@ impl State {
             root.join("recipe.json").is_file(),
             "index recipe missing; re-index required"
         );
-        let state = Self::open(&root)?;
+        let mut state = Self::open(&root)?;
+        state.location = location;
         let recipe = state.validate_recipe(selected)?;
         Ok((state, recipe))
     }
@@ -207,31 +435,28 @@ impl State {
     pub fn recover(&self) -> Result<()> {
         let active: HashSet<String> = self
             .db
-            .prepare("SELECT generation FROM documents")?
+            .prepare(&format!("SELECT generation FROM {}", self.table()))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for entry in std::fs::read_dir(self.root.join("generations"))? {
-            let entry = entry?;
-            if !active.contains(&entry.file_name().to_string_lossy().into_owned()) {
-                std::fs::remove_dir_all(entry.path())?;
-            }
-        }
+        recover_generations(&self.root, &active, |warning| eprintln!("{warning}"));
         Ok(())
     }
     pub fn generations(&self) -> Result<Vec<String>> {
         Ok(self
             .db
-            .prepare("SELECT generation FROM documents ORDER BY doc_id")?
+            .prepare(&format!(
+                "SELECT generation FROM {} ORDER BY doc_id",
+                self.table()
+            ))?
             .query_map([], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?)
     }
     pub fn document(&self, generation: &str) -> Result<Document> {
-        Ok(serde_json::from_slice(&std::fs::read(
-            self.root
-                .join("generations")
-                .join(generation)
-                .join("document.json"),
-        )?)?)
+        anyhow::ensure!(
+            generation_seal::valid_id(generation),
+            "invalid generation ID"
+        );
+        read_document(&self.root.join("generations").join(generation))
     }
     pub fn documents(&self) -> Result<Vec<Document>> {
         self.generations()?
@@ -240,8 +465,21 @@ impl State {
             .collect()
     }
     pub async fn stage(&self, doc: &Document) -> Result<String> {
+        let (id, warning) = self.stage_with_seal_warning(doc).await?;
+        if let Some(error) = warning {
+            eprintln!("{}: could not write generation seal: {error}", doc.path);
+        }
+        Ok(id)
+    }
+
+    pub(crate) async fn stage_with_seal_warning(
+        &self,
+        doc: &Document,
+    ) -> Result<(String, Option<std::io::Error>)> {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let path = self.root.join("generations").join(&id);
+        let directory = self.root.join("generations");
+        generation_seal::ordinary_directory(&directory)?;
+        let path = directory.join(&id);
         std::fs::create_dir(&path)?;
         let batch = chunks_batch(&doc.chunks)?;
         let db = lancedb::connect(
@@ -263,51 +501,95 @@ impl State {
         let file = std::fs::File::create(path.join("document.json"))?;
         serde_json::to_writer(&file, doc)?;
         file.sync_all()?;
+        drop(file);
         #[cfg(unix)]
         std::fs::File::open(&path)?.sync_all()?;
-        Ok(id)
+        let request = crate::worker::Request {
+            path,
+            generation_readback: Some(crate::worker::GenerationReadback {
+                doc_id: doc.doc_id.clone(),
+                source_path: doc.path.clone(),
+                source_hash: doc.sha256.clone(),
+            }),
+            pdfium: None,
+            office: None,
+            projection: None,
+            readback: None,
+        };
+        run_generation_readback(request).await?;
+        let recipe;
+        let recipe_id = if let Some(workspace_recipe) = &self.workspace_recipe {
+            workspace_recipe
+        } else {
+            recipe = match std::fs::read(self.root.join("recipe.json")) {
+                Ok(bytes) => crate::active_index::recipe_id(&serde_json::from_slice(&bytes)?)?,
+                // A caller can use the lower-level State store before configuring a recipe.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(error) => return Err(error.into()),
+            };
+            &recipe
+        };
+        let seal = generation_seal::Seal::validated(&self.root, &id, recipe_id, doc)?;
+        Ok((id, seal.write(&self.root).err()))
     }
     pub fn commit(&mut self, doc: &Document, mtime: &str, generation: &str) -> Result<()> {
+        let table = self.table();
         let tx = self.db.transaction()?;
-        tx.execute("INSERT INTO documents VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path,size=excluded.size,mtime=excluded.mtime,sha256=excluded.sha256,generation=excluded.generation", params![doc.doc_id, doc.path, doc.bytes, mtime, doc.sha256, generation])?;
+        tx.execute(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(doc_id) DO UPDATE SET path=excluded.path,size=excluded.size,mtime=excluded.mtime,sha256=excluded.sha256,generation=excluded.generation"), params![doc.doc_id, doc.path, doc.bytes, mtime, doc.sha256, generation])?;
         tx.commit()?;
         Ok(())
     }
     pub async fn search(&self, query: &str, vector: &[f32], top_k: usize) -> Result<Vec<Hit>> {
+        let report = self.search_with_availability(query, vector, top_k).await?;
+        for document in report.unavailable {
+            eprintln!(
+                "Search unavailable: {} (generation {})",
+                document.path, document.generation
+            );
+        }
+        Ok(report.hits)
+    }
+
+    pub async fn search_with_availability(
+        &self,
+        query: &str,
+        vector: &[f32],
+        top_k: usize,
+    ) -> Result<SearchReport> {
         let _timer = crate::engine::PhaseTimer::new("search");
         let mut lexical = Vec::new();
         let mut semantic = Vec::new();
-        let docs = self.documents()?;
-        let chunks = docs
-            .into_iter()
-            .flat_map(|d| d.chunks)
-            .map(|c| (c.chunk_id.clone(), c))
-            .collect::<std::collections::HashMap<_, _>>();
-        for id in self.generations()? {
-            let path = self.root.join("generations").join(id).join("lance");
-            let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
-                .execute()
-                .await?;
-            let table = db.open_table("chunks").execute().await?;
-            let batches = table
-                .vector_search(vector)?
-                .limit(top_k * 3)
-                .execute()
-                .await?
-                .try_collect::<Vec<_>>()
-                .await?;
-            collect_scores(&batches, "_distance", &mut semantic)?;
-            let batches = table
-                .query()
-                .full_text_search(lance_index::scalar::FullTextSearchQuery::new(
-                    query.to_owned(),
-                ))
-                .limit(top_k * 3)
-                .execute()
-                .await?
-                .try_collect::<Vec<_>>()
-                .await?;
-            collect_scores(&batches, "_score", &mut lexical)?;
+        let mut chunks = std::collections::HashMap::new();
+        let mut paths = std::collections::HashMap::new();
+        let mut unavailable = Vec::new();
+        for row in crate::index::ScanRow::read(&self.db, self.table())? {
+            let result = async {
+                let doc = self.document(&row.generation)?;
+                let path = self
+                    .root
+                    .join("generations")
+                    .join(&row.generation)
+                    .join("lance");
+                let rankings = search_generation(&path, query, vector, top_k).await?;
+                Ok::<_, anyhow::Error>((doc, rankings))
+            }
+            .await;
+            match result {
+                Ok((doc, (mut vectors, mut words))) => {
+                    chunks.extend(
+                        doc.chunks
+                            .into_iter()
+                            .map(|chunk| (chunk.chunk_id.clone(), chunk)),
+                    );
+                    paths.insert(row.doc_id, row.path);
+                    semantic.append(&mut vectors);
+                    lexical.append(&mut words);
+                }
+                Err(_) => unavailable.push(UnavailableDocument {
+                    generation: row.generation,
+                    path: row.path,
+                }),
+            }
         }
         semantic.sort_by(|a, b| a.1.total_cmp(&b.1));
         lexical.sort_by(|a, b| b.1.total_cmp(&a.1));
@@ -319,13 +601,274 @@ impl State {
         }
         let mut merged: Vec<_> = scores.into_iter().collect();
         merged.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        Ok(merged
+        let hits = merged
             .into_iter()
             .take(top_k)
-            .filter_map(|(id, score)| chunks.get(&id).cloned().map(|chunk| Hit { chunk, score }))
-            .collect())
+            .filter_map(|(id, score)| chunks.remove(&id).map(|chunk| Hit { chunk, score }))
+            .collect();
+        Ok(SearchReport {
+            hits,
+            unavailable,
+            paths,
+        })
     }
 }
+
+pub(crate) fn create_generations_if_missing(root: &Path) -> std::io::Result<()> {
+    let directory = root.join("generations");
+    match directory.symlink_metadata() {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(directory)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn generation_entries(root: &Path) -> std::io::Result<std::fs::ReadDir> {
+    let directory = root.join("generations");
+    generation_seal::ordinary_directory(&directory)?;
+    std::fs::read_dir(directory)
+}
+
+pub(crate) fn recover_generations(
+    root: &Path,
+    active: &HashSet<String>,
+    mut warn: impl FnMut(String),
+) {
+    let mut present = HashSet::with_capacity(active.len());
+    match generation_entries(root) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        warn(format!(
+                            "Deferred generation cleanup in {}: {error}",
+                            root.display()
+                        ));
+                        present.extend(active.iter().map(String::as_str));
+                        break;
+                    }
+                };
+                if let Some(id) = active.get(entry.file_name().to_string_lossy().as_ref()) {
+                    present.insert(id.as_str());
+                } else if let Err(error) = remove_index_node(&entry.path()) {
+                    warn(format!(
+                        "Deferred generation cleanup at {}: {error}",
+                        entry.path().display()
+                    ));
+                }
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            warn(format!(
+                "Deferred generation cleanup in {}: {error}",
+                root.display()
+            ));
+            present.extend(active.iter().map(String::as_str));
+        }
+    }
+    generation_seal::recover(root, &present, warn);
+}
+
+pub(crate) fn remove_index_node(path: &Path) -> std::io::Result<()> {
+    let metadata = path.symlink_metadata()?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::FileTypeExt;
+        if metadata.file_type().is_symlink_dir()
+            || (metadata.is_dir() && generation_seal::is_link(&metadata))
+        {
+            return std::fs::remove_dir(path);
+        }
+    }
+    if metadata.is_dir() && !generation_seal::is_link(&metadata) {
+        return std::fs::remove_dir_all(path);
+    }
+    std::fs::remove_file(path)
+}
+
+#[derive(Debug)]
+pub(crate) struct CandidateReadback;
+
+impl std::fmt::Display for CandidateReadback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("staged generation readback failed")
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static READBACK_PROBE: std::cell::RefCell<Option<ReadbackProbe>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ReadbackProbe {
+    pub source: std::path::PathBuf,
+    pub crash: bool,
+}
+
+async fn run_generation_readback(request: crate::worker::Request) -> Result<()> {
+    #[cfg(test)]
+    let probe = READBACK_PROBE.with(|probe| {
+        probe.borrow().as_ref().and_then(|probe| {
+            let job = request.generation_readback.as_ref().unwrap();
+            (Path::new(&job.source_path) == probe.source).then_some(probe.crash)
+        })
+    });
+    tokio::task::spawn_blocking(move || {
+        let timeout = std::time::Duration::from_secs(5);
+        #[cfg(test)]
+        let request = {
+            let mut request = request;
+            match probe {
+                Some(true) => return crate::worker::crashed_readback(&request, timeout),
+                Some(false) => request.generation_readback.as_mut().unwrap().doc_id.clear(),
+                None => {}
+            }
+            request
+        };
+        crate::worker::run(&crate::worker::executable()?, &request, timeout)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|result| result)
+    .context(CandidateReadback)?;
+    Ok(())
+}
+
+fn read_document(generation: &Path) -> Result<Document> {
+    Ok(serde_json::from_slice(&std::fs::read(
+        generation.join("document.json"),
+    )?)?)
+}
+
+/// Worker entry point for the one-time readback of an unpublished generation.
+pub fn readback_staged_generation(
+    generation: &Path,
+    job: &crate::worker::GenerationReadback,
+) -> Result<()> {
+    let read = async {
+        let doc = read_document(generation)?;
+        anyhow::ensure!(
+            doc.doc_id == job.doc_id
+                && doc.path == job.source_path
+                && doc.sha256 == job.source_hash,
+            "staged generation does not match its source"
+        );
+        let chunk = doc
+            .chunks
+            .first()
+            .context("staged generation has no chunks")?;
+        let query = chunk.text.split_whitespace().next().unwrap_or("probe");
+        search_generation(&generation.join("lance"), query, &chunk.embedding, 1).await?;
+        Ok(())
+    };
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?
+        .block_on(read)
+}
+
+#[derive(serde::Serialize)]
+pub struct UnavailableDocument {
+    pub generation: String,
+    pub path: String,
+}
+
+pub struct SearchReport {
+    pub hits: Vec<Hit>,
+    pub unavailable: Vec<UnavailableDocument>,
+    pub paths: std::collections::HashMap<String, String>,
+}
+
+type RankedChunks = Vec<(String, f32)>;
+
+fn check_lance_directory(path: &Path) -> Result<()> {
+    generation_seal::ordinary_directory(path)
+        .and_then(|()| std::fs::read_dir(path).map(drop))
+        .context("generation Lance directory unavailable")
+}
+
+async fn search_generation(
+    path: &Path,
+    query: &str,
+    vector: &[f32],
+    top_k: usize,
+) -> Result<(RankedChunks, RankedChunks)> {
+    let mut semantic = Vec::new();
+    let mut lexical = Vec::new();
+    check_lance_directory(path)?;
+    let db = lancedb::connect(path.to_str().context("UTF-8 path")?)
+        .execute()
+        .await?;
+    let table = db.open_table("chunks").execute().await?;
+    let batches = table
+        .vector_search(vector)?
+        .limit(top_k * 3)
+        .execute()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    collect_scores(&batches, "_distance", &mut semantic)?;
+    let batches = table
+        .query()
+        .full_text_search(lance_index::scalar::FullTextSearchQuery::new(
+            query.to_owned(),
+        ))
+        .limit(top_k * 3)
+        .execute()
+        .await?
+        .try_collect::<Vec<_>>()
+        .await?;
+    collect_scores(&batches, "_score", &mut lexical)?;
+    Ok((semantic, lexical))
+}
+
+// SQLite WAL header: big-endian fields, magic selects checksum word order.
+fn unusable_wal_header(path: &Path) -> Result<bool> {
+    use std::io::Read;
+    let mut header = [0_u8; 32];
+    let mut file = std::fs::File::open(path)?;
+    match file.read_exact(&mut header) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(true),
+        Err(error) => return Err(error.into()),
+    }
+    let word = |i| u32::from_be_bytes(header[i..i + 4].try_into().unwrap());
+    let magic = word(0);
+    if !matches!(magic, 0x377f0682 | 0x377f0683)
+        || !(512..=65536).contains(&word(8))
+        || !word(8).is_power_of_two()
+    {
+        return Ok(true);
+    }
+    let mut sums = (0_u32, 0_u32);
+    for pair in header[..24].chunks_exact(8) {
+        let value = |bytes: &[u8]| {
+            if magic == 0x377f0682 {
+                u32::from_le_bytes(bytes.try_into().unwrap())
+            } else {
+                u32::from_be_bytes(bytes.try_into().unwrap())
+            }
+        };
+        sums.0 = sums.0.wrapping_add(value(&pair[..4])).wrapping_add(sums.1);
+        sums.1 = sums.1.wrapping_add(value(&pair[4..])).wrapping_add(sums.0);
+    }
+    if sums != (word(24), word(28)) {
+        return Ok(true);
+    }
+    anyhow::ensure!(
+        word(4) == 3007000,
+        "unsupported SQLite WAL format version {}; re-index stopped before cleanup; WAL retained",
+        word(4)
+    );
+    Ok(false)
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Hit {
     pub chunk: Chunk,
@@ -480,6 +1023,133 @@ mod tests {
     use super::*;
 
     #[test]
+    fn wal_header_checks_protect_real_sqlite_commits() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Connection::open(root.path().join("state.sqlite")).unwrap();
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE committed(value); INSERT INTO committed VALUES(42)").unwrap();
+        let wal = root.path().join("state.sqlite-wal");
+        assert!(!unusable_wal_header(&wal).unwrap());
+        let mut bytes = std::fs::read(&wal).unwrap();
+        bytes[16] ^= 1; // Salt is part of the header checksum.
+        let damaged = root.path().join("damaged-wal");
+        std::fs::write(&damaged, &bytes).unwrap();
+        assert!(unusable_wal_header(&damaged).unwrap());
+        let preserved = tempfile::tempdir().unwrap();
+        drop(State::open(preserved.path()).unwrap());
+        std::fs::write(preserved.path().join("state.sqlite-wal"), &bytes).unwrap();
+        State::quarantine_orphan_wal(preserved.path()).unwrap();
+        let prefix = format!(
+            "{}.state.sqlite-wal.orphan-",
+            preserved.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(std::fs::read_dir(preserved.path().parent().unwrap())
+            .unwrap()
+            .any(|entry| {
+                let entry = entry.unwrap();
+                entry.file_name().to_string_lossy().starts_with(&prefix) && {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        assert_eq!(
+                            entry.metadata().unwrap().permissions().mode() & 0o777,
+                            0o600
+                        );
+                    }
+                    std::fs::read(entry.path()).unwrap() == bytes
+                }
+            }));
+        for bytes in [vec![], vec![0; 31], vec![0; 32]] {
+            std::fs::write(&damaged, bytes).unwrap();
+            assert!(unusable_wal_header(&damaged).unwrap());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wal_diagnostic_is_private_under_umask_022() {
+        if std::env::var_os("VZ_WAL_UMASK_CHILD").is_some() {
+            unsafe {
+                libc::umask(0o022);
+            }
+            wal_header_checks_protect_real_sqlite_commits();
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "storage::tests::wal_diagnostic_is_private_under_umask_022",
+                "--nocapture",
+            ])
+            .env("VZ_WAL_UMASK_CHILD", "1")
+            .status()
+            .expect("spawn isolated umask test helper");
+        assert!(status.success());
+    }
+
+    #[test]
+    fn corrupt_main_database_still_fails_after_diagnostic_copy() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("state.sqlite"), b"not a SQLite database").unwrap();
+        let wal = root.path().join("state.sqlite-wal");
+        std::fs::write(&wal, [0; 32]).unwrap();
+        assert!(State::quarantine_orphan_wal(root.path()).is_err());
+        assert_eq!(
+            std::fs::read(root.path().join("state.sqlite")).unwrap(),
+            b"not a SQLite database"
+        );
+        let prefix = format!(
+            "{}.state.sqlite-wal.orphan-",
+            root.path().file_name().unwrap().to_string_lossy()
+        );
+        assert!(std::fs::read_dir(root.path().parent().unwrap())
+            .unwrap()
+            .any(|entry| entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&prefix)));
+    }
+
+    #[test]
+    fn review_content_observes_only_committed_rows_during_a_writer_transaction() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        let before = State::review_content(root.path()).unwrap();
+        let tx = state.db.unchecked_transaction().unwrap();
+        tx.execute("INSERT INTO index_metadata VALUES('test','pending')", [])
+            .unwrap();
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+        tx.rollback().unwrap();
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+        state
+            .db
+            .execute("INSERT INTO index_metadata VALUES('test','published')", [])
+            .unwrap();
+        assert_ne!(State::review_content(root.path()).unwrap(), before);
+    }
+
+    #[test]
+    fn review_content_lock_contention_is_bounded_and_named() {
+        let root = tempfile::tempdir().unwrap();
+        let state = State::open(root.path()).unwrap();
+        let before = State::review_content(root.path()).unwrap();
+        state
+            .db
+            .execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;")
+            .unwrap();
+        let start = std::time::Instant::now();
+        let error = State::review_content(root.path()).unwrap_err();
+        assert!(
+            error.downcast_ref::<ReviewDatabaseBusy>().is_some(),
+            "{error:#}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+        state.db.execute_batch("ROLLBACK").unwrap();
+        drop(state);
+        assert_eq!(State::review_content(root.path()).unwrap(), before);
+    }
+
+    #[test]
     fn review_failure_reasons_use_only_latest_failed_jobs_without_writes() {
         let root = tempfile::tempdir().unwrap();
         let state = State::open(root.path()).unwrap();
@@ -503,7 +1173,18 @@ mod tests {
         }
         drop(state);
         let before = std::fs::read(root.path().join("state.sqlite")).unwrap();
-        let reasons = State::review_failure_reasons(root.path()).unwrap();
+        let reasons = State::review_failure_reasons(
+            root.path(),
+            &[
+                "empty.txt",
+                "recovered.txt",
+                "skipped.txt",
+                "unknown.txt",
+                "blank.txt",
+            ]
+            .map(PathBuf::from),
+        )
+        .unwrap();
         assert_eq!(
             reasons,
             std::collections::BTreeMap::from([(
@@ -517,6 +1198,16 @@ mod tests {
         );
         assert!(!root.path().join("state.sqlite-wal").exists());
         assert!(!root.path().join("state.sqlite-shm").exists());
+    }
+
+    #[test]
+    fn current_unindexed_candidates_have_a_hard_path_limit() {
+        let root = tempfile::tempdir().unwrap();
+        drop(State::open(root.path()).unwrap());
+        let error =
+            State::review_failure_reasons(root.path(), &vec![PathBuf::from("current"); 50_001])
+                .unwrap_err();
+        assert!(error.to_string().contains("review job path limit"));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-//! Bounded length-prefixed JSON worker protocol and process supervision.
+//! Bounded framed JSON and process supervision.
 use crate::pipeline::Page;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -50,6 +50,12 @@ pub struct ReadbackJob {
     pub identity_terms: Vec<String>,
 }
 #[derive(Serialize, Deserialize)]
+pub struct GenerationReadback {
+    pub doc_id: String,
+    pub source_path: String,
+    pub source_hash: String,
+}
+#[derive(Serialize, Deserialize)]
 pub struct Request {
     pub path: PathBuf,
     pub pdfium: Option<PathBuf>,
@@ -59,6 +65,8 @@ pub struct Request {
     pub projection: Option<ProjectionJob>,
     #[serde(default)]
     pub readback: Option<ReadbackJob>,
+    #[serde(default)]
+    pub generation_readback: Option<GenerationReadback>,
 }
 impl Request {
     pub fn memory_bytes(&self) -> u64 {
@@ -119,7 +127,13 @@ pub fn read_frame<T: DeserializeOwned>(mut reader: impl Read) -> Result<T> {
     reader.read_exact(&mut bytes)?;
     Ok(serde_json::from_slice(&bytes)?)
 }
+#[cfg(test)]
+thread_local! {
+    pub(crate) static WORKER_REQUESTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 pub fn executable() -> Result<PathBuf> {
+    #[cfg(test)]
+    WORKER_REQUESTS.with(|count| count.set(count.get() + 1));
     let name = if cfg!(windows) {
         "vz-parser-worker.exe"
     } else {
@@ -173,6 +187,19 @@ fn run_command(
     sandboxed: bool,
 ) -> Result<Vec<Page>> {
     run_command_checked(cmd, request, timeout, sandboxed, || Ok(()))
+}
+
+#[cfg(test)]
+pub(crate) fn crashed_readback(request: &Request, timeout: Duration) -> Result<Vec<Page>> {
+    #[cfg(windows)]
+    let mut cmd = Command::new("cmd.exe");
+    #[cfg(windows)]
+    cmd.args(["/D", "/C", "more >nul & exit /B 79"]);
+    #[cfg(not(windows))]
+    let mut cmd = Command::new("/bin/sh");
+    #[cfg(not(windows))]
+    cmd.args(["-c", "cat >/dev/null; exit 79"]);
+    run_command(cmd, request, timeout, false)
 }
 fn run_command_checked(
     cmd: Command,
@@ -571,6 +598,7 @@ mod tests {
                 pdfium: None,
                 office: None,
                 projection: None,
+                generation_readback: None,
                 readback: None,
             },
             Duration::from_secs(5),

@@ -93,17 +93,34 @@ fn candidate(
     let refusal = if indexed {
         preparation
     } else {
-        let recorded = indexing_reason.map(str::to_owned);
-        // Keep the PDF projection's named OCR refusal; otherwise prefer the
-        // indexer's explanation (e.g. empty text) to a generic projection error.
-        let reason = if doc.kind == "pdf" {
-            preparation.or(recorded)
+        // Preserve the known content failure's useful explanation. Otherwise a
+        // current named projection refusal wins over historical raw worker errors.
+        // Recorded reasons describe the last attempt, never a final verdict.
+        let recorded = indexing_reason.map(|reason| {
+            let reason = match reason {
+                "document has no text" | "needs text recognition (OCR)" => reason,
+                _ => "indexing did not complete",
+            };
+            format!("Last indexing attempt: {reason}")
+        });
+        let reason = if doc.kind != "pdf" && indexing_reason == Some("document has no text") {
+            recorded
         } else {
-            recorded.or(preparation)
+            match preparation {
+                Some(reason) if reason.contains("PROJECTION_") || doc.kind == "pdf" => Some(reason),
+                other => recorded.or(other),
+            }
         };
-        Some(reason.unwrap_or_else(|| {
-            "Document is not indexed; re-index or exclude it before rebuilding".into()
-        }))
+        Some(match reason {
+            Some(reason)
+                if reason.contains("PROJECTION_")
+                    || reason.contains("needs text recognition (OCR)") =>
+            {
+                format!("{reason}; exclude it before rebuilding")
+            }
+            Some(reason) => format!("{reason}; re-index or exclude it before rebuilding"),
+            None => "Document is not indexed; re-index or exclude it before rebuilding".into(),
+        })
     };
     #[cfg(not(feature = "listing-originals"))]
     let projection_summary = budget
@@ -757,6 +774,782 @@ mod tests {
 
     #[test]
     #[cfg(not(feature = "listing-originals"))]
+    fn selected_root_includes_top_level_failed_pdf() {
+        selected_folder_failures("scan.pdf", false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn selected_root_includes_sibling_failed_pdf() {
+        selected_folder_failures("scans/scan.pdf", false);
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn all_failed_selected_folder_opens_review() {
+        selected_folder_failures("scans/scan.pdf", true);
+    }
+
+    #[cfg(not(feature = "listing-originals"))]
+    fn selected_folder_failures(pdf_name: &str, all_failed: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let source = root.join("source");
+        let library = root.join("library");
+        std::fs::create_dir_all(source.join("reports")).unwrap();
+        std::fs::create_dir_all(source.join("scans")).unwrap();
+        std::fs::write(source.join(pdf_name), image_only_pdf()).unwrap();
+        std::fs::write(source.join("empty.txt"), "").unwrap();
+        if !all_failed {
+            std::fs::write(source.join("reports/good.txt"), "Searchable document.").unwrap();
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let engines = Engines::load_embedding(
+            &repo.join(".assets"),
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let progress = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(vz_core::active_index::reindex(
+                &library,
+                &source,
+                &engines,
+                &repo.join(".assets"),
+                |_| {},
+                || false,
+            ))
+            .unwrap();
+        assert_eq!(progress.failed, 2);
+        assert_eq!(progress.completed, usize::from(!all_failed));
+        let index = vz_core::active_index::resolve_state(&library);
+        let selected = vz_core::active_index::last_indexed_folder(&index).unwrap();
+        assert_eq!(Path::new(&selected), source);
+        let docs = crate::review_store::NativeIndexFence::candidate_documents(
+            &library,
+            Path::new(&selected),
+        )
+        .unwrap();
+        assert_eq!(docs.len(), if all_failed { 2 } else { 3 });
+        assert_eq!(
+            docs.iter().filter(|doc| doc.indexed).count(),
+            usize::from(!all_failed)
+        );
+        for entry in docs.iter().filter(|entry| !entry.indexed) {
+            let refused = candidate(
+                &entry.doc,
+                false,
+                entry.indexing_reason.as_deref(),
+                "projection/document-0001".into(),
+                Path::new(&selected),
+                &mut Budget::default(),
+                Some(&engines.pdfium_library()),
+            )
+            .unwrap();
+            assert!(!refused.supported);
+            let reason = refused.refusal.unwrap();
+            assert!(reason.contains("exclude it"), "{reason}");
+            if entry.doc.kind == "pdf" {
+                assert!(!reason.contains("re-index"), "{reason}");
+                assert_eq!(refused.source, pdf_name);
+                assert!(reason.contains("PROJECTION_PDF_NEEDS_OCR"), "{reason}");
+            } else {
+                assert!(reason.contains("document has no text"), "{reason}");
+            }
+        }
+        let policy = ListingPolicy::new(Arc::new(Source(Mutex::new(ManagedPolicy::Allowed))));
+        let store = ReviewStore::open(&root.join("reviews")).unwrap();
+        let id = Uuid::new_v4();
+        let guard = store.lock_native(&policy, id, &library).unwrap();
+        let mut changes = Changes::default();
+        assert!(build(&guard, &source, id, &engines, "query", &changes)
+            .unwrap_err()
+            .to_string()
+            .contains("unindexed source must be excluded"));
+        if !all_failed {
+            changes
+                .exclusions
+                .extend([pdf_name.into(), "empty.txt".into()]);
+            let current = build(&guard, &source, id, &engines, "query", &changes).unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            assert_eq!(crate::verify(&payload).unwrap()["counts"]["documents"], 1);
+        }
+    }
+
+    include!("../../vz-core/tests/support/deny_read.rs");
+
+    #[test]
+    fn listing_review_and_pack_build_refuse_unavailable_search_generation() {
+        let f = Fixture::new();
+        let library = f.root.join("seal-library");
+        let source = f.root.join("seal-source");
+        std::fs::create_dir(&source).unwrap();
+        for name in ["a", "b"] {
+            std::fs::write(
+                source.join(format!("{name}.txt")),
+                format!("Orbital archive {name}."),
+            )
+            .unwrap();
+        }
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let scan = || {
+            rt.block_on(vz_core::active_index::reindex(
+                &library,
+                &source,
+                &engines,
+                &assets,
+                |_| {},
+                || false,
+            ))
+            .unwrap()
+        };
+        assert_eq!(scan().completed, 2);
+        let index = vz_core::active_index::resolve_state(&library);
+        let generation: String = State::review_connection(&index)
+            .unwrap()
+            .query_row(
+                "SELECT generation FROM documents ORDER BY path LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let document = index
+            .join("generations")
+            .join(&generation)
+            .join("document.json");
+        assert_eq!(
+            crate::review_store::NativeIndexFence::candidate_documents(&library, &source)
+                .unwrap()
+                .len(),
+            2
+        );
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("seal-reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        let current = build(
+            &guard,
+            &source,
+            id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap();
+        guard.accept(&current).unwrap();
+        drop(guard);
+
+        let access = deny_read(&document);
+        let stats = scan();
+        assert_eq!((stats.skipped, stats.failed), (2, 0));
+        let search = || {
+            let state = State::open(&index).unwrap();
+            rt.block_on(state.search_with_availability(
+                "orbital",
+                &engines.vector("orbital", true).unwrap(),
+                5,
+            ))
+            .unwrap()
+        };
+        let result = search();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.unavailable.len(), 1);
+        assert_eq!(result.unavailable[0].generation, generation);
+        assert!(
+            crate::review_store::NativeIndexFence::candidate_documents(&library, &source).is_err()
+        );
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        assert!(guard.reviewed_payload(&current).is_err());
+        assert!(build(
+            &guard,
+            &source,
+            id,
+            &engines,
+            "orbital",
+            &Changes::default()
+        )
+        .is_err());
+        drop(guard);
+        drop(access);
+        assert_eq!(search().hits.len(), 2);
+
+        let lance = document.with_file_name("lance");
+        let saved = f.root.join("saved-lance");
+        std::fs::rename(&lance, &saved).unwrap();
+        let result = search();
+        assert_eq!(result.hits.len(), 1);
+        assert_eq!(result.unavailable.len(), 1);
+        assert_eq!(result.unavailable[0].generation, generation);
+        let error = crate::review_store::NativeIndexFence::candidate_documents(&library, &source)
+            .err()
+            .unwrap();
+        assert!(
+            format!("{error:#}").contains("generation Lance directory unavailable"),
+            "{error:#}"
+        );
+        let fresh_id = Uuid::new_v4();
+        let guard = store.lock_native(&f.policy, fresh_id, &library).unwrap();
+        let error = build(
+            &guard,
+            &source,
+            fresh_id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("generation Lance directory unavailable"),
+            "{error:#}"
+        );
+        drop(guard);
+        std::fs::rename(saved, lance).unwrap();
+        assert_eq!(search().hits.len(), 2);
+    }
+
+    #[test]
+    fn t15_publication_process_child() {
+        let Some(library) = std::env::var_os("VZ_REVIEW_PUBLICATION_LIBRARY") else {
+            return;
+        };
+        let source =
+            std::path::PathBuf::from(std::env::var_os("VZ_REVIEW_PUBLICATION_SOURCE").unwrap());
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let mut engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        if std::env::var_os("VZ_PUBLICATION_RECIPE_CHANGE").is_some() {
+            engines.recipe.model.push_str("-migration");
+        }
+        let scanning =
+            std::env::var("VZ_PUBLICATION_CRASH_STEP").ok().as_deref() == Some("scanning");
+        let result =
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(vz_core::active_index::reindex(
+                    Path::new(&library),
+                    &source,
+                    &engines,
+                    &assets,
+                    |_| {
+                        if scanning {
+                            std::fs::write(
+                                std::env::var_os("VZ_PUBLICATION_READY").unwrap(),
+                                "scanning",
+                            )
+                            .unwrap();
+                            loop {
+                                std::thread::sleep(std::time::Duration::from_millis(10));
+                            }
+                        }
+                    },
+                    || false,
+                ));
+        // A released child intentionally fails before publication.
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn t15_accept_export_first_after_process_death_or_failed_install() {
+        use std::process::{Command, Stdio};
+        for step in [
+            "scanning",
+            "generation install",
+            "before sqlite commit",
+            "after sqlite commit",
+            "before pointer rename",
+            "failed install",
+        ] {
+            let f = Fixture::new();
+            let library = f.root.join("flat-library");
+            let a = f.root.join("a");
+            let b = f.root.join("b");
+            std::fs::create_dir(&a).unwrap();
+            std::fs::create_dir(&b).unwrap();
+            std::fs::write(
+                a.join("a.txt"),
+                "Reviewed original content with stable source bytes.",
+            )
+            .unwrap();
+            std::fs::write(
+                b.join("b.txt"),
+                "Private replacement for publication crash tests.",
+            )
+            .unwrap();
+            let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+            let assets = repo.join(".assets");
+            let engines =
+                Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                    .unwrap();
+            tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(vz_core::active_index::index_explicit(
+                    &library,
+                    &a,
+                    &engines,
+                    &assets,
+                    |_| {},
+                ))
+                .unwrap();
+            let store = ReviewStore::open(&f.root.join("real-reviews")).unwrap();
+            let id = Uuid::new_v4();
+            let guard = store.lock_native(&f.policy, id, &library).unwrap();
+            let current = build(&guard, &a, id, &engines, "reviewed", &Changes::default()).unwrap();
+            guard.accept(&current).unwrap();
+            drop(guard);
+            let ready = f.root.join("child-ready");
+            let release = f.root.join("child-release");
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "review_build::tests::t15_publication_process_child",
+                    "--nocapture",
+                ])
+                .env("VZ_REVIEW_PUBLICATION_LIBRARY", &library)
+                .env("VZ_REVIEW_PUBLICATION_SOURCE", &b)
+                .env("VZ_PUBLICATION_READY", &ready)
+                .env("VZ_PUBLICATION_RELEASE", &release)
+                .env(
+                    "VZ_PUBLICATION_CRASH_STEP",
+                    if step == "failed install" {
+                        "generation install"
+                    } else {
+                        step
+                    },
+                )
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            if step == "before pointer rename" {
+                command.env("VZ_PUBLICATION_RECIPE_CHANGE", "1");
+            }
+            let mut child = command.spawn().unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while !ready.exists() {
+                if std::time::Instant::now() > deadline || child.try_wait().unwrap().is_some() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("child did not reach {step}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let busy = store
+                .lock_native_current(&f.policy, &current, &library)
+                .err()
+                .unwrap();
+            assert!(format!("{busy:#}").contains("in use"), "{busy:#}");
+            if step == "failed install" {
+                std::fs::write(&release, "fail before commit").unwrap();
+                assert!(child.wait().unwrap().success());
+            } else {
+                child.kill().unwrap();
+                child.wait().unwrap();
+            }
+            // First native command after death: no search, recovery or re-index.
+            let result = store.lock_native_current(&f.policy, &current, &library);
+            if step == "after sqlite commit" {
+                assert!(result.is_err());
+                continue;
+            }
+            let guard = result.unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join("export-after-death"),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn t15_review_accept_and_export_survive_private_scans_and_busy_does_not_invalidate() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let f = Fixture::new();
+        let library = f.root.join("real-library");
+        let a = f.root.join("a");
+        let b = f.root.join("b");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        std::fs::write(
+            a.join("good.txt"),
+            "A usable reviewed document about orbital archive retention.",
+        )
+        .unwrap();
+        std::fs::write(b.join("a-good.txt"), "Private staged replacement document.").unwrap();
+        std::fs::write(b.join("z-bad.pdf"), "broken").unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let mut engines =
+            Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true)
+                .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        let id = Uuid::new_v4();
+        let store = ReviewStore::open(&f.root.join("real-reviews")).unwrap();
+        let guard = store.lock_native(&f.policy, id, &library).unwrap();
+        let current = build(&guard, &a, id, &engines, "orbital", &Changes::default()).unwrap();
+        guard.accept(&current).unwrap();
+        for export_first in [false, true] {
+            let index = vz_core::active_index::resolve_state(&library);
+            let database = rusqlite::Connection::open(index.join("state.sqlite")).unwrap();
+            database
+                .execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE;",
+                )
+                .unwrap();
+            let error = if export_first {
+                guard.reviewed_payload(&current).unwrap_err()
+            } else {
+                guard.accept(&current).unwrap_err()
+            };
+            assert!(
+                error
+                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                    .is_some(),
+                "{error:#}"
+            );
+            database.execute_batch("ROLLBACK").unwrap();
+            drop(database);
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join(format!("sqlite-busy-export-{export_first}")),
+            )
+            .unwrap();
+        }
+        // Read-only review must preserve the orphan and remain retryable.
+        // Re-index quarantines it, preserving its exact bytes for diagnosis.
+        let index = vz_core::active_index::resolve_state(&library);
+        let database_before = std::fs::read(index.join("state.sqlite")).unwrap();
+        let wal = index.join("state.sqlite-wal");
+        drop(guard);
+        for contents in [vec![], vec![0_u8; 32]] {
+            assert!(!index.join("state.sqlite-shm").exists());
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            std::fs::write(&wal, &contents).unwrap();
+            for export_first in [false, true] {
+                let error = if export_first {
+                    guard.reviewed_payload(&current).unwrap_err()
+                } else {
+                    guard.accept(&current).unwrap_err()
+                };
+                assert!(
+                    error
+                        .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                        .is_some(),
+                    "{error:#}"
+                );
+                assert_eq!(std::fs::read(&wal).unwrap(), contents);
+                assert_eq!(
+                    std::fs::read(index.join("state.sqlite")).unwrap(),
+                    database_before
+                );
+                assert!(!index.join("state.sqlite-shm").exists());
+            }
+            drop(guard);
+            let result = rt
+                .block_on(vz_core::active_index::reindex(
+                    &library,
+                    &a,
+                    &engines,
+                    &assets,
+                    |_| {},
+                    || false,
+                ))
+                .unwrap();
+            assert_eq!(result.completed, 0);
+            assert!(!wal.exists());
+            assert!(!index.join("state.sqlite-shm").exists());
+            assert!(std::fs::read_dir(index.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    let entry = entry.unwrap();
+                    entry.file_name().to_string_lossy().starts_with(&format!(
+                        "{}.state.sqlite-wal.orphan-",
+                        index.file_name().unwrap().to_string_lossy()
+                    )) && std::fs::read(entry.path()).unwrap() == contents
+                }));
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            guard.accept(&current).unwrap();
+            guard.reviewed_payload(&current).unwrap();
+        }
+        for cancel in [true, false] {
+            let stopped = AtomicBool::new(false);
+            let missing = f.root.join("no-assets");
+            let result = rt.block_on(vz_core::active_index::reindex(
+                &library,
+                &b,
+                &engines,
+                if cancel { &assets } else { &missing },
+                |_| {
+                    let busy = store
+                        .lock_native_current(&f.policy, &current, &library)
+                        .err()
+                        .unwrap();
+                    assert!(format!("{busy:#}").contains("in use"), "{busy:#}");
+                    if cancel {
+                        stopped.store(true, Ordering::SeqCst);
+                    }
+                },
+                || stopped.load(Ordering::SeqCst),
+            ));
+            assert!(result.is_err());
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            guard.accept(&current).unwrap();
+            let (payload, _) = guard.reviewed_payload(&current).unwrap();
+            crate::review_transfer::package(
+                &guard,
+                &current,
+                &payload,
+                &f.root.join(format!("export-{cancel}")),
+            )
+            .unwrap();
+        }
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        store
+            .lock_native_current(&f.policy, &current, &library)
+            .unwrap()
+            .check_accepted(&current)
+            .unwrap();
+        let flat = f.root.join("reviewed-flat");
+        rt.block_on(vz_core::active_index::index_explicit(
+            &flat,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+        ))
+        .unwrap();
+        let flat_id = Uuid::new_v4();
+        let guard = store.lock_native(&f.policy, flat_id, &flat).unwrap();
+        let flat_review = build(
+            &guard,
+            &a,
+            flat_id,
+            &engines,
+            "orbital",
+            &Changes::default(),
+        )
+        .unwrap();
+        guard.accept(&flat_review).unwrap();
+        drop(guard);
+        engines.recipe.model.push_str("-migration");
+        assert!(rt
+            .block_on(vz_core::active_index::reindex(
+                &flat,
+                &b,
+                &engines,
+                &f.root.join("no-assets"),
+                |_| {},
+                || false
+            ))
+            .is_err());
+        let guard = store
+            .lock_native_current(&f.policy, &flat_review, &flat)
+            .unwrap();
+        guard.accept(&flat_review).unwrap();
+        let (payload, _) = guard.reviewed_payload(&flat_review).unwrap();
+        crate::review_transfer::package(
+            &guard,
+            &flat_review,
+            &payload,
+            &f.root.join("export-failed-flat-migration"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn failed_and_cancelled_folder_switch_leave_review_openable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let a = root.join("folder-a");
+        let b = root.join("folder-b");
+        let library = root.join("library");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("good.txt"), "A usable review document.").unwrap();
+        std::fs::write(b.join("a-good.txt"), "A replacement review document.").unwrap();
+        std::fs::write(b.join("z-bad.pdf"), "broken").unwrap();
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let assets = repo.join(".assets");
+        let engines = vz_core::engine::Engines::load_embedding(
+            &assets,
+            &repo.join("spike/fixtures/models.json"),
+            true,
+        )
+        .unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(vz_core::active_index::reindex(
+            &library,
+            &a,
+            &engines,
+            &assets,
+            |_| {},
+            || false,
+        ))
+        .unwrap();
+        for cancel in [false, true] {
+            let stopped = AtomicBool::new(false);
+            let used_assets = if cancel {
+                assets.clone()
+            } else {
+                root.join("missing-assets")
+            };
+            assert!(rt
+                .block_on(vz_core::active_index::reindex(
+                    &library,
+                    &b,
+                    &engines,
+                    &used_assets,
+                    |_| {
+                        if cancel {
+                            stopped.store(true, Ordering::SeqCst);
+                        }
+                    },
+                    || stopped.load(Ordering::SeqCst)
+                ))
+                .is_err());
+            let selected = vz_core::active_index::last_indexed_folder(
+                &vz_core::active_index::resolve(&library),
+            )
+            .unwrap();
+            assert_eq!(Path::new(&selected), a);
+            let candidates = crate::review_store::NativeIndexFence::candidate_documents(
+                &library,
+                Path::new(&selected),
+            )
+            .unwrap();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates[0].indexed);
+            let candidate = candidate(
+                &candidates[0].doc,
+                true,
+                None,
+                "projection/document-0001".into(),
+                &a,
+                &mut Budget::default(),
+                None,
+            )
+            .unwrap();
+            assert!(candidate.supported, "{:?}", candidate.refusal);
+        }
+    }
+
+    #[test]
+    fn transient_index_failure_is_historical_and_keeps_action_hint() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().canonicalize().unwrap();
+        let path = source.join("fixed.txt");
+        std::fs::write(&path, "Fixed document with text.").unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "id".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: vz_core::pipeline::file_sha256(&path).unwrap(),
+            bytes: std::fs::metadata(&path).unwrap().len(),
+            pages: 0,
+            kind: "txt".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        for reason in [
+            "interrupted before completion",
+            "source changed during parsing; retry indexing",
+            "worker timeout",
+        ] {
+            let refusal = candidate(
+                &doc,
+                false,
+                Some(reason),
+                "projection/document-0001".into(),
+                &source,
+                &mut Budget::default(),
+                None,
+            )
+            .unwrap()
+            .refusal
+            .unwrap();
+            assert!(
+                refusal.starts_with("Last indexing attempt: indexing did not complete"),
+                "{refusal}"
+            );
+            assert!(!refusal.contains(reason));
+            assert!(refusal.contains("re-index or exclude"), "{refusal}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
+    fn non_pdf_projection_refusal_wins_over_raw_indexing_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().canonicalize().unwrap();
+        let path = source.join("broken.html");
+        std::fs::write(&path, "<html><script>unsafe()</script></html>").unwrap();
+        let doc = vz_core::pipeline::Document {
+            doc_id: "id".into(),
+            path: path.to_str().unwrap().into(),
+            sha256: vz_core::pipeline::file_sha256(&path).unwrap(),
+            bytes: std::fs::metadata(&path).unwrap().len(),
+            pages: 0,
+            kind: "html".into(),
+            needs_ocr_pages: vec![],
+            chunks: vec![],
+        };
+        let refusal = candidate(
+            &doc,
+            false,
+            Some("raw infrastructure chain /private/source"),
+            "projection/document-0001".into(),
+            &source,
+            &mut Budget::default(),
+            None,
+        )
+        .unwrap()
+        .refusal
+        .unwrap();
+        assert!(refusal.contains("PROJECTION_"), "{refusal}");
+        assert!(!refusal.contains("raw infrastructure"), "{refusal}");
+        assert!(refusal.contains("exclude it"));
+        assert!(!refusal.contains("re-index"));
+    }
+
+    #[test]
+    #[cfg(not(feature = "listing-originals"))]
     fn unindexed_image_pdf_is_refused_and_exclusion_rebuilds_without_it() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -869,7 +1662,7 @@ mod tests {
         )
         .unwrap();
         assert!(!refused.supported);
-        assert_eq!(refused.refusal.as_deref(), Some("document has no text"));
+        assert_eq!(refused.refusal.as_deref(), Some("Last indexing attempt: document has no text; re-index or exclude it before rebuilding"));
         // A newly added supported file has no job record and keeps the generic refusal.
         std::fs::write(source.join("added-later.txt"), "Added after indexing.").unwrap();
         let later_docs =
@@ -1134,7 +1927,7 @@ mod tests {
                 };
                 let generation = Uuid::new_v4().to_string();
                 let directory = index.join("generations").join(&generation);
-                std::fs::create_dir(&directory).unwrap();
+                std::fs::create_dir_all(directory.join("lance")).unwrap();
                 std::fs::write(
                     directory.join("document.json"),
                     serde_json::to_vec(&doc).unwrap(),
@@ -1247,7 +2040,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = f.root.join("index/generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -1483,7 +2276,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -1601,7 +2394,7 @@ mod tests {
             };
             let generation = Uuid::new_v4().to_string();
             let directory = index.join("generations").join(&generation);
-            std::fs::create_dir(&directory).unwrap();
+            std::fs::create_dir_all(directory.join("lance")).unwrap();
             std::fs::write(
                 directory.join("document.json"),
                 serde_json::to_vec(&doc).unwrap(),
@@ -1692,7 +2485,7 @@ mod tests {
             };
             let generation = Uuid::new_v4().to_string();
             let directory = index.join("generations").join(&generation);
-            std::fs::create_dir(&directory).unwrap();
+            std::fs::create_dir_all(directory.join("lance")).unwrap();
             std::fs::write(
                 directory.join("document.json"),
                 serde_json::to_vec(&doc).unwrap(),
@@ -1749,7 +2542,7 @@ mod tests {
         };
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),
@@ -1877,7 +2670,7 @@ mod tests {
         let mut state = State::open(&index).unwrap();
         let generation = Uuid::new_v4().to_string();
         let directory = index.join("generations").join(&generation);
-        std::fs::create_dir(&directory).unwrap();
+        std::fs::create_dir_all(directory.join("lance")).unwrap();
         std::fs::write(
             directory.join("document.json"),
             serde_json::to_vec(&doc).unwrap(),

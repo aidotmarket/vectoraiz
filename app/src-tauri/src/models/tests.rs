@@ -558,7 +558,7 @@ fn bundled_pins_are_sized_and_download_does_not_fetch_valid_models() {
 }
 
 #[test]
-fn invalid_folder_guard_preserves_seeded_rows_generation_files_and_search() {
+fn empty_index_request_preserves_seeded_rows_generation_files_and_search() {
     use vz_core::{
         pipeline::{Chunk, Document},
         storage::State,
@@ -593,15 +593,15 @@ fn invalid_folder_guard_preserves_seeded_rows_generation_files_and_search() {
         .text
         .clone();
     drop(state);
+    assert!(validate_index_request(dir.0.join("missing").to_str().unwrap()).is_ok());
     for (folder, message) in [
         ("", "Choose a folder to index"),
         ("   ", "Choose a folder to index"),
-        (dir.0.join("missing").to_str().unwrap(), "Folder not found"),
     ] {
         // Snapshot only while SQLite is closed: Windows locks portions of an
         // open database, and reopening/searching may update its bookkeeping.
         let before = index_snapshot(&dir.0).unwrap();
-        assert_eq!(validate_folder(folder).unwrap_err(), message);
+        assert_eq!(validate_index_request(folder).unwrap_err(), message);
         assert_eq!(index_snapshot(&dir.0).unwrap(), before);
         let state = State::open(&dir.0).unwrap();
         assert_eq!(state.documents().unwrap()[0].doc_id, "doc");
