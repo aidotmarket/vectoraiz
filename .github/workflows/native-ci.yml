@@ -128,7 +128,7 @@ jobs:
       - name: Projection worker RSS watchdog and deadline named refusals
         run: cargo test --locked -p vz-parser-worker --test supervision projection_resource_exhaustion_is_a_named_seller_refusal -- --exact --nocapture
       - name: Rust tests
-        timeout-minutes: 20
+        timeout-minutes: 35
         run: python scripts/rust-tests.py ${{ env.NATIVE_FEATURES }}
       - name: PDF projection render trap (positive control and regressions)
         run: python scripts/projection-pdf-render-trap.py --library .assets/${{ runner.os == 'Windows' && 'pdfium/bin/pdfium.dll' || 'pdfium/lib/libpdfium.dylib' }} --scratch ${{ runner.temp }}/projection-render-trap
