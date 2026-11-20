@@ -503,8 +503,8 @@ impl State {
             generation: id.clone(),
         };
         anyhow::ensure!(
-            crate::index::readable_generation(&self.root, &row)
-                .await
+            crate::index::validate_generation(&self.root, &row, true)
+                .await?
                 .is_some(),
             "new generation failed full storage validation"
         );
@@ -834,9 +834,7 @@ mod tests {
             wal_header_checks_protect_real_sqlite_commits();
             return;
         }
-        let status = std::process::Command::new("rtk")
-            .arg("proxy")
-            .arg(std::env::current_exe().unwrap())
+        let status = std::process::Command::new(std::env::current_exe().expect("test executable"))
             .args([
                 "--exact",
                 "storage::tests::wal_diagnostic_is_private_under_umask_022",
@@ -844,7 +842,7 @@ mod tests {
             ])
             .env("VZ_WAL_UMASK_CHILD", "1")
             .status()
-            .unwrap();
+            .expect("spawn isolated umask test helper");
         assert!(status.success());
     }
 

@@ -639,7 +639,7 @@ async fn noninitial_posting_damage_invalidates_fingerprint_and_rebuilds_only_one
     let marker_path = root
         .join(".vz-validation")
         .join(format!("{}.json", before[0]));
-    let marker = std::fs::read(&marker_path).unwrap();
+    assert!(marker_path.is_file());
     // An evicted/missing cache record triggers first validation without changing
     // any file bound by a listing review, and survives process-independent reuse.
     let snapshot = || {
@@ -674,8 +674,8 @@ async fn noninitial_posting_damage_invalidates_fingerprint_and_rebuilds_only_one
         (0, 2)
     );
     assert_eq!(snapshot(), bound_files);
-    assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
-    // A normal no-change scan uses the marker without rewriting it.
+    assert!(!marker_path.exists());
+    // Repeated reuse also leaves the evicted marker absent.
     let unchanged = active_index::reindex(
         data.path(),
         source.path(),
@@ -687,7 +687,7 @@ async fn noninitial_posting_damage_invalidates_fingerprint_and_rebuilds_only_one
     .await
     .unwrap();
     assert_eq!((unchanged.completed, unchanged.skipped), (0, 2));
-    assert_eq!(std::fs::read(&marker_path).unwrap(), marker);
+    assert!(!marker_path.exists());
     let directory = std::fs::read_dir(generation.join("lance/chunks.lance/_indices"))
         .unwrap()
         .next()
@@ -956,4 +956,114 @@ async fn damaged_token_first_third_is_bounded_and_rebuilds_only_one_document() {
         .unwrap()
         .iter()
         .any(|hit| hit.chunk.text.contains("zebras")));
+}
+
+#[tokio::test]
+async fn markerless_legacy_index_retains_every_row_when_worker_is_unavailable() {
+    use vz_core::{active_index, engine::Engines};
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let assets = repo.join(".assets");
+    let engines =
+        Engines::load_embedding(&assets, &repo.join("spike/fixtures/models.json"), true).unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let source = tempfile::tempdir().unwrap();
+    for name in ["a", "b", "c"] {
+        std::fs::write(
+            source.path().join(format!("{name}.txt")),
+            format!("Healthy archive {name}"),
+        )
+        .unwrap();
+    }
+    active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap();
+    let snapshot = || {
+        walkdir::WalkDir::new(data.path())
+            .into_iter()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (
+                    entry.path().strip_prefix(data.path()).unwrap().to_owned(),
+                    if entry.file_type().is_file() {
+                        std::fs::read(entry.path()).unwrap()
+                    } else {
+                        Vec::new()
+                    },
+                )
+            })
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let worker = vz_core::worker::executable().unwrap();
+    let hidden = worker.with_extension("fold17-hidden");
+    struct Restore(std::path::PathBuf, std::path::PathBuf);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            std::fs::rename(&self.1, &self.0).expect("restore worker");
+        }
+    }
+    std::fs::rename(&worker, &hidden).unwrap();
+    let restore = Restore(worker, hidden);
+    let warm = active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap();
+    assert_eq!((warm.completed, warm.skipped, warm.failed), (0, 3, 0));
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::{
+            Foundation::LocalFree,
+            Security::{
+                Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
+                SetFileSecurityW, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+            },
+        };
+        let cache = data.path().join(".vz-validation");
+        let name: Vec<u16> = cache.as_os_str().encode_wide().chain(Some(0)).collect();
+        let sddl: Vec<u16> = "D:P(A;OICI;FA;;;WD)\0".encode_utf16().collect();
+        let mut descriptor = std::ptr::null_mut();
+        unsafe {
+            assert_ne!(
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    std::ptr::null_mut()
+                ),
+                0
+            );
+            let changed = SetFileSecurityW(
+                name.as_ptr(),
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            );
+            LocalFree(descriptor);
+            assert_ne!(changed, 0);
+        }
+        // Matching markers exist, but their prior DACL must force a real probe.
+        let error =
+            active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+                .await
+                .unwrap_err();
+        assert!(format!("{error:#}").contains("infrastructure unavailable"));
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
+    }
+    std::fs::remove_dir_all(data.path().join(".vz-validation")).unwrap();
+    let before = snapshot();
+    let error = active_index::index_explicit(data.path(), source.path(), &engines, &assets, |_| {})
+        .await
+        .unwrap_err();
+    drop(restore);
+    assert!(
+        format!("{error:#}").contains("infrastructure unavailable"),
+        "{error:#}"
+    );
+    assert_eq!(
+        snapshot(),
+        before,
+        "all rows, selection, jobs and generation bytes must survive"
+    );
+    assert_eq!(
+        State::open(data.path()).unwrap().documents().unwrap().len(),
+        3
+    );
 }

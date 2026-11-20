@@ -1700,6 +1700,8 @@ mod tests {
             |_| {},
         ))
         .unwrap();
+        // Reproduce the pre-fold-16 layout, before validation markers existed.
+        fs::remove_dir_all(index.join(".vz-validation")).unwrap();
         let old =
             ReviewBinding::capture_version(&source, &index, &index.join("recipe.json"), None, None)
                 .unwrap();
@@ -1718,6 +1720,7 @@ mod tests {
         assert!(!index.join(".vz-scan/scan.sqlite").exists());
         old.check().unwrap();
         new.check().unwrap();
+        assert!(!index.join(".vz-validation").exists());
         let b = f.0.join("other-source");
         fs::create_dir(&b).unwrap();
         fs::write(b.join("good.txt"), "Reusable cancelled success.").unwrap();

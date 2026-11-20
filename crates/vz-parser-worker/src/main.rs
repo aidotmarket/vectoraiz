@@ -1,4 +1,4 @@
-//! One request per process. stdout is exclusively length-prefixed JSON.
+//! One request per process. stdout is reserved for the bounded worker protocol.
 fn main() {
     let result = vz_core::worker::apply_memory_limit().and_then(|_| {
         let request: vz_core::worker::Request =

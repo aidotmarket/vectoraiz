@@ -1,4 +1,4 @@
-//! Bounded length-prefixed JSON worker protocol and process supervision.
+//! Bounded framed JSON, validation-start acknowledgment and process supervision.
 use crate::pipeline::Page;
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -289,8 +289,22 @@ fn run_command_with_watchdog(
     drop(stdin);
     let stdout = child.stdout.take().context("worker stdout")?;
     let (sender, receiver) = std::sync::mpsc::channel();
+    let validation = request.validation.is_some();
+    let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_started = started.clone();
     std::thread::spawn(move || {
         let mut stdout = BufReader::new(stdout);
+        if validation {
+            let mut ack = [0];
+            if stdout.read_exact(&mut ack).is_err() || ack != *b"V" {
+                let _ = sender.send((
+                    true,
+                    Err(anyhow::anyhow!("validation worker did not start")),
+                ));
+                return;
+            }
+            reader_started.store(true, std::sync::atomic::Ordering::Release);
+        }
         let no_response_bytes = matches!(stdout.fill_buf(), Ok([]));
         let _ = sender.send((no_response_bytes, read_frame::<Response>(stdout)));
     });
@@ -321,6 +335,22 @@ fn run_command_with_watchdog(
                 let diagnostic = diagnostic_rx
                     .recv_timeout(Duration::from_millis(100))
                     .unwrap_or_default();
+                if validation && started.load(std::sync::atomic::Ordering::Acquire) {
+                    let allocation_denied = diagnostic
+                        .windows(b"memory allocation of ".len())
+                        .any(|w| w == b"memory allocation of ")
+                        && diagnostic
+                            .windows(b"bytes failed".len())
+                            .any(|w| w == b"bytes failed");
+                    #[cfg(windows)]
+                    let allocation_denied =
+                        allocation_denied || windows_memory_refusal(status.code(), false);
+                    if allocation_denied {
+                        return Err(crate::failures::content(
+                            "validation worker memory cap while reading",
+                        ));
+                    }
+                }
                 if let Some(label) = request.office_label() {
                     if diagnostic
                         .windows(b"memory allocation of ".len())
@@ -344,18 +374,31 @@ fn run_command_with_watchdog(
                 {
                     bail!("parser sandbox failed to start the worker: {status}");
                 }
+                if validation {
+                    bail!("validation worker exited without reporting damage: {status}");
+                }
                 return Err(crate::failures::content(format!(
                     "worker crashed: {status}"
                 )));
             }
+            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
+                bail!("validation worker unavailable before probe startup");
+            }
             if let Some(error) = request_error {
+                if validation {
+                    bail!("validation worker request unavailable: {error:#}");
+                }
                 return Err(crate::failures::content(format!(
                     "worker request failed: {error:#}"
                 )));
             }
-            let response = response
-                .and_then(|(_, r)| r)
-                .map_err(|e| crate::failures::content(format!("worker response failed: {e:#}")))?;
+            let response = response.and_then(|(_, r)| r).map_err(|e| {
+                if validation {
+                    anyhow::anyhow!("validation worker response unavailable: {e:#}")
+                } else {
+                    crate::failures::content(format!("worker response failed: {e:#}"))
+                }
+            })?;
             if let Some(error) = response.error {
                 return Err(if response.content_failure {
                     crate::failures::content(error)
@@ -370,6 +413,9 @@ fn run_command_with_watchdog(
             let usage = last_usage;
             terminate(&mut child)?;
             child.wait()?;
+            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
+                bail!("validation worker memory limit before probe startup");
+            }
             return Err(crate::failures::content(
                 if let Some(label) = request.office_label() {
                     format!("{memory_prefix}_MEMORY_LIMIT_EXCEEDED: {}: limit {memory_limit} bytes; last observed {usage} bytes",label)
@@ -381,6 +427,9 @@ fn run_command_with_watchdog(
         if start.elapsed() >= timeout {
             terminate(&mut child)?;
             child.wait()?;
+            if validation && !started.load(std::sync::atomic::Ordering::Acquire) {
+                bail!("validation worker timeout before probe startup");
+            }
             let prefix = if request.projection.is_some() || request.readback.is_some() {
                 "PROJECTION_RESOURCE_LIMIT: "
             } else {
@@ -588,6 +637,47 @@ mod tests {
             sandboxed,
         )
         .unwrap_err()
+    }
+
+    #[test]
+    fn validation_requires_start_ack_and_reports_resource_caps_only_after_start() {
+        for (script, content) in [
+            ("/bin/sleep 1", false),
+            ("printf V; /bin/sleep 1", true),
+            ("exit 1", false),
+            ("printf V; exit 1", false),
+        ] {
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", script]);
+            let error = run_command(
+                cmd,
+                &Request {
+                    path: "index".into(),
+                    pdfium: None,
+                    office: None,
+                    projection: None,
+                    readback: None,
+                    validation: Some(ValidationJob {
+                        row: crate::index::ScanRow {
+                            doc_id: "doc".into(),
+                            path: "source.txt".into(),
+                            size: 1,
+                            mtime: String::new(),
+                            hash: "hash".into(),
+                            generation: "generation".into(),
+                        },
+                    }),
+                },
+                Duration::from_millis(100),
+                false,
+            )
+            .unwrap_err();
+            assert_eq!(
+                crate::failures::is_content(&error),
+                content,
+                "{script}: {error:#}"
+            );
+        }
     }
 
     #[test]

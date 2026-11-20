@@ -231,9 +231,9 @@ impl ScanWorkspace {
                 let result = readable_generation(root, &row).await;
                 ((staged, row), result)
             })
-            .buffer_unordered(8);
+            .buffer_unordered(2);
         while let Some((key, result)) = probes.next().await {
-            self.probed.insert(key, result);
+            self.probed.insert(key, result?);
         }
         Ok(())
     }
@@ -255,7 +255,7 @@ impl ScanWorkspace {
             if let Some(row) = row.filter(|r| r.hash == hash) {
                 let status = match self.probed.get(&(staged, row.clone())) {
                     Some(result) => result.clone(),
-                    None => readable_generation(root, &row).await,
+                    None => readable_generation(root, &row).await?,
                 };
                 if let Some(status) = status {
                     return Ok(Some((status, row, staged)));
@@ -302,36 +302,57 @@ fn generation_fingerprint(path: &Path) -> Option<Vec<(std::path::PathBuf, u64, u
     Some(files)
 }
 
-pub(crate) async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
-    // Fingerprinting and child supervision stay off the scan runtime.
-    // The private validation directory is excluded from review commitments.
-    let root = root.to_owned();
-    let row = row.clone();
-    tokio::task::spawn_blocking(move || {
-        std::panic::catch_unwind(|| validated_generation(&root, &row))
-            .ok()
-            .flatten()
-    })
-    .await
-    .ok()
-    .flatten()
+#[derive(Debug)]
+struct ValidationUnavailable;
+impl std::fmt::Display for ValidationUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("generation validation infrastructure unavailable; scan aborted, published index retained")
+    }
+}
+impl std::error::Error for ValidationUnavailable {}
+
+/// Three outcomes: Some = valid, None = confirmed damage, Err = unavailable.
+/// Unavailable validation aborts the scan before publication can revoke rows.
+pub(crate) async fn readable_generation(root: &Path, row: &ScanRow) -> Result<Option<Vec<u32>>> {
+    validate_generation(root, row, false).await
 }
 
-fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
+pub(crate) async fn validate_generation(
+    root: &Path,
+    row: &ScanRow,
+    write_marker: bool,
+) -> Result<Option<Vec<u32>>> {
+    let root = root.to_owned();
+    let row = row.clone();
+    tokio::task::spawn_blocking(move || validated_generation(&root, &row, write_marker))
+        .await
+        .context("generation validation supervisor unavailable")
+        .and_then(|result| result)
+        .map_err(|error| error.context(ValidationUnavailable))
+}
+
+fn validated_generation(
+    root: &Path,
+    row: &ScanRow,
+    write_marker: bool,
+) -> Result<Option<Vec<u32>>> {
     if row.generation.is_empty()
         || !row
             .generation
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-')
     {
-        return None;
+        return supervised_probe(root, row);
     }
     let generation = root.join("generations").join(&row.generation);
-    let files = generation_fingerprint(&generation)?;
+    let Some(files) = generation_fingerprint(&generation) else {
+        return supervised_probe(root, row);
+    };
     let cache = root.join(".vz-validation");
     // Never read markers through a symlink or an insecure directory. Failure
     // only disables caching; validated content remains publishable.
-    let cache_ready = crate::private_fs::directory(&cache).is_ok();
+    let cache_ready =
+        (write_marker || cache.exists()) && crate::private_fs::directory(&cache).is_ok();
     let marker_path = cache.join(format!("{}.json", row.generation));
     if let Some(marker) = cache_ready
         .then(|| std::fs::read(&marker_path).ok())
@@ -344,13 +365,16 @@ fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
             && marker.hash == row.hash
             && marker.files == files
         {
-            return Some(marker.needs_ocr_pages);
+            return Ok(Some(marker.needs_ocr_pages));
         }
     }
-    let status = supervised_probe(root, row)?;
-    if generation_fingerprint(&generation)? != files {
-        return None;
-    }
+    let Some(status) = supervised_probe(root, row)? else {
+        return Ok(None);
+    };
+    anyhow::ensure!(
+        generation_fingerprint(&generation).as_ref() == Some(&files),
+        "generation changed during validation; retry scan"
+    );
     let marker = ValidationMarker {
         version: 2,
         generation: row.generation.clone(),
@@ -359,17 +383,26 @@ fn validated_generation(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
         files,
         needs_ocr_pages: status.clone(),
     };
-    if cache_ready {
+    if cache_ready && write_marker {
         // A marker is an optimization, never part of validation success.
         let _ = (|| -> Result<()> {
-            let mut temporary = tempfile::NamedTempFile::new_in(&cache)?;
-            serde_json::to_writer(&mut temporary, &marker)?;
-            temporary.as_file().sync_all()?;
-            temporary.persist(marker_path)?;
+            let temporary_path = cache.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
+            let mut temporary_file = crate::private_fs::create_file(&temporary_path)?;
+            let temporary_path = tempfile::TempPath::try_from_path(temporary_path)?;
+            let written = (|| -> Result<()> {
+                serde_json::to_writer(&mut temporary_file, &marker)?;
+                temporary_file.sync_all()?;
+                Ok(())
+            })();
+            // Windows private handles deny sharing; close before rename or
+            // error cleanup removes the temporary file.
+            drop(temporary_file);
+            written?;
+            temporary_path.persist(marker_path)?;
             Ok(())
         })();
     }
-    Some(status)
+    Ok(Some(status))
 }
 
 /// Keep an already validated generation warm across its publication rename.
@@ -388,7 +421,7 @@ pub(crate) fn install_validation_marker(from: &Path, to: &Path, generation: &str
 
 const VALIDATION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-fn supervised_probe(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
+fn supervised_probe(root: &Path, row: &ScanRow) -> Result<Option<Vec<u32>>> {
     let request = worker::Request {
         path: root.to_owned(),
         pdfium: None,
@@ -397,8 +430,11 @@ fn supervised_probe(root: &Path, row: &ScanRow) -> Option<Vec<u32>> {
         readback: None,
         validation: Some(worker::ValidationJob { row: row.clone() }),
     };
-    let pages = worker::run(&worker::executable().ok()?, &request, VALIDATION_TIMEOUT).ok()?;
-    Some(pages.into_iter().map(|page| page.page).collect())
+    match worker::run(&worker::executable()?, &request, VALIDATION_TIMEOUT) {
+        Ok(pages) => Ok(Some(pages.into_iter().map(|page| page.page).collect())),
+        Err(error) if crate::failures::is_content(&error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// Deep read entry point used only by the supervised worker. No marker I/O and
@@ -409,16 +445,22 @@ pub fn validation_worker(request: &worker::Request) -> Result<Vec<crate::pipelin
         .validation
         .as_ref()
         .context("validation job missing")?;
-    let doc = tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()
-        .build()?
+        .build()?;
+    // Acknowledge after all startup work, immediately before reading storage.
+    // A startup timeout or runtime failure must never imply damaged content.
+    use std::io::Write;
+    std::io::stdout().write_all(b"V")?;
+    std::io::stdout().flush()?;
+    let doc = runtime
         .block_on(
             std::panic::AssertUnwindSafe(probe_generation(&request.path, &job.row)).catch_unwind(),
         )
         .ok()
         .flatten()
-        .context("unreadable generation")?;
+        .ok_or_else(|| crate::failures::content("unreadable generation"))?;
     Ok(doc
         .needs_ocr_pages
         .into_iter()
@@ -1011,9 +1053,12 @@ pub(crate) async fn scan(
                 }
             }
             Err(error) => {
+                if error.downcast_ref::<ValidationUnavailable>().is_some() {
+                    return Err(error);
+                }
                 if let Some(row) = state.baseline_rows.get(&path_text) {
                     if readable_generation(&state.published_root, row)
-                        .await
+                        .await?
                         .is_none()
                     {
                         outcome.damaged.insert(path_text.clone());
