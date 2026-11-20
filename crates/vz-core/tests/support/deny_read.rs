@@ -14,7 +14,7 @@ fn deny_read(path: &std::path::Path) -> impl Drop {
 }
 
 #[cfg(windows)]
-fn deny_read(path: &std::path::Path) -> impl Drop {
+fn deny_read(path: &std::path::Path) -> std::fs::File {
     use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
     OpenOptions::new().read(true).share_mode(0).open(path).unwrap()
 }
