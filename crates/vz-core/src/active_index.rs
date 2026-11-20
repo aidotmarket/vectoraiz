@@ -1046,6 +1046,9 @@ pub(crate) async fn scan_candidate(
     if is_library_root(data) {
         cleanup_library(data, candidate.as_ref().map(|c| c.1.as_path()))?;
     }
+    if same_recipe {
+        State::quarantine_orphan_wal(&active)?;
+    }
     let previous = last_indexed_folder(&active);
     let current = previous
         .as_deref()

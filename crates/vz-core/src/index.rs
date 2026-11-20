@@ -75,7 +75,7 @@ pub(crate) fn initialize_recipe(
 }
 
 /// Private retry state. Opening an unchanged scan never creates a workspace.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct ScanRow {
     pub doc_id: String,
     pub path: String,
@@ -113,6 +113,8 @@ pub(crate) struct ScanWorkspace {
     pub published_root: std::path::PathBuf,
     published_by_path: std::collections::HashMap<String, ScanRow>,
     baseline_rows: std::collections::HashMap<String, ScanRow>,
+    // Scan-local results only; immutable generations are fenced for this scan.
+    probed: std::collections::HashMap<(bool, ScanRow), Option<Vec<u32>>>,
     pub state: Option<State>,
     source: String,
     recipe: String,
@@ -161,6 +163,7 @@ impl ScanWorkspace {
                 .map(|r| (r.path.clone(), r.clone()))
                 .collect(),
             state,
+            probed: Default::default(),
             reset_before_write: !reuse && root.join("scan.sqlite").exists(),
             source: source.into(),
             recipe: recipe.into(),
@@ -208,7 +211,36 @@ impl ScanWorkspace {
         }
         Ok(())
     }
-    async fn unchanged(&self, path: &str, hash: &str) -> Result<Option<(Document, ScanRow, bool)>> {
+    async fn probe_reuse(&mut self, files: &[std::path::PathBuf]) -> Result<()> {
+        use futures::{stream, StreamExt};
+        let paths: HashSet<_> = files.iter().filter_map(|p| p.to_str()).collect();
+        let candidates = self
+            .staged()?
+            .into_iter()
+            .map(|r| (r, true))
+            .chain(self.published_by_path.values().cloned().map(|r| (r, false)))
+            .filter(|(r, _)| paths.contains(r.path.as_str()))
+            .collect::<Vec<_>>();
+        let root = &self.root;
+        let published = &self.published_root;
+        // Bound outstanding readers and decoded documents. Keep only the OCR
+        // status needed by the scan, never all documents / embeddings in memory.
+        let mut probes = stream::iter(candidates)
+            .map(|(row, staged)| async move {
+                let root = if staged { root } else { published };
+                let result = readable_generation(root, &row)
+                    .await
+                    .map(|doc| doc.needs_ocr_pages);
+                ((staged, row), result)
+            })
+            .buffer_unordered(8);
+        while let Some((key, result)) = probes.next().await {
+            self.probed.insert(key, result);
+        }
+        Ok(())
+    }
+
+    async fn unchanged(&self, path: &str, hash: &str) -> Result<Option<(Vec<u32>, ScanRow, bool)>> {
         let staged = if let Some(state) = &self.state {
             state.db.query_row("SELECT doc_id,path,size,mtime,sha256,generation FROM scan_documents WHERE path=?1",[path],|r| Ok(ScanRow {doc_id:r.get(0)?,path:r.get(1)?,size:r.get(2)?,mtime:r.get(3)?,hash:r.get(4)?,generation:r.get(5)?})).optional()?
         } else {
@@ -223,8 +255,14 @@ impl ScanWorkspace {
             ),
         ] {
             if let Some(row) = row.filter(|r| r.hash == hash) {
-                if let Some(doc) = readable_generation(root, &row, staged).await {
-                    return Ok(Some((doc, row, staged)));
+                let status = match self.probed.get(&(staged, row.clone())) {
+                    Some(result) => result.clone(),
+                    None => readable_generation(root, &row)
+                        .await
+                        .map(|doc| doc.needs_ocr_pages),
+                };
+                if let Some(status) = status {
+                    return Ok(Some((status, row, staged)));
                 }
             }
         }
@@ -232,7 +270,18 @@ impl ScanWorkspace {
     }
 }
 
-async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option<Document> {
+async fn readable_generation(root: &Path, row: &ScanRow) -> Option<Document> {
+    use futures::FutureExt;
+    // All reuse, published or staged, crosses this boundary. Lance conversion,
+    // metadata parsing and page decoding can panic on malformed persisted data.
+    std::panic::AssertUnwindSafe(probe_generation(root, row))
+        .catch_unwind()
+        .await
+        .ok()
+        .flatten()
+}
+
+async fn probe_generation(root: &Path, row: &ScanRow) -> Option<Document> {
     if row.generation.is_empty()
         || !row
             .generation
@@ -295,36 +344,123 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
                 ) {
                     return None;
                 }
+                decode_lance_node(&table.join("data").join(relative)).await?;
             }
         }
         if !found_data {
             return None;
         }
-        if !staged {
-            return Some(doc);
-        }
     }
-    use futures::{FutureExt, TryStreamExt};
-    use lancedb::query::{ExecutableQuery, QueryBase};
-    std::panic::AssertUnwindSafe(async {
-        let db = lancedb::connect(generation.join("lance").to_str()?)
-            .execute()
-            .await
-            .ok()?;
-        let table = db.open_table("chunks").execute().await.ok()?;
-        let mut batches = table.query().limit(1).execute().await.ok()?;
-        batches.try_next().await.ok()??;
-        Some(doc)
-    })
-    .catch_unwind()
+    Some(doc)
+}
+
+// Reject corrupt indirect ranges before Lance splits them into read chunks.
+// An all-0xff offsets buffer can otherwise request nearly u64::MAX bytes.
+#[derive(Debug)]
+struct BoundedFragmentIo {
+    inner: lance_file::v2::LanceEncodingsIo,
+    length: u64,
+    small_file: Option<prost::bytes::Bytes>,
+}
+impl lance_encoding::EncodingsIo for BoundedFragmentIo {
+    fn submit_request(
+        &self,
+        ranges: Vec<std::ops::Range<u64>>,
+        priority: u64,
+    ) -> futures::future::BoxFuture<'static, lance_core::Result<Vec<prost::bytes::Bytes>>> {
+        if ranges
+            .iter()
+            .any(|r| r.start > r.end || r.end > self.length)
+        {
+            return Box::pin(std::future::ready(Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "fragment read outside file bounds",
+            )
+            .into())));
+        }
+        if let Some(bytes) = &self.small_file {
+            let buffers = ranges
+                .into_iter()
+                .map(|r| bytes.slice(r.start as usize..r.end as usize))
+                .collect();
+            return Box::pin(std::future::ready(Ok(buffers)));
+        }
+        self.inner.submit_request(ranges, priority)
+    }
+}
+
+// Use the same v2 reader/decoders as Lance search, with every column projected.
+// Decode the full document so damage in a later page cannot escape the probe.
+async fn decode_lance_node(path: &Path) -> Option<()> {
+    use lance_core::cache::LanceCache;
+    use lance_encoding::decoder::{DecoderPlugins, FilterExpression};
+    use lance_file::v2::reader::{FileReader, FileReaderOptions};
+    use lance_io::{
+        scheduler::{ScanScheduler, SchedulerConfig},
+        utils::CachedFileSize,
+        ReadBatchParams,
+    };
+    use std::sync::Arc;
+    let length = std::fs::metadata(path).ok()?.len();
+    // Small fragments avoid per-buffer async I/O; large documents stay streamed.
+    let small_file = if length <= 1024 * 1024 {
+        Some(prost::bytes::Bytes::from(std::fs::read(path).ok()?))
+    } else {
+        None
+    };
+    let (store, path) = lance_io::object_store::ObjectStore::from_uri(path.to_str()?)
+        .await
+        .ok()?;
+    let config = SchedulerConfig::max_bandwidth(&store);
+    let scheduler = ScanScheduler::new(store, config);
+    let file = scheduler
+        .open_file(&path, &CachedFileSize::unknown())
+        .await
+        .ok()?;
+    let metadata = Arc::new(FileReader::read_all_metadata(&file).await.ok()?);
+    let io = BoundedFragmentIo {
+        inner: lance_file::v2::LanceEncodingsIo::new(file),
+        length,
+        small_file,
+    };
+    let reader = FileReader::try_open_with_file_metadata(
+        Arc::new(io),
+        path,
+        None,
+        Arc::<DecoderPlugins>::default(),
+        metadata,
+        &LanceCache::no_cache(),
+        FileReaderOptions::default(),
+    )
     .await
-    .ok()
-    .flatten()
+    .ok()?;
+    // Lance exposes a synchronous decoder for small local reads. Run it off
+    // the runtime thread; it uses the same column/page decoders as search.
+    tokio::task::spawn_blocking(move || {
+        let batches = reader
+            .read_stream_projected_blocking(
+                ReadBatchParams::RangeFull,
+                1024,
+                None,
+                FilterExpression::no_filter(),
+            )
+            .ok()?;
+        for batch in batches {
+            let batch = batch.ok()?;
+            // Some decoders construct Arrow buffers without validating values.
+            for column in batch.columns() {
+                column.to_data().validate_full().ok()?;
+            }
+        }
+        Some(())
+    })
+    .await
+    .ok()?
 }
 
 // Match the manifest's recorded fragment length as well as the LANC footer.
 // Unknown lengths conservatively rebuild rather than reuse unverified storage.
-// This avoids a database/query for every unchanged published document.
+// This rejects cheap structural failures before invoking the full Lance decoder.
 fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u32)) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     (|| -> std::io::Result<bool> {
@@ -519,6 +655,7 @@ pub(crate) async fn scan(
         }
     }
     files.sort();
+    state.probe_reuse(&files).await?;
     let mut stats = Progress {
         total: files.len(),
         ..Default::default()
@@ -551,8 +688,10 @@ pub(crate) async fn scan(
             {
                 outcome.changed.insert(path_text.clone());
             }
-            if let Some((doc, mut row, staged)) = state.unchanged(&path_text, &hash).await? {
-                stats.needs_ocr_pages = doc.needs_ocr_pages;
+            if let Some((needs_ocr_pages, mut row, staged)) =
+                state.unchanged(&path_text, &hash).await?
+            {
+                stats.needs_ocr_pages = needs_ocr_pages;
                 row.size = metadata.len();
                 row.mtime = mtime;
                 if staged {
@@ -672,7 +811,7 @@ pub(crate) async fn scan(
             }
             Err(error) => {
                 if let Some(row) = state.baseline_rows.get(&path_text) {
-                    if readable_generation(&state.published_root, row, true)
+                    if readable_generation(&state.published_root, row)
                         .await
                         .is_none()
                     {
@@ -1042,8 +1181,7 @@ mod tests {
             .unwrap()
             .unwrap()
             .0;
-        assert_eq!(skipped.path, path.to_str().unwrap());
-        assert_eq!(skipped.needs_ocr_pages, [2]);
+        assert_eq!(skipped, [2]);
         let mtime: String = state
             .db
             .query_row(

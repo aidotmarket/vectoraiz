@@ -53,8 +53,9 @@ impl State {
             // not evidence that committed review content changed; never create
             // sidecars here or fall back to an immutable (potentially stale) DB.
             if !root.join("state.sqlite-shm").try_exists()? {
-                return Err(anyhow::Error::new(ReviewDatabaseBusy)
-                    .context("review WAL requires shared-memory recovery; retry after indexing"));
+                return Err(anyhow::Error::new(ReviewDatabaseBusy).context(
+                    "review WAL has no shared-memory file; re-index to quarantine the orphan WAL",
+                ));
             }
             "readonly_shm=1"
         } else {
@@ -70,6 +71,52 @@ impl State {
             format!("file:{uri}?{mode}"),
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
         )?)
+    }
+
+    /// Called only by re-index while holding the exclusive writer fence.
+    /// Preserve an orphan that read-only SQLite cannot open, rather than leaving
+    /// every future scan blocked behind review_connection's read-only policy.
+    pub(crate) fn quarantine_orphan_wal(root: &Path) -> Result<()> {
+        let wal = root.join("state.sqlite-wal");
+        if !wal.try_exists()? || root.join("state.sqlite-shm").try_exists()? {
+            return Ok(());
+        }
+        let uri = root.join("state.sqlite");
+        let uri = uri
+            .to_str()
+            .context("index path must be UTF-8")?
+            .replace('%', "%25")
+            .replace('?', "%3F")
+            .replace('#', "%23");
+        let probe = (|| -> rusqlite::Result<()> {
+            let db = Connection::open_with_flags(
+                format!("file:{uri}?readonly_shm=1"),
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )?;
+            db.query_row("SELECT count(*) FROM sqlite_master", [], |_| Ok(()))
+        })();
+        match probe {
+            Err(rusqlite::Error::SqliteFailure(code, _))
+                if code.code == rusqlite::ErrorCode::CannotOpen =>
+            {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)?
+                    .as_nanos();
+                // A sibling lies outside the bound index and all generation /
+                // workspace cleanup. Never delete quarantined bytes on retry.
+                let target = root.with_file_name(format!(
+                    "{}.state.sqlite-wal.orphan-{timestamp}-{}",
+                    root.file_name()
+                        .context("index directory name")?
+                        .to_string_lossy(),
+                    uuid::Uuid::new_v4()
+                ));
+                std::fs::rename(&wal, &target).context("quarantine orphan review WAL")?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+            Ok(()) => Ok(()),
+        }
     }
 
     /// Canonical committed DB commitment and referenced generations from one read

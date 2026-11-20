@@ -1103,36 +1103,66 @@ mod tests {
             )
             .unwrap();
         }
-        // Outside tools may orphan a WAL without SHM. Keep the accepted review
-        // retryable, preserve both files, and read content again after recovery.
+        // Read-only review must preserve the orphan and remain retryable.
+        // Re-index quarantines it, preserving its exact bytes for diagnosis.
         let index = vz_core::active_index::resolve_state(&library);
         let database_before = std::fs::read(index.join("state.sqlite")).unwrap();
         let wal = index.join("state.sqlite-wal");
-        assert!(!index.join("state.sqlite-shm").exists());
-        std::fs::write(&wal, [0_u8; 32]).unwrap();
-        for export_first in [false, true] {
-            let error = if export_first {
-                guard.reviewed_payload(&current).unwrap_err()
-            } else {
-                guard.accept(&current).unwrap_err()
-            };
-            assert!(
-                error
-                    .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
-                    .is_some(),
-                "{error:#}"
-            );
-            assert_eq!(std::fs::read(&wal).unwrap(), [0_u8; 32]);
-            assert_eq!(
-                std::fs::read(index.join("state.sqlite")).unwrap(),
-                database_before
-            );
-            assert!(!index.join("state.sqlite-shm").exists());
-        }
-        std::fs::remove_file(wal).unwrap();
-        guard.accept(&current).unwrap();
-        guard.reviewed_payload(&current).unwrap();
         drop(guard);
+        for contents in [vec![], vec![0_u8; 32]] {
+            assert!(!index.join("state.sqlite-shm").exists());
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            std::fs::write(&wal, &contents).unwrap();
+            for export_first in [false, true] {
+                let error = if export_first {
+                    guard.reviewed_payload(&current).unwrap_err()
+                } else {
+                    guard.accept(&current).unwrap_err()
+                };
+                assert!(
+                    error
+                        .downcast_ref::<vz_core::storage::ReviewDatabaseBusy>()
+                        .is_some(),
+                    "{error:#}"
+                );
+                assert_eq!(std::fs::read(&wal).unwrap(), contents);
+                assert_eq!(
+                    std::fs::read(index.join("state.sqlite")).unwrap(),
+                    database_before
+                );
+                assert!(!index.join("state.sqlite-shm").exists());
+            }
+            drop(guard);
+            let result = rt
+                .block_on(vz_core::active_index::reindex(
+                    &library,
+                    &a,
+                    &engines,
+                    &assets,
+                    |_| {},
+                    || false,
+                ))
+                .unwrap();
+            assert_eq!(result.completed, 0);
+            assert!(!wal.exists());
+            assert!(!index.join("state.sqlite-shm").exists());
+            assert!(std::fs::read_dir(index.parent().unwrap())
+                .unwrap()
+                .any(|entry| {
+                    let entry = entry.unwrap();
+                    entry.file_name().to_string_lossy().starts_with(&format!(
+                        "{}.state.sqlite-wal.orphan-",
+                        index.file_name().unwrap().to_string_lossy()
+                    )) && std::fs::read(entry.path()).unwrap() == contents
+                }));
+            let guard = store
+                .lock_native_current(&f.policy, &current, &library)
+                .unwrap();
+            guard.accept(&current).unwrap();
+            guard.reviewed_payload(&current).unwrap();
+        }
         for cancel in [true, false] {
             let stopped = AtomicBool::new(false);
             let missing = f.root.join("no-assets");

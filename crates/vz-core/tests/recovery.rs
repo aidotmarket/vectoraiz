@@ -139,6 +139,37 @@ fn damage_fragment(table: &Path, damage: &str) {
             let start = u64::from_le_bytes(bytes[footer..footer + 8].try_into().unwrap()) as usize;
             bytes[start] = 0; // Protobuf field zero is invalid; record bounds stay intact.
         }
+        "nested page encoding" | "page body" => {
+            use prost::Message;
+            let offsets =
+                u64::from_le_bytes(bytes[footer + 8..footer + 16].try_into().unwrap()) as usize;
+            let start =
+                u64::from_le_bytes(bytes[offsets..offsets + 8].try_into().unwrap()) as usize;
+            let size =
+                u64::from_le_bytes(bytes[offsets + 8..offsets + 16].try_into().unwrap()) as usize;
+            let mut column =
+                lance_file::format::pbfile::ColumnMetadata::decode(&bytes[start..start + size])
+                    .unwrap();
+            let page = column.pages.first_mut().unwrap();
+            if damage == "nested page encoding" {
+                let location = page.encoding.as_mut().unwrap().location.as_mut().unwrap();
+                let lance_file::format::pbfile::encoding::Location::Direct(direct) = location
+                else {
+                    panic!("expected direct encoding")
+                };
+                direct.encoding.fill(0xff);
+                let encoded = column.encode_to_vec();
+                assert_eq!(encoded.len(), size);
+                bytes[start..start + size].copy_from_slice(&encoded);
+                // The outer metadata remains valid; only its opaque nested Any is damaged.
+                lance_file::format::pbfile::ColumnMetadata::decode(&bytes[start..start + size])
+                    .unwrap();
+            } else {
+                for (&offset, &size) in page.buffer_offsets.iter().zip(&page.buffer_sizes) {
+                    bytes[offset as usize..(offset + size) as usize].fill(0xff);
+                }
+            }
+        }
         "column count" => {
             let count = u32::from_le_bytes(bytes[footer + 28..footer + 32].try_into().unwrap());
             bytes[footer + 28..footer + 32].copy_from_slice(&(count + 1).to_le_bytes());
@@ -155,6 +186,34 @@ fn damage_fragment(table: &Path, damage: &str) {
     std::fs::write(fragment, bytes).unwrap();
 }
 
+fn damage_manifest_parent(table: &Path) {
+    use prost::Message;
+    let latest = std::fs::read_dir(table.join("_versions"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .max_by_key(|p| {
+            p.file_stem()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap()
+        })
+        .unwrap();
+    let bytes = std::fs::read(&latest).unwrap();
+    let offset =
+        u64::from_le_bytes(bytes[bytes.len() - 16..bytes.len() - 8].try_into().unwrap()) as usize;
+    let mut manifest =
+        lance_table::format::pb::Manifest::decode(&bytes[offset + 4..bytes.len() - 16]).unwrap();
+    manifest.fields[0].parent_id = i32::MAX;
+    let message = manifest.encode_to_vec();
+    let mut damaged = bytes[..offset].to_vec();
+    damaged.extend_from_slice(&(message.len() as u32).to_le_bytes());
+    damaged.extend_from_slice(&message);
+    damaged.extend_from_slice(&bytes[bytes.len() - 16..]);
+    std::fs::write(latest, damaged).unwrap();
+}
+
 #[tokio::test]
 async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_misses() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,12 +227,14 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
     let b = tempfile::tempdir().unwrap();
     std::fs::write(a.path().join("a.txt"), "Published recovery document.").unwrap();
     std::fs::write(b.path().join("b.txt"), "Staged recovery document.").unwrap();
+    std::fs::write(b.path().join("c.txt"), "Undamaged staged control.").unwrap();
     active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
         .await
         .unwrap();
     let root = active_index::resolve(data.path());
     for damage in [
         "document",
+        "manifest parent",
         "metadata offset zero",
         "footer version 2.0",
         "column metadata tag",
@@ -184,16 +245,22 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
             b.path(),
             &engines,
             &assets,
-            |_| stopped.store(true, Ordering::SeqCst),
+            |p| {
+                if p.completed == 2 {
+                    stopped.store(true, Ordering::SeqCst);
+                }
+            },
             || stopped.load(Ordering::SeqCst)
         )
         .await
         .is_err());
         let staged = {
             let db = rusqlite::Connection::open(root.join(".vz-scan/scan.sqlite")).unwrap();
-            db.query_row("SELECT generation FROM scan_documents", [], |r| {
-                r.get::<_, String>(0)
-            })
+            db.query_row(
+                "SELECT generation FROM scan_documents WHERE path LIKE '%b.txt'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
             .unwrap()
         };
         if damage == "document" {
@@ -204,6 +271,13 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
                 "damaged",
             )
             .unwrap();
+        } else if damage == "manifest parent" {
+            damage_manifest_parent(
+                &root
+                    .join(".vz-scan/generations")
+                    .join(&staged)
+                    .join("lance/chunks.lance"),
+            );
         } else {
             damage_fragment(
                 &root
@@ -217,25 +291,27 @@ async fn damaged_generations_in_published_and_scan_databases_are_per_file_cache_
             active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
                 .await
                 .unwrap();
-        assert_eq!((result.completed, result.skipped), (1, 0));
+        assert_eq!((result.completed, result.skipped), (1, 1));
         assert!(!root.join(".vz-scan/generations").join(staged).exists());
-        assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+        assert_eq!(State::review_documents(&root).unwrap().len(), 2);
         active_index::reindex(data.path(), a.path(), &engines, &assets, |_| {}, || false)
             .await
             .unwrap();
     }
     let generation = State::review_connection(&root)
         .unwrap()
-        .query_row("SELECT generation FROM documents", [], |r| {
-            r.get::<_, String>(0)
-        })
+        .query_row(
+            "SELECT generation FROM documents WHERE path LIKE '%a.txt'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
         .unwrap();
     std::fs::remove_dir_all(root.join("generations").join(&generation)).unwrap();
     let result = active_index::reindex(data.path(), b.path(), &engines, &assets, |_| {}, || false)
         .await
         .unwrap();
-    assert_eq!((result.completed, result.skipped), (1, 0));
-    assert_eq!(State::review_documents(&root).unwrap().len(), 1);
+    assert_eq!((result.completed, result.skipped), (2, 0));
+    assert_eq!(State::review_documents(&root).unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -339,6 +415,8 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
         "fragment version",
         "fragment metadata offset",
         "fragment metadata offset zero",
+        "nested page encoding",
+        "page body",
         "footer version 2.0",
         "column metadata tag",
     ] {
@@ -376,7 +454,10 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
             std::fs::write(latest, bytes).unwrap();
         } else if damage == "data" {
             std::fs::remove_dir_all(table.join("data")).unwrap();
-        } else if matches!(damage, "footer version 2.0" | "column metadata tag") {
+        } else if matches!(
+            damage,
+            "footer version 2.0" | "column metadata tag" | "nested page encoding" | "page body"
+        ) {
             damage_fragment(&table, damage);
         } else {
             let fragment = std::fs::read_dir(table.join("data"))
