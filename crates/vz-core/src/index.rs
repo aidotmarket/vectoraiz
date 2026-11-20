@@ -357,6 +357,7 @@ pub(crate) async fn scan(
         stats.reason = None;
         stats.needs_ocr_pages.clear();
         let mut unknown = false;
+        let mut damaged = false;
         let result: Result<bool> = async {
             let metadata =
                 std::fs::metadata(&path).map_err(|e| crate::failures::source_io(e.into()))?;
@@ -381,9 +382,7 @@ pub(crate) async fn scan(
                 let reuse = match generation_seal::check(root, &row, &state.recipe) {
                     Ok(reuse) => reuse,
                     Err(Unavailable::Damaged) => {
-                        if !staged {
-                            outcome.damaged.insert(path_text.clone());
-                        }
+                        damaged |= !staged;
                         continue;
                     }
                     Err(Unavailable::Unknown(error)) if staged => {
@@ -420,7 +419,7 @@ pub(crate) async fn scan(
                 }
                 return Ok(false);
             }
-            if let Some(error) = staged_error.filter(|_| !outcome.damaged.contains(&path_text)) {
+            if let Some(error) = staged_error.filter(|_| !damaged) {
                 unknown = true;
                 return Err(anyhow::Error::new(error).context("staged generation unavailable"));
             }
@@ -530,6 +529,9 @@ pub(crate) async fn scan(
             }
             Err(error) => {
                 stats.failed += 1;
+                if damaged {
+                    outcome.damaged.insert(path_text.clone());
+                }
                 // Unknown storage is reported without making it a revocation
                 // or refusing publication of the rest of the walk.
                 if !unknown {

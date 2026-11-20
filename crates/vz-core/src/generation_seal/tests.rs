@@ -393,6 +393,38 @@ async fn unknown_survives_current_and_overlapping_failed_path_revocations() {
 }
 
 #[tokio::test]
+async fn successful_damage_rebuild_is_kept_for_retry_after_unrelated_refusal() {
+    let f = Fixture::new().await;
+    let root = f.root();
+    let rows = f.rows();
+    let document = root
+        .join("generations")
+        .join(&rows[0].generation)
+        .join("document.json");
+    fs::remove_file(&document).unwrap();
+    let failed = f.source().join("no-parser.pdf");
+    fs::write(&failed, "no parser asset").unwrap();
+    assert!(active_index::reindex(
+        &f.library(),
+        &f.source(),
+        &f.engines,
+        &f.temp.path().join("no-assets"),
+        |_| {},
+        || false,
+    )
+    .await
+    .is_err());
+    assert_eq!(f.rows(), rows);
+    assert!(path(&root, &rows[0].generation).is_file());
+    assert!(root.join(".vz-scan/scan.sqlite").is_file());
+    fs::remove_file(failed).unwrap();
+    assert_reused(f.scan().await);
+    assert_ne!(f.rows()[0].generation, rows[0].generation);
+    assert_eq!(f.rows()[1], rows[1]);
+    f.assert_search(2, &[]).await;
+}
+
+#[tokio::test]
 async fn unreadable_seal_or_file_at_time_refresh_reports_unknown() {
     let f = Fixture::new().await;
     let root = f.root();
