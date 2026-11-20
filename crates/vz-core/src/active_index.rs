@@ -393,53 +393,94 @@ pub(crate) fn source_identity(folder: &Path) -> Option<PathBuf> {
     None
 }
 
-// Existing paths canonicalize to the volume's spelling. For a removed tail,
-// compare against the persisted spelling only after proving its surviving
-// ancestor accepts alternate case. Case-sensitive volumes keep exact identity.
+// Compare the persisted spelling component by component. Never resolve or stat
+// historical ancestors: a former parent may now be a symlink to another source.
+// Only the request's containing directory supplies read-only case information.
 pub(crate) fn same_source(current: &Path, previous: &Path) -> bool {
-    // The persisted canonical path is historical evidence. Resolving it again
-    // could follow a new symlink to a different source.
-    if current == previous {
-        return true;
-    }
-    // Compare surviving ancestors by file identity (dev/inode on Unix,
-    // volume serial/file index on Windows), without writing to the source tree.
-    // Probe alternate spellings of that existing ancestor, never the removed
-    // selection itself. A case-sensitive volume keeps exact suffix matching.
-    for (ancestor, historical) in current
-        .ancestors()
-        .skip(1)
-        .zip(previous.ancestors().skip(1))
-    {
-        if !same_existing_identity(ancestor, historical) {
-            continue;
-        }
-        let current_tail = current.strip_prefix(ancestor).unwrap();
-        let previous_tail = previous.strip_prefix(historical).unwrap();
-        if current_tail == previous_tail {
-            return true;
-        }
-        let Some(name) = ancestor.file_name() else {
+    let mut parent = PathBuf::new();
+    let mut previous = previous.components();
+    for component in current.components() {
+        let Some(historical) = previous.next() else {
             return false;
         };
-        let spelling = name.to_string_lossy();
-        let alternatives = [spelling.to_lowercase(), spelling.to_uppercase()];
-        if alternatives
-            .iter()
-            .all(|alternate| alternate == spelling.as_ref())
+        if component != historical
+            && !(matches!(component, Component::Normal(_))
+                && matches!(historical, Component::Normal(_))
+                && equivalent_missing_tail(
+                    Path::new(component.as_os_str()),
+                    Path::new(historical.as_os_str()),
+                )
+                && directory_is_case_insensitive(&parent))
         {
-            continue;
-        }
-        let insensitive = alternatives.iter().any(|alternate| {
-            alternate != spelling.as_ref()
-                && same_existing_identity(ancestor, &ancestor.with_file_name(alternate))
-        });
-        if !insensitive {
             return false;
         }
-        return equivalent_missing_tail(current_tail, previous_tail);
+        parent.push(component.as_os_str());
     }
-    false
+    previous.next().is_none()
+}
+
+fn directory_is_case_insensitive(directory: &Path) -> bool {
+    // Missing intermediate directories inherit the nearest surviving container's
+    // rules. Query the directory itself, including a mount point or drive root.
+    let Some(directory) = directory.ancestors().find(|p| p.is_dir()) else {
+        return false;
+    };
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let Ok(path) = std::ffi::CString::new(directory.as_os_str().as_bytes()) else {
+            return false;
+        };
+        unsafe { libc::pathconf(path.as_ptr(), libc::_PC_CASE_SENSITIVE) == 0 }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileCaseSensitiveInfo, GetFileInformationByHandleEx, GetVolumeInformationByHandleW,
+            FILE_CASE_SENSITIVE_INFO, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        };
+        let Ok(handle) = fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(directory)
+        else {
+            return false;
+        };
+        let mut info = FILE_CASE_SENSITIVE_INFO { Flags: 0 };
+        unsafe {
+            if GetFileInformationByHandleEx(
+                handle.as_raw_handle(),
+                FileCaseSensitiveInfo,
+                (&mut info as *mut FILE_CASE_SENSITIVE_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            ) != 0
+            {
+                return info.Flags & 1 == 0; // FILE_CS_FLAG_CASE_SENSITIVE_DIR
+            }
+            // Older Windows/filesystems lack per-directory case information.
+            // FILE_CASE_SENSITIVE_SEARCH means the volume supports sensitive
+            // lookup, not that this directory enables it. Only use a successful
+            // volume query for the default Windows insensitive semantics.
+            let mut flags = 0;
+            GetVolumeInformationByHandleW(
+                handle.as_raw_handle(),
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut flags,
+                std::ptr::null_mut(),
+                0,
+            ) != 0
+                && flags & 1 == 0
+        }
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = directory;
+        false
+    }
 }
 
 fn equivalent_missing_tail(current: &Path, previous: &Path) -> bool {
@@ -483,19 +524,6 @@ fn equivalent_missing_tail(current: &Path, previous: &Path) -> bool {
         };
         fold(current) == fold(previous)
     }
-}
-
-fn same_existing_identity(left: &Path, right: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        fs::metadata(left)
-            .ok()
-            .zip(fs::metadata(right).ok())
-            .is_some_and(|(left, right)| (left.dev(), left.ino()) == (right.dev(), right.ino()))
-    }
-    #[cfg(not(unix))]
-    same_file::is_same_file(left, right).unwrap_or(false)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -831,25 +859,6 @@ pub fn cleanup_library(data: &Path, keep: Option<&Path>) -> Result<()> {
             // Durable discovery survives removal of state.sqlite and any later
             // cleanup error or process death. Keep the recipe until the record is retired.
             let marker = root.join(".vz-flat-cleanup");
-            // Repair only an empty, unlinked ordinary marker while the original
-            // database still independently proves ownership. Other collisions
-            // remain untouched, including after database removal.
-            if let Ok(metadata) = marker.symlink_metadata() {
-                #[cfg(unix)]
-                let single_link = {
-                    use std::os::unix::fs::MetadataExt;
-                    metadata.nlink() == 1
-                };
-                #[cfg(not(unix))]
-                let single_link = true;
-                if metadata.is_file()
-                    && metadata.len() == 0
-                    && single_link
-                    && owned_legacy_directory(&root)
-                {
-                    fs::remove_file(&marker)?;
-                }
-            }
             match marker.symlink_metadata() {
                 Ok(_) => ensure!(
                     valid_flat_cleanup(&root),
@@ -1198,7 +1207,13 @@ pub(crate) async fn scan_candidate(
                             .context(PublishedFailure("workspace cleanup"))?;
                     }
                 } else {
-                    for name in ["scan.sqlite", "scan.sqlite-journal", "scan-writer.lock"] {
+                    for name in [
+                        "scan.sqlite",
+                        "scan.sqlite-journal",
+                        "scan.sqlite-wal",
+                        "scan.sqlite-shm",
+                        "scan-writer.lock",
+                    ] {
                         let p = root.join(name);
                         if p.exists() {
                             fs::remove_file(p).context(PublishedFailure("workspace cleanup"))?;
@@ -1279,20 +1294,12 @@ pub(crate) async fn scan_candidate(
     }
     control.complete()?;
     if outcome.unavailable {
-        workspace.retain(&Default::default())?;
-        if candidate.is_some() {
-            // Nothing from an unavailable walk is reusable. Close both Windows
-            // lock handles before reclaiming this unpublished candidate.
-            drop(workspace.state.take());
-            drop(_writer);
-            fs::remove_dir_all(root)?;
-        }
         let reason = outcome
             .error
             .take()
             .map(|e| e.to_string())
             .unwrap_or_else(|| "source missing".into());
-        anyhow::bail!(
+        let message = format!(
             "source unavailable: {reason}{}",
             if previous.is_some() && !current {
                 "; the previous folder is still active"
@@ -1300,6 +1307,19 @@ pub(crate) async fn scan_candidate(
                 ""
             }
         );
+        let cleanup = (|| -> Result<()> {
+            workspace.retain(&Default::default())?;
+            if candidate.is_some() {
+                // Nothing from an unavailable walk is reusable. Close both Windows
+                // lock handles before reclaiming this unpublished candidate.
+                drop(workspace.state.take());
+                drop(_writer);
+                fs::remove_dir_all(root)?;
+            }
+            Ok(())
+        })();
+        cleanup.with_context(|| format!("{message}; unpublished scan cleanup failed"))?;
+        anyhow::bail!(message);
     }
     // Preserve the embedding API's per-file report; CLI/desktop callers use
     // the refusing entry points and receive the publication outcome as an error.
@@ -2923,7 +2943,7 @@ mod tests {
     }
 
     #[test]
-    fn flat_cleanup_repairs_empty_interrupted_marker() {
+    fn flat_cleanup_preserves_unverified_empty_marker() {
         let data = tempfile::tempdir().unwrap();
         let recipe = recipe();
         fs::write(
@@ -2935,9 +2955,13 @@ mod tests {
         seed(data.path(), &recipe);
         activate(data.path(), &recipe).unwrap();
         fs::write(data.path().join(".vz-flat-cleanup"), b"").unwrap();
-        cleanup_start(data.path()).unwrap();
-        assert!(!data.path().join("state.sqlite").exists());
-        assert!(!data.path().join(".vz-flat-cleanup").exists());
+        let database = fs::read(data.path().join("state.sqlite")).unwrap();
+        assert!(cleanup_start(data.path()).is_err());
+        assert_eq!(
+            fs::read(data.path().join("state.sqlite")).unwrap(),
+            database
+        );
+        assert_eq!(fs::read(data.path().join(".vz-flat-cleanup")).unwrap(), b"");
         assert!(resolve(data.path()).join("recipe.json").exists());
     }
 
@@ -3110,14 +3134,214 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let parent = temp.path().join("CaseParent");
         fs::create_dir(&parent).unwrap();
-        let alternate = temp.path().join("cASEpARENT");
+        fs::write(parent.join("CaseSentinel"), b"case control").unwrap();
         let parent = parent.canonicalize().unwrap();
-        let insensitive = same_file::is_same_file(&alternate, &parent).unwrap_or(false);
+        let insensitive =
+            same_file::is_same_file(parent.join("CaseSentinel"), parent.join("cASEsENTINEL"))
+                .unwrap_or(false);
+        let modified = fs::metadata(&parent).unwrap().modified().unwrap();
+        let entries = fs::read_dir(&parent).unwrap().count();
         assert_eq!(
             same_source(&parent.join("DOCS"), &parent.join("docs")),
             insensitive
         );
         assert!(!same_source(&parent.join("other"), &parent.join("docs")));
+        assert_eq!(fs::metadata(&parent).unwrap().modified().unwrap(), modified);
+        assert_eq!(fs::read_dir(&parent).unwrap().count(), entries);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retargeted_historical_parent_preserves_selection_documents_and_generations() {
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        let a = sources.path().join("A");
+        let b = sources.path().join("B");
+        let source = a.join("docs");
+        fs::create_dir_all(&source).unwrap();
+        fs::create_dir(&b).unwrap();
+        fs::write(
+            source.join("good.txt"),
+            "Historical source remains published.",
+        )
+        .unwrap();
+        reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        let root = resolve(data.path());
+        let selection = last_indexed_folder(&root).unwrap();
+        let pointer = fs::read(data.path().join("active-index.json")).unwrap();
+        let state = crate::storage::State::open(&root).unwrap();
+        let generations = state.generations().unwrap();
+        let documents = serde_json::to_value(state.documents().unwrap()).unwrap();
+        drop(state);
+        fs::rename(&a, sources.path().join("original-A")).unwrap();
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        let request = source_identity(&b.join("docs")).unwrap();
+        assert!(!same_source(&request, Path::new(&selection)));
+        assert!(reindex(
+            data.path(),
+            &b.join("docs"),
+            &engines,
+            &assets,
+            |_| {},
+            || false
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("previous folder is still active"));
+        assert_eq!(last_indexed_folder(&root).unwrap(), selection);
+        assert_eq!(
+            fs::read(data.path().join("active-index.json")).unwrap(),
+            pointer
+        );
+        let state = crate::storage::State::open(&root).unwrap();
+        assert_eq!(state.generations().unwrap(), generations);
+        assert_eq!(
+            serde_json::to_value(state.documents().unwrap()).unwrap(),
+            documents
+        );
+        assert!(!state
+            .search(
+                "Historical",
+                &engines.vector("Historical", true).unwrap(),
+                3
+            )
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn missing_tail_reads_mount_case_rules_without_writes() {
+        // A pre-existing sensitive mount is optional; do not create a volume.
+        let mount = Path::new("/Volumes/Backups of Koskadeux");
+        if !mount.is_dir() || directory_is_case_insensitive(mount) {
+            return;
+        }
+        eprintln!("case-sensitive mount regression ran on {}", mount.display());
+        assert!(!same_source(&mount.join("Docs"), &mount.join("docs")));
+        assert!(!same_source(
+            &mount.join("2024/Docs"),
+            &mount.join("2024/docs")
+        ));
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn missing_current_drive_root_child_revokes_case_variant() {
+        let (engines, assets) = embedding_fixture();
+        let temp = tempfile::tempdir().unwrap();
+        let drive: PathBuf = temp
+            .path()
+            .canonicalize()
+            .unwrap()
+            .components()
+            .take(2)
+            .collect();
+        assert!(
+            directory_is_case_insensitive(&drive),
+            "drive-root regression requires Windows' default case-insensitive root"
+        );
+        let name = format!("VzDocs-{}", uuid::Uuid::new_v4());
+        let source = drive.join(&name);
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("good.txt"), "Drive root selected document.").unwrap();
+        reindex(temp.path(), &source, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        let root = resolve(temp.path());
+        let selection = last_indexed_folder(&root);
+        fs::remove_dir_all(&source).unwrap();
+        let request = drive.join(name.to_uppercase());
+        assert!(same_source(
+            &request,
+            Path::new(selection.as_ref().unwrap())
+        ));
+        assert!(
+            reindex(temp.path(), &request, &engines, &assets, |_| {}, || false)
+                .await
+                .is_err()
+        );
+        assert_eq!(last_indexed_folder(&root), selection);
+        assert!(crate::storage::State::review_documents(&root)
+            .unwrap()
+            .is_empty());
+        assert_eq!(fs::read_dir(root.join("generations")).unwrap().count(), 0);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn case_sensitive_container_preserves_distinct_source() {
+        use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+        use windows_sys::Win32::Storage::FileSystem::{
+            FileCaseSensitiveInfo, SetFileInformationByHandle, FILE_CASE_SENSITIVE_INFO,
+            FILE_FLAG_BACKUP_SEMANTICS,
+        };
+        let (engines, assets) = embedding_fixture();
+        let data = tempfile::tempdir().unwrap();
+        let parent = tempfile::tempdir().unwrap();
+        let handle = fs::OpenOptions::new()
+            .access_mode(0x100) // FILE_WRITE_ATTRIBUTES
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(parent.path())
+            .unwrap();
+        let info = FILE_CASE_SENSITIVE_INFO { Flags: 1 };
+        if unsafe {
+            SetFileInformationByHandle(
+                handle.as_raw_handle(),
+                FileCaseSensitiveInfo,
+                (&info as *const FILE_CASE_SENSITIVE_INFO).cast(),
+                std::mem::size_of_val(&info) as u32,
+            )
+        } == 0
+        {
+            eprintln!(
+                "per-directory case sensitivity unavailable: {}",
+                std::io::Error::last_os_error()
+            );
+            return;
+        }
+        drop(handle);
+        let source = parent.path().join("Docs");
+        fs::create_dir(&source).unwrap();
+        fs::write(
+            source.join("good.txt"),
+            "Distinct case source remains published.",
+        )
+        .unwrap();
+        reindex(data.path(), &source, &engines, &assets, |_| {}, || false)
+            .await
+            .unwrap();
+        let root = resolve(data.path());
+        let selection = last_indexed_folder(&root);
+        let state = crate::storage::State::open(&root).unwrap();
+        let generations = state.generations().unwrap();
+        let documents = serde_json::to_value(state.documents().unwrap()).unwrap();
+        drop(state);
+        assert!(!directory_is_case_insensitive(parent.path()));
+        assert!(reindex(
+            data.path(),
+            &parent.path().join("docs"),
+            &engines,
+            &assets,
+            |_| {},
+            || false
+        )
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("previous folder is still active"));
+        assert_eq!(last_indexed_folder(&root), selection);
+        let state = crate::storage::State::open(&root).unwrap();
+        assert_eq!(state.generations().unwrap(), generations);
+        assert_eq!(
+            serde_json::to_value(state.documents().unwrap()).unwrap(),
+            documents
+        );
     }
 
     #[tokio::test]

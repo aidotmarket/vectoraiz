@@ -268,7 +268,14 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
     .await
     .unwrap();
     let root = active_index::resolve(data.path());
-    for damage in ["manifest", "data", "truncated fragment"] {
+    for damage in [
+        "manifest",
+        "data",
+        "truncated fragment",
+        "fragment version",
+        "fragment metadata offset",
+        "fragment metadata offset zero",
+    ] {
         let generation: String = State::review_connection(&root)
             .unwrap()
             .query_row(
@@ -312,10 +319,45 @@ async fn published_lance_manifest_and_data_damage_are_cache_misses() {
                 .path();
             let bytes = std::fs::read(&fragment).unwrap();
             assert!(bytes.ends_with(b"LANC"));
-            // Preserve the complete footer but remove part of the data body.
-            let mut truncated = bytes[..8].to_vec();
-            truncated.extend_from_slice(&bytes[bytes.len() - 40..]);
-            std::fs::write(fragment, truncated).unwrap();
+            if damage == "truncated fragment" {
+                // Preserve the complete footer but remove part of the data body.
+                let mut truncated = bytes[..8].to_vec();
+                truncated.extend_from_slice(&bytes[bytes.len() - 40..]);
+                std::fs::write(fragment, truncated).unwrap();
+            } else {
+                let mut damaged = bytes.clone();
+                let offset = bytes.len() - if damage == "fragment version" { 8 } else { 40 };
+                let count = if damage == "fragment version" { 4 } else { 8 };
+                damaged[offset..offset + count].fill(if damage.ends_with("zero") {
+                    0
+                } else {
+                    0xff
+                });
+                assert_eq!(damaged.len(), bytes.len());
+                assert!(damaged.ends_with(b"LANC"));
+                std::fs::write(fragment, damaged).unwrap();
+                // Prove the structural mutation breaks the real Lance reader
+                // before asking re-index to repair it.
+                use futures::{FutureExt, TryStreamExt};
+                use lancedb::query::{ExecutableQuery, QueryBase};
+                // Lance 0.38 can panic inside its query task on an invalid
+                // offset. Either a query error or that panic proves unreadability.
+                let unreadable = std::panic::AssertUnwindSafe(async {
+                    let db = lancedb::connect(table.parent().unwrap().to_str().unwrap())
+                        .execute()
+                        .await?;
+                    let table = db.open_table("chunks").execute().await?;
+                    let mut stream = table.query().limit(1).execute().await?;
+                    stream.try_next().await?;
+                    Ok::<_, anyhow::Error>(())
+                })
+                .catch_unwind()
+                .await;
+                assert!(
+                    !matches!(unreadable, Ok(Ok(()))),
+                    "damage must make Lance unreadable: {damage}"
+                );
+            }
         }
         let result = active_index::reindex(
             data.path(),

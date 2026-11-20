@@ -291,6 +291,7 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
                 if !readable_lance_node(
                     &table.join("data").join(relative),
                     file.file_size_bytes.get().map(|size| size.get()),
+                    (file.file_major_version, file.file_minor_version),
                 ) {
                     return None;
                 }
@@ -313,7 +314,7 @@ async fn readable_generation(root: &Path, row: &ScanRow, staged: bool) -> Option
 // Match the manifest's recorded fragment length as well as the LANC footer.
 // Unknown lengths conservatively rebuild rather than reuse unverified storage.
 // This avoids a database/query for every unchanged published document.
-fn readable_lance_node(path: &Path, expected_size: Option<u64>) -> bool {
+fn readable_lance_node(path: &Path, expected_size: Option<u64>, version: (u32, u32)) -> bool {
     use std::io::{Read, Seek, SeekFrom};
     (|| -> std::io::Result<bool> {
         if !std::fs::symlink_metadata(path)?.is_file() {
@@ -323,13 +324,63 @@ fn readable_lance_node(path: &Path, expected_size: Option<u64>) -> bool {
         let length = file.metadata()?.len();
         // Current writers record the complete fragment length in the manifest.
         // A footer alone cannot detect a truncated body with its footer retained.
-        if length < 16 || expected_size.is_none_or(|expected| expected != length) {
+        if length < 40 || expected_size.is_none_or(|expected| expected != length) {
             return Ok(false);
         }
-        file.seek(SeekFrom::End(-4))?;
-        let mut magic = [0; 4];
-        file.read_exact(&mut magic)?;
-        Ok(&magic == b"LANC")
+        file.seek(SeekFrom::End(-40))?;
+        let mut footer = [0; 40];
+        file.read_exact(&mut footer)?;
+        let u64_at = |i| u64::from_le_bytes(footer[i..i + 8].try_into().unwrap());
+        let u32_at = |i| u32::from_le_bytes(footer[i..i + 4].try_into().unwrap());
+        let actual_version = (
+            u16::from_le_bytes(footer[32..34].try_into().unwrap()) as u32,
+            u16::from_le_bytes(footer[34..36].try_into().unwrap()) as u32,
+        );
+        // The v2 footer describes column metadata, its offset table, and the
+        // global-buffer offset table. Validate all boundaries against the file,
+        // not just its final magic. Version must agree with the manifest.
+        let (columns, column_offsets, global_offsets) = (u64_at(0), u64_at(8), u64_at(16));
+        let valid_footer = &footer[36..] == b"LANC"
+            // Lance's v2.0 writer uses 0.3 in the footer; manifests use 2.0.
+            && (if actual_version == (0, 3) { (2, 0) } else { actual_version })
+                == (if version == (0, 3) { (2, 0) } else { version })
+            && matches!(version, (0, 3) | (2, 0..=2))
+            && columns <= column_offsets
+            && column_offsets.checked_add(u64::from(u32_at(28)) * 16) == Some(global_offsets)
+            && global_offsets.checked_add(u64::from(u32_at(24)) * 16) == Some(length - 40);
+        if !valid_footer {
+            return Ok(false);
+        }
+        // Cross-check the metadata start against the actual descriptor table:
+        // a smaller, in-bounds corrupted offset is just as unreadable as an
+        // offset past EOF. Current v2 writers serialize these nodes contiguously.
+        file.seek(SeekFrom::Start(column_offsets))?;
+        let mut next = columns;
+        let mut descriptor = [0; 16];
+        for _ in 0..u32_at(28) {
+            file.read_exact(&mut descriptor)?;
+            let start = u64::from_le_bytes(descriptor[..8].try_into().unwrap());
+            let size = u64::from_le_bytes(descriptor[8..].try_into().unwrap());
+            let Some(end) = start.checked_add(size) else {
+                return Ok(false);
+            };
+            if start != next || size == 0 || end > column_offsets {
+                return Ok(false);
+            }
+            next = end;
+        }
+        if next != column_offsets {
+            return Ok(false);
+        }
+        for _ in 0..u32_at(24) {
+            file.read_exact(&mut descriptor)?;
+            let start = u64::from_le_bytes(descriptor[..8].try_into().unwrap());
+            let size = u64::from_le_bytes(descriptor[8..].try_into().unwrap());
+            if start.checked_add(size).is_none_or(|end| end > columns) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     })()
     .unwrap_or(false)
 }
