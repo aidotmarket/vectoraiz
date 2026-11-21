@@ -1,5 +1,7 @@
 use serde_json::{json, Value};
-use vz_pack::handoff::{validate_lengths, Handoff, MAX_ENCODED_BYTES, MAX_EXPANDED_BYTES};
+use vz_pack::handoff::{
+    bucket_selection_digest, validate_lengths, Handoff, MAX_ENCODED_BYTES, MAX_EXPANDED_BYTES,
+};
 
 const PACK: &str = "550e8400-e29b-41d4-a716-446655440000";
 
@@ -107,6 +109,11 @@ fn handoff_boundary() {
     assert!(native_valid(gateway.clone()));
     gateway["files"] = json!(pairs);
     assert!(!native_valid(gateway));
+
+    let key = format!("vz/{PACK}/manifest.json");
+    let original = bucket_selection_digest(PACK, &[(&key, "\"source-etag-2\"", 50)]).unwrap();
+    let swapped = bucket_selection_digest(PACK, &[(&key, "\"replacement-etag-2\"", 50)]).unwrap();
+    assert_ne!(original, swapped);
 }
 
 #[test]
@@ -154,6 +161,7 @@ fn import_marker_idempotency() {
         listing_commands::{review, ListingReference},
         listing_policy::{system, ListingError},
         review_build::rebuild,
+        review_store::ReviewStore,
     };
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let assets = repo.join(".assets");
@@ -214,13 +222,61 @@ fn import_marker_idempotency() {
             .code,
         ListingError::ReviewRequired
     );
-    review(policy, &reference.store, &library, &reference.current, true).unwrap();
+    let accepted = review(policy, &reference.store, &library, &reference.current, true).unwrap();
     let first = get_listing_handoff(policy, &reference, request()).unwrap();
     let second = get_listing_handoff(policy, &reference, request()).unwrap();
     assert_eq!(first.idempotency_key, reference.current.generation);
     assert_eq!(
         serde_json::to_vec(&first).unwrap(),
         serde_json::to_vec(&second).unwrap()
+    );
+
+    let mut forged = reference.clone();
+    forged.current.review_hash = "1".repeat(64).try_into().unwrap();
+    assert_eq!(
+        get_listing_handoff(policy, &forged, request())
+            .unwrap_err()
+            .code,
+        ListingError::StaleGeneration
+    );
+
+    // Freeze and accept a legacy-shaped generation using the same active
+    // index so the archive is the reason it goes stale.
+    let legacy = dir.path().join("legacy");
+    let vector_payload = reference
+        .store
+        .join(reference.current.pack_id.to_string())
+        .join(reference.current.generation.to_string())
+        .join("payload");
+    for artifact in &accepted.staged_artifacts {
+        let destination = legacy.join(&artifact.artifact);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::copy(vector_payload.join(&artifact.artifact), destination).unwrap();
+    }
+    fs::write(legacy.join("originals-0001.zip"), b"legacy original bytes").unwrap();
+    let store = ReviewStore::open(&reference.store).unwrap();
+    let pack_id = uuid::Uuid::new_v4();
+    let binding = store
+        .lock_native(policy, pack_id, &library)
+        .unwrap()
+        .capture(&source)
+        .unwrap();
+    let guard = store.lock(policy, pack_id).unwrap();
+    let mut legacy_review = accepted;
+    legacy_review.pack_id = pack_id;
+    legacy_review.accepted_review_hash = None;
+    let legacy_current = guard.freeze(binding, legacy_review, &legacy).unwrap();
+    guard.accept(&legacy_current).unwrap();
+    drop(guard);
+    let legacy_reference = ListingReference {
+        current: legacy_current,
+        ..reference.clone()
+    };
+    assert_eq!(
+        get_listing_handoff(policy, &legacy_reference, request())
+            .unwrap_err()
+            .code,
+        ListingError::StaleGeneration
     );
 
     fs::write(&file, "The new retention policy is sixty days.").unwrap();
