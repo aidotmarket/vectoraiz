@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -643,6 +644,22 @@ class PackageGate(unittest.TestCase):
                'Provisional model licences and source notices:\nModel licence\n'
                'Release model licences and source notices:\nRelease licence\n'
                'UI npm dependencies\nnpm licence\n')
+
+    def test_dev_strip_is_scoped_to_stage1_rust_build_steps(self):
+        workflow = (version.ROOT / '.github/workflows/native-ci.yml').read_text()
+        key = 'CARGO_PROFILE_DEV_STRIP'
+        steps = [
+            'Build standalone CPU sidecars for Windows installer',
+            'Build stage 1 sidecars for macOS',
+            'Package ad-hoc macOS app (no updater signing key)',
+            'Package unsigned per-machine Windows MSI',
+        ]
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertRegex(workflow, rf"(?m)^      - name: {re.escape(step)}\n"
+                                 rf"(?:        if: [^\n]+\n)?        env:\n"
+                                 rf"          {key}: 'true'$")
+        self.assertEqual(workflow.count(key), len(steps))
 
     def package_module(self):
         spec = importlib.util.spec_from_file_location('package', Path(__file__).with_name('native-package.py'))
