@@ -253,7 +253,8 @@ mod error_tests {
     fn desktop_handoff_is_absent_by_default_and_confined_to_local_main_window() {
         use tauri::ipc::Origin;
         use vz_mcp::protocol::LISTING_HANDOFF;
-        let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
+        let mut context: tauri::Context<tauri::test::MockRuntime> =
+            tauri::test::mock_context(tauri::test::noop_assets());
         super::allow_listing_handoff(&mut context, false);
         let local = Origin::Local;
         assert!(context
