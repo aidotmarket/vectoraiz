@@ -73,6 +73,76 @@ where
     response
 }
 
+// The build-generated app manifest covers the regular commands. Add the
+// preview command at runtime, with the invoke handler enforcing the main window.
+pub fn allow_listing_handoff<R: tauri::Runtime>(
+    context: &mut tauri::Context<R>,
+    preview_enabled: bool,
+) {
+    if preview_enabled {
+        context.runtime_authority_mut().__allow_command(
+            vz_mcp::protocol::LISTING_HANDOFF.into(),
+            tauri::utils::acl::ExecutionContext::Local,
+        );
+    }
+}
+
+pub fn listing_handoff_visible(preview_enabled: bool, window: &str) -> bool {
+    preview_enabled && window == "main"
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ListingArguments {
+    pub current: vz_pack::review_store::CurrentReview,
+    pub request: vz_pack::handoff::HandoffRequest,
+}
+
+pub async fn call_listing<F>(
+    dir: &Path,
+    request: crate::mcp_channel::Request,
+    cancel: tokio_util::sync::CancellationToken,
+    execute: impl FnOnce(ListingArguments) -> F,
+) -> Value
+where
+    F: std::future::Future<
+        Output = Result<
+            vz_pack::handoff::ListingHandoff,
+            vz_pack::listing_commands::ListingFailure,
+        >,
+    >,
+{
+    use crate::mcp_channel::gate;
+    let policy = vz_pack::listing_policy::system();
+    let policy_failure = |error: vz_pack::listing_policy::ListingError| json!({"ok":false,"code":error,"message":error.to_string()});
+    if let Err(error) = policy.require_preview() {
+        return policy_failure(error);
+    }
+    if let Err(error) = gate(dir, &request) {
+        return error;
+    }
+    let arguments = match serde_json::from_value(request.args.clone()) {
+        Ok(arguments) => arguments,
+        Err(_) => {
+            return json!({"ok":false,"code":"invalid_args","message":"Invalid listing handoff request."})
+        }
+    };
+    let result = tokio::select! { biased;
+        _ = cancel.cancelled() => return json!({"ok":false,"code":"cancelled","message":vz_mcp::NO_ACCESS}),
+        result = execute(arguments) => result,
+    };
+    if let Err(error) = policy.require_preview() {
+        return policy_failure(error);
+    }
+    if let Err(error) = gate(dir, &request) {
+        return error;
+    }
+    match result {
+        Ok(result) => json!({"ok":true,"result":result}),
+        Err(error) => policy_failure(error.code),
+    }
+}
+
 fn customer_error(detail: &str) -> &str {
     match detail {
         vz_mcp::NO_ACCESS | "That document isn't in your vectorAIz library." | "Unknown tool." => {
@@ -179,6 +249,34 @@ pub fn execute(
 
 #[cfg(test)]
 mod error_tests {
+    #[test]
+    fn desktop_handoff_is_absent_by_default_and_confined_to_local_main_window() {
+        use tauri::ipc::Origin;
+        use vz_mcp::protocol::LISTING_HANDOFF;
+        let mut context: tauri::Context<tauri::test::MockRuntime> = tauri::generate_context!();
+        super::allow_listing_handoff(&mut context, false);
+        let local = Origin::Local;
+        assert!(context
+            .runtime_authority_mut()
+            .resolve_access(LISTING_HANDOFF, "main", "main", &local)
+            .is_none());
+        assert!(!super::listing_handoff_visible(false, "main"));
+
+        super::allow_listing_handoff(&mut context, true);
+        let authority = context.runtime_authority_mut();
+        assert!(authority
+            .resolve_access(LISTING_HANDOFF, "main", "main", &local)
+            .is_some());
+        let remote = Origin::Remote {
+            url: "https://example.com".parse().unwrap(),
+        };
+        assert!(authority
+            .resolve_access(LISTING_HANDOFF, "main", "main", &remote)
+            .is_none());
+        assert!(!super::listing_handoff_visible(true, "other"));
+        assert!(super::listing_handoff_visible(true, "main"));
+    }
+
     #[test]
     fn engine_paths_stay_local() {
         for detail in [

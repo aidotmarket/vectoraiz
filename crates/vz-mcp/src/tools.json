@@ -208,5 +208,213 @@
       "readOnlyHint": true,
       "openWorldHint": false
     }
+  },
+  {
+    "name": "get_listing_handoff",
+    "description": "Prepare an import handoff for the current accepted vector-only listing review.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "type": "object",
+          "properties": {
+            "pack_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "generation": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "review_hash": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "pack_id",
+            "generation",
+            "review_hash"
+          ],
+          "additionalProperties": false
+        },
+        "request": {
+          "type": "object",
+          "properties": {
+            "draft": {
+              "type": "object",
+              "properties": {
+                "title": {
+                  "type": "string",
+                  "maxLength": 255
+                },
+                "brief": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "description": {
+                  "type": "string",
+                  "maxLength": 10000
+                },
+                "category": {
+                  "type": "string",
+                  "maxLength": 200
+                },
+                "tags": {
+                  "type": "string",
+                  "maxLength": 1000
+                }
+              },
+              "required": [
+                "title",
+                "brief",
+                "description",
+                "category",
+                "tags"
+              ],
+              "additionalProperties": false
+            },
+            "target": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "bucket"
+                    },
+                    "provider": {
+                      "type": "string",
+                      "enum": [
+                        "aws",
+                        "r2"
+                      ]
+                    },
+                    "bucket": {
+                      "type": "string",
+                      "maxLength": 255
+                    },
+                    "region": {
+                      "type": "string",
+                      "maxLength": 80
+                    },
+                    "account_id": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "objects": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "key": {
+                            "type": "string"
+                          },
+                          "etag": {
+                            "type": "string"
+                          },
+                          "size": {
+                            "type": "integer",
+                            "minimum": 0
+                          }
+                        },
+                        "required": [
+                          "key",
+                          "etag",
+                          "size"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "minItems": 6,
+                      "maxItems": 6
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "provider",
+                    "bucket",
+                    "objects"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "const": "gateway"
+                    },
+                    "names": {
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "manifest.json",
+                          "chunks.parquet",
+                          "documents.parquet",
+                          "README.md",
+                          "query.py",
+                          "query.json"
+                        ]
+                      },
+                      "minItems": 6,
+                      "maxItems": 6,
+                      "uniqueItems": true
+                    }
+                  },
+                  "required": [
+                    "type",
+                    "names"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          },
+          "required": [
+            "draft",
+            "target"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "current",
+        "request"
+      ],
+      "additionalProperties": false
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "handoff": {
+          "type": "string",
+          "maxLength": 49152
+        },
+        "idempotency_key": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "source_revision": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "native_commitment": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "required": [
+        "handoff",
+        "idempotency_key",
+        "source_revision",
+        "native_commitment"
+      ],
+      "additionalProperties": false
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "openWorldHint": false
+    }
   }
 ]

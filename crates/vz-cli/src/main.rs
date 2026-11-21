@@ -1,6 +1,6 @@
 //! Headless pipeline. Network is used by explicit upload and SFTP export commands.
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args as _, CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -131,9 +131,66 @@ fn main() {
     }
 }
 
+const LISTING_HANDOFF: &str = "get-listing-handoff";
+
+#[derive(clap::Args)]
+struct HandoffArgs {
+    /// JSON draft and destination selection.
+    #[arg(long)]
+    request: PathBuf,
+}
+
+fn command(handoff_available: bool) -> clap::Command {
+    let command = Args::command();
+    if handoff_available {
+        command.subcommand(HandoffArgs::augment_args(
+            clap::Command::new(LISTING_HANDOFF)
+                .about("Emit a handoff for a current accepted listing review."),
+        ))
+    } else {
+        command
+    }
+}
+
 fn run() -> Result<()> {
-    let args = Args::parse();
     let policy = vz_pack::listing_policy::system();
+    let available = policy.require_preview();
+    let matches = command(available.is_ok())
+        .try_get_matches()
+        .unwrap_or_else(|error| {
+            use clap::error::{ContextKind, ContextValue, ErrorKind};
+            if error.kind() == ErrorKind::InvalidSubcommand
+                && error.get(ContextKind::InvalidSubcommand)
+                    == Some(&ContextValue::String(LISTING_HANDOFF.into()))
+            {
+                if let Err(code) = available {
+                    eprintln!("Error: {code}");
+                    std::process::exit(vz_pack::export::exit_code(&code.into()));
+                }
+            }
+            error.exit();
+        });
+    if let Some((LISTING_HANDOFF, handoff)) = matches.subcommand() {
+        use vz_pack::{handoff::get_listing_handoff, listing_policy::ListingError};
+        policy.require_preview()?;
+        let path = matches
+            .get_one::<PathBuf>("review_reference")
+            .ok_or(ListingError::ReviewRequired)?;
+        let reference = read_reference::<vz_pack::listing_commands::ListingReference>(path, 16384)?;
+        let library = matches
+            .get_one::<PathBuf>("state")
+            .expect("CLI state default");
+        anyhow::ensure!(
+            library.canonicalize()? == reference.library.canonicalize()?,
+            "requested library differs from reviewed library"
+        );
+        let args = HandoffArgs::from_arg_matches(handoff).unwrap_or_else(|error| error.exit());
+        let request = read_reference(&args.request, 128 * 1024)?;
+        let result = get_listing_handoff(policy, &reference, request)?;
+        println!("{}", serde_json::to_string(&result)?);
+        return Ok(());
+    }
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
     policy.refresh();
     if let Operation::ListingStatus = &args.command {
         println!("{}", serde_json::to_string(&policy.status())?);
@@ -386,4 +443,23 @@ fn read_questions(path: &std::path::Path) -> Result<Vec<serde_json::Value>> {
         .filter(|line| !line.trim().is_empty())
         .map(|line| Ok(serde_json::from_str(line)?))
         .collect()
+}
+
+#[cfg(test)]
+mod listing_handoff_tests {
+    use super::*;
+
+    #[test]
+    fn handoff_absent_from_default_help() {
+        assert!(command(false).find_subcommand(LISTING_HANDOFF).is_none());
+        assert!(command(true).find_subcommand(LISTING_HANDOFF).is_some());
+        let regular = command(false)
+            .try_get_matches_from(["vectoraiz-cli", "self-test"])
+            .unwrap();
+        assert!(matches!(regular.subcommand(), Some(("self-test", _))));
+        assert!(!command(false)
+            .render_long_help()
+            .to_string()
+            .contains(LISTING_HANDOFF));
+    }
 }
