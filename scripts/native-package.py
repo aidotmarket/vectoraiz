@@ -78,7 +78,9 @@ def main():
         for name in ['vz-parser-worker', 'vectoraiz-mcp', 'vectoraiz-cli']:
             shutil.copy2(ROOT / f'target/debug/{name}{suffix}', generated / f'bin/{name}-{triple}{suffix}')
         if not windows:
-            shutil.copy2(ROOT / 'target/debug/vz-vision-ocr', generated / f'bin/vz-vision-ocr-{triple}')
+            vision = generated / f'bin/vz-vision-ocr-{triple}'
+            shutil.copy2(ROOT / 'target/debug/vz-vision-ocr', vision)
+            run('strip', '-x', vision)
         config = json.loads((ROOT / 'app/src-tauri/tauri.stage1.conf.json').read_text())
         if not windows:
             config['bundle']['externalBin'].append('gen/bin/vz-vision-ocr')
