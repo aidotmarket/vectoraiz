@@ -537,10 +537,11 @@ mod tests {
         originals: bool,
     ) -> ListingReference {
         use std::fs;
-        let library = dir.join("index");
-        let source = dir.join("source");
-        let payload = dir.join("fixture-payload");
-        let store_path = dir.join("reviews");
+        let root = dir.canonicalize().unwrap();
+        let library = root.join("index");
+        let source = root.join("source");
+        let payload = root.join("fixture-payload");
+        let store_path = root.join("reviews");
         fs::create_dir(&library).unwrap();
         fs::create_dir(&source).unwrap();
         fs::create_dir_all(payload.join("examples")).unwrap();

@@ -172,9 +172,10 @@ fn import_marker_idempotency() {
     )
     .unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let source = dir.path().join("source");
-    let library = dir.path().join("library");
-    let store = dir.path().join("reviews");
+    let root = dir.path().canonicalize().unwrap();
+    let source = root.join("source");
+    let library = root.join("library");
+    let store = root.join("reviews");
     fs::create_dir(&source).unwrap();
     let file = source.join("sample.txt");
     fs::write(&file, "Orbital archive retention is thirty days.").unwrap();
@@ -242,7 +243,7 @@ fn import_marker_idempotency() {
 
     // Freeze and accept a legacy-shaped generation using the same active
     // index so the archive is the reason it goes stale.
-    let legacy = dir.path().join("legacy");
+    let legacy = root.join("legacy");
     let vector_payload = reference
         .store
         .join(reference.current.pack_id.to_string())
