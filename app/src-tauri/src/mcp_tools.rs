@@ -1,4 +1,4 @@
-//! Read-only library tools. The caller owns the inference guard and has passed gate 2.
+//! Local library tools and their activity records.
 use crate::models::EngineCache;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -100,9 +100,11 @@ pub struct ListingArguments {
 
 pub async fn call_listing<F>(
     dir: &Path,
+    apps: &crate::mcp_apps::Apps,
     request: crate::mcp_channel::Request,
     cancel: tokio_util::sync::CancellationToken,
-    execute: impl FnOnce(ListingArguments) -> F,
+    require_preview: impl Fn() -> Result<(), vz_pack::listing_policy::ListingError>,
+    execute: impl FnOnce(ListingArguments, tokio_util::sync::CancellationToken) -> F,
 ) -> Value
 where
     F: std::future::Future<
@@ -113,34 +115,41 @@ where
     >,
 {
     use crate::mcp_channel::gate;
-    let policy = vz_pack::listing_policy::system();
     let policy_failure = |error: vz_pack::listing_policy::ListingError| json!({"ok":false,"code":error,"message":error.to_string()});
-    if let Err(error) = policy.require_preview() {
-        return policy_failure(error);
-    }
-    if let Err(error) = gate(dir, &request) {
-        return error;
-    }
-    let arguments = match serde_json::from_value(request.args.clone()) {
-        Ok(arguments) => arguments,
-        Err(_) => {
-            return json!({"ok":false,"code":"invalid_args","message":"Invalid listing handoff request."})
+    let checked = require_preview()
+        .map_err(policy_failure)
+        .and_then(|()| gate(dir, &request));
+    let call_id = apps.record(dir, &request.client, &request.tool, checked.as_ref().err());
+    let response = async {
+        if let Err(error) = checked {
+            return error;
         }
-    };
-    let result = tokio::select! { biased;
-        _ = cancel.cancelled() => return json!({"ok":false,"code":"cancelled","message":vz_mcp::NO_ACCESS}),
-        result = execute(arguments) => result,
-    };
-    if let Err(error) = policy.require_preview() {
-        return policy_failure(error);
+        let arguments = match serde_json::from_value(request.args.clone()) {
+            Ok(arguments) => arguments,
+            Err(_) => {
+                return json!({"ok":false,"code":"invalid_args","message":"Invalid listing handoff request."})
+            }
+        };
+        let worker_cancel = cancel.child_token();
+        let _cancel_on_drop = worker_cancel.clone().drop_guard();
+        let result = tokio::select! { biased;
+            _ = cancel.cancelled() => return json!({"ok":false,"code":"cancelled","message":vz_mcp::NO_ACCESS}),
+            result = execute(arguments, worker_cancel) => result,
+        };
+        if let Err(error) = require_preview() {
+            return policy_failure(error);
+        }
+        if let Err(error) = gate(dir, &request) {
+            return error;
+        }
+        match result {
+            Ok(result) => json!({"ok":true,"result":result}),
+            Err(error) => policy_failure(error.code),
+        }
     }
-    if let Err(error) = gate(dir, &request) {
-        return error;
-    }
-    match result {
-        Ok(result) => json!({"ok":true,"result":result}),
-        Err(error) => policy_failure(error.code),
-    }
+    .await;
+    apps.completed(dir, &call_id, &response);
+    response
 }
 
 fn customer_error(detail: &str) -> &str {

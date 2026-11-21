@@ -176,10 +176,11 @@ mod tests {
             let result = immediate_with_preview(&list, true, || enabled).1.unwrap();
             let tools = result["result"]["tools"].as_array().unwrap();
             assert_eq!(tools.len(), if enabled { 5 } else { 4 });
-            assert_eq!(
-                tools.iter().any(|tool| tool["name"] == LISTING_HANDOFF),
-                enabled
-            );
+            let handoff = tools.iter().find(|tool| tool["name"] == LISTING_HANDOFF);
+            assert_eq!(handoff.is_some(), enabled);
+            if let Some(handoff) = handoff {
+                assert_eq!(handoff["annotations"]["readOnlyHint"], false);
+            }
             assert_eq!(
                 immediate_with_preview(&call, true, || enabled).1.is_none(),
                 enabled

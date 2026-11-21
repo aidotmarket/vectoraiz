@@ -661,9 +661,17 @@ async fn mcp_call<R: tauri::Runtime>(
         Err(_) => return mcp_channel::refusal(cloud_gate::GateError::Revoked),
     };
     if request.tool == vz_mcp::protocol::LISTING_HANDOFF {
-        return mcp_tools::call_listing(&dir, request, cancel, |arguments| {
-            get_listing_handoff(app, arguments.current, arguments.request)
-        })
+        let apps = app.state::<mcp_apps::Apps>();
+        return mcp_tools::call_listing(
+            &dir,
+            &apps,
+            request,
+            cancel,
+            || vz_pack::listing_policy::system().require_preview(),
+            |arguments, cancel| {
+                listing_handoff(app.clone(), arguments.current, arguments.request, cancel)
+            },
+        )
         .await;
     }
     let root = match data_root(&app) {
@@ -1911,6 +1919,17 @@ async fn get_listing_handoff<R: tauri::Runtime>(
     current: vz_pack::review_store::CurrentReview,
     request: vz_pack::handoff::HandoffRequest,
 ) -> Result<vz_pack::handoff::ListingHandoff, vz_pack::listing_commands::ListingFailure> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    listing_handoff(app, current, request, cancel).await
+}
+
+async fn listing_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: vz_pack::review_store::CurrentReview,
+    request: vz_pack::handoff::HandoffRequest,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<vz_pack::handoff::ListingHandoff, vz_pack::listing_commands::ListingFailure> {
     use tauri::Manager;
     use vz_pack::listing_commands::{ListingFailure, ListingReference};
     let policy = vz_pack::listing_policy::system();
@@ -1926,7 +1945,7 @@ async fn get_listing_handoff<R: tauri::Runtime>(
         current,
     };
     tauri::async_runtime::spawn_blocking(move || {
-        vz_pack::handoff::get_listing_handoff(policy, &reference, request)
+        vz_pack::handoff::get_listing_handoff_with_cancel(policy, &reference, request, &cancel)
     })
     .await
     .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?

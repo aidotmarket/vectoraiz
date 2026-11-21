@@ -290,7 +290,15 @@ impl Apps {
     pub fn record(&self, dir: &Path, client: &str, tool: &str, error: Option<&Value>) -> String {
         use std::io::Write;
         let call_id = uuid::Uuid::new_v4().simple().to_string();
-        let tool = if ["list_collections", "search", "get_document", "get_chunk"].contains(&tool) {
+        let tool = if [
+            "list_collections",
+            "search",
+            "get_document",
+            "get_chunk",
+            vz_mcp::protocol::LISTING_HANDOFF,
+        ]
+        .contains(&tool)
+        {
             tool
         } else {
             "unknown_tool"

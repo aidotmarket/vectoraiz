@@ -9,6 +9,7 @@ use std::{
     collections::BTreeMap,
     io::{Cursor, Write},
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
@@ -16,7 +17,7 @@ use crate::{
     listing_commands::{ListingFailure, ListingReference},
     listing_policy::{ListingError, ListingPolicy},
     review::{ListingReview, Sha256, StagedArtifact},
-    review_store::{CurrentReview, ReviewStore},
+    review_store::{check_cancel, CurrentReview, ReviewStore},
 };
 
 pub const MAX_ENCODED_BYTES: usize = 48 * 1024;
@@ -308,9 +309,27 @@ pub fn get_listing_handoff(
     reference: &ListingReference,
     request: HandoffRequest,
 ) -> Result<ListingHandoff, ListingFailure> {
+    get_listing_handoff_inner(policy, reference, request, None)
+}
+
+pub fn get_listing_handoff_with_cancel(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+    cancel: &CancellationToken,
+) -> Result<ListingHandoff, ListingFailure> {
+    get_listing_handoff_inner(policy, reference, request, Some(cancel))
+}
+
+fn get_listing_handoff_inner(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+    cancel: Option<&CancellationToken>,
+) -> Result<ListingHandoff, ListingFailure> {
     let run = || {
         policy.require_preview()?;
-        get_reviewed_handoff(policy, reference, request)
+        get_reviewed_handoff(policy, reference, request, cancel)
     };
     run().map_err(Into::into)
 }
@@ -319,17 +338,24 @@ fn get_reviewed_handoff(
     policy: &ListingPolicy,
     reference: &ListingReference,
     request: HandoffRequest,
+    cancel: Option<&CancellationToken>,
 ) -> Result<ListingHandoff> {
-    let store = ReviewStore::open(&reference.store)?;
+    check_cancel(cancel)?;
+    let store = ReviewStore::open_existing(&reference.store)?;
     // Reuse the same published-index selection, binding verification (including
     // old index_binding formats), policy lease and lock order as transfer.
-    let pack = store.lock_native_current(policy, &reference.current, &reference.library)?;
+    let pack = store.lock_existing_native_current(
+        policy,
+        &reference.current,
+        &reference.library,
+        cancel,
+    )?;
     let review = pack.check_accepted(&reference.current)?;
     let artifacts = vector_artifacts(&review)?;
     let (staged, terms) = pack.reviewed_payload(&reference.current)?;
     #[cfg(feature = "listing-originals")]
     {
-        let manifest = crate::verify(&staged)?;
+        let manifest = crate::verify_checked(&staged, &|| check_cancel(cancel))?;
         ensure!(
             manifest["originals"] == false,
             ListingError::StaleGeneration
@@ -337,8 +363,10 @@ fn get_reviewed_handoff(
     }
     #[cfg(not(feature = "listing-originals"))]
     let _ = staged;
+    check_cancel(cancel)?;
     let payload = build_payload(&review, &artifacts, &terms, request)?;
     let result = encode_listing(&reference.current, review.source_revision, &payload)?;
+    check_cancel(cancel)?;
     pack.check_policy()?;
     Ok(result)
 }
@@ -592,12 +620,125 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(any(
+        feature = "listing-preview-harness",
+        feature = "listing-preview-test-switch"
+    )))]
+    fn allowed_policy_cannot_get_handoff_in_default_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        assert_eq!(
+            get_listing_handoff(&policy, &reference, gateway_request())
+                .unwrap_err()
+                .code,
+            ListingError::PreviewDisabled
+        );
+    }
+
+    #[test]
+    fn unknown_pack_leaves_store_untouched_and_stale_pack_is_invalidated() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let snapshot = || {
+            walkdir::WalkDir::new(&reference.store)
+                .sort_by_file_name()
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let bytes = entry
+                        .file_type()
+                        .is_file()
+                        .then(|| fs::read(entry.path()).unwrap());
+                    (entry.into_path(), bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        let mut unknown = reference.clone();
+        unknown.current.pack_id = Uuid::new_v4();
+        let error = get_reviewed_handoff(&policy, &unknown, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        assert_eq!(snapshot(), before);
+
+        unknown.store = reference.store.with_file_name("missing-reviews");
+        let error = get_reviewed_handoff(&policy, &unknown, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        assert!(!unknown.store.exists());
+
+        let source = reference
+            .library
+            .with_file_name("source")
+            .join("source.txt");
+        let original = fs::read(&source).unwrap();
+        fs::write(&source, b"changed source").unwrap();
+        let error = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        let invalidation = reference
+            .store
+            .join(reference.current.pack_id.to_string())
+            .join(reference.current.generation.to_string())
+            .join("invalidated.json");
+        assert!(invalidation.is_file());
+        fs::write(&source, original).unwrap();
+        let error = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+    }
+
+    #[test]
+    fn cancelled_handoff_worker_exits_while_pack_is_locked() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = std::sync::Arc::new(ListingPolicy::new(std::sync::Arc::new(Allowed)));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let store = ReviewStore::open_existing(&reference.store).unwrap();
+        let lock = store.lock(&policy, reference.current.pack_id).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let worker_policy = policy.clone();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let mut worker = runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            get_reviewed_handoff(
+                &worker_policy,
+                &reference,
+                gateway_request(),
+                Some(&worker_cancel),
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (blocked, outcome) = runtime.block_on(async {
+            let blocked = tokio::time::timeout(Duration::from_millis(100), &mut worker).await;
+            cancel.cancel();
+            let outcome = if blocked.is_err() {
+                Some(tokio::time::timeout(Duration::from_secs(2), &mut worker).await)
+            } else {
+                None
+            };
+            (blocked, outcome)
+        });
+        drop(lock);
+        assert!(blocked.is_err(), "worker did not wait for the held lock");
+        let error = outcome
+            .unwrap()
+            .expect("worker must exit before the lock is released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "listing handoff cancelled");
+    }
+
+    #[test]
     fn import_marker_idempotency_for_accepted_generation() {
         let dir = tempfile::tempdir().unwrap();
         let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
         let reference = freeze_fixture(dir.path(), &policy, false);
-        let first = get_reviewed_handoff(&policy, &reference, gateway_request()).unwrap();
-        let second = get_reviewed_handoff(&policy, &reference, gateway_request()).unwrap();
+        let first = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap();
+        let second = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap();
         assert_eq!(
             serde_json::to_vec(&first).unwrap(),
             serde_json::to_vec(&second).unwrap()
@@ -668,24 +809,24 @@ mod tests {
         let reference = freeze_fixture(dir.path(), &policy, false);
         let mut forged = reference.clone();
         forged.current.review_hash = "f".repeat(64).try_into().unwrap();
-        assert!(get_reviewed_handoff(&policy, &forged, gateway_request()).is_err());
+        assert!(get_reviewed_handoff(&policy, &forged, gateway_request(), None).is_err());
         let mut request = gateway_request();
         request.draft.brief = "\0".repeat(4000);
         request.draft.description = "\0".repeat(10000);
-        assert!(get_reviewed_handoff(&policy, &reference, request)
+        assert!(get_reviewed_handoff(&policy, &reference, request, None)
             .unwrap_err()
             .to_string()
             .contains("64 KB"));
 
         std::fs::write(reference.library.join("active-index.json"), b"invalid").unwrap();
-        let stale = get_reviewed_handoff(&policy, &reference, gateway_request()).unwrap_err();
+        let stale = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
         assert_eq!(stale.downcast_ref(), Some(&ListingError::StaleGeneration));
         std::fs::remove_file(reference.library.join("active-index.json")).unwrap();
-        assert!(get_reviewed_handoff(&policy, &reference, gateway_request()).is_err());
+        assert!(get_reviewed_handoff(&policy, &reference, gateway_request(), None).is_err());
 
         let legacy = tempfile::tempdir().unwrap();
         let legacy = freeze_fixture(legacy.path(), &policy, true);
-        let stale = get_reviewed_handoff(&policy, &legacy, gateway_request()).unwrap_err();
+        let stale = get_reviewed_handoff(&policy, &legacy, gateway_request(), None).unwrap_err();
         assert_eq!(stale.downcast_ref(), Some(&ListingError::StaleGeneration));
     }
 

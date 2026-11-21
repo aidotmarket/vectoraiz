@@ -23,6 +23,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 #[cfg(target_os = "macos")]
@@ -69,7 +70,8 @@ struct NativeSelection {
 }
 
 impl NativeSelection {
-    fn capture(library: &Path) -> Result<Self> {
+    fn capture(library: &Path, check: &dyn Fn() -> Result<()>) -> Result<Self> {
+        check()?;
         ensure!(
             !vz_core::active_index::needs_pointer_repair(library),
             ListingError::StaleGeneration
@@ -79,7 +81,7 @@ impl NativeSelection {
             library: plain_directory(library)?,
             index: plain_directory(&vz_core::active_index::resolve_state(library))?,
             pointer: if pointer.try_exists()? {
-                Some(hash_file(&pointer)?)
+                Some(hash_file_checked(&pointer, check)?)
             } else {
                 None
             },
@@ -152,12 +154,13 @@ impl NativeIndexFence {
     }
 
     fn acquire(library: &Path) -> Result<Self> {
-        Self::acquire_mode(library, false)
+        Self::acquire_mode(library, false, &|| Ok(()))
     }
-    fn acquire_existing(library: &Path) -> Result<Self> {
-        Self::acquire_mode(library, true)
-    }
-    fn acquire_mode(library: &Path, existing: bool) -> Result<Self> {
+    fn acquire_mode(
+        library: &Path,
+        existing: bool,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
         plain_directory(library)?;
         let selection = if existing {
             check_regular(&library.join("index-selection.lock"))?;
@@ -165,14 +168,14 @@ impl NativeIndexFence {
         } else {
             vz_core::active_index::selection_fence(library, false)?
         };
-        let snapshot = NativeSelection::capture(library)?;
+        let snapshot = NativeSelection::capture(library, check)?;
         let lock_path = snapshot.index.join("writer.lock");
         check_regular(&lock_path)?;
         let writer = OpenOptions::new().read(true).open(lock_path)?;
         fs2::FileExt::try_lock_shared(&writer)
             .context("native index is in use; retry after indexing/search")?;
         ensure!(
-            NativeSelection::capture(library)? == snapshot,
+            NativeSelection::capture(library, check)? == snapshot,
             ListingError::StaleGeneration
         );
         Ok(Self {
@@ -248,6 +251,16 @@ impl ReviewBinding {
         selection: Option<NativeSelection>,
         version: Option<u8>,
     ) -> Result<Self> {
+        Self::capture_checked(source, index, recipe, selection, version, &|| Ok(()))
+    }
+    fn capture_checked(
+        source: &Path,
+        index: &Path,
+        recipe: &Path,
+        selection: Option<NativeSelection>,
+        version: Option<u8>,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
         ensure!(
             version.is_none() || version == Some(2),
             "unknown index binding"
@@ -256,18 +269,19 @@ impl ReviewBinding {
             index_tree(
                 index,
                 selection.as_ref().is_some_and(|s| s.library == s.index),
+                check,
             )?
         } else {
-            tree(index)?
+            tree_checked(index, check)?
         };
         Ok(Self {
             source: plain_directory(source)?,
             index: plain_directory(index)?,
-            source_files: tree(source)?,
+            source_files: tree_checked(source, check)?,
             index_files,
             index_binding: version,
             recipe: fs::canonicalize(recipe)?,
-            recipe_file: hash_file(recipe)?,
+            recipe_file: hash_file_checked(recipe, check)?,
             recipe_sha256: digest(&read_input_json::<serde_json::Value>(recipe)?)?,
             selection,
         })
@@ -281,19 +295,23 @@ impl ReviewBinding {
         ))
     }
     fn check(&self) -> Result<()> {
+        self.check_with(&|| Ok(()))
+    }
+    fn check_with(&self, check: &dyn Fn() -> Result<()>) -> Result<()> {
         if let Some(selection) = &self.selection {
             ensure!(
-                NativeSelection::capture(&selection.library)? == *selection
+                NativeSelection::capture(&selection.library, check)? == *selection
                     && selection.index == self.index,
                 ListingError::StaleGeneration
             );
         }
-        let captured = Self::capture_version(
+        let captured = Self::capture_checked(
             &self.source,
             &self.index,
             &self.recipe,
             self.selection.clone(),
             self.index_binding,
+            check,
         )?;
         ensure!(captured == *self, ListingError::StaleGeneration);
         Ok(())
@@ -347,40 +365,60 @@ impl ReviewStore {
         })
     }
 
+    pub(crate) fn open_existing(root: &Path) -> Result<Self> {
+        let root = plain_directory(root).map_err(missing_review)?;
+        check_private(&root)?;
+        Ok(Self { root })
+    }
+
     /// Acquire a policy lease BEFORE the cross-process per-pack mutex. Policy
     /// refresh never takes this mutex. Holding this guard serializes rebuilding,
     /// accepting and transfer promotion for the same pack UUID.
     pub fn lock<'a>(&'a self, policy: &'a ListingPolicy, pack_id: Uuid) -> Result<PackReview<'a>> {
+        self.lock_pack(policy, pack_id, true, None)
+    }
+
+    fn lock_pack<'a>(
+        &'a self,
+        policy: &'a ListingPolicy,
+        pack_id: Uuid,
+        create: bool,
+        cancel: Option<&'a CancellationToken>,
+    ) -> Result<PackReview<'a>> {
         let lease = policy.policy_lease()?;
+        check_cancel(cancel)?;
         let path = self.root.join(pack_id.to_string());
-        private_directory(&path)?;
         let lock_path = path.join("pack.lock");
-        let lock = match private_file(&lock_path) {
-            Ok(file) => file,
-            Err(error) if lock_path.try_exists()? => {
-                check_regular(&lock_path)?;
-                check_private(&lock_path)?;
-                OpenOptions::new()
-                    .write(true)
-                    .open(&lock_path)
-                    .context(error)?
+        let lock = if create {
+            private_directory(&path)?;
+            match private_file(&lock_path) {
+                Ok(file) => file,
+                Err(error) if lock_path.try_exists()? => {
+                    open_pack_lock(&lock_path).context(error)?
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
+        } else {
+            plain_directory(&path).map_err(missing_review)?;
+            check_private(&path)?;
+            open_pack_lock(&lock_path).map_err(missing_review)?
         };
         loop {
+            check_cancel(cancel)?;
             lease.check(policy)?;
             match fs2::FileExt::try_lock_exclusive(&lock) {
                 Ok(()) => break,
                 Err(error)
                     if error.raw_os_error() == fs2::lock_contended_error().raw_os_error() =>
                 {
-                    // A waiter must observe policy cancellation even while a
-                    // different process still owns the pack's file lock.
+                    // Observe request and policy cancellation while another
+                    // process owns the pack's file lock.
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(error) => return Err(error.into()),
             }
         }
+        check_cancel(cancel)?;
         lease.check(policy)?;
         Ok(PackReview {
             store: self,
@@ -388,6 +426,7 @@ impl ReviewStore {
             pack_id,
             policy,
             lease,
+            cancel,
             _lock: lock,
         })
     }
@@ -415,16 +454,36 @@ impl ReviewStore {
         current: &CurrentReview,
         library: &Path,
     ) -> Result<NativePackReview<'a>> {
-        let pack = self.lock(policy, current.pack_id)?;
+        Self::fence_current(self.lock(policy, current.pack_id)?, current, library)
+    }
+
+    pub(crate) fn lock_existing_native_current<'a>(
+        &'a self,
+        policy: &'a ListingPolicy,
+        current: &CurrentReview,
+        library: &Path,
+        cancel: Option<&'a CancellationToken>,
+    ) -> Result<NativePackReview<'a>> {
+        let pack = self.lock_pack(policy, current.pack_id, false, cancel)?;
+        Self::fence_current(pack, current, library)
+    }
+
+    fn fence_current<'a>(
+        pack: PackReview<'a>,
+        current: &CurrentReview,
+        library: &Path,
+    ) -> Result<NativePackReview<'a>> {
         let generation: Generation =
             read_json(&pack.generation_path(current).join("generation.json"))
                 .map_err(|_| ListingError::StaleGeneration)?;
-        let selection = NativeSelection::capture(library);
+        let check = || pack.check_cancel();
+        let selection = NativeSelection::capture(library, &check);
+        check()?;
         if selection.as_ref().ok() != generation.binding.selection.as_ref() {
             pack.invalidate(current, "native index selection changed or binding absent")?;
             return Err(ListingError::StaleGeneration.into());
         }
-        let index = match NativeIndexFence::acquire_existing(library) {
+        let index = match NativeIndexFence::acquire_mode(library, true, &check) {
             Ok(index) => index,
             Err(error) => {
                 if error.chain().any(|e| {
@@ -441,6 +500,31 @@ impl ReviewStore {
         native.inspect(current)?;
         Ok(native)
     }
+}
+
+fn missing_review(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<std::io::Error>()
+        .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    {
+        ListingError::StaleGeneration.into()
+    } else {
+        error
+    }
+}
+
+fn open_pack_lock(path: &Path) -> Result<File> {
+    check_regular(path)?;
+    check_private(path)?;
+    Ok(OpenOptions::new().write(true).open(path)?)
+}
+
+pub(crate) fn check_cancel(cancel: Option<&CancellationToken>) -> Result<()> {
+    ensure!(
+        !cancel.is_some_and(CancellationToken::is_cancelled),
+        "listing handoff cancelled"
+    );
+    Ok(())
 }
 
 pub struct NativePackReview<'a> {
@@ -568,7 +652,7 @@ impl NativePackReview<'_> {
             ListingError::ReviewRequired
         );
         #[cfg(not(feature = "listing-originals"))]
-        crate::vector_payload::verify(&path.join("payload"))?;
+        crate::vector_payload::verify_checked(&path.join("payload"), &|| self.pack.check_cancel())?;
         let terms = serde_json::from_value(private["identity_terms"].clone())?;
         Ok((path.join("payload"), terms))
     }
@@ -721,6 +805,7 @@ pub struct PackReview<'a> {
     pack_id: Uuid,
     policy: &'a ListingPolicy,
     lease: PolicyLease,
+    cancel: Option<&'a CancellationToken>,
     _lock: File,
 }
 
@@ -731,7 +816,12 @@ impl Drop for PackReview<'_> {
 }
 
 impl PackReview<'_> {
+    fn check_cancel(&self) -> Result<()> {
+        check_cancel(self.cancel)
+    }
+
     fn invalidate(&self, current: &CurrentReview, reason: &str) -> Result<()> {
+        self.check_cancel()?;
         let path = self.generation_path(current).join("invalidated.json");
         if !path.try_exists()? {
             write_json(&path, &reason)?;
@@ -1037,6 +1127,8 @@ impl PackReview<'_> {
         require_accepted: bool,
         edit_origin: bool,
     ) -> Result<Generation> {
+        let check = || self.check_cancel();
+        check()?;
         self.lease.check(self.policy)?;
         ensure!(
             current.pack_id == self.pack_id
@@ -1048,7 +1140,7 @@ impl PackReview<'_> {
             ListingError::StaleGeneration
         );
         let path = self.generation_path(current);
-        check_private_tree(&path)?;
+        check_private_tree(&path, &check)?;
         if edit_origin {
             ensure!(
                 !path.join("edit-origin-revoked.json").try_exists()?,
@@ -1068,6 +1160,7 @@ impl PackReview<'_> {
         );
         let generation: Generation =
             read_json(&path.join("generation.json")).map_err(|_| ListingError::StaleGeneration)?;
+        check()?;
         ensure!(
             generation.current == *current
                 && generation_hash(
@@ -1091,7 +1184,9 @@ impl PackReview<'_> {
                 )
             })
             .collect();
-        let binding_changed = match generation.binding.check() {
+        let binding = generation.binding.check_with(&check);
+        check()?;
+        let binding_changed = match binding {
             Ok(()) => false,
             Err(error)
                 if error
@@ -1102,7 +1197,10 @@ impl PackReview<'_> {
             }
             Err(_) => true,
         };
-        if binding_changed || tree(&path.join("payload")).ok().as_ref() != Some(&expected) {
+        if binding_changed
+            || tree_checked(&path.join("payload"), &check).ok().as_ref() != Some(&expected)
+        {
+            check()?;
             if edit_origin && !path.join("edit-origin-revoked.json").try_exists()? {
                 write_json(
                     &path.join("edit-origin-revoked.json"),
@@ -1186,6 +1284,11 @@ fn check_regular(path: &Path) -> Result<fs::Metadata> {
 }
 
 fn hash_file(path: &Path) -> Result<FileHash> {
+    hash_file_checked(path, &|| Ok(()))
+}
+
+fn hash_file_checked(path: &Path, check: &dyn Fn() -> Result<()>) -> Result<FileHash> {
+    check()?;
     let metadata = check_regular(path)?;
     ensure!(metadata.len() <= MAX_BYTES, "review file byte limit");
     // An empty writer.lock still participates in the tree commitment. Do not
@@ -1196,18 +1299,14 @@ fn hash_file(path: &Path) -> Result<FileHash> {
     } else {
         MAX_BYTES + 1
     };
-    let mut reader = File::open(path)?.take(limit);
-    let mut hasher = Hasher::new();
-    let size = std::io::copy(&mut reader, &mut hasher)?;
+    let (size, sha256) = crate::hash_reader(File::open(path)?.take(limit), check)?;
     ensure!(
         size == metadata.len() && size <= MAX_BYTES && check_regular(path)?.len() == size,
         "review input changed while hashing"
     );
     Ok(FileHash {
         size,
-        sha256: format!("{:x}", hasher.finalize())
-            .try_into()
-            .map_err(anyhow::Error::msg)?,
+        sha256: sha256.try_into().map_err(anyhow::Error::msg)?,
     })
 }
 
@@ -1232,7 +1331,12 @@ fn plain_directory(path: &Path) -> Result<PathBuf> {
 
 /// Only the index root has reserved names. Source and payload walkers retain
 /// the original strict tree rule, including directories named `.vz-scan`.
-fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
+fn index_tree(
+    root: &Path,
+    flat: bool,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<BTreeMap<String, FileHash>> {
+    check()?;
     plain_directory(root)?;
     let mut bytes = 0_u64;
     for name in ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"] {
@@ -1250,7 +1354,7 @@ fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
     }
     ensure!(bytes <= MAX_BYTES, "review tree byte limit");
     let (content, referenced) = if root.join("state.sqlite").exists() {
-        let (digest, generations) = vz_core::storage::State::review_content(root)?;
+        let (digest, generations) = vz_core::storage::State::review_content_checked(root, check)?;
         (
             Some(digest.try_into().map_err(anyhow::Error::msg)?),
             generations,
@@ -1262,7 +1366,7 @@ fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
     if let Some(sha256) = content {
         files.insert("state.sqlite".into(), FileHash { size: 0, sha256 });
     }
-    strict_tree(root, bytes, files, |entry| {
+    strict_tree(root, bytes, files, check, |entry| {
         let Ok(relative) = entry.path().strip_prefix(root) else {
             return true;
         };
@@ -1287,13 +1391,18 @@ fn index_tree(root: &Path, flat: bool) -> Result<BTreeMap<String, FileHash>> {
 }
 
 fn tree(root: &Path) -> Result<BTreeMap<String, FileHash>> {
-    strict_tree(root, 0, BTreeMap::new(), |_| true)
+    tree_checked(root, &|| Ok(()))
+}
+
+fn tree_checked(root: &Path, check: &dyn Fn() -> Result<()>) -> Result<BTreeMap<String, FileHash>> {
+    strict_tree(root, 0, BTreeMap::new(), check, |_| true)
 }
 
 fn strict_tree(
     root: &Path,
     mut bytes: u64,
     mut files: BTreeMap<String, FileHash>,
+    check: &dyn Fn() -> Result<()>,
     include: impl FnMut(&walkdir::DirEntry) -> bool,
 ) -> Result<BTreeMap<String, FileHash>> {
     plain_directory(root)?;
@@ -1305,6 +1414,7 @@ fn strict_tree(
         .filter_entry(include)
         .enumerate()
     {
+        check()?;
         ensure!(count <= MAX_FILES, "review tree entry count limit");
         let entry = entry?;
         if entry.file_type().is_dir() {
@@ -1316,7 +1426,7 @@ fn strict_tree(
             files.len() - logical_entries < MAX_FILES,
             "review file count limit"
         );
-        let hash = hash_file(entry.path())?;
+        let hash = hash_file_checked(entry.path(), check)?;
         bytes = bytes
             .checked_add(hash.size)
             .context("review byte overflow")?;
@@ -1372,12 +1482,13 @@ fn check_private(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn check_private_tree(root: &Path) -> Result<()> {
+fn check_private_tree(root: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
     for (count, entry) in walkdir::WalkDir::new(root)
         .max_depth(64)
         .into_iter()
         .enumerate()
     {
+        check()?;
         ensure!(count <= MAX_FILES, "private storage entry limit");
         let entry = entry?;
         ensure!(
@@ -1785,7 +1896,7 @@ mod tests {
         }
         fs::create_dir_all(&deep).unwrap();
         fs::write(deep.join("hidden"), b"bound content").unwrap();
-        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        let error = index_tree(&f.0.join("index"), false, &|| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("depth limit"));
     }
 
@@ -1796,7 +1907,7 @@ mod tests {
         fs::create_dir(f.0.join("index/ordinary")).unwrap();
         fs::write(f.0.join("index/ordinary/name"), b"one").unwrap();
         fs::write(f.0.join("index/ordinary\\name"), b"two").unwrap();
-        let error = index_tree(&f.0.join("index"), false).unwrap_err();
+        let error = index_tree(&f.0.join("index"), false, &|| Ok(())).unwrap_err();
         assert!(format!("{error:#}").contains("duplicate review path"));
     }
 
