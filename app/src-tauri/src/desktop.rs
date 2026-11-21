@@ -415,7 +415,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
             ).expect("start smoke-test button click"); }
         }
     });
-    let regular = tauri::generate_handler![
+    let regular: fn(tauri::ipc::Invoke<R>) -> bool = tauri::generate_handler![
         open_product_page,
         third_party_notices,
         self_test,
@@ -455,7 +455,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         answer_turn_off,
         delete_unused_model
     ];
-    let handoff = tauri::generate_handler![get_listing_handoff];
+    let handoff: fn(tauri::ipc::Invoke<R>) -> bool = tauri::generate_handler![get_listing_handoff];
     builder.invoke_handler(move |invoke| {
         if invoke.message.command() != vz_mcp::protocol::LISTING_HANDOFF {
             return regular(invoke);
