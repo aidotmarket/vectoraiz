@@ -174,6 +174,7 @@ async fn listing_handoff_records_one_content_free_entry_per_call() {
         &f.apps,
         listing_request(&f),
         CancellationToken::new(),
+        true,
         || Ok(()),
         |_, _| async {
             Ok(vz_pack::handoff::ListingHandoff {
@@ -199,6 +200,7 @@ async fn listing_handoff_records_one_content_free_entry_per_call() {
         &f.apps,
         refused,
         CancellationToken::new(),
+        true,
         || Ok(()),
         |_, _| async { panic!("refused call reached the handoff worker") },
     )
@@ -249,6 +251,37 @@ async fn listing_handoff_records_one_content_free_entry_per_call() {
 }
 
 #[tokio::test]
+async fn listing_handoff_records_unknown_tool_when_preview_is_off() {
+    use vz_pack::listing_policy::ListingError;
+
+    let f = Fixture::new().await;
+    for (error, code) in [
+        (ListingError::PreviewDisabled, "PREVIEW_DISABLED"),
+        (ListingError::PolicyDenied, "POLICY_DENIED"),
+    ] {
+        let response = mcp_tools::call_listing(
+            &f.dir,
+            &f.apps,
+            listing_request(&f),
+            CancellationToken::new(),
+            false,
+            || Err(error),
+            |_, _| async { panic!("hidden tool call reached the handoff worker") },
+        )
+        .await;
+        assert_eq!(response["code"], code);
+    }
+
+    let log = std::fs::read_to_string(f.dir.parent().unwrap().join("mcp-calls.log")).unwrap();
+    assert_eq!(log.lines().count(), 2);
+    for line in log.lines() {
+        let entry: Value = serde_json::from_str(line).unwrap();
+        assert_eq!(entry["tool"], "unknown_tool");
+        assert_eq!(entry["allowed"], false);
+    }
+}
+
+#[tokio::test]
 async fn listing_disconnect_cancels_execution_and_completes_activity_entry() {
     let f = Fixture::new().await;
     let (mut client, server) = tokio::io::duplex(4096);
@@ -264,6 +297,7 @@ async fn listing_disconnect_cancels_execution_and_completes_activity_entry() {
                 &apps,
                 request,
                 cancel,
+                true,
                 || Ok(()),
                 |_, worker_cancel| async move {
                     started.send(worker_cancel).unwrap();

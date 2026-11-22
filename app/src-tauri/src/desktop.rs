@@ -667,6 +667,7 @@ async fn mcp_call<R: tauri::Runtime>(
             &apps,
             request,
             cancel,
+            vz_pack::listing_policy::process_preview_enabled(),
             || vz_pack::listing_policy::system().require_preview(),
             |arguments, cancel| {
                 listing_handoff(app.clone(), arguments.current, arguments.request, cancel)
