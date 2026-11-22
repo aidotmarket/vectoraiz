@@ -103,6 +103,7 @@ pub async fn call_listing<F>(
     apps: &crate::mcp_apps::Apps,
     request: crate::mcp_channel::Request,
     cancel: tokio_util::sync::CancellationToken,
+    preview_enabled: bool,
     require_preview: impl Fn() -> Result<(), vz_pack::listing_policy::ListingError>,
     execute: impl FnOnce(ListingArguments, tokio_util::sync::CancellationToken) -> F,
 ) -> Value
@@ -119,7 +120,12 @@ where
     let checked = require_preview()
         .map_err(policy_failure)
         .and_then(|()| gate(dir, &request));
-    let call_id = apps.record(dir, &request.client, &request.tool, checked.as_ref().err());
+    let activity_tool = if preview_enabled {
+        request.tool.as_str()
+    } else {
+        "unknown_tool"
+    };
+    let call_id = apps.record(dir, &request.client, activity_tool, checked.as_ref().err());
     let response = async {
         if let Err(error) = checked {
             return error;

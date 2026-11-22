@@ -86,9 +86,15 @@ class Client:
             self.validate(notice, 'InitializedNotification'); self.write(notice)
         self.call('ping')
         listed = self.call('tools/list')['result']['tools']
-        assert {t['name'] for t in listed} == {'list_collections', 'search', 'get_document', 'get_chunk'}
+        read_only_tools = {'list_collections', 'search', 'get_document', 'get_chunk'}
+        handoff_tool = 'get_listing_handoff'
+        names = {tool['name'] for tool in listed}
+        assert names - {handoff_tool} == read_only_tools
         for tool in listed:
-            assert tool['annotations']['readOnlyHint'] is True
+            if tool['name'] == handoff_tool:
+                assert tool['annotations']['readOnlyHint'] is False
+            else:
+                assert tool['annotations']['readOnlyHint'] is True
             assert tool['annotations']['openWorldHint'] is False
             jsonschema.Draft202012Validator.check_schema(tool['inputSchema'])
             jsonschema.Draft202012Validator.check_schema(tool['outputSchema'])
