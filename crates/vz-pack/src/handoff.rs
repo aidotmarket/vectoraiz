@@ -1,16 +1,24 @@
-//! Untrusted native desktop design 7.2/7.3 handoff contracts, without a codec,
-//! browser launcher, network client, or integration with export. Gate 2 C2 keeps
-//! identity terms client-only, superseding their mention in design 7.3.
-//!
-//! Neither hashes nor successful validation prove an honest native client. A
-//! server must independently verify source ownership/selection; native review is
-//! a seller attestation. No local purchaser inventory is transmitted here.
+//! Native handoffs are seller attestations. The importer independently verifies
+//! the selected destination inventory and ownership.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, ensure, Result};
+use russh::keys::ssh_encoding::base64::{Base64Unpadded, Encoding};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256 as Hasher};
+use std::{
+    collections::BTreeMap,
+    io::{Cursor, Write},
+};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::review::Sha256;
+use crate::{
+    listing_commands::{ListingFailure, ListingReference},
+    listing_policy::{ListingError, ListingPolicy},
+    review::{ListingReview, Sha256, StagedArtifact},
+    review_store::{check_cancel, CurrentReview, ReviewStore},
+};
 
 pub const MAX_ENCODED_BYTES: usize = 48 * 1024;
 pub const MAX_EXPANDED_BYTES: usize = 64 * 1024;
@@ -19,7 +27,7 @@ pub const MAX_GATEWAY_FILES: usize = 64;
 /// Reject before decoding, and check expanded length while decompressing, before
 /// allocating/writing each output chunk. This helper does not decompress input.
 /// Lengths are bytes, not Unicode character counts; nothing is truncated.
-/// Actual encoded/expanded measurement and bounded decompression are C2 work.
+/// The backend bounds decompression when importing the handoff.
 pub fn validate_lengths(encoded_bytes: usize, expanded_bytes: usize) -> Result<()> {
     if encoded_bytes > MAX_ENCODED_BYTES {
         bail!("handoff exceeds 48 KB encoded limit");
@@ -112,17 +120,20 @@ pub struct BucketHandoff {
 }
 
 fn validate_pack_id(pack_id: &str) -> Result<()> {
-    // Supports existing native pack-<hash> ids and future review UUIDs. A pack
-    // id is one neutral identifier, never a path, URL, or navigation component.
-    if pack_id.is_empty()
-        || pack_id.len() > 128
-        || !pack_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        bail!("invalid handoff pack id");
-    }
+    ensure!(
+        Uuid::parse_str(pack_id).is_ok_and(|uuid| uuid.to_string() == pack_id),
+        "invalid handoff pack id"
+    );
     Ok(())
+}
+
+fn identifier(value: &str, limit: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= limit
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
+        && !matches!(value, "." | "..")
 }
 
 impl BucketHandoff {
@@ -132,7 +143,15 @@ impl BucketHandoff {
             bail!("bucket handoff must select its exact vz pack prefix");
         }
         let nonempty = |value: &Option<String>| value.as_ref().is_some_and(|s| !s.is_empty());
-        if self.bucket.is_empty()
+        if !identifier(&self.bucket, 255)
+            || self
+                .region
+                .as_ref()
+                .is_some_and(|value| !identifier(value, 80))
+            || self
+                .account_id
+                .as_ref()
+                .is_some_and(|value| !identifier(value, 128))
             || !match self.provider {
                 BucketProvider::Aws => nonempty(&self.region) && self.account_id.is_none(),
                 BucketProvider::R2 => nonempty(&self.account_id) && self.region.is_none(),
@@ -242,6 +261,268 @@ pub fn bucket_selection_digest(pack_id: &str, tuples: &[(&str, &str, u64)]) -> R
         .expect("SHA256 hex"))
 }
 
+/// Input metadata stays local. A bucket caller supplies provider readback tuples
+/// (quoted ETags, exact keys and sizes); gateway commitments come from the review.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum HandoffTarget {
+    Bucket {
+        provider: BucketProvider,
+        bucket: String,
+        region: Option<String>,
+        account_id: Option<String>,
+        objects: Vec<BucketObject>,
+    },
+    Gateway {
+        names: Vec<String>,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BucketObject {
+    pub key: String,
+    pub etag: String,
+    pub size: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffRequest {
+    pub draft: DraftText,
+    pub target: HandoffTarget,
+}
+
+/// Only `handoff` is the encoded 7.2/7.3 payload. The generation UUID maps to
+/// ImportRequest.idempotency_key. The other fields describe the local review;
+/// the backend independently derives its own source revision and commitment.
+#[derive(Debug, Serialize)]
+pub struct ListingHandoff {
+    pub handoff: String,
+    pub idempotency_key: Uuid,
+    pub source_revision: String,
+    pub native_commitment: Sha256,
+}
+
+pub fn get_listing_handoff(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+) -> Result<ListingHandoff, ListingFailure> {
+    get_listing_handoff_inner(policy, reference, request, None)
+}
+
+pub fn get_listing_handoff_with_cancel(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+    cancel: &CancellationToken,
+) -> Result<ListingHandoff, ListingFailure> {
+    get_listing_handoff_inner(policy, reference, request, Some(cancel))
+}
+
+fn get_listing_handoff_inner(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+    cancel: Option<&CancellationToken>,
+) -> Result<ListingHandoff, ListingFailure> {
+    let run = || {
+        policy.require_preview()?;
+        get_reviewed_handoff(policy, reference, request, cancel)
+    };
+    run().map_err(Into::into)
+}
+
+fn get_reviewed_handoff(
+    policy: &ListingPolicy,
+    reference: &ListingReference,
+    request: HandoffRequest,
+    cancel: Option<&CancellationToken>,
+) -> Result<ListingHandoff> {
+    check_cancel(cancel)?;
+    let store = ReviewStore::open_existing(&reference.store)?;
+    // Reuse the same published-index selection, binding verification (including
+    // old index_binding formats), policy lease and lock order as transfer.
+    let pack = store.lock_existing_native_current(
+        policy,
+        &reference.current,
+        &reference.library,
+        cancel,
+    )?;
+    let review = pack.check_accepted(&reference.current)?;
+    let artifacts = vector_artifacts(&review)?;
+    let (staged, terms) = pack.reviewed_payload(&reference.current)?;
+    #[cfg(feature = "listing-originals")]
+    {
+        let manifest = crate::verify_checked(&staged, &|| check_cancel(cancel))?;
+        ensure!(
+            manifest["originals"] == false,
+            ListingError::StaleGeneration
+        );
+    }
+    #[cfg(not(feature = "listing-originals"))]
+    let _ = staged;
+    check_cancel(cancel)?;
+    let payload = build_payload(&review, &artifacts, &terms, request)?;
+    let result = encode_listing(&reference.current, review.source_revision, &payload)?;
+    check_cancel(cancel)?;
+    pack.check_policy()?;
+    Ok(result)
+}
+
+fn vector_artifacts(review: &ListingReview) -> Result<BTreeMap<&str, &StagedArtifact>> {
+    let artifacts: BTreeMap<_, _> = review
+        .staged_artifacts
+        .iter()
+        .map(|file| (file.artifact.as_str(), file))
+        .collect();
+    ensure!(
+        review.staged_artifacts.len() == crate::vector_payload::FILES.len()
+            && artifacts.len() == crate::vector_payload::FILES.len()
+            && crate::vector_payload::FILES
+                .iter()
+                .all(|name| artifacts.contains_key(name)),
+        ListingError::StaleGeneration
+    );
+    Ok(artifacts)
+}
+
+fn build_payload(
+    review: &ListingReview,
+    artifacts: &BTreeMap<&str, &StagedArtifact>,
+    terms: &[String],
+    request: HandoffRequest,
+) -> Result<Handoff> {
+    let HandoffRequest { draft, target } = request;
+    let pack_id = review.pack_id.to_string();
+    crate::sanitize::check_identifier(&pack_id, terms)?;
+    let payload = match target {
+        HandoffTarget::Bucket {
+            provider,
+            bucket,
+            region,
+            account_id,
+            mut objects,
+        } => {
+            for identifier in std::iter::once(&bucket)
+                .chain(region.iter())
+                .chain(account_id.iter())
+            {
+                crate::sanitize::check_identifier(identifier, terms)?;
+            }
+            let prefix = format!("vz/{pack_id}/");
+            ensure!(
+                objects.len() == artifacts.len(),
+                "bucket selection count mismatch"
+            );
+            objects.sort_unstable_by(|a, b| a.key.cmp(&b.key));
+            for object in &objects {
+                let found = object
+                    .key
+                    .strip_prefix(&prefix)
+                    .and_then(|name| artifacts.get(name));
+                ensure!(
+                    found.is_some_and(|file| file.size == object.size),
+                    "bucket selection names or sizes differ from review"
+                );
+                ensure!(
+                    object
+                        .etag
+                        .strip_prefix('"')
+                        .and_then(|s| s.strip_suffix('"'))
+                        .is_some_and(|s| !s.is_empty() && !s.contains(['"', '\r', '\n'])),
+                    "bucket selection requires quoted provider ETags"
+                );
+            }
+            let tuples: Vec<_> = objects
+                .iter()
+                .map(|o| (o.key.as_str(), o.etag.as_str(), o.size))
+                .collect();
+            let selection_sha256 = bucket_selection_digest(&pack_id, &tuples)?;
+            Handoff::Bucket(BucketHandoff {
+                version: HandoffVersion::V1,
+                pack_id,
+                provider,
+                bucket,
+                region,
+                account_id,
+                connection_folder: "vz".into(),
+                pack_prefix: prefix,
+                file_count: tuples.len() as u64,
+                selection_sha256,
+                draft,
+            })
+        }
+        HandoffTarget::Gateway { mut names } => {
+            let mut expected: Vec<_> = artifacts
+                .keys()
+                .map(|name| name.rsplit('/').next().unwrap())
+                .collect();
+            expected.sort_unstable();
+            names.sort_unstable();
+            ensure!(
+                names == expected,
+                "gateway selection names differ from review"
+            );
+            let files = artifacts
+                .values()
+                .map(|file| GatewayFile {
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                })
+                .collect();
+            Handoff::Gateway(GatewayHandoff {
+                version: HandoffVersion::V1,
+                pack_id,
+                files,
+                draft,
+            })
+        }
+    };
+    Ok(payload)
+}
+
+fn encode_listing(
+    current: &CurrentReview,
+    source_revision: String,
+    payload: &Handoff,
+) -> Result<ListingHandoff> {
+    payload.validate()?;
+    let raw = serde_json::to_vec(payload)?;
+    validate_lengths(0, raw.len())?;
+    let handoff = encode_deflate(&raw)?;
+    validate_lengths(handoff.len(), raw.len())?;
+    Ok(ListingHandoff {
+        handoff,
+        idempotency_key: current.generation,
+        source_revision,
+        native_commitment: current.review_hash.clone(),
+    })
+}
+
+fn encode_deflate(raw: &[u8]) -> Result<String> {
+    // ZIP method 8 stores a raw RFC 1951 stream. Use the existing compressor
+    // and extract exactly that member's compressed bytes for the wire format.
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file(
+        "handoff",
+        SimpleFileOptions::default()
+            .compression_method(CompressionMethod::Deflated)
+            .compression_level(Some(6)),
+    )?;
+    writer.write_all(raw)?;
+    let archive = writer.finish()?.into_inner();
+    let mut zip = ZipArchive::new(Cursor::new(&archive))?;
+    let entry = zip.by_index_raw(0)?;
+    let start = usize::try_from(entry.data_start())?;
+    let end = start + usize::try_from(entry.compressed_size())?;
+    // The backend requires unpadded URL-safe base64.
+    Ok(Base64Unpadded::encode_string(&archive[start..end])
+        .replace('+', "-")
+        .replace('/', "_"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,11 +533,301 @@ mod tests {
     }
 
     fn gateway() -> Value {
-        json!({"version": 1, "pack_id": "pack-123", "files": [{"size": 42, "sha256": "a".repeat(64)}], "draft": draft()})
+        json!({"version": 1, "pack_id": "550e8400-e29b-41d4-a716-446655440000", "files": [{"size": 42, "sha256": "a".repeat(64)}], "draft": draft()})
     }
 
     fn bucket() -> Value {
-        json!({"version": 1, "pack_id": "pack-123", "provider": "aws", "bucket": "seller-bucket", "region": "eu-west-1", "connection_folder": "vz", "pack_prefix": "vz/pack-123/", "file_count": 1, "selection_sha256": "b".repeat(64), "draft": draft()})
+        json!({"version": 1, "pack_id": "550e8400-e29b-41d4-a716-446655440000", "provider": "aws", "bucket": "seller-bucket", "region": "eu-west-1", "connection_folder": "vz", "pack_prefix": "vz/550e8400-e29b-41d4-a716-446655440000/", "file_count": 1, "selection_sha256": "b".repeat(64), "draft": draft()})
+    }
+
+    struct Allowed;
+    impl crate::listing_policy::PolicySource for Allowed {
+        fn read(&self) -> crate::listing_policy::ManagedPolicy {
+            crate::listing_policy::ManagedPolicy::Allowed
+        }
+    }
+
+    fn gateway_request() -> HandoffRequest {
+        HandoffRequest {
+            target: HandoffTarget::Gateway {
+                names: crate::vector_payload::FILES
+                    .iter()
+                    .map(|name| name.rsplit('/').next().unwrap().to_string())
+                    .collect(),
+            },
+            draft: serde_json::from_value(draft()).unwrap(),
+        }
+    }
+
+    fn freeze_fixture(
+        dir: &std::path::Path,
+        policy: &ListingPolicy,
+        originals: bool,
+    ) -> ListingReference {
+        use std::fs;
+        let root = dir.canonicalize().unwrap();
+        let library = root.join("index");
+        let source = root.join("source");
+        let payload = root.join("fixture-payload");
+        let store_path = root.join("reviews");
+        fs::create_dir(&library).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::create_dir_all(payload.join("examples")).unwrap();
+        fs::write(library.join("writer.lock"), b"").unwrap();
+        fs::write(library.join("recipe.json"), b"{}").unwrap();
+        fs::write(source.join("source.txt"), b"original content").unwrap();
+        let mut files = serde_json::Map::new();
+        for name in crate::vector_payload::FILES
+            .into_iter()
+            .filter(|name| *name != "manifest.json")
+        {
+            fs::write(payload.join(name), name).unwrap();
+            files.insert(name.into(), json!(format!("{:x}", Hasher::digest(name))));
+        }
+        if originals {
+            fs::write(payload.join("originals-0001.zip"), b"legacy original").unwrap();
+        }
+        fs::write(
+            payload.join("manifest.json"),
+            json!({"originals": originals, "files": files}).to_string(),
+        )
+        .unwrap();
+
+        let pack_id = Uuid::new_v4();
+        let review = serde_json::from_value(json!({
+            "schema_version":"listing-review-v1", "pack_id": pack_id,
+            "staged_artifacts": [], "metadata_inventory_schema_version":1,
+            "metadata_inventory":[{"location":"fixture","kind":"text","value":"staged","warning":false}],
+            "source_revision":"", "index_revision":"", "embedding_recipe_sha256":"0".repeat(64),
+            "warnings":[], "exclusions":[]
+        })).unwrap();
+        let store = ReviewStore::open(&store_path).unwrap();
+        let guard = store.lock_native(policy, pack_id, &library).unwrap();
+        let current = guard
+            .freeze_sanitized(
+                guard.capture(&source).unwrap(),
+                review,
+                &payload,
+                json!({"identity_terms":["Sensitive Corp"]}),
+            )
+            .unwrap();
+        guard.accept(&current).unwrap();
+        ListingReference {
+            store: store_path,
+            library,
+            current,
+        }
+    }
+
+    #[test]
+    #[cfg(not(any(
+        feature = "listing-preview-harness",
+        feature = "listing-preview-test-switch"
+    )))]
+    fn allowed_policy_cannot_get_handoff_in_default_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        assert_eq!(
+            get_listing_handoff(&policy, &reference, gateway_request())
+                .unwrap_err()
+                .code,
+            ListingError::PreviewDisabled
+        );
+    }
+
+    #[test]
+    fn unknown_pack_leaves_store_untouched_and_stale_pack_is_invalidated() {
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let snapshot = || {
+            walkdir::WalkDir::new(&reference.store)
+                .sort_by_file_name()
+                .into_iter()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    let bytes = entry
+                        .file_type()
+                        .is_file()
+                        .then(|| fs::read(entry.path()).unwrap());
+                    (entry.into_path(), bytes)
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = snapshot();
+        let mut unknown = reference.clone();
+        unknown.current.pack_id = Uuid::new_v4();
+        let error = get_reviewed_handoff(&policy, &unknown, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        assert_eq!(snapshot(), before);
+
+        unknown.store = reference.store.with_file_name("missing-reviews");
+        let error = get_reviewed_handoff(&policy, &unknown, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        assert!(!unknown.store.exists());
+
+        let source = reference
+            .library
+            .with_file_name("source")
+            .join("source.txt");
+        let original = fs::read(&source).unwrap();
+        fs::write(&source, b"changed source").unwrap();
+        let error = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+        let invalidation = reference
+            .store
+            .join(reference.current.pack_id.to_string())
+            .join(reference.current.generation.to_string())
+            .join("invalidated.json");
+        assert!(invalidation.is_file());
+        fs::write(&source, original).unwrap();
+        let error = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
+        assert_eq!(error.downcast_ref(), Some(&ListingError::StaleGeneration));
+    }
+
+    #[test]
+    fn cancelled_handoff_worker_exits_while_pack_is_locked() {
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let policy = std::sync::Arc::new(ListingPolicy::new(std::sync::Arc::new(Allowed)));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let store = ReviewStore::open_existing(&reference.store).unwrap();
+        let lock = store.lock(&policy, reference.current.pack_id).unwrap();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let cancel = CancellationToken::new();
+        let worker_cancel = cancel.clone();
+        let worker_policy = policy.clone();
+        let (started, waiting) = std::sync::mpsc::channel();
+        let mut worker = runtime.spawn_blocking(move || {
+            started.send(()).unwrap();
+            get_reviewed_handoff(
+                &worker_policy,
+                &reference,
+                gateway_request(),
+                Some(&worker_cancel),
+            )
+        });
+        waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+        let (blocked, outcome) = runtime.block_on(async {
+            let blocked = tokio::time::timeout(Duration::from_millis(100), &mut worker).await;
+            cancel.cancel();
+            let outcome = if blocked.is_err() {
+                Some(tokio::time::timeout(Duration::from_secs(2), &mut worker).await)
+            } else {
+                None
+            };
+            (blocked, outcome)
+        });
+        drop(lock);
+        assert!(blocked.is_err(), "worker did not wait for the held lock");
+        let error = outcome
+            .unwrap()
+            .expect("worker must exit before the lock is released")
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.to_string(), "listing handoff cancelled");
+    }
+
+    #[test]
+    fn import_marker_idempotency_for_accepted_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let first = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap();
+        let second = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap();
+        assert_eq!(
+            serde_json::to_vec(&first).unwrap(),
+            serde_json::to_vec(&second).unwrap()
+        );
+        assert_eq!(first.idempotency_key, reference.current.generation);
+        assert_eq!(first.native_commitment, reference.current.review_hash);
+        assert_eq!(first.source_revision.len(), 64);
+
+        let store = ReviewStore::open(&reference.store).unwrap();
+        let guard = store
+            .lock_native_current(&policy, &reference.current, &reference.library)
+            .unwrap();
+        let review = guard.check_accepted(&reference.current).unwrap();
+        let artifacts = vector_artifacts(&review).unwrap();
+        let bucket_request = |etag: &str| HandoffRequest {
+            target: HandoffTarget::Bucket {
+                provider: BucketProvider::Aws,
+                bucket: "seller-bucket".into(),
+                region: Some("us-east-1".into()),
+                account_id: None,
+                objects: artifacts
+                    .values()
+                    .rev()
+                    .map(|file| BucketObject {
+                        key: format!("vz/{}/{}", review.pack_id, file.artifact),
+                        etag: format!("\"{etag}\""),
+                        size: file.size,
+                    })
+                    .collect(),
+            },
+            draft: serde_json::from_value(draft()).unwrap(),
+        };
+        let first = build_payload(&review, &artifacts, &[], bucket_request("abc")).unwrap();
+        let mut swapped = bucket_request("abc");
+        if let HandoffTarget::Bucket { objects, .. } = &mut swapped.target {
+            objects[0].etag = "\"def\"".into();
+        }
+        let swapped = build_payload(&review, &artifacts, &[], swapped).unwrap();
+        assert_ne!(first, swapped);
+        for case in ["missing", "extra", "duplicate", "wrong name", "wrong size"] {
+            let mut request = bucket_request("abc");
+            if let HandoffTarget::Bucket { objects, .. } = &mut request.target {
+                match case {
+                    "missing" => {
+                        objects.pop();
+                    }
+                    "extra" => objects.push(BucketObject {
+                        key: "extra".into(),
+                        etag: "\"extra\"".into(),
+                        size: 1,
+                    }),
+                    "duplicate" => objects[0].key = objects[1].key.clone(),
+                    "wrong name" => objects[0].key = "originals-0001.zip".into(),
+                    _ => objects[0].size += 1,
+                }
+            }
+            assert!(
+                build_payload(&review, &artifacts, &[], request).is_err(),
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn handoff_boundary_rejects_invalid_current_and_oversized_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = ListingPolicy::new(std::sync::Arc::new(Allowed));
+        let reference = freeze_fixture(dir.path(), &policy, false);
+        let mut forged = reference.clone();
+        forged.current.review_hash = "f".repeat(64).try_into().unwrap();
+        assert!(get_reviewed_handoff(&policy, &forged, gateway_request(), None).is_err());
+        let mut request = gateway_request();
+        request.draft.brief = "\0".repeat(4000);
+        request.draft.description = "\0".repeat(10000);
+        assert!(get_reviewed_handoff(&policy, &reference, request, None)
+            .unwrap_err()
+            .to_string()
+            .contains("64 KB"));
+
+        std::fs::write(reference.library.join("active-index.json"), b"invalid").unwrap();
+        let stale = get_reviewed_handoff(&policy, &reference, gateway_request(), None).unwrap_err();
+        assert_eq!(stale.downcast_ref(), Some(&ListingError::StaleGeneration));
+        std::fs::remove_file(reference.library.join("active-index.json")).unwrap();
+        assert!(get_reviewed_handoff(&policy, &reference, gateway_request(), None).is_err());
+
+        let legacy = tempfile::tempdir().unwrap();
+        let legacy = freeze_fixture(legacy.path(), &policy, true);
+        let stale = get_reviewed_handoff(&policy, &legacy, gateway_request(), None).unwrap_err();
+        assert_eq!(stale.downcast_ref(), Some(&ListingError::StaleGeneration));
     }
 
     #[test]
@@ -354,9 +925,11 @@ mod tests {
     }
 
     #[test]
-    fn pack_id_length_accepts_128_and_rejects_129() {
-        validate_pack_id(&"a".repeat(128)).unwrap();
-        assert!(validate_pack_id(&"a".repeat(129)).is_err());
+    fn pack_id_requires_canonical_uuid() {
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        validate_pack_id(id).unwrap();
+        assert!(validate_pack_id(&id.to_uppercase()).is_err());
+        assert!(validate_pack_id(&id.replace('-', "")).is_err());
     }
 
     #[test]
@@ -386,33 +959,53 @@ mod tests {
     #[test]
     fn bucket_digest_is_exact_sorted_tuple_commitment() {
         let tuples = [
-            ("vz/pack-123/a", "\"multipart-2\"", 42),
-            ("vz/pack-123/b", "etag", 100),
+            (
+                "vz/550e8400-e29b-41d4-a716-446655440000/a",
+                "\"multipart-2\"",
+                42,
+            ),
+            ("vz/550e8400-e29b-41d4-a716-446655440000/b", "etag", 100),
         ];
         let expected: Sha256 = format!(
             "{:x}",
             Hasher::digest(
-                br#"[["vz/pack-123/a","\"multipart-2\"",42],["vz/pack-123/b","etag",100]]"#
+                br#"[["vz/550e8400-e29b-41d4-a716-446655440000/a","\"multipart-2\"",42],["vz/550e8400-e29b-41d4-a716-446655440000/b","etag",100]]"#
             )
         )
         .try_into()
         .unwrap();
         assert_eq!(
-            bucket_selection_digest("pack-123", &tuples).unwrap(),
+            bucket_selection_digest("550e8400-e29b-41d4-a716-446655440000", &tuples).unwrap(),
             expected
         );
-        assert!(bucket_selection_digest("pack-123", &[tuples[1], tuples[0]]).is_err());
-        assert!(bucket_selection_digest("pack-123", &[tuples[0], tuples[0]]).is_err());
+        assert!(bucket_selection_digest(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &[tuples[1], tuples[0]]
+        )
+        .is_err());
+        assert!(bucket_selection_digest(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &[tuples[0], tuples[0]]
+        )
+        .is_err());
         for key in [
             "other/a",
-            "vz/pack-123/",
-            "vz/pack-123/../a",
-            "vz/pack-123//a",
-            "vz/pack-123/a\\b",
+            "vz/550e8400-e29b-41d4-a716-446655440000/",
+            "vz/550e8400-e29b-41d4-a716-446655440000/../a",
+            "vz/550e8400-e29b-41d4-a716-446655440000//a",
+            "vz/550e8400-e29b-41d4-a716-446655440000/a\\b",
         ] {
-            assert!(bucket_selection_digest("pack-123", &[(key, "etag", 1)]).is_err());
+            assert!(bucket_selection_digest(
+                "550e8400-e29b-41d4-a716-446655440000",
+                &[(key, "etag", 1)]
+            )
+            .is_err());
         }
-        assert!(bucket_selection_digest("pack-123", &[("vz/pack-123/a", "", 1)]).is_err());
+        assert!(bucket_selection_digest(
+            "550e8400-e29b-41d4-a716-446655440000",
+            &[("vz/550e8400-e29b-41d4-a716-446655440000/a", "", 1)]
+        )
+        .is_err());
     }
 
     #[test]
@@ -438,16 +1031,16 @@ mod tests {
 
     #[test]
     fn bucket_selection_rejects_count_and_object_changes() {
-        let tuples = [("vz/pack-123/a", "etag", 42)];
+        let tuples = [("vz/550e8400-e29b-41d4-a716-446655440000/a", "etag", 42)];
         let mut payload: BucketHandoff = serde_json::from_value(bucket()).unwrap();
         payload.selection_sha256 = bucket_selection_digest(&payload.pack_id, &tuples).unwrap();
         payload.validate_selection(&tuples).unwrap();
         assert!(payload.validate_selection(&[]).is_err());
         assert!(payload
-            .validate_selection(&[("vz/pack-123/a", "changed", 42)])
+            .validate_selection(&[("vz/550e8400-e29b-41d4-a716-446655440000/a", "changed", 42)])
             .is_err());
         assert!(payload
-            .validate_selection(&[("vz/pack-123/a", "etag", 43)])
+            .validate_selection(&[("vz/550e8400-e29b-41d4-a716-446655440000/a", "etag", 43)])
             .is_err());
     }
 }

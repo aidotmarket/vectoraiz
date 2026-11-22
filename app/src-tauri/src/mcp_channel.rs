@@ -171,6 +171,7 @@ where
         args: Value::Null,
     };
     let cancel = CancellationToken::new();
+    let listing = release.tool == vz_mcp::protocol::LISTING_HANDOFF;
     let mut byte = [0u8];
     let work = async {
         let value = run(request, cancel.clone()).await;
@@ -192,9 +193,16 @@ where
             let _ = deliver(&mut writer, &value, &cancel).await;
         }
     };
+    tokio::pin!(work);
     tokio::select! { biased;
-        _ = reader.read(&mut byte) => { cancel.cancel(); },
-        _ = work => {},
+        _ = reader.read(&mut byte) => {
+            cancel.cancel();
+            if listing {
+                // Let the dispatcher complete the cancelled call's activity entry.
+                work.await;
+            }
+        },
+        _ = &mut work => {},
     }
 }
 

@@ -138,6 +138,8 @@ jobs:
         run: npx --yes @anthropic-ai/mcpb@2.1.2 validate target/mcpb-manifest.json
       - name: Build CLI workers and Tauri debug app
         run: cargo build --locked --workspace --features vectoraiz/smoke-test,vectoraiz/custom-protocol ${{ env.NATIVE_FEATURES }}
+      - name: Listing authority handoff harness
+        run: cargo test -p vz-pack --features listing-preview-harness --test authority_handoff
       - name: Validate both MCP eras against pinned official schemas
         run: python scripts/native-mcp-protocol.py --bridge target/debug/vectoraiz-mcp${{ runner.os == 'Windows' && '.exe' || '' }}
       - name: Pipeline and MinIO acceptance (CPU)

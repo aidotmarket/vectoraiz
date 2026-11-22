@@ -415,7 +415,7 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
             ).expect("start smoke-test button click"); }
         }
     });
-    builder.invoke_handler(tauri::generate_handler![
+    let regular: fn(tauri::ipc::Invoke<R>) -> bool = tauri::generate_handler![
         open_product_page,
         third_party_notices,
         self_test,
@@ -454,7 +454,20 @@ fn configure<R: tauri::Runtime>(builder: tauri::Builder<R>) -> tauri::Builder<R>
         answer_switch,
         answer_turn_off,
         delete_unused_model
-    ])
+    ];
+    let handoff: fn(tauri::ipc::Invoke<R>) -> bool = tauri::generate_handler![get_listing_handoff];
+    builder.invoke_handler(move |invoke| {
+        if invoke.message.command() != vz_mcp::protocol::LISTING_HANDOFF {
+            return regular(invoke);
+        }
+        if !mcp_tools::listing_handoff_visible(
+            vz_pack::listing_policy::process_preview_enabled(),
+            invoke.message.webview().window().label(),
+        ) {
+            return false;
+        }
+        handoff(invoke)
+    })
 }
 
 #[cfg(feature = "smoke-test")]
@@ -464,7 +477,11 @@ fn smoke_test_requested() -> bool {
 
 pub(crate) fn run() {
     let _ = vz_core::credentials::init();
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
+    mcp_tools::allow_listing_handoff(
+        &mut context,
+        vz_pack::listing_policy::process_preview_enabled(),
+    );
     #[cfg(all(feature = "ui-test", debug_assertions))]
     let context = {
         let mut context = context;
@@ -632,10 +649,31 @@ async fn mcp_call<R: tauri::Runtime>(
     cancel: tokio_util::sync::CancellationToken,
 ) -> serde_json::Value {
     use tauri::Manager;
+    if request.v == 1 && request.tool == vz_mcp::protocol::LISTING_HANDOFF_AVAILABILITY {
+        // Same-user discovery exposes only availability. It does not access a
+        // library or return a successful tool result to the channel.
+        return serde_json::json!({"listing_handoff_available":
+            vz_pack::listing_policy::system().require_preview().is_ok()
+        });
+    }
     let dir = match model_dir(&app) {
         Ok(d) => d,
         Err(_) => return mcp_channel::refusal(cloud_gate::GateError::Revoked),
     };
+    if request.tool == vz_mcp::protocol::LISTING_HANDOFF {
+        let apps = app.state::<mcp_apps::Apps>();
+        return mcp_tools::call_listing(
+            &dir,
+            &apps,
+            request,
+            cancel,
+            || vz_pack::listing_policy::system().require_preview(),
+            |arguments, cancel| {
+                listing_handoff(app.clone(), arguments.current, arguments.request, cancel)
+            },
+        )
+        .await;
+    }
     let root = match data_root(&app) {
         Ok(r) => vz_core::active_index::resolve(&r),
         Err(_) => return mcp_channel::refusal(cloud_gate::GateError::Revoked),
@@ -1870,6 +1908,44 @@ async fn listing_review<R: tauri::Runtime>(
             &current,
             accept,
         )
+    })
+    .await
+    .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?
+}
+
+#[tauri::command]
+async fn get_listing_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: vz_pack::review_store::CurrentReview,
+    request: vz_pack::handoff::HandoffRequest,
+) -> Result<vz_pack::handoff::ListingHandoff, vz_pack::listing_commands::ListingFailure> {
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let _cancel_on_drop = cancel.clone().drop_guard();
+    listing_handoff(app, current, request, cancel).await
+}
+
+async fn listing_handoff<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    current: vz_pack::review_store::CurrentReview,
+    request: vz_pack::handoff::HandoffRequest,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<vz_pack::handoff::ListingHandoff, vz_pack::listing_commands::ListingFailure> {
+    use tauri::Manager;
+    use vz_pack::listing_commands::{ListingFailure, ListingReference};
+    let policy = vz_pack::listing_policy::system();
+    policy.require_preview().map_err(anyhow::Error::from)?;
+    let library = data_root(&app).map_err(anyhow::Error::msg)?;
+    let parent = app
+        .path()
+        .app_local_data_dir()
+        .map_err(anyhow::Error::from)?;
+    let reference = ListingReference {
+        store: parent.join("listing-reviews"),
+        library,
+        current,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        vz_pack::handoff::get_listing_handoff_with_cancel(policy, &reference, request, &cancel)
     })
     .await
     .map_err(|error| ListingFailure::from(anyhow::Error::from(error)))?

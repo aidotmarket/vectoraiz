@@ -17,8 +17,14 @@ pub(crate) const ATTESTATION: &str =
     "The seller attests: chunks, embeddings and metadata; no source files are delivered.";
 #[cfg(not(feature = "listing-originals"))]
 pub(crate) fn verify(root: &Path) -> Result<()> {
+    verify_checked(root, &|| Ok(()))
+}
+
+#[cfg(not(feature = "listing-originals"))]
+pub(crate) fn verify_checked(root: &Path, check: &dyn Fn() -> Result<()>) -> Result<()> {
     let mut actual = BTreeSet::new();
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        check()?;
         let entry = entry?;
         ensure!(
             !entry.file_type().is_symlink(),
@@ -61,6 +67,6 @@ pub(crate) fn verify(root: &Path) -> Result<()> {
                 .collect(),
         "vector manifest hash set differs from payload"
     );
-    crate::verify(root)?;
+    crate::verify_checked(root, check)?;
     Ok(())
 }

@@ -117,11 +117,19 @@ impl State {
     /// transaction. Values have explicit type tags and big-endian length prefixes;
     /// table/row boundaries and NULL are distinct. Jobs expose the latest per path.
     pub fn review_content(root: &Path) -> Result<(String, HashSet<String>)> {
+        Self::review_content_checked(root, &|| Ok(()))
+    }
+
+    pub fn review_content_checked(
+        root: &Path,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<(String, HashSet<String>)> {
         // Retry the whole read transaction, never a partial digest. Keep SQLite
         // lock contention bounded and distinguish it from changed content.
         let mut retries = 2;
         loop {
-            match Self::review_content_once(root) {
+            check()?;
+            match Self::review_content_once(root, check) {
                 Err(error)
                     if matches!(
                         error.downcast_ref::<rusqlite::Error>(),
@@ -140,7 +148,10 @@ impl State {
         }
     }
 
-    fn review_content_once(root: &Path) -> Result<(String, HashSet<String>)> {
+    fn review_content_once(
+        root: &Path,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<(String, HashSet<String>)> {
         use sha2::{Digest, Sha256};
         let db = Self::review_connection(root)?;
         db.busy_timeout(std::time::Duration::from_millis(100))?;
@@ -152,6 +163,7 @@ impl State {
             ("index_metadata", "SELECT key,value FROM index_metadata ORDER BY key"),
             ("jobs", "SELECT path,status,reason FROM jobs WHERE id IN (SELECT max(id) FROM jobs GROUP BY path) ORDER BY path"),
         ] {
+            check()?;
             hash.update((table.len() as u64).to_be_bytes()); hash.update(table.as_bytes());
             let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",[table],|r| r.get(0))?;
             if !exists { hash.update([0]); continue; }
@@ -159,6 +171,7 @@ impl State {
             let columns = statement.column_count();
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
+                check()?;
                 hash.update([1]);
                 for col in 0..columns {
                     use rusqlite::types::ValueRef;

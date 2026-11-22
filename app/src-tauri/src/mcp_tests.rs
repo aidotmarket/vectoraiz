@@ -143,6 +143,160 @@ impl Fixture {
         client
     }
 }
+
+fn listing_request(fixture: &Fixture) -> Request {
+    let mut request = fixture.request(vz_mcp::protocol::LISTING_HANDOFF);
+    request.args = json!({
+        "current": {
+            "pack_id": uuid::Uuid::new_v4(),
+            "generation": uuid::Uuid::new_v4(),
+            "review_hash": "0".repeat(64)
+        },
+        "request": {
+            "draft": {
+                "title": "private draft text", "brief": "", "description": "",
+                "category": "", "tags": ""
+            },
+            "target": {
+                "type": "bucket", "provider": "aws", "bucket": "private-bucket", "region": "us-east-1",
+                "objects": [{"key":"private destination inventory","etag":"etag","size":42}]
+            }
+        }
+    });
+    request
+}
+
+#[tokio::test]
+async fn listing_handoff_records_one_content_free_entry_per_call() {
+    let f = Fixture::new().await;
+    let allowed = mcp_tools::call_listing(
+        &f.dir,
+        &f.apps,
+        listing_request(&f),
+        CancellationToken::new(),
+        || Ok(()),
+        |_, _| async {
+            Ok(vz_pack::handoff::ListingHandoff {
+                handoff: "private handoff bytes".into(),
+                idempotency_key: uuid::Uuid::new_v4(),
+                source_revision: "0".repeat(64),
+                native_commitment: "0".repeat(64).try_into().unwrap(),
+            })
+        },
+    );
+    let (connection, allowed) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(f.apps.test_connection(&f.dir, &f.id), allowed)
+    })
+    .await
+    .unwrap();
+    assert_eq!(connection.unwrap()["connected"], true);
+    assert_eq!(allowed["result"]["handoff"], "private handoff bytes");
+
+    let mut refused = listing_request(&f);
+    refused.client = "f".repeat(32);
+    let refused = mcp_tools::call_listing(
+        &f.dir,
+        &f.apps,
+        refused,
+        CancellationToken::new(),
+        || Ok(()),
+        |_, _| async { panic!("refused call reached the handoff worker") },
+    )
+    .await;
+    assert_eq!(refused["code"], "access_denied");
+
+    let log = std::fs::read_to_string(f.dir.parent().unwrap().join("mcp-calls.log")).unwrap();
+    let entries: Vec<Value> = log
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(entries.len(), 2);
+    for entry in &entries {
+        assert_eq!(entry["tool"], vz_mcp::protocol::LISTING_HANDOFF);
+        let mut keys: Vec<_> = entry
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "allowed",
+                "call_id",
+                "client",
+                "client_id",
+                "refusal_code",
+                "result_count",
+                "time",
+                "tool"
+            ]
+        );
+    }
+    assert_eq!(entries[0]["allowed"], true);
+    assert_eq!(entries[0]["result_count"], 1);
+    assert_eq!(entries[1]["allowed"], false);
+    assert_eq!(entries[1]["result_count"], 0);
+    assert_eq!(entries[1]["refusal_code"], "access_denied");
+    for private in [
+        "private draft text",
+        "private destination inventory",
+        "private handoff bytes",
+    ] {
+        assert!(!log.contains(private));
+    }
+}
+
+#[tokio::test]
+async fn listing_disconnect_cancels_execution_and_completes_activity_entry() {
+    let f = Fixture::new().await;
+    let (mut client, server) = tokio::io::duplex(4096);
+    let dir = f.dir.clone();
+    let apps = f.apps.clone();
+    let (started, running) = tokio::sync::oneshot::channel();
+    let serving = tokio::spawn(mcp_channel::serve(
+        server,
+        dir.clone(),
+        move |request, cancel| async move {
+            mcp_tools::call_listing(
+                &dir,
+                &apps,
+                request,
+                cancel,
+                || Ok(()),
+                |_, worker_cancel| async move {
+                    started.send(worker_cancel).unwrap();
+                    std::future::pending().await
+                },
+            )
+            .await
+        },
+    ));
+    let request = listing_request(&f);
+    let bytes = serde_json::to_vec(&json!({
+        "v": request.v, "client": request.client, "tool": request.tool, "args": request.args
+    }))
+    .unwrap();
+    vz_mcp::channel::write_frame(&mut client, &bytes, vz_mcp::REQUEST_CAP)
+        .await
+        .unwrap();
+    let worker_cancel = tokio::time::timeout(Duration::from_secs(2), running)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!worker_cancel.is_cancelled());
+    drop(client);
+    tokio::time::timeout(Duration::from_secs(2), serving)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(worker_cancel.is_cancelled());
+    let log = std::fs::read_to_string(f.dir.parent().unwrap().join("mcp-calls.log")).unwrap();
+    let entry: Value = serde_json::from_str(&log).unwrap();
+    assert_eq!(entry["refusal_code"], "cancelled");
+}
+
 #[tokio::test]
 async fn every_tool_denied_without_index_opens() {
     for tool in ["list_collections", "search", "get_document", "get_chunk"] {

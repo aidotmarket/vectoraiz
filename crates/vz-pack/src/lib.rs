@@ -50,6 +50,33 @@ pub fn write(
     })
 }
 pub fn verify(pack: &Path) -> Result<Value> {
+    verify_checked(pack, &|| Ok(()))
+}
+
+pub(crate) fn hash_reader(
+    mut reader: impl std::io::Read,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<(u64, String)> {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    let mut size = 0;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        check()?;
+        let count = match reader.read(&mut buffer) {
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            result => result?,
+        };
+        if count == 0 {
+            return Ok((size, format!("{:x}", hash.finalize())));
+        }
+        hash.update(&buffer[..count]);
+        size += count as u64;
+    }
+}
+
+pub(crate) fn verify_checked(pack: &Path, check: &dyn Fn() -> Result<()>) -> Result<Value> {
+    check()?;
     let manifest: Value = serde_json::from_slice(&std::fs::read(pack.join("manifest.json"))?)?;
     for (name, digest) in manifest["files"].as_object().context("manifest files")? {
         let relative = Path::new(name);
@@ -60,9 +87,9 @@ pub fn verify(pack: &Path) -> Result<Value> {
         {
             bail!("unsafe pack path");
         }
-        if sha256(&std::fs::read(pack.join(relative))?)
-            != digest.as_str().context("hash must be string")?
-        {
+        check()?;
+        let (_, hash) = hash_reader(std::fs::File::open(pack.join(relative))?, check)?;
+        if hash != digest.as_str().context("hash must be string")? {
             bail!("pack hash mismatch: {name}");
         }
     }
